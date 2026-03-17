@@ -16,8 +16,8 @@ detection:
   hold_time: 0.5 # Seconds to hold recording open after signal drops below threshold
   warmup_seconds: 3.0 # Seconds of ambient sampling before detection activates
   ema_alpha: 0.01 # Ambient noise EMA smoothing factor (lower = slower adaptation)
-  trim_pre_samples: 0 # Extra samples to keep before the first loud sample when trimming
-  trim_post_samples: 0 # Extra samples to keep after the last loud sample when trimming
+  trim_pre_samples: 10 # Extra samples to keep before the first loud sample when trimming (S-curve fade applied)
+  trim_post_samples: 25 # Extra samples to keep after the last loud sample when trimming (S-curve fade applied)
 
 output:
   directory: "./samples" # Where recorded WAV files are saved

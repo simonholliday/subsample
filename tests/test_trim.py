@@ -123,6 +123,95 @@ class TestTrimPadding:
 		assert result.shape[0] == 15  # 10 loud + 5 silent
 
 
+class TestTrimFade:
+
+	def test_fade_in_applied (self) -> None:
+		"""Padding before the signal should be faded in with an S-curve."""
+		audio = _make_audio(_silent(20) + _loud(10))
+
+		result = subsample.trim.trim_silence(audio, _THRESHOLD, pre_samples=10)
+
+		# First sample should be near zero (ramp starts at 0.0)
+		assert abs(int(result[0, 0])) < 5
+
+		# Fade region (indices 0–9) should be monotonically increasing —
+		# S-curve ramp rises from 0.0 to 1.0 over the padding
+		assert result[0, 0] <= result[4, 0] <= result[9, 0]
+
+		# Loud section (indices 10–19) must be untouched
+		assert numpy.all(result[10:] == 5000)
+
+	def test_fade_out_applied (self) -> None:
+		"""Padding after the signal should be faded out with an S-curve."""
+		audio = _make_audio(_loud(10) + _silent(20))
+
+		result = subsample.trim.trim_silence(audio, _THRESHOLD, post_samples=10)
+
+		# Loud section (indices 0–9) must be untouched
+		assert numpy.all(result[:10] == 5000)
+
+		# Fade region (indices 10–19) should be monotonically decreasing —
+		# S-curve ramp falls from 1.0 to 0.0 over the padding
+		assert result[10, 0] >= result[14, 0] >= result[19, 0]
+
+		# Last sample should be near zero (ramp ends at 0.0)
+		assert abs(int(result[-1, 0])) < 5
+
+	def test_fade_in_and_out_combined (self) -> None:
+		"""Both leading and trailing padding should be faded independently."""
+		audio = _make_audio(_silent(20) + _loud(10) + _silent(20))
+
+		result = subsample.trim.trim_silence(
+			audio, _THRESHOLD, pre_samples=8, post_samples=8,
+		)
+
+		assert result.shape[0] == 26  # 8 pre + 10 loud + 8 post
+
+		# Edges faded
+		assert abs(int(result[0, 0])) < 100
+		assert abs(int(result[-1, 0])) < 100
+
+		# Loud section untouched
+		assert numpy.all(result[8:18] == 5000)
+
+	def test_no_fade_when_no_padding (self) -> None:
+		"""With no padding, values should be identical to the original signal."""
+		audio = _make_audio(_loud(20))
+
+		result = subsample.trim.trim_silence(audio, _THRESHOLD)
+
+		assert numpy.array_equal(result, audio)
+
+	def test_fade_stereo (self) -> None:
+		"""Fade must be applied identically to both channels."""
+		audio = _make_audio(_silent(20) + _loud(10), channels=2)
+
+		result = subsample.trim.trim_silence(audio, _THRESHOLD, pre_samples=10)
+
+		# Both channels should be faded equally
+		assert numpy.array_equal(result[:, 0], result[:, 1])
+
+		# First sample near zero on both channels
+		assert abs(int(result[0, 0])) < 100
+		assert abs(int(result[0, 1])) < 100
+
+	def test_fade_clamped_padding (self) -> None:
+		"""Fade applies over however many padding samples are available."""
+		# Only 3 silent samples before the loud section, but requesting 20
+		audio = _make_audio(_silent(3) + _loud(10))
+
+		result = subsample.trim.trim_silence(audio, _THRESHOLD, pre_samples=20)
+
+		# Should extend back to index 0 (3 samples of fade, not 20)
+		assert result.shape[0] == 13  # 3 pre + 10 loud
+
+		# First sample near zero (start of fade over 3 samples)
+		assert abs(int(result[0, 0])) < 100
+
+		# Loud section untouched
+		assert numpy.all(result[3:] == 5000)
+
+
 class TestTrimStereo:
 
 	def test_stereo_shape_preserved (self) -> None:

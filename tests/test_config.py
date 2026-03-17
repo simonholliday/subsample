@@ -88,8 +88,8 @@ class TestLoadDefault:
 	def test_default_trim_padding_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.detection.trim_pre_samples == 0
-		assert cfg.detection.trim_post_samples == 0
+		assert cfg.detection.trim_pre_samples == 10
+		assert cfg.detection.trim_post_samples == 25
 
 
 class TestLoadCustomConfig:

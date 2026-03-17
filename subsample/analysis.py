@@ -225,6 +225,15 @@ def analyze_mono (
 			spectral_bandwidth=0.0,
 		)
 
+	# Clamp n_fft to the signal length for short recordings. librosa zero-pads
+	# when n_fft > len(signal), but emits a UserWarning. Clamping avoids the
+	# warning without sacrificing accuracy: a 606-sample signal has no real
+	# spectral information beyond 606 bins regardless of the window size.
+	# Also clamp hop_length so it never exceeds n_fft.
+	effective_n_fft = min(params.n_fft, len(mono))
+	effective_hop = min(params.hop_length, effective_n_fft)
+	params = dataclasses.replace(params, n_fft=effective_n_fft, hop_length=effective_hop)
+
 	flatness = librosa.feature.spectral_flatness(
 		y=mono,
 		n_fft=params.n_fft,

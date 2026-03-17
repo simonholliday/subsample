@@ -418,6 +418,20 @@ class TestAnalyzeMono:
 		assert 0.0 <= result.spectral_flatness <= 1.0
 		assert 0.0 <= result.spectral_bandwidth <= 1.0
 
+	def test_short_signal_no_warning (self) -> None:
+		"""Signals shorter than n_fft should not emit a UserWarning from librosa."""
+		# 606 samples at 44100 Hz is shorter than the default n_fft of 2048
+		short = numpy.zeros(606, dtype=numpy.float32)
+		short[100:200] = 0.5  # some non-silent content
+
+		import warnings
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("error")
+			result = subsample.analysis.analyze_mono(short, self._params())
+
+		assert isinstance(result, subsample.analysis.AnalysisResult)
+
 
 class TestFormatResult:
 
