@@ -129,11 +129,11 @@ def select_device (devices: list[DeviceInfo]) -> int:
 	while True:
 		raw = input(f"Select device [0–{len(devices) - 1}]: ").strip()
 
-		if not raw.isdigit():
+		try:
+			choice = int(raw)
+		except ValueError:
 			print("  Please enter a number.")
 			continue
-
-		choice = int(raw)
 
 		if 0 <= choice < len(devices):
 			return int(devices[choice]["index"])

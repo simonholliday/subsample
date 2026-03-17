@@ -11,6 +11,7 @@ dependencies = [
 	"PyAudio>=0.2.14",
 	"PyYAML>=6.0",
 	"numpy>=1.26",
+	"librosa>=0.10",
 ]
 
 [project.optional-dependencies]

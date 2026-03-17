@@ -14,6 +14,8 @@ def _make_detection_config (
 	ema_alpha: float = 0.5,       # High alpha for fast ambient adjustment in tests
 ) -> subsample.config.DetectionConfig:
 
+	"""Factory for test DetectionConfig with sensible defaults."""
+
 	return subsample.config.DetectionConfig(
 		snr_threshold_db=snr_threshold_db,
 		hold_time=hold_time,
@@ -32,6 +34,8 @@ def _make_detector (
 	sample_rate: int = 1000,
 	chunk_size: int = 100,
 ) -> subsample.detector.LevelDetector:
+
+	"""Factory for test LevelDetector with sensible defaults."""
 
 	cfg = _make_detection_config(
 		snr_threshold_db=snr_threshold_db,

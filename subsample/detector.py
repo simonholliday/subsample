@@ -15,11 +15,16 @@ State machine:
 """
 
 import enum
+import logging
+import math
 import typing
 
 import numpy
 
 import subsample.config
+
+
+_log = logging.getLogger(__name__)
 
 
 # Minimum ambient RMS before threshold comparisons are meaningful.
@@ -69,8 +74,8 @@ class LevelDetector:
 
 		# Derived frame counts for warmup and hold-time
 		chunks_per_second = sample_rate / chunk_size
-		self._warmup_chunks_remaining: int = int(cfg.warmup_seconds * chunks_per_second)
-		self._hold_chunks_total: int = max(1, int(cfg.hold_time * chunks_per_second))
+		self._warmup_chunks_remaining: int = round(cfg.warmup_seconds * chunks_per_second)
+		self._hold_chunks_total: int = max(1, round(cfg.hold_time * chunks_per_second))
 
 		self._state: DetectorState = DetectorState.WARMUP
 		self._ambient_rms: float = 0.0
@@ -134,7 +139,7 @@ class LevelDetector:
 
 		if self._warmup_chunks_remaining <= 0:
 			self._state = DetectorState.IDLE
-			print("Ambient calibration complete. Listening…")
+			_log.info("Ambient calibration complete. Listening…")
 
 		return None
 
@@ -173,9 +178,9 @@ class LevelDetector:
 				end_frame = current_frame
 				start_frame = self._recording_start_frame
 				self._state = DetectorState.IDLE
-				print(
-					f"Recording force-ended: reached buffer capacity "
-					f"({recording_length} frames)"
+				_log.info(
+					"Recording force-ended: reached buffer capacity (%d frames)",
+					recording_length,
 				)
 				return (start_frame, end_frame)
 
@@ -223,7 +228,7 @@ class LevelDetector:
 		if chunk_rms <= _AMBIENT_FLOOR:
 			return False
 
-		snr_db = 20.0 * numpy.log10(chunk_rms / ambient)
+		snr_db = 20.0 * math.log10(chunk_rms / ambient)
 
 		return float(snr_db) >= self._cfg.snr_threshold_db
 

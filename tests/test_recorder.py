@@ -3,6 +3,7 @@
 import numpy
 import pytest
 
+import subsample.audio
 import subsample.recorder
 
 
@@ -45,8 +46,6 @@ class TestPackInt24:
 
 	def test_round_trip_via_unpack (self) -> None:
 		"""pack → unpack should recover the original 24-bit sample values."""
-		import subsample.audio
-
 		# Create some 24-bit values packed into int32 (left-shifted by 8)
 		original_24bit = numpy.array([0, 1000, -1000, 8388607, -8388608], dtype=numpy.int32)
 		audio = (original_24bit * 256).reshape(-1, 1)  # simulate left-shift

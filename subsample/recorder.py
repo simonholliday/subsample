@@ -15,6 +15,7 @@ import wave
 
 import numpy
 
+import subsample.analysis
 import subsample.config
 
 
@@ -38,11 +39,16 @@ class WavWriter:
 		writer.shutdown()
 	"""
 
-	def __init__ (self, cfg: subsample.config.Config) -> None:
+	def __init__ (
+		self,
+		cfg: subsample.config.Config,
+		analysis_params: subsample.analysis.AnalysisParams,
+	) -> None:
 
 		"""Start the writer thread and ensure the output directory exists."""
 
 		self._cfg = cfg
+		self._analysis_params = analysis_params
 		self._queue: queue.Queue[_QueueItem] = queue.Queue()
 
 		output_dir = pathlib.Path(cfg.output.directory)
@@ -85,14 +91,29 @@ class WavWriter:
 			if item is _SHUTDOWN:
 				break
 
-			# Safe to unpack now that we've ruled out the sentinel
-			audio, timestamp = typing.cast(
-				tuple[numpy.ndarray, datetime.datetime], item
-			)
+			try:
+				# Safe to unpack now that we've ruled out the sentinel
+				audio, timestamp = typing.cast(
+					tuple[numpy.ndarray, datetime.datetime], item
+				)
 
-			self._write_wav(audio, timestamp)
+				result = subsample.analysis.analyze(
+					audio,
+					self._analysis_params,
+					self._cfg.audio.bit_depth,
+				)
 
-	def _write_wav (self, audio: numpy.ndarray, timestamp: datetime.datetime) -> None:
+				self._write_wav(audio, timestamp, result)
+
+			except Exception as exc:
+				_log.error("Failed to write recording: %s", exc, exc_info=True)
+
+	def _write_wav (
+		self,
+		audio: numpy.ndarray,
+		timestamp: datetime.datetime,
+		result: subsample.analysis.AnalysisResult,
+	) -> None:
 
 		"""Write a single audio segment to a WAV file.
 
@@ -100,10 +121,16 @@ class WavWriter:
 			audio:     PCM samples, shape (n_frames, channels).
 			           16-bit: int16. 24-bit: int32 (left-shifted by 8). 32-bit: int32.
 			timestamp: Used to construct the filename.
+			result:    Analysis metrics computed before this call.
 		"""
 
-		filename = timestamp.strftime(self._cfg.output.filename_format) + ".wav"
-		filepath = self._output_dir / filename
+		# Generate base filename and find a free path (handle same-second collisions)
+		filename_base = timestamp.strftime(self._cfg.output.filename_format)
+		filepath = self._output_dir / (filename_base + ".wav")
+		suffix_counter = 2
+		while filepath.exists():
+			filepath = self._output_dir / (filename_base + f"_{suffix_counter}.wav")
+			suffix_counter += 1
 
 		# Ensure the array is 2-D (n_frames, channels) before writing
 		if audio.ndim == 1:
@@ -130,8 +157,8 @@ class WavWriter:
 		duration = n_frames / self._cfg.audio.sample_rate
 
 		_log.debug(
-			"Stored recording: file=%s  frames=%d  duration=%.2fs",
-			filepath.name, n_frames, duration,
+			"Stored recording: file=%s  frames=%d  duration=%.2fs  flatness=%.3f",
+			filepath.name, n_frames, duration, result.spectral_flatness,
 		)
 
 
@@ -151,7 +178,7 @@ def _pack_int24 (audio: numpy.ndarray) -> bytes:
 	"""
 
 	# Right-shift by 8 to undo the LSB padding added at capture
-	samples = (audio >> 8).astype(numpy.int32)
+	samples = audio >> 8
 
 	# View each int32 as 4 uint8 bytes (little-endian), then drop byte 3 (MSB padding)
 	b = samples.view(numpy.uint8).reshape(-1, 4)

@@ -4,6 +4,7 @@ import numpy
 import pytest
 
 import subsample.audio
+import subsample.recorder
 
 
 class TestUnpackAudio16Bit:

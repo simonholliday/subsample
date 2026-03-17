@@ -4,7 +4,7 @@
 
 audio:
   sample_rate: 44100     # Hz — 44100 is standard CD quality
-  bit_depth: 16          # Bits per sample — 16 (paInt16) or 24 (paInt24)
+  bit_depth: 16          # Bits per sample — 16, 24, or 32
   channels: 1            # 1 = mono, 2 = stereo
   chunk_size: 1024       # Frames read per buffer cycle
 

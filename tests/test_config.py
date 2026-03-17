@@ -102,3 +102,28 @@ class TestLoadCustomConfig:
 
 		with pytest.raises(FileNotFoundError):
 			subsample.config.load_config(nonexistent)
+
+	def test_invalid_bit_depth_raises (self, tmp_path: pathlib.Path) -> None:
+		"""Loading a config with unsupported bit_depth should raise ValueError."""
+		yaml_content = textwrap.dedent("""\
+			audio:
+			  sample_rate: 44100
+			  bit_depth: 8
+			  channels: 1
+			  chunk_size: 1024
+			buffer:
+			  max_seconds: 60
+			detection:
+			  snr_threshold_db: 6.0
+			  hold_time: 0.5
+			  warmup_seconds: 2.0
+			  ema_alpha: 0.01
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			""")
+		config_file = tmp_path / "bad_config.yaml"
+		config_file.write_text(yaml_content)
+
+		with pytest.raises(ValueError, match="Unsupported bit_depth"):
+			subsample.config.load_config(config_file)

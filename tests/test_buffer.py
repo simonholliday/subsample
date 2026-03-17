@@ -72,7 +72,7 @@ class TestCircularBufferRead:
 
 		result = buf.read_range(5, 5)
 
-		assert result.shape[0] == 0
+		assert result.shape == (0, 1)
 
 	def test_read_partial_range (self) -> None:
 		buf = subsample.buffer.CircularBuffer(max_frames=100, channels=1)
