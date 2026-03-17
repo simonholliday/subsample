@@ -6,6 +6,14 @@ never delayed by analysis work.
 
 Analysis parameters (FFT window size, hop length) are derived once from the
 audio config at startup and reused for every recording.
+
+All metrics are normalised to [0.0, 1.0]:
+
+  spectral_flatness  — 0 = perfectly tonal (sine wave), 1 = pure noise
+  attack             — 0 = instant/percussive onset, 1 = very gradual build
+  release            — 0 = instant cutoff, 1 = long sustain/decay tail
+  spectral_centroid  — 0 = very bassy, 1 = very trebly
+  spectral_bandwidth — 0 = narrow/pure tone, 1 = wide/spectrally complex
 """
 
 import dataclasses
@@ -15,6 +23,27 @@ import librosa
 import numpy
 
 import subsample.config
+
+
+# ---------------------------------------------------------------------------
+# Reference constants for log-scale normalisation
+# ---------------------------------------------------------------------------
+
+# Attack / release: time range over which scores are spread.
+# 1 ms = imperceptibly fast (e.g. a single sample click at 44 kHz).
+# 2 s = extremely slow (ambient pad with gradual fade-in/out).
+# Log midpoint ≈ 45 ms — roughly where a medium-speed pluck or strum sits.
+_ATTACK_RELEASE_MIN_S: float = 0.001   # 1 ms
+_ATTACK_RELEASE_MAX_S: float = 2.0     # 2 s
+
+# Spectral frequency range: 20 Hz (lower limit of human hearing) to Nyquist.
+# Using 20 Hz as the minimum means a signal centred at 20 Hz scores 0.0.
+_FREQ_MIN_HZ: float = 20.0
+
+# Threshold for onset/decay detection: frames where RMS exceeds this fraction
+# of the peak RMS are considered "active". 10 % chosen as a reasonable -20 dB
+# equivalent for typical audio signals.
+_ACTIVE_THRESHOLD_RATIO: float = 0.1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -32,12 +61,29 @@ class AnalysisResult:
 
 	"""Metrics computed from a single recording.
 
-	Fields are intentionally minimal for now; extend here as new metrics are
-	added so the rest of the pipeline receives a single structured object.
+	All values are in [0.0, 1.0]. Extend here as new metrics are added;
+	the rest of the pipeline receives a single structured object and
+	benefits automatically.
 	"""
 
 	spectral_flatness: float
-	"""Wiener entropy in [0.0, 1.0]. 0.0 = perfectly tonal, 1.0 = pure noise."""
+	"""Wiener entropy. 0.0 = perfectly tonal (sine), 1.0 = pure noise."""
+
+	attack: float
+	"""Time from onset to peak energy, log-mapped to [0, 1].
+	0.0 = instant/percussive (≤ 1 ms), 1.0 = very gradual (≥ 2 s)."""
+
+	release: float
+	"""Time from peak energy to decay, log-mapped to [0, 1].
+	0.0 = instant cutoff (≤ 1 ms), 1.0 = very long tail (≥ 2 s)."""
+
+	spectral_centroid: float
+	"""Centre of mass of the frequency spectrum, log-mapped from 20 Hz to Nyquist.
+	0.0 = very bassy, 1.0 = very trebly."""
+
+	spectral_bandwidth: float
+	"""Spread of frequency content, log-mapped from 20 Hz to Nyquist.
+	0.0 = narrow / pure tone, 1.0 = wide / spectrally complex."""
 
 
 def compute_params (audio_cfg: subsample.config.AudioConfig) -> AnalysisParams:
@@ -92,11 +138,17 @@ def analyze (
 		bit_depth: Original capture bit depth (16, 24, or 32).
 
 	Returns:
-		AnalysisResult with all computed metrics.
+		AnalysisResult with all computed metrics in [0.0, 1.0].
 	"""
 
 	if audio.shape[0] == 0:
-		return AnalysisResult(spectral_flatness=0.0)
+		return AnalysisResult(
+			spectral_flatness=0.0,
+			attack=0.0,
+			release=0.0,
+			spectral_centroid=0.0,
+			spectral_bandwidth=0.0,
+		)
 
 	mono = _to_mono_float(audio, bit_depth)
 
@@ -106,7 +158,17 @@ def analyze (
 		hop_length=params.hop_length,
 	)
 
-	return AnalysisResult(spectral_flatness=float(numpy.mean(flatness)))
+	attack, release = _compute_attack_release(mono, params)
+	centroid = _compute_spectral_centroid(mono, params)
+	bandwidth = _compute_spectral_bandwidth(mono, params)
+
+	return AnalysisResult(
+		spectral_flatness=float(numpy.mean(flatness)),
+		attack=attack,
+		release=release,
+		spectral_centroid=centroid,
+		spectral_bandwidth=bandwidth,
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -139,3 +201,174 @@ def _to_mono_float (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
 
 	# Mix stereo (or multi-channel) to mono
 	return numpy.mean(float_audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]
+
+
+def _log_normalize (value: float, min_ref: float, max_ref: float) -> float:
+
+	"""Map a value to [0.0, 1.0] using a logarithmic scale.
+
+	Values at or below min_ref return 0.0; values at or above max_ref return
+	1.0. The midpoint on the log scale is sqrt(min_ref * max_ref).
+
+	Using log scale for time and frequency reflects human perception: we
+	distinguish a 1 ms vs 10 ms attack much more clearly than a 1 s vs 1.01 s
+	attack; similarly, an octave is always an octave regardless of register.
+
+	Args:
+		value:   The raw value to normalise.
+		min_ref: Reference minimum (maps to 0.0).
+		max_ref: Reference maximum (maps to 1.0).
+
+	Returns:
+		Normalised score in [0.0, 1.0].
+	"""
+
+	if value <= min_ref:
+		return 0.0
+
+	if value >= max_ref:
+		return 1.0
+
+	return math.log(value / min_ref) / math.log(max_ref / min_ref)
+
+
+def _compute_attack_release (
+	mono: numpy.ndarray,
+	params: AnalysisParams,
+) -> tuple[float, float]:
+
+	"""Measure the attack and release durations from the RMS energy envelope.
+
+	Both are mapped to [0, 1] using _log_normalize against
+	_ATTACK_RELEASE_MIN_S and _ATTACK_RELEASE_MAX_S.
+
+	How it works:
+	  1. Compute the frame-by-frame RMS energy envelope.
+	  2. Find the peak RMS frame — this is the energy apex.
+	  3. Threshold at _ACTIVE_THRESHOLD_RATIO * peak_rms (≈ -20 dB below peak).
+	  4. Attack  = time from first above-threshold frame to peak.
+	  5. Release = time from peak to last above-threshold frame.
+	  Both are converted to seconds via hop_length / sample_rate.
+
+	Attack and release are independent: a sound can have a fast attack AND a
+	long release (e.g. piano), or slow attack AND fast release (e.g. fade-in
+	with hard cut), because they measure different ends of the peak.
+
+	Args:
+		mono:   Float32 audio, shape (n_frames,), normalised to [-1, 1].
+		params: FFT params for consistent frame sizing with other metrics.
+
+	Returns:
+		(attack_score, release_score), both in [0.0, 1.0].
+	"""
+
+	rms = librosa.feature.rms(
+		y=mono,
+		frame_length=params.n_fft,
+		hop_length=params.hop_length,
+	)[0]  # librosa returns shape (1, n_frames); [0] gives (n_frames,)
+
+	peak_idx = int(numpy.argmax(rms))
+	peak_rms = float(rms[peak_idx])
+
+	# Guard against silence or near-silence: if the peak is essentially zero
+	# there's no meaningful attack or release to measure.
+	if peak_rms < 1e-8:
+		return (0.0, 0.0)
+
+	threshold = peak_rms * _ACTIVE_THRESHOLD_RATIO
+
+	# Frames where energy is above the threshold
+	active_frames = numpy.where(rms >= threshold)[0]
+
+	if active_frames.size == 0:
+		return (0.0, 0.0)
+
+	# seconds per frame, used to convert frame counts to wall-clock time
+	seconds_per_frame = params.hop_length / params.sample_rate
+
+	# Attack: frames between the first active frame and the peak
+	first_active = int(active_frames[0])
+	attack_seconds = (peak_idx - first_active) * seconds_per_frame
+
+	# Release: frames between the peak and the last active frame
+	last_active = int(active_frames[-1])
+	release_seconds = (last_active - peak_idx) * seconds_per_frame
+
+	attack_score = _log_normalize(attack_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
+	release_score = _log_normalize(release_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
+
+	return (attack_score, release_score)
+
+
+def _compute_spectral_centroid (
+	mono: numpy.ndarray,
+	params: AnalysisParams,
+) -> float:
+
+	"""Measure the centre of mass of the frequency spectrum (bassy vs trebly).
+
+	Returns a value in [0, 1] via log-frequency normalisation between 20 Hz
+	and Nyquist.  Using log scale matches human pitch perception: an octave
+	jump is always an octave regardless of register, so the midpoint of the
+	scale (0.5) sits at sqrt(20 * nyquist) Hz — roughly the middle of the
+	musical range (~1 kHz at 44.1 kHz sample rate).
+
+	Args:
+		mono:   Float32 audio, shape (n_frames,).
+		params: FFT params.
+
+	Returns:
+		Centroid score in [0.0, 1.0]. 0 = bassy, 1 = trebly.
+	"""
+
+	centroid = librosa.feature.spectral_centroid(
+		y=mono,
+		sr=params.sample_rate,
+		n_fft=params.n_fft,
+		hop_length=params.hop_length,
+	)
+
+	# centroid has shape (1, n_frames); mean over frames gives a single Hz value
+	mean_hz = float(numpy.mean(centroid))
+
+	nyquist = params.sample_rate / 2.0
+
+	return _log_normalize(mean_hz, _FREQ_MIN_HZ, nyquist)
+
+
+def _compute_spectral_bandwidth (
+	mono: numpy.ndarray,
+	params: AnalysisParams,
+) -> float:
+
+	"""Measure how spread out the frequency content is (narrow vs wide).
+
+	Spectral bandwidth is the weighted standard deviation of the spectrum
+	around the spectral centroid — wide means energy is spread across many
+	frequencies (complex/noisy), narrow means it is concentrated (tonal/pure).
+
+	Normalised with the same log-frequency scale as spectral_centroid so the
+	two metrics are directly comparable in magnitude.
+
+	Args:
+		mono:   Float32 audio, shape (n_frames,).
+		params: FFT params.
+
+	Returns:
+		Bandwidth score in [0.0, 1.0]. 0 = narrow/tonal, 1 = wide/complex.
+	"""
+
+	bandwidth = librosa.feature.spectral_bandwidth(
+		y=mono,
+		sr=params.sample_rate,
+		n_fft=params.n_fft,
+		hop_length=params.hop_length,
+	)
+
+	# bandwidth has shape (1, n_frames); mean over frames gives a single Hz value
+	mean_hz = float(numpy.mean(bandwidth))
+
+	nyquist = params.sample_rate / 2.0
+
+	return _log_normalize(mean_hz, _FREQ_MIN_HZ, nyquist)

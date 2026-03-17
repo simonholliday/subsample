@@ -157,8 +157,11 @@ class WavWriter:
 		duration = n_frames / self._cfg.audio.sample_rate
 
 		_log.debug(
-			"Stored recording: file=%s  frames=%d  duration=%.2fs  flatness=%.3f",
-			filepath.name, n_frames, duration, result.spectral_flatness,
+			"Stored recording: file=%s  frames=%d  duration=%.2fs  "
+			"flatness=%.3f  attack=%.3f  release=%.3f  centroid=%.3f  bandwidth=%.3f",
+			filepath.name, n_frames, duration,
+			result.spectral_flatness, result.attack, result.release,
+			result.spectral_centroid, result.spectral_bandwidth,
 		)
 
 
