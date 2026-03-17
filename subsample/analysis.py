@@ -302,6 +302,13 @@ def analyze_rhythm (
 	)
 
 	# --- plp: frame-by-frame pulse salience, handles varying tempo ---
+	# win_length controls the autocorrelation window in frames (librosa default 384).
+	# It must not exceed the number of onset envelope frames in the signal, otherwise
+	# librosa warns and produces degenerate output. For short recordings we clamp it
+	# down — at the cost of coarser tempo resolution, but without errors or warnings.
+	n_signal_frames = max(1, len(mono) // params.hop_length)
+	plp_win_length = min(384, n_signal_frames)
+
 	# Returns shape (1, n_frames) or (n_frames,) depending on librosa version.
 	pulse_raw = librosa.beat.plp(
 		y=mono,
@@ -309,6 +316,7 @@ def analyze_rhythm (
 		hop_length=params.hop_length,
 		tempo_min=rhythm_cfg.tempo_min,
 		tempo_max=rhythm_cfg.tempo_max,
+		win_length=plp_win_length,
 	)
 
 	# Flatten to 1-D in case librosa returns a leading channel dimension.
