@@ -14,7 +14,7 @@ buffer:
 detection:
   snr_threshold_db: 6.0  # dB above ambient required to trigger a recording
   hold_time: 0.5         # Seconds to hold recording open after signal drops below threshold
-  warmup_seconds: 2.0    # Seconds of ambient sampling before detection activates
+  warmup_seconds: 3.0    # Seconds of ambient sampling before detection activates
   ema_alpha: 0.01        # Ambient noise EMA smoothing factor (lower = slower adaptation)
   trim_pre_samples: 0   # Extra samples to keep before the first loud sample when trimming
   trim_post_samples: 0  # Extra samples to keep after the last loud sample when trimming

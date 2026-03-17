@@ -41,7 +41,7 @@ class TestLoadDefault:
 
 		assert cfg.detection.snr_threshold_db == 6.0
 		assert cfg.detection.hold_time == 0.5
-		assert cfg.detection.warmup_seconds == 2.0
+		assert cfg.detection.warmup_seconds == 3.0
 		assert cfg.detection.ema_alpha == 0.01
 
 	def test_default_output_values (self) -> None:
