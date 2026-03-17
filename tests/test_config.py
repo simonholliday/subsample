@@ -22,6 +22,7 @@ class TestLoadDefault:
 		assert isinstance(cfg.buffer, subsample.config.BufferConfig)
 		assert isinstance(cfg.detection, subsample.config.DetectionConfig)
 		assert isinstance(cfg.output, subsample.config.OutputConfig)
+		assert isinstance(cfg.analysis, subsample.config.AnalysisConfig)
 
 	def test_default_audio_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -49,6 +50,40 @@ class TestLoadDefault:
 
 		assert cfg.output.directory == "./samples"
 		assert cfg.output.filename_format == "%Y-%m-%d_%H-%M-%S"
+
+	def test_default_analysis_values (self) -> None:
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert cfg.analysis.start_bpm == 120.0
+		assert cfg.analysis.tempo_min == 30.0
+		assert cfg.analysis.tempo_max == 300.0
+
+	def test_analysis_defaults_when_section_absent (self, tmp_path: pathlib.Path) -> None:
+		"""A config.yaml without an analysis section should use class defaults."""
+		yaml_content = textwrap.dedent("""\
+			audio:
+			  sample_rate: 44100
+			  bit_depth: 16
+			  channels: 1
+			  chunk_size: 1024
+			buffer:
+			  max_seconds: 60
+			detection:
+			  snr_threshold_db: 6.0
+			  hold_time: 0.5
+			  warmup_seconds: 3.0
+			  ema_alpha: 0.01
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.analysis.start_bpm == 120.0
+		assert cfg.analysis.tempo_min == 30.0
+		assert cfg.analysis.tempo_max == 300.0
 
 	def test_default_trim_padding_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)

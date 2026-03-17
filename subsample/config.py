@@ -46,12 +46,27 @@ class OutputConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class AnalysisConfig:
+
+	start_bpm: float = 120.0
+	"""Tempo prior for beat_track — the algorithm's initial BPM estimate.
+	Does not constrain the result; just biases the search."""
+
+	tempo_min: float = 30.0
+	"""Minimum tempo (BPM) considered by the PLP pulse detector."""
+
+	tempo_max: float = 300.0
+	"""Maximum tempo (BPM) considered by the PLP pulse detector."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
 
 	audio: AudioConfig
 	buffer: BufferConfig
 	detection: DetectionConfig
 	output: OutputConfig
+	analysis: AnalysisConfig = dataclasses.field(default_factory=AnalysisConfig)
 
 
 def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
@@ -118,6 +133,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	buffer_raw: dict[str, typing.Any] = raw.get("buffer", {})
 	detection_raw: dict[str, typing.Any] = raw.get("detection", {})
 	output_raw: dict[str, typing.Any] = raw.get("output", {})
+	analysis_raw: dict[str, typing.Any] = raw.get("analysis", {})
 
 	audio = AudioConfig(
 		sample_rate=int(audio_raw["sample_rate"]),
@@ -150,4 +166,10 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		filename_format=str(output_raw["filename_format"]),
 	)
 
-	return Config(audio=audio, buffer=buffer, detection=detection, output=output)
+	analysis = AnalysisConfig(
+		start_bpm=float(analysis_raw.get("start_bpm", 120.0)),
+		tempo_min=float(analysis_raw.get("tempo_min", 30.0)),
+		tempo_max=float(analysis_raw.get("tempo_max", 300.0)),
+	)
+
+	return Config(audio=audio, buffer=buffer, detection=detection, output=output, analysis=analysis)

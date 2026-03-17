@@ -31,6 +31,9 @@ All settings live in `config.yaml`. The defaults are:
 | `detection.ema_alpha` | `0.01` | Ambient noise adaptation speed (lower = slower) |
 | `output.directory` | `./samples` | Where WAV files are saved |
 | `output.filename_format` | `%Y-%m-%d_%H-%M-%S` | strftime format for filenames |
+| `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |
+| `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
+| `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 
 ## Output
 
@@ -50,13 +53,19 @@ You can analyze any WAV file (recorded by Subsample or elsewhere) using the `ana
 python scripts/analyze_file.py samples/2026-03-17_14-32-01.wav
 ```
 
-This runs the same analysis pipeline used during live capture and prints a single line of metrics:
+This runs the same analysis pipeline used during live capture and prints two lines:
 
 ```
-duration=0.07s  flatness=0.017  attack=0.414  release=0.000  centroid=0.728  bandwidth=0.757
+tempo=120.2bpm  beats=4  pulses=12
+duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001
 ```
 
-Each metric is in the range [0.0, 1.0]:
+The first line shows rhythm properties (not normalised):
+- **tempo** - Estimated global tempo in BPM (0.0 if no beat detected)
+- **beats** - Number of beat positions detected on a regular grid
+- **pulses** - Number of local pulse peaks from the PLP algorithm
+
+The second line shows spectral metrics, each in the range [0.0, 1.0]:
 - **duration** - Recording length in seconds
 - **flatness** - 0 = tonal (e.g. sine wave), 1 = noisy
 - **attack** - 0 = instant/percussive onset, 1 = gradual build-up

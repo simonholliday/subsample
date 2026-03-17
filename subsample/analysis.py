@@ -1,19 +1,26 @@
 """Audio analysis for Subsample.
 
-Computes perceptual metrics on completed recordings before they are written
-to disk. Designed to run in the writer thread so the main capture loop is
-never delayed by analysis work.
+Computes perceptual metrics and rhythmic properties on completed recordings
+before they are written to disk. Designed to run in the writer thread so the
+main capture loop is never delayed by analysis work.
 
 Analysis parameters (FFT window size, hop length) are derived once from the
 audio config at startup and reused for every recording.
 
-All metrics are normalised to [0.0, 1.0]:
+Spectral metrics (AnalysisResult) — normalised to [0.0, 1.0]:
 
   spectral_flatness  — 0 = perfectly tonal (sine wave), 1 = pure noise
   attack             — 0 = instant/percussive onset, 1 = very gradual build
   release            — 0 = instant cutoff, 1 = long sustain/decay tail
   spectral_centroid  — 0 = very bassy, 1 = very trebly
   spectral_bandwidth — 0 = narrow/pure tone, 1 = wide/spectrally complex
+
+Rhythm metrics (RhythmResult) — raw values, NOT normalised:
+
+  tempo_bpm          — estimated global tempo in BPM (0.0 if undetected)
+  beat_times         — beat positions in seconds from beat_track
+  pulse_curve        — frame-by-frame rhythmic salience from PLP
+  pulse_peak_times   — local maxima of pulse curve in seconds
 """
 
 import dataclasses
@@ -21,6 +28,9 @@ import math
 
 import librosa
 import numpy
+import scipy.signal
+
+import subsample.config
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +92,37 @@ class AnalysisResult:
 	spectral_bandwidth: float
 	"""Spread of frequency content, log-mapped from 20 Hz to Nyquist.
 	0.0 = narrow / pure tone, 1.0 = wide / spectrally complex."""
+
+
+@dataclasses.dataclass(frozen=True)
+class RhythmResult:
+
+	"""Rhythmic properties detected from a single recording.
+
+	Unlike AnalysisResult, values are NOT normalised to [0, 1]. They represent
+	raw temporal and rhythmic data intended for downstream beat-fitting — mapping
+	detected pulses onto a known BPM grid.
+	"""
+
+	tempo_bpm: float
+	"""Estimated global tempo from beat_track, in beats per minute.
+	0.0 if no tempo could be detected (e.g. silence or arrhythmic audio)."""
+
+	beat_times: tuple[float, ...]
+	"""Beat positions in seconds, estimated by beat_track using dynamic programming.
+	Values are quantised to a regular grid at tempo_bpm.
+	Empty tuple if no beats were detected."""
+
+	pulse_curve: numpy.ndarray
+	"""Frame-by-frame rhythmic salience from the PLP (Predominant Local Pulse) algorithm.
+	Shape (n_frames,), values >= 0. Peaks mark rhythmically salient moments.
+	Frame timing: frame i corresponds to i * hop_length / sample_rate seconds.
+	Unlike beat_times, this reflects locally varying tempo and is not grid-quantised."""
+
+	pulse_peak_times: tuple[float, ...]
+	"""Local maxima of the pulse curve, in seconds.
+	Candidate beat locations that do not assume constant tempo.
+	Useful when beat_times is empty or the detected grid does not fit the signal well."""
 
 
 def compute_params (sample_rate: int) -> AnalysisParams:
@@ -151,7 +192,7 @@ def analyze (
 			spectral_bandwidth=0.0,
 		)
 
-	mono = _to_mono_float(audio, bit_depth)
+	mono = to_mono_float(audio, bit_depth)
 
 	return analyze_mono(mono, params)
 
@@ -203,6 +244,97 @@ def analyze_mono (
 	)
 
 
+def analyze_rhythm (
+	mono: numpy.ndarray,
+	params: AnalysisParams,
+	rhythm_cfg: subsample.config.AnalysisConfig,
+) -> RhythmResult:
+
+	"""Detect rhythmic properties from a pre-normalised float32 mono array.
+
+	Runs two complementary algorithms:
+	  1. beat_track — dynamic programming to find a consistent beat grid and
+	     global tempo. Best when the rhythm is steady (e.g. a clock tick).
+	  2. plp (Predominant Local Pulse) — analyses locally dominant periodicities
+	     without assuming constant tempo. Better for drifting or irregular rhythms.
+
+	The results are intended for downstream beat-fitting: beat_times provides
+	a grid, while pulse_peak_times provides raw candidate locations.
+
+	Args:
+		mono:       Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+		params:     Pre-computed FFT parameters from compute_params().
+		rhythm_cfg: Configurable tempo priors from AnalysisConfig.
+
+	Returns:
+		RhythmResult with tempo, beat positions, and pulse curve data.
+	"""
+
+	if mono.shape[0] == 0:
+		return RhythmResult(
+			tempo_bpm=0.0,
+			beat_times=(),
+			pulse_curve=numpy.zeros(0, dtype=numpy.float32),
+			pulse_peak_times=(),
+		)
+
+	# --- beat_track: global tempo estimation + beat grid ---
+	# Returns tempo as a numpy scalar and beat positions in the units specified.
+	# start_bpm biases (but does not constrain) the tempo search.
+	tempo_raw, beat_frames_raw = librosa.beat.beat_track(
+		y=mono,
+		sr=params.sample_rate,
+		hop_length=params.hop_length,
+		start_bpm=rhythm_cfg.start_bpm,
+		units='frames',
+	)
+
+	# tempo_raw may be a 1-D array of shape (1,) in newer librosa versions
+	tempo_bpm = float(numpy.atleast_1d(tempo_raw)[0])
+
+	# Convert beat frame indices to seconds for downstream use
+	beat_times: tuple[float, ...] = tuple(
+		float(t) for t in librosa.frames_to_time(
+			beat_frames_raw,
+			sr=params.sample_rate,
+			hop_length=params.hop_length,
+		)
+	)
+
+	# --- plp: frame-by-frame pulse salience, handles varying tempo ---
+	# Returns shape (1, n_frames) or (n_frames,) depending on librosa version.
+	pulse_raw = librosa.beat.plp(
+		y=mono,
+		sr=params.sample_rate,
+		hop_length=params.hop_length,
+		tempo_min=rhythm_cfg.tempo_min,
+		tempo_max=rhythm_cfg.tempo_max,
+	)
+
+	# Flatten to 1-D in case librosa returns a leading channel dimension.
+	# Use atleast_1d to ensure we get at least (n,), never a 0-D scalar array,
+	# which would crash find_peaks.
+	pulse_curve: numpy.ndarray = numpy.atleast_1d(pulse_raw.squeeze()).astype(numpy.float32)
+
+	# Extract peak positions: frames where the pulse curve is locally maximal
+	peak_indices, _ = scipy.signal.find_peaks(pulse_curve)
+
+	pulse_peak_times: tuple[float, ...] = tuple(
+		float(t) for t in librosa.frames_to_time(
+			peak_indices,
+			sr=params.sample_rate,
+			hop_length=params.hop_length,
+		)
+	)
+
+	return RhythmResult(
+		tempo_bpm=tempo_bpm,
+		beat_times=beat_times,
+		pulse_curve=pulse_curve,
+		pulse_peak_times=pulse_peak_times,
+	)
+
+
 def format_result (result: AnalysisResult, duration: float) -> str:
 
 	"""Return a single-line human-readable summary of an analysis result.
@@ -229,16 +361,36 @@ def format_result (result: AnalysisResult, duration: float) -> str:
 	)
 
 
+def format_rhythm_result (result: RhythmResult) -> str:
+
+	"""Return a single-line human-readable summary of a rhythm analysis result.
+
+	Args:
+		result: Computed rhythm metrics.
+
+	Returns:
+		String of the form:
+		"tempo=X.XBpm  beats=N  pulses=N"
+	"""
+
+	return (
+		f"tempo={result.tempo_bpm:.1f}bpm"
+		f"  beats={len(result.beat_times)}"
+		f"  pulses={len(result.pulse_peak_times)}"
+	)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _to_mono_float (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
+def to_mono_float (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
 
 	"""Convert integer PCM to a normalised float32 mono array.
 
 	Normalises to [-1.0, 1.0] using the full-scale range for the bit depth.
-	Stereo (or higher) inputs are mixed down by averaging channels.
+	Stereo (or higher) inputs are mixed down by averaging channels. The result
+	can be passed directly to analyze_mono() and analyze_rhythm().
 
 	Args:
 		audio:     Shape (n_frames, channels), integer dtype.

@@ -4,7 +4,10 @@ import math
 
 import numpy
 
+import warnings
+
 import subsample.analysis
+import subsample.config
 
 
 class TestComputeParams:
@@ -467,3 +470,222 @@ class TestFormatResult:
 		s = subsample.analysis.format_result(self._result(), 0.0)
 
 		assert "duration=0.00s" in s
+
+
+class TestAnalyzeRhythm:
+
+	"""Tests for analyze_rhythm() and format_rhythm_result()."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _cfg (self) -> subsample.config.AnalysisConfig:
+		return subsample.config.AnalysisConfig()
+
+	def _click_track (
+		self,
+		bpm: float = 120.0,
+		duration_seconds: float = 2.0,
+		sample_rate: int = 44100,
+	) -> numpy.ndarray:
+		"""Generate a mono float32 click track at a fixed BPM.
+
+		Each beat is a single full-amplitude sample surrounded by silence.
+		This is the simplest possible rhythmic signal for beat detection.
+		"""
+		n = int(duration_seconds * sample_rate)
+		audio = numpy.zeros(n, dtype=numpy.float32)
+		beat_interval = int(sample_rate * 60.0 / bpm)
+
+		for i in range(0, n, beat_interval):
+			audio[i] = 1.0
+
+		return audio
+
+	def _silence (self, duration_seconds: float = 1.0) -> numpy.ndarray:
+		"""Generate a silent float32 mono signal."""
+		return numpy.zeros(int(duration_seconds * 44100), dtype=numpy.float32)
+
+	# ------------------------------------------------------------------
+	# Empty / silence guard
+	# ------------------------------------------------------------------
+
+	def test_empty_array_returns_empty_result (self) -> None:
+		"""An empty array should return a zeroed RhythmResult without error."""
+		empty = numpy.zeros(0, dtype=numpy.float32)
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(empty, self._params(), self._cfg())
+
+		assert result.tempo_bpm == 0.0
+		assert result.beat_times == ()
+		assert result.pulse_peak_times == ()
+		assert result.pulse_curve.shape[0] == 0
+
+	def test_very_short_signal_does_not_crash (self) -> None:
+		"""Very short non-empty signals should not crash find_peaks."""
+		short = numpy.array([1.0, 0.5, 0.2], dtype=numpy.float32)
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(short, self._params(), self._cfg())
+
+		# Should return valid RhythmResult without raising
+		assert isinstance(result, subsample.analysis.RhythmResult)
+		assert result.pulse_curve.ndim == 1
+
+	# ------------------------------------------------------------------
+	# Return types
+	# ------------------------------------------------------------------
+
+	def test_returns_rhythm_result_type (self) -> None:
+		"""analyze_rhythm() should return a RhythmResult instance."""
+		audio = self._click_track()
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert isinstance(result, subsample.analysis.RhythmResult)
+
+	def test_tempo_bpm_is_float (self) -> None:
+		"""tempo_bpm must be a Python float."""
+		audio = self._click_track()
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert isinstance(result.tempo_bpm, float)
+
+	def test_beat_times_is_tuple_of_floats (self) -> None:
+		"""beat_times must be a tuple of floats."""
+		audio = self._click_track()
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert isinstance(result.beat_times, tuple)
+		assert all(isinstance(t, float) for t in result.beat_times)
+
+	def test_pulse_peak_times_is_tuple_of_floats (self) -> None:
+		"""pulse_peak_times must be a tuple of floats."""
+		audio = self._click_track()
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert isinstance(result.pulse_peak_times, tuple)
+		assert all(isinstance(t, float) for t in result.pulse_peak_times)
+
+	def test_pulse_curve_is_1d_float32 (self) -> None:
+		"""pulse_curve must be a 1-D float32 numpy array."""
+		audio = self._click_track()
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert result.pulse_curve.ndim == 1
+		assert result.pulse_curve.dtype == numpy.float32
+
+	# ------------------------------------------------------------------
+	# Click track — should detect a tempo
+	# ------------------------------------------------------------------
+
+	def test_click_track_has_nonzero_tempo (self) -> None:
+		"""A regular click track should yield a positive BPM estimate."""
+		audio = self._click_track(bpm=120.0)
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert result.tempo_bpm > 0.0
+
+	def test_click_track_has_beat_times (self) -> None:
+		"""A regular click track should produce at least one detected beat."""
+		audio = self._click_track(bpm=120.0, duration_seconds=4.0)
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert len(result.beat_times) > 0
+
+	def test_click_track_has_pulse_peaks (self) -> None:
+		"""A regular click track should produce at least one PLP pulse peak."""
+		audio = self._click_track(bpm=120.0, duration_seconds=4.0)
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert len(result.pulse_peak_times) > 0
+
+	def test_beat_times_are_within_duration (self) -> None:
+		"""All detected beat times should fall within the signal duration."""
+		duration = 4.0
+		audio = self._click_track(bpm=120.0, duration_seconds=duration)
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		for t in result.beat_times:
+			assert 0.0 <= t <= duration
+
+	def test_pulse_peak_times_are_within_duration (self) -> None:
+		"""All pulse peak times should fall within the signal duration."""
+		duration = 4.0
+		audio = self._click_track(bpm=120.0, duration_seconds=duration)
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		for t in result.pulse_peak_times:
+			assert 0.0 <= t <= duration
+
+	# ------------------------------------------------------------------
+	# format_rhythm_result
+	# ------------------------------------------------------------------
+
+	def test_format_contains_all_labels (self) -> None:
+		"""format_rhythm_result() output must include all three labels."""
+		audio = self._click_track()
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		s = subsample.analysis.format_rhythm_result(result)
+
+		assert "tempo=" in s
+		assert "beats=" in s
+		assert "pulses=" in s
+
+	def test_format_is_single_line (self) -> None:
+		"""format_rhythm_result() should return a single line."""
+		audio = self._click_track()
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", UserWarning)
+			result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		s = subsample.analysis.format_rhythm_result(result)
+
+		assert "\n" not in s
+
+	def test_format_empty_result (self) -> None:
+		"""format_rhythm_result() on an empty result should not raise."""
+		empty = numpy.zeros(0, dtype=numpy.float32)
+		result = subsample.analysis.analyze_rhythm(empty, self._params(), self._cfg())
+		s = subsample.analysis.format_rhythm_result(result)
+
+		assert "tempo=0.0bpm" in s
+		assert "beats=0" in s
+		assert "pulses=0" in s
