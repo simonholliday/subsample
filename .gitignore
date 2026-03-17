@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+
+# Generated audio recordings
+*.wav
+*.flac
+*.mp3
+
+# Documentation build output
+docs/html/
+docs/*.html
+
+# Project metadata and instructions
+CLAUDE.md
+README-AGENTS.md
+AGENT-INSTRUCTIONS.md
+.vscode/

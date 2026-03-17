@@ -1,0 +1,24 @@
+# Subsample default configuration.
+# Copy this file to config.yaml and adjust to your needs:
+#   cp config.yaml.default config.yaml
+
+audio:
+  sample_rate: 44100     # Hz — 44100 is standard CD quality
+  bit_depth: 16          # Bits per sample — 16 (paInt16) or 24 (paInt24)
+  channels: 1            # 1 = mono, 2 = stereo
+  chunk_size: 1024       # Frames read per buffer cycle
+
+buffer:
+  max_seconds: 60        # Length of the circular recording buffer in seconds
+
+detection:
+  snr_threshold_db: 6.0  # dB above ambient required to trigger a recording
+  hold_time: 0.5         # Seconds to hold recording open after signal drops below threshold
+  warmup_seconds: 2.0    # Seconds of ambient sampling before detection activates
+  ema_alpha: 0.01        # Ambient noise EMA smoothing factor (lower = slower adaptation)
+  trim_pre_samples: 0   # Extra samples to keep before the first loud sample when trimming
+  trim_post_samples: 0  # Extra samples to keep after the last loud sample when trimming
+
+output:
+  directory: "./samples"             # Where recorded WAV files are saved
+  filename_format: "%Y-%m-%d_%H-%M-%S"  # strftime format for filenames

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subsample"
+version = "0.1.0"
+description = "Ambient audio sample recorder"
+requires-python = ">=3.12"
+dependencies = [
+	"PyAudio>=0.2.14",
+	"PyYAML>=6.0",
+	"numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+	"mypy>=1.9",
+	"pytest>=8.0",
+	"types-pyaudio>=0.2.16",
+	"types-PyYAML>=6.0.12",
+]
+
+[project.scripts]
+subsample = "subsample.cli:main"
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
