@@ -156,13 +156,12 @@ class WavWriter:
 		n_frames = audio.shape[0]
 		duration = n_frames / self._cfg.audio.sample_rate
 
-		_log.debug(
-			"Stored recording: file=%s  frames=%d  duration=%.2fs  "
-			"flatness=%.3f  attack=%.3f  release=%.3f  centroid=%.3f  bandwidth=%.3f",
-			filepath.name, n_frames, duration,
-			result.spectral_flatness, result.attack, result.release,
-			result.spectral_centroid, result.spectral_bandwidth,
-		)
+		if _log.isEnabledFor(logging.DEBUG):
+			_log.debug(
+				"Stored recording: file=%s  frames=%d  %s",
+				filepath.name, n_frames,
+				subsample.analysis.format_result(result, duration),
+			)
 
 
 def _pack_int24 (audio: numpy.ndarray) -> bytes:

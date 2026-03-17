@@ -72,7 +72,7 @@ def main () -> None:
 		max_recording_frames=max_frames,
 	)
 
-	analysis_params = subsample.analysis.compute_params(cfg.audio)
+	analysis_params = subsample.analysis.compute_params(cfg.audio.sample_rate)
 	writer = subsample.recorder.WavWriter(cfg, analysis_params)
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")

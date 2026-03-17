@@ -1,6 +1,6 @@
 # Subsample
 
-Subsample is an ambient audio sample recorder written in Python. It continuously monitors an audio input, learns the ambient noise floor, and automatically records any sound that rises above it — saving each event as a timestamped WAV file.
+Subsample is an ambient audio sample recorder written in Python. It continuously monitors an audio input, learns the ambient noise floor, and automatically records any sound that rises above it - saving each event as a timestamped WAV file.
 
 ## Quick start
 
@@ -42,10 +42,32 @@ samples/
   2026-03-17_14-35-44.wav
 ```
 
+## Analyzing recorded files
+
+You can analyze any WAV file (recorded by Subsample or elsewhere) using the `analyze_file` script:
+
+```bash
+python scripts/analyze_file.py samples/2026-03-17_14-32-01.wav
+```
+
+This runs the same analysis pipeline used during live capture and prints a single line of metrics:
+
+```
+duration=0.07s  flatness=0.017  attack=0.414  release=0.000  centroid=0.728  bandwidth=0.757
+```
+
+Each metric is in the range [0.0, 1.0]:
+- **duration** - Recording length in seconds
+- **flatness** - 0 = tonal (e.g. sine wave), 1 = noisy
+- **attack** - 0 = instant/percussive onset, 1 = gradual build-up
+- **release** - 0 = sudden stop, 1 = long sustain/decay tail
+- **centroid** - 0 = bassy/low-frequency, 1 = trebly/high-frequency
+- **bandwidth** - 0 = narrow/pure tone, 1 = wide/spectrally complex
+
 ## Requirements
 
 - Python 3.12+
-- PortAudio (required by PyAudio — install via your system package manager: `apt install portaudio19-dev` or `brew install portaudio`)
+- PortAudio (required by PyAudio - install via your system package manager: `apt install portaudio19-dev` or `brew install portaudio`)
 
 ## Development
 

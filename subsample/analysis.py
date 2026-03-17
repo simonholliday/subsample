@@ -22,8 +22,6 @@ import math
 import librosa
 import numpy
 
-import subsample.config
-
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -86,19 +84,19 @@ class AnalysisResult:
 	0.0 = narrow / pure tone, 1.0 = wide / spectrally complex."""
 
 
-def compute_params (audio_cfg: subsample.config.AudioConfig) -> AnalysisParams:
+def compute_params (sample_rate: int) -> AnalysisParams:
 
-	"""Derive FFT analysis parameters from the audio configuration.
+	"""Derive FFT analysis parameters for a given sample rate.
 
 	Targets a ~46ms analysis window (the audio analysis standard at 44.1 kHz),
 	rounded to the nearest power of two for FFT efficiency. This keeps the
 	window duration roughly constant regardless of sample rate.
 
 	Args:
-		audio_cfg: The audio section of the loaded config.
+		sample_rate: Audio sample rate in Hz.
 
 	Returns:
-		AnalysisParams suitable for passing to analyze() on every recording.
+		AnalysisParams suitable for passing to analyze() or analyze_mono().
 
 	Examples:
 		11025 Hz → n_fft=512,  hop=128
@@ -108,15 +106,18 @@ def compute_params (audio_cfg: subsample.config.AudioConfig) -> AnalysisParams:
 		96000 Hz → n_fft=4096, hop=1024
 	"""
 
+	if sample_rate <= 0:
+		raise ValueError(f"sample_rate must be positive, got {sample_rate}")
+
 	# Reference window: 2048 samples at 44100 Hz ≈ 0.04644 s
 	target_seconds = 2048 / 44100
-	n_fft = int(2 ** round(math.log2(target_seconds * audio_cfg.sample_rate)))
+	n_fft = int(2 ** round(math.log2(target_seconds * sample_rate)))
 	hop_length = n_fft // 4
 
 	return AnalysisParams(
 		n_fft=n_fft,
 		hop_length=hop_length,
-		sample_rate=audio_cfg.sample_rate,
+		sample_rate=sample_rate,
 	)
 
 
@@ -129,7 +130,7 @@ def analyze (
 	"""Compute analysis metrics for a single audio recording.
 
 	Converts the integer PCM array to normalised float32, mixes stereo to mono,
-	then runs librosa analysis. The original array is not modified.
+	then delegates to analyze_mono(). The original array is not modified.
 
 	Args:
 		audio:     Shape (n_frames, channels), dtype int16 or int32.
@@ -152,6 +153,37 @@ def analyze (
 
 	mono = _to_mono_float(audio, bit_depth)
 
+	return analyze_mono(mono, params)
+
+
+def analyze_mono (
+	mono: numpy.ndarray,
+	params: AnalysisParams,
+) -> AnalysisResult:
+
+	"""Compute analysis metrics from a pre-normalised float32 mono array.
+
+	Use this entry point when audio is already normalised to [-1, 1] — for
+	example when reading a file via soundfile. For integer PCM from the live
+	capture pipeline, use analyze() instead, which handles the conversion.
+
+	Args:
+		mono:   Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+		params: Pre-computed FFT parameters from compute_params().
+
+	Returns:
+		AnalysisResult with all computed metrics in [0.0, 1.0].
+	"""
+
+	if mono.shape[0] == 0:
+		return AnalysisResult(
+			spectral_flatness=0.0,
+			attack=0.0,
+			release=0.0,
+			spectral_centroid=0.0,
+			spectral_bandwidth=0.0,
+		)
+
 	flatness = librosa.feature.spectral_flatness(
 		y=mono,
 		n_fft=params.n_fft,
@@ -168,6 +200,32 @@ def analyze (
 		release=release,
 		spectral_centroid=centroid,
 		spectral_bandwidth=bandwidth,
+	)
+
+
+def format_result (result: AnalysisResult, duration: float) -> str:
+
+	"""Return a single-line human-readable summary of an analysis result.
+
+	Used by both the WAV writer debug log and the analyze_file script so the
+	format is defined once and stays consistent.
+
+	Args:
+		result:   Computed analysis metrics.
+		duration: Recording length in seconds.
+
+	Returns:
+		String of the form:
+		"duration=X.XXs  flatness=X.XXX  attack=X.XXX  release=X.XXX  centroid=X.XXX  bandwidth=X.XXX"
+	"""
+
+	return (
+		f"duration={duration:.2f}s"
+		f"  flatness={result.spectral_flatness:.3f}"
+		f"  attack={result.attack:.3f}"
+		f"  release={result.release:.3f}"
+		f"  centroid={result.spectral_centroid:.3f}"
+		f"  bandwidth={result.spectral_bandwidth:.3f}"
 	)
 
 

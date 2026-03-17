@@ -5,23 +5,13 @@ import math
 import numpy
 
 import subsample.analysis
-import subsample.config
-
-
-def _make_audio_cfg (sample_rate: int) -> subsample.config.AudioConfig:
-	return subsample.config.AudioConfig(
-		sample_rate=sample_rate,
-		bit_depth=16,
-		channels=1,
-		chunk_size=1024,
-	)
 
 
 class TestComputeParams:
 
 	def test_44100_hz (self) -> None:
 		"""Standard CD rate should yield the classic n_fft=2048."""
-		params = subsample.analysis.compute_params(_make_audio_cfg(44100))
+		params = subsample.analysis.compute_params(44100)
 
 		assert params.n_fft == 2048
 		assert params.hop_length == 512
@@ -29,28 +19,28 @@ class TestComputeParams:
 
 	def test_11025_hz (self) -> None:
 		"""Quarter rate should quarter the window to n_fft=512."""
-		params = subsample.analysis.compute_params(_make_audio_cfg(11025))
+		params = subsample.analysis.compute_params(11025)
 
 		assert params.n_fft == 512
 		assert params.hop_length == 128
 
 	def test_22050_hz (self) -> None:
 		"""22050 Hz should yield n_fft=1024, hop_length=256."""
-		params = subsample.analysis.compute_params(_make_audio_cfg(22050))
+		params = subsample.analysis.compute_params(22050)
 
 		assert params.n_fft == 1024
 		assert params.hop_length == 256
 
 	def test_48000_hz (self) -> None:
 		"""48 kHz is close enough to 44.1 kHz that n_fft stays at 2048."""
-		params = subsample.analysis.compute_params(_make_audio_cfg(48000))
+		params = subsample.analysis.compute_params(48000)
 
 		assert params.n_fft == 2048
 		assert params.hop_length == 512
 
 	def test_96000_hz (self) -> None:
 		"""96 kHz should yield n_fft=4096, hop_length=1024."""
-		params = subsample.analysis.compute_params(_make_audio_cfg(96000))
+		params = subsample.analysis.compute_params(96000)
 
 		assert params.n_fft == 4096
 		assert params.hop_length == 1024
@@ -58,13 +48,13 @@ class TestComputeParams:
 	def test_hop_length_is_quarter_n_fft (self) -> None:
 		"""hop_length should always equal n_fft // 4."""
 		for rate in [8000, 16000, 22050, 44100, 48000, 96000]:
-			params = subsample.analysis.compute_params(_make_audio_cfg(rate))
+			params = subsample.analysis.compute_params(rate)
 			assert params.hop_length == params.n_fft // 4
 
 	def test_n_fft_is_power_of_two (self) -> None:
 		"""n_fft should always be a power of two."""
 		for rate in [8000, 16000, 22050, 44100, 48000, 96000]:
-			params = subsample.analysis.compute_params(_make_audio_cfg(rate))
+			params = subsample.analysis.compute_params(rate)
 			assert params.n_fft > 0 and (params.n_fft & (params.n_fft - 1)) == 0
 
 
@@ -101,7 +91,7 @@ class TestLogNormalize:
 class TestAnalyze:
 
 	def _params (self, sample_rate: int = 44100) -> subsample.analysis.AnalysisParams:
-		return subsample.analysis.compute_params(_make_audio_cfg(sample_rate))
+		return subsample.analysis.compute_params(sample_rate)
 
 	def _sine_wave (
 		self,
@@ -354,3 +344,126 @@ class TestAnalyze:
 		assert result.release == 0.0
 		assert result.spectral_centroid == 0.0
 		assert result.spectral_bandwidth == 0.0
+
+
+class TestAnalyzeMono:
+
+	"""Tests for the float-input entry point used by the file analysis script."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _float_sine (
+		self,
+		frequency: float = 440.0,
+		duration_seconds: float = 0.5,
+	) -> numpy.ndarray:
+		"""Generate a normalised float32 mono sine wave."""
+		n = int(duration_seconds * 44100)
+		t = numpy.arange(n) / 44100
+		return (numpy.sin(2 * numpy.pi * frequency * t) * 0.9).astype(numpy.float32)
+
+	def test_returns_analysis_result (self) -> None:
+		"""analyze_mono() should return a complete AnalysisResult."""
+		result = subsample.analysis.analyze_mono(self._float_sine(), self._params())
+
+		assert isinstance(result, subsample.analysis.AnalysisResult)
+
+	def test_all_metrics_in_range (self) -> None:
+		"""All metrics returned by analyze_mono() must be in [0.0, 1.0]."""
+		result = subsample.analysis.analyze_mono(self._float_sine(), self._params())
+
+		assert 0.0 <= result.spectral_flatness <= 1.0
+		assert 0.0 <= result.attack <= 1.0
+		assert 0.0 <= result.release <= 1.0
+		assert 0.0 <= result.spectral_centroid <= 1.0
+		assert 0.0 <= result.spectral_bandwidth <= 1.0
+
+	def test_matches_analyze_for_integer_input (self) -> None:
+		"""analyze_mono and analyze should agree on the same audio content."""
+		# Build equivalent signals: float mono vs int16 mono
+		n = int(0.5 * 44100)
+		t = numpy.arange(n) / 44100
+		float_mono = (numpy.sin(2 * numpy.pi * 440 * t) * 0.9).astype(numpy.float32)
+		int_audio = (float_mono * 32768.0).astype(numpy.int16).reshape(-1, 1)
+
+		params = self._params()
+		result_float = subsample.analysis.analyze_mono(float_mono, params)
+		result_int = subsample.analysis.analyze(int_audio, params, bit_depth=16)
+
+		assert abs(result_float.spectral_flatness - result_int.spectral_flatness) < 0.01
+		assert abs(result_float.spectral_centroid - result_int.spectral_centroid) < 0.01
+
+	def test_empty_array_returns_zeros (self) -> None:
+		"""An empty float32 array should return all-zero metrics without error."""
+		empty = numpy.zeros(0, dtype=numpy.float32)
+		result = subsample.analysis.analyze_mono(empty, self._params())
+
+		assert result.spectral_flatness == 0.0
+		assert result.attack == 0.0
+		assert result.release == 0.0
+		assert result.spectral_centroid == 0.0
+		assert result.spectral_bandwidth == 0.0
+
+	def test_white_noise_all_metrics_in_range (self) -> None:
+		"""White noise (spectrally complex) should stay within [0.0, 1.0]."""
+		rng = numpy.random.default_rng(seed=42)
+		n = int(0.5 * 44100)
+		noise = rng.random(n).astype(numpy.float32) * 2.0 - 1.0
+		result = subsample.analysis.analyze_mono(noise, self._params())
+
+		assert 0.0 <= result.spectral_flatness <= 1.0
+		assert 0.0 <= result.spectral_bandwidth <= 1.0
+
+
+class TestFormatResult:
+
+	"""Tests for the shared result formatting function."""
+
+	def _result (self) -> subsample.analysis.AnalysisResult:
+		return subsample.analysis.AnalysisResult(
+			spectral_flatness=0.017,
+			attack=0.414,
+			release=0.000,
+			spectral_centroid=0.728,
+			spectral_bandwidth=0.757,
+		)
+
+	def test_contains_all_field_names (self) -> None:
+		"""Output string must include all metric labels."""
+		s = subsample.analysis.format_result(self._result(), 0.07)
+
+		assert "duration=" in s
+		assert "flatness=" in s
+		assert "attack=" in s
+		assert "release=" in s
+		assert "centroid=" in s
+		assert "bandwidth=" in s
+
+	def test_duration_formatted_correctly (self) -> None:
+		"""Duration should appear as e.g. 'duration=0.07s'."""
+		s = subsample.analysis.format_result(self._result(), 0.07)
+
+		assert "duration=0.07s" in s
+
+	def test_metric_values_formatted_correctly (self) -> None:
+		"""Metric values should be formatted to 3 decimal places."""
+		s = subsample.analysis.format_result(self._result(), 0.07)
+
+		assert "flatness=0.017" in s
+		assert "attack=0.414" in s
+		assert "release=0.000" in s
+		assert "centroid=0.728" in s
+		assert "bandwidth=0.757" in s
+
+	def test_returns_single_line (self) -> None:
+		"""Output should be a single line with no newlines."""
+		s = subsample.analysis.format_result(self._result(), 1.0)
+
+		assert "\n" not in s
+
+	def test_zero_duration (self) -> None:
+		"""Zero duration should format correctly without error."""
+		s = subsample.analysis.format_result(self._result(), 0.0)
+
+		assert "duration=0.00s" in s
