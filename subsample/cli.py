@@ -40,10 +40,11 @@ def main () -> None:
 	"""
 
 	logging.basicConfig(
-		level=logging.DEBUG,
+		level=logging.WARNING,
 		format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 		datefmt="%H:%M:%S",
 	)
+	logging.getLogger("subsample").setLevel(logging.DEBUG)
 
 	cfg = subsample.config.load_config()
 
