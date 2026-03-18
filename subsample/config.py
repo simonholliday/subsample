@@ -141,6 +141,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		bit_depth=int(audio_raw["bit_depth"]),
 		channels=int(audio_raw["channels"]),
 		chunk_size=int(audio_raw["chunk_size"]),
+		device=audio_raw.get("device"),
 	)
 
 	if audio.bit_depth not in {16, 24, 32}:

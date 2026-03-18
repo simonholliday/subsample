@@ -3,6 +3,14 @@
 #   cp config.yaml.default config.yaml
 
 audio:
+
+  # device: "Samson Go Mic: USB Audio (hw:1,0)"
+  # Name (or substring) of the audio input device to use.
+  # Case-insensitive substring match — "Samson" matches the full device name above.
+  # If omitted, subsample auto-selects when only one input device is present,
+  # or shows an interactive numbered menu when multiple devices are found.
+  # Run subsample once without this set to see available device names.
+
   sample_rate: 44100
   # Sample rate in Hz. Standard values: 44100 (CD quality), 48000 (professional), 16000 (speech).
   # Lower = less CPU, smaller files. Higher = better fidelity for music.
@@ -28,13 +36,6 @@ audio:
   # Larger (1024, 2048): higher latency, fewer callbacks (less overhead). Default 512 is
   # optimal for USB audio devices with typical ALSA period sizes.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
-
-  # device: "Samson Go Mic: USB Audio (hw:1,0)"
-  # Name (or substring) of the audio input device to use.
-  # Case-insensitive substring match — "Samson" matches the full device name above.
-  # If omitted, subsample auto-selects when only one input device is present,
-  # or shows an interactive numbered menu when multiple devices are found.
-  # Run subsample once without this set to see available device names.
 
 buffer:
   max_seconds: 60

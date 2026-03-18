@@ -20,6 +20,7 @@ All settings live in `config.yaml`. The defaults are:
 
 | Setting | Default | Description |
 |---|---|---|
+| `audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
 | `audio.sample_rate` | `44100` | Sample rate in Hz |
 | `audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
 | `audio.channels` | `1` | 1 = mono, 2 = stereo |
