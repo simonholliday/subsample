@@ -550,21 +550,28 @@ class TestAnalyzeRhythm:
 		assert result.pulse_peak_times == ()
 		assert result.pulse_curve.shape[0] == 0
 
-	def test_very_short_signal_does_not_crash (self) -> None:
-		"""Very short non-empty signals should not crash find_peaks.
+	def test_very_short_signal_no_warning (self) -> None:
+		"""Signals shorter than n_fft should return empty result without UserWarning.
 
-		3 samples is shorter than n_fft=2048, so librosa will warn about
-		the FFT window being too large — that is expected and suppressed here.
-		The important assertion is that no exception is raised.
+		The early guard in analyze_rhythm() ensures we never call librosa.beat_track
+		or librosa.beat.plp on signals too short for meaningful rhythm analysis.
+		This prevents librosa's internal stft from emitting n_fft warnings.
 		"""
-		short = numpy.array([1.0, 0.5, 0.2], dtype=numpy.float32)
+		short = numpy.array([1.0, 0.5, 0.2], dtype=numpy.float32)  # 3 samples
 
-		with warnings.catch_warnings():
-			warnings.simplefilter("ignore", UserWarning)
+		with warnings.catch_warnings(record=True) as w:
+			warnings.simplefilter("always")
 			result = subsample.analysis.analyze_rhythm(short, self._params(), self._cfg())
 
-		assert isinstance(result, subsample.analysis.RhythmResult)
-		assert result.pulse_curve.ndim == 1
+		# No UserWarning should be raised
+		user_warnings = [x for x in w if issubclass(x.category, UserWarning)]
+		assert len(user_warnings) == 0, f"Unexpected UserWarning: {user_warnings}"
+
+		# Result should be empty (early return)
+		assert result.tempo_bpm == 0.0
+		assert result.beat_times == ()
+		assert result.pulse_peak_times == ()
+		assert result.pulse_curve.shape[0] == 0
 
 	# ------------------------------------------------------------------
 	# Return types

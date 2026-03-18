@@ -279,7 +279,12 @@ def analyze_rhythm (
 		RhythmResult with tempo, beat positions, and pulse curve data.
 	"""
 
-	if mono.shape[0] == 0:
+	if mono.shape[0] < params.n_fft:
+		# Beat analysis requires enough samples to compute onset strength.
+		# Signals shorter than n_fft (46ms at 44100 Hz) are too short for meaningful
+		# rhythm analysis. librosa.beat.beat_track/plp call stft internally with
+		# hardcoded n_fft=2048; for short signals this triggers a UserWarning and
+		# produces degenerate output. Just bail out and return silence.
 		return RhythmResult(
 			tempo_bpm=0.0,
 			beat_times=(),
