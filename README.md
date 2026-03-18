@@ -1,6 +1,9 @@
 # Subsample
 
+*A combine harvester for sound.*
+
 Subsample is an automatic field recorder, sample analyzer, and MIDI playback device.
+
 Point a microphone at the world, and Subsample continuously listens - automatically
 capturing every usable sound, trimming the silence, and analyzing each clip for its
 spectral, rhythmic, and pitch character.
@@ -8,8 +11,9 @@ spectral, rhythmic, and pitch character.
 Most samplers ask you to manually record a chunk of audio, chop it up, and figure out
 where each piece belongs. Subsample automates the entire pipeline: it harvests sounds
 from a live stream or a pre-recorded file, sorts them intelligently (tonal vs.
-percussive, pitched vs. unpitched), and builds a feature vector for each one. The
-end goal is a live instrument - sounds are assigned to MIDI notes as they are
+percussive, pitched vs. unpitched), and builds a feature vector for each one.
+
+The end goal is a live instrument - sounds are assigned to MIDI notes as they are
 discovered, pitch-mapped tonal samples become playable across a keyboard, and an
 external controller can trigger the whole collection in real time. The chaotic
 environment becomes an instant, organized sample pack.
