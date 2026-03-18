@@ -215,6 +215,38 @@ def list_input_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:
 	return devices
 
 
+def find_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
+
+	"""Return the index of the first input device whose name contains *name*.
+
+	Matching is case-insensitive substring search, so "Samson" matches
+	"Samson Go Mic: USB Audio (hw:1,0)".
+
+	Args:
+		pa:   Active PyAudio instance.
+		name: Substring to match against device names.
+
+	Returns:
+		Device index of the first matching input device.
+
+	Raises:
+		ValueError: If no input device name contains *name*, with a list of
+		            available device names to help the user correct the config.
+	"""
+
+	devices = list_input_devices(pa)
+	name_lower = name.lower()
+
+	for dev in devices:
+		if name_lower in str(dev["name"]).lower():
+			return int(dev["index"])
+
+	available = "\n".join(f"  {d['name']}" for d in devices) or "  (none)"
+	raise ValueError(
+		f"No input device matching {name!r} found.\nAvailable devices:\n{available}"
+	)
+
+
 def select_device (devices: list[DeviceInfo]) -> int:
 
 	"""Return the device index to use, prompting the user if there are multiple.

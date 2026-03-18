@@ -29,6 +29,13 @@ audio:
   # optimal for USB audio devices with typical ALSA period sizes.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
+  # device: "Samson Go Mic: USB Audio (hw:1,0)"
+  # Name (or substring) of the audio input device to use.
+  # Case-insensitive substring match — "Samson" matches the full device name above.
+  # If omitted, subsample auto-selects when only one input device is present,
+  # or shows an interactive numbered menu when multiple devices are found.
+  # Run subsample once without this set to see available device names.
+
 buffer:
   max_seconds: 60
   # Length of the circular recording buffer in seconds. Determines how much audio history
@@ -46,7 +53,7 @@ detection:
   # Typical: 6–12 dB. Set higher for noisy environments, lower for quiet detection.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
 
-  ema_alpha: 0.05
+  ema_alpha: 0.1
   # Exponential moving average smoothing factor for ambient noise tracking.
   # Ambient = alpha * chunk_rms + (1 - alpha) * ambient_prev.
   # Range: 0.001–0.1. Default 0.01 ≈ 100-chunk averaging (5s at 44100 Hz, 512 chunk_size).
@@ -64,23 +71,23 @@ detection:
   # Range: 0.1–2.0 seconds. Larger = longer tail preservation, risk of extra silence/noise.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
 
-  warmup_seconds: 3.0
+  warmup_seconds: 1.0
   # Seconds of ambient sampling before detection activates. The ambient floor EMA is
   # initialized during warmup; a longer warmup yields a more stable baseline.
   # Range: 1–10 seconds. Typical: 2–5 seconds. Longer = slower startup, cleaner detection.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
 
-  trim_pre_samples: 10
+  trim_pre_samples: 15
   # Extra audio samples to keep before the detected signal onset when trimming silence.
   # Creates a fade-in envelope (S-curve) over these samples for smooth audio onset.
-  # At 44100 Hz, 10 samples ≈ 0.23 ms. Range: 0–100 samples.
+  # At 44100 Hz, 15 samples ≈ 0.34 ms. Range: 0–100 samples.
   # Smaller = abrupt onset. Larger = longer fade-in and pre-signal context.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
 
-  trim_post_samples: 25
+  trim_post_samples: 45
   # Extra audio samples to keep after the detected signal end when trimming silence.
   # Creates a fade-out envelope (S-curve) over these samples for smooth audio release.
-  # At 44100 Hz, 25 samples ≈ 0.57 ms. Range: 0–100 samples.
+  # At 44100 Hz, 45 samples ≈ 1.02 ms. Range: 0–100 samples.
   # Smaller = abrupt cutoff. Larger = longer fade-out and post-signal tail.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
 

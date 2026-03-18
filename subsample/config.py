@@ -19,6 +19,7 @@ class AudioConfig:
 	bit_depth: int
 	channels: int
 	chunk_size: int
+	device: typing.Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True)

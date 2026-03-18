@@ -183,6 +183,51 @@ class TestAudioReader:
 		mock_stream.close.assert_called_once()
 
 
+class TestFindDeviceByName:
+
+	"""Tests for find_device_by_name()."""
+
+	def _make_pa (self, device_names: list[str]) -> unittest.mock.MagicMock:
+		"""Return a mock PyAudio exposing the given device names as input devices."""
+		mock_pa = unittest.mock.MagicMock()
+		mock_pa.get_device_count.return_value = len(device_names)
+
+		def _device_info (i: int) -> dict[str, typing.Union[str, int]]:
+			return {"index": i, "name": device_names[i], "maxInputChannels": 1}
+
+		mock_pa.get_device_info_by_index.side_effect = _device_info
+		return mock_pa
+
+	def test_exact_match_returns_index (self) -> None:
+		pa = self._make_pa(["Built-in Mic", "Samson Go Mic: USB Audio (hw:1,0)"])
+		assert subsample.audio.find_device_by_name(pa, "Samson Go Mic: USB Audio (hw:1,0)") == 1
+
+	def test_case_insensitive_match (self) -> None:
+		pa = self._make_pa(["Built-in Mic", "Samson Go Mic: USB Audio (hw:1,0)"])
+		assert subsample.audio.find_device_by_name(pa, "samson go mic") == 1
+
+	def test_substring_match (self) -> None:
+		pa = self._make_pa(["Built-in Mic", "Samson Go Mic: USB Audio (hw:1,0)"])
+		assert subsample.audio.find_device_by_name(pa, "Samson") == 1
+
+	def test_first_match_returned_when_multiple (self) -> None:
+		pa = self._make_pa(["USB Mic A", "USB Mic B", "Built-in Mic"])
+		assert subsample.audio.find_device_by_name(pa, "USB") == 0
+
+	def test_no_match_raises_value_error (self) -> None:
+		pa = self._make_pa(["Built-in Mic", "HDMI Output"])
+		with pytest.raises(ValueError, match="nonexistent"):
+			subsample.audio.find_device_by_name(pa, "nonexistent")
+
+	def test_error_message_lists_available_devices (self) -> None:
+		pa = self._make_pa(["Built-in Mic", "USB Audio Device"])
+		with pytest.raises(ValueError) as exc_info:
+			subsample.audio.find_device_by_name(pa, "Samson")
+		msg = str(exc_info.value)
+		assert "Built-in Mic" in msg
+		assert "USB Audio Device" in msg
+
+
 class TestUnpackAudioErrors:
 
 	def test_unsupported_bit_depth_raises (self) -> None:

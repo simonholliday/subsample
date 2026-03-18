@@ -53,8 +53,11 @@ def main () -> None:
 	pa = subsample.audio.create_pyaudio()
 
 	try:
-		devices = subsample.audio.list_input_devices(pa)
-		device_index = subsample.audio.select_device(devices)
+		if cfg.audio.device is not None:
+			device_index = subsample.audio.find_device_by_name(pa, cfg.audio.device)
+		else:
+			devices = subsample.audio.list_input_devices(pa)
+			device_index = subsample.audio.select_device(devices)
 		reader = subsample.audio.AudioReader(pa, device_index, cfg.audio)
 	except (ValueError, OSError) as exc:
 		print(f"Error opening audio device: {exc}", file=sys.stderr)

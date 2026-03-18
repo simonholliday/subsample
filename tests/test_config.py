@@ -42,8 +42,8 @@ class TestLoadDefault:
 
 		assert cfg.detection.snr_threshold_db == 12.0
 		assert cfg.detection.hold_time == 0.5
-		assert cfg.detection.warmup_seconds == 3.0
-		assert cfg.detection.ema_alpha == 0.05
+		assert cfg.detection.warmup_seconds == 1.0
+		assert cfg.detection.ema_alpha == 0.1
 
 	def test_default_output_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -88,8 +88,8 @@ class TestLoadDefault:
 	def test_default_trim_padding_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.detection.trim_pre_samples == 10
-		assert cfg.detection.trim_post_samples == 25
+		assert cfg.detection.trim_pre_samples == 15
+		assert cfg.detection.trim_post_samples == 45
 
 
 class TestLoadCustomConfig:
