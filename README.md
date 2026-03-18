@@ -1,6 +1,51 @@
 # Subsample
 
-Subsample is an ambient audio sample recorder written in Python. It continuously monitors an audio input, learns the ambient noise floor, and automatically records any sound that rises above it - saving each event as a timestamped WAV file.
+Subsample is an automatic field recorder, sample analyzer, and MIDI playback device.
+Point a microphone at the world, and Subsample continuously listens - automatically
+capturing every usable sound, trimming the silence, and analyzing each clip for its
+spectral, rhythmic, and pitch character.
+
+Most samplers ask you to manually record a chunk of audio, chop it up, and figure out
+where each piece belongs. Subsample automates the entire pipeline: it harvests sounds
+from a live stream or a pre-recorded file, sorts them intelligently (tonal vs.
+percussive, pitched vs. unpitched), and builds a feature vector for each one. The
+end goal is a live instrument - sounds are assigned to MIDI notes as they are
+discovered, pitch-mapped tonal samples become playable across a keyboard, and an
+external controller can trigger the whole collection in real time. The chaotic
+environment becomes an instant, organized sample pack.
+
+## Implemented
+
+- **Live audio capture** - continuous monitoring via PyAudio callback mode; SNR-triggered
+  recording with configurable threshold; auto-silence trimming with S-curve fade in/out;
+  timestamped WAV output.
+- **Device selection** - specify the input device by name in `config.yaml`; falls back to
+  interactive menu or auto-select when one device is present.
+- **Feature analysis** - 9 normalised spectral metrics (flatness, attack, release,
+  centroid, bandwidth, zero-crossing rate, harmonic ratio, spectral contrast, voiced
+  fraction); rhythm analysis (BPM, beats, pulses, onsets); pitch analysis (fundamental
+  frequency, pitch class, chroma profile, MFCC timbre fingerprint).
+- **File analysis** - `scripts/analyze_file.py` runs the same analysis pipeline on any
+  local audio file (WAV, FLAC, AIFF, OGG, etc.).
+
+## Planned
+
+- **Sample similarity** - compare feature vectors (MFCC, spectral metrics) between
+  recordings using cosine distance to find the most "kick-like", "snare-like", etc.
+  sample from the library.
+- **Canonical sound training** - define reference sounds (kick, snare, hi-hat, …) from
+  example recordings; new samples are automatically classified by similarity.
+- **MIDI note assignment** - allocate MIDI trigger notes based on sample classification;
+  notes can be replaced in real time as better examples arrive; manual override supported.
+- **MIDI playback device** - receive MIDI note triggers and play back the assigned sample
+  for each note.
+- **Pitch re-mapping** - recognise tonal samples and map them across a keyboard range
+  centered on their recorded pitch, so a single sample can be played at any pitch.
+- **BPM time-stretching** - warp rhythmic samples to a target tempo to fit a song or loop.
+- **Sample library** - load previously collected samples, re-analyze them, and assign
+  them to MIDI notes alongside newly recorded material.
+- **Independent modes** - recording, analysis, MIDI assignment, and MIDI playback can
+  each run separately or together in real time.
 
 ## Quick start
 
@@ -83,7 +128,6 @@ The second line shows spectral metrics, each in the range [0.0, 1.0]:
 - **voiced** - Fraction of frames with detected pitch: 0 = unpitched, 1 = clearly pitched
 
 The third line shows pitch and timbre data (raw values, not normalised):
-- **pitch** - Dominant fundamental frequency in Hz, or "none" for unpitched audio
 - **pitch** - Dominant fundamental frequency in Hz, or "none" for unpitched audio
 - **chroma** - Dominant pitch class (C, C#, D, … B), or "none" for unpitched audio
 - **pitch_conf** - pyin pitch detection confidence [0, 1] (use with `voiced` to judge reliability)
