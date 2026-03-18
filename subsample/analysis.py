@@ -44,6 +44,15 @@ import subsample.config
 _ATTACK_RELEASE_MIN_S: float = 0.001   # 1 ms
 _ATTACK_RELEASE_MAX_S: float = 2.0     # 2 s
 
+# Spectral flatness (Wiener entropy) log-normalization range.
+# Raw Wiener entropy from librosa clusters near 0 for all real-world audio —
+# even "noisy" sounds. Log scale spreads the useful range.
+# Values at or below _FLATNESS_MIN map to 0.0 (very tonal); values at or
+# above _FLATNESS_MAX map to 1.0 (noise-like). Calibrate against your source
+# material if values still cluster — log the pre-normalization mean.
+_FLATNESS_MIN: float = 0.001   # very tonal real signal (approx. a plucked string)
+_FLATNESS_MAX: float = 0.9     # near-white noise
+
 # Spectral frequency range: 20 Hz (lower limit of human hearing) to Nyquist.
 # Using 20 Hz as the minimum means a signal centred at 20 Hz scores 0.0.
 _FREQ_MIN_HZ: float = 20.0
@@ -245,7 +254,9 @@ def analyze_mono (
 	bandwidth = _compute_spectral_bandwidth(mono, params)
 
 	return AnalysisResult(
-		spectral_flatness=float(numpy.mean(flatness)),
+		spectral_flatness=_log_normalize(
+			float(numpy.mean(flatness)), _FLATNESS_MIN, _FLATNESS_MAX
+		),
 		attack=attack,
 		release=release,
 		spectral_centroid=centroid,

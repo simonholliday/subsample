@@ -176,20 +176,22 @@ class TestAnalyze:
 	# ------------------------------------------------------------------
 
 	def test_pure_tone_has_low_flatness (self) -> None:
-		"""A sine wave is highly tonal; spectral flatness should be low."""
+		"""A sine wave is highly tonal; after log-normalization flatness should be low."""
 		audio = self._sine_wave()
 		result = subsample.analysis.analyze(audio, self._params(), bit_depth=16)
 
-		assert result.spectral_flatness < 0.3
+		# After log-normalization against _FLATNESS_MIN/_FLATNESS_MAX, a pure sine
+		# (raw Wiener entropy near _FLATNESS_MIN) maps to near 0.0.
+		assert result.spectral_flatness < 0.5
 
 	def test_white_noise_has_high_flatness (self) -> None:
-		"""White noise is spectrally flat; flatness should be higher than a sine wave."""
+		"""White noise is spectrally flat; after log-normalization flatness should be high."""
 		audio = self._white_noise()
 		result = subsample.analysis.analyze(audio, self._params(), bit_depth=16)
 
-		# librosa spectral_flatness on random noise lands around 0.5; sine is < 0.1.
-		# The key property is that noise >> tone; exact value depends on window size.
-		assert result.spectral_flatness > 0.4
+		# After log-normalization, white noise (raw Wiener entropy ≈ 0.7–0.9) maps
+		# close to 1.0. Key property: noise >> tone; exact value depends on window size.
+		assert result.spectral_flatness > 0.7
 
 	def test_result_is_in_range (self) -> None:
 		"""spectral_flatness must be non-negative for any non-silent audio."""
