@@ -489,10 +489,16 @@ def _compute_attack_release (
 		(attack_score, release_score), both in [0.0, 1.0].
 	"""
 
+	# center=False: frames start at sample 0 with no zero-padding.
+	# center=True (librosa default) pads n_fft//2 zeros at the start, which
+	# artificially shifts the apparent peak forward by n_fft//2/hop_length
+	# frames (2 frames at 44100 Hz with default params). For any sustained
+	# signal this produces a constant, meaningless attack value of 0.414.
 	rms = librosa.feature.rms(
 		y=mono,
 		frame_length=params.n_fft,
 		hop_length=params.hop_length,
+		center=False,
 	)[0]  # librosa returns shape (1, n_frames); [0] gives (n_frames,)
 
 	peak_idx = int(numpy.argmax(rms))

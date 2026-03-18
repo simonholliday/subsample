@@ -238,6 +238,22 @@ class TestAnalyze:
 		# lower reference, so the score should be at or near 0.
 		assert result.attack < 0.3
 
+	def test_sustained_loud_signal_attack_is_low (self) -> None:
+		"""A signal that is loud from sample 0 must not produce the 0.414 artefact.
+
+		Regression: librosa.feature.rms with center=True (default) pads n_fft//2
+		zeros before the signal, making the first 2 frames appear weaker than
+		frame 2. For any sustained loud signal this gives a constant attack of
+		0.414 regardless of the actual onset shape. center=False removes the
+		padding so frame 0 already reflects the real signal level.
+		"""
+		n = int(0.5 * 44100)
+		audio = numpy.full((n, 1), 32000, dtype=numpy.int16)
+		result = subsample.analysis.analyze(audio, self._params(), bit_depth=16)
+
+		# A signal that is loud from the very first sample should have near-zero attack
+		assert result.attack < 0.1
+
 	def test_gradual_attack_scores_higher_than_percussive (self) -> None:
 		"""A slow ramp should have a higher attack score than an instant click."""
 		click = self._percussive_click()
