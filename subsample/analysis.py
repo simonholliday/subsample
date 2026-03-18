@@ -50,7 +50,7 @@ _ATTACK_RELEASE_MAX_S: float = 2.0     # 2 s
 # Values at or below _FLATNESS_MIN map to 0.0 (very tonal); values at or
 # above _FLATNESS_MAX map to 1.0 (noise-like). Calibrate against your source
 # material if values still cluster — log the pre-normalization mean.
-_FLATNESS_MIN: float = 0.001   # very tonal real signal (approx. a plucked string)
+_FLATNESS_MIN: float = 1e-5    # below the floor of real tonal sounds; maps to 0.0
 _FLATNESS_MAX: float = 0.9     # near-white noise
 
 # Spectral frequency range: 20 Hz (lower limit of human hearing) to Nyquist.
