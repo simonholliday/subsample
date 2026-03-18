@@ -25,10 +25,10 @@ All settings live in `config.yaml`. The defaults are:
 | `audio.channels` | `1` | 1 = mono, 2 = stereo |
 | `audio.chunk_size` | `512` | Frames per buffer read |
 | `buffer.max_seconds` | `60` | Circular buffer length |
-| `detection.snr_threshold_db` | `9.0` | dB above ambient to trigger recording |
+| `detection.snr_threshold_db` | `12.0` | dB above ambient to trigger recording |
 | `detection.hold_time` | `0.5` | Seconds to hold recording open after signal drops |
 | `detection.warmup_seconds` | `3.0` | Calibration period before detection activates |
-| `detection.ema_alpha` | `0.01` | Ambient noise adaptation speed (lower = slower) |
+| `detection.ema_alpha` | `0.05` | Ambient noise adaptation speed (lower = slower) |
 | `detection.trim_pre_samples` | `10` | Samples to keep before signal onset (S-curve fade applied) |
 | `detection.trim_post_samples` | `25` | Samples to keep after signal end (S-curve fade applied) |
 | `output.directory` | `./samples` | Where WAV files are saved |

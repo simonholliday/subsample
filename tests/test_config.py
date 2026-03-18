@@ -40,10 +40,10 @@ class TestLoadDefault:
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.detection.snr_threshold_db == 9.0
+		assert cfg.detection.snr_threshold_db == 12.0
 		assert cfg.detection.hold_time == 0.5
 		assert cfg.detection.warmup_seconds == 3.0
-		assert cfg.detection.ema_alpha == 0.01
+		assert cfg.detection.ema_alpha == 0.05
 
 	def test_default_output_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
