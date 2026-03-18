@@ -55,13 +55,15 @@ def main () -> None:
 	# Use default analysis config (same as live capture defaults)
 	rhythm_cfg = subsample.config.AnalysisConfig()
 
-	# Rhythm analysis first, then spectral metrics
+	# Rhythm, spectral, and pitch analysis
 	rhythm = subsample.analysis.analyze_rhythm(mono, params, rhythm_cfg)
 	result = subsample.analysis.analyze_mono(mono, params)
+	pitch = subsample.analysis.analyze_pitch(mono, params)
 
 	duration = len(data) / samplerate
-	print(subsample.analysis.format_rhythm_result(rhythm))
-	print(subsample.analysis.format_result(result, duration))
+	print(f"rhythm:   {subsample.analysis.format_rhythm_result(rhythm)}")
+	print(f"spectral: {subsample.analysis.format_result(result, duration)}")
+	print(f"pitch:    {subsample.analysis.format_pitch_result(pitch)}")
 
 
 if __name__ == "__main__":

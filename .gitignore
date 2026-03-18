@@ -9,6 +9,9 @@ build/
 # Config
 config.yaml
 
+# Reference Audio
+reference/
+
 # Logs
 *.log
 

@@ -55,17 +55,19 @@ You can analyze any WAV file (recorded by Subsample or elsewhere) using the `ana
 python scripts/analyze_file.py samples/2026-03-17_14-32-01.wav
 ```
 
-This runs the same analysis pipeline used during live capture and prints two lines:
+This runs the same analysis pipeline used during live capture and prints three lines:
 
 ```
-tempo=120.2bpm  beats=4  pulses=12
-duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001
+rhythm:   tempo=120.2bpm  beats=4  pulses=12  onsets=4
+spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001  zcr=0.120  harmonic=0.821  contrast=0.310  voiced=0.940
+pitch:    pitch=440.0Hz  chroma=A  pitch_conf=0.89
 ```
 
 The first line shows rhythm properties (not normalised):
 - **tempo** - Estimated global tempo in BPM (0.0 if no beat detected)
 - **beats** - Number of beat positions detected on a regular grid
 - **pulses** - Number of local pulse peaks from the PLP algorithm
+- **onsets** - Number of transient onsets detected (start of each audible event)
 
 The second line shows spectral metrics, each in the range [0.0, 1.0]:
 - **duration** - Recording length in seconds
@@ -74,6 +76,16 @@ The second line shows spectral metrics, each in the range [0.0, 1.0]:
 - **release** - 0 = sudden stop, 1 = long sustain/decay tail
 - **centroid** - 0 = bassy/low-frequency, 1 = trebly/high-frequency
 - **bandwidth** - 0 = narrow/pure tone, 1 = wide/spectrally complex
+- **zcr** - Zero crossing rate: 0 = smooth/DC, 1 = maximally noisy
+- **harmonic** - Harmonic energy fraction (HPSS): 0 = percussive, 1 = harmonic/tonal
+- **contrast** - Spectral peak-vs-valley contrast: 0 = flat spectrum, 1 = strong peaks
+- **voiced** - Fraction of frames with detected pitch: 0 = unpitched, 1 = clearly pitched
+
+The third line shows pitch and timbre data (raw values, not normalised):
+- **pitch** - Dominant fundamental frequency in Hz, or "none" for unpitched audio
+- **pitch** - Dominant fundamental frequency in Hz, or "none" for unpitched audio
+- **chroma** - Dominant pitch class (C, C#, D, … B), or "none" for unpitched audio
+- **pitch_conf** - pyin pitch detection confidence [0, 1] (use with `voiced` to judge reliability)
 
 ## Requirements
 

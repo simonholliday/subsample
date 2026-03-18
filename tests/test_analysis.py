@@ -365,6 +365,10 @@ class TestAnalyze:
 		assert result.release == 0.0
 		assert result.spectral_centroid == 0.0
 		assert result.spectral_bandwidth == 0.0
+		assert result.zcr == 0.0
+		assert result.harmonic_ratio == 0.0
+		assert result.spectral_contrast == 0.0
+		assert result.voiced_fraction == 0.0
 
 
 class TestAnalyzeMono:
@@ -399,6 +403,10 @@ class TestAnalyzeMono:
 		assert 0.0 <= result.release <= 1.0
 		assert 0.0 <= result.spectral_centroid <= 1.0
 		assert 0.0 <= result.spectral_bandwidth <= 1.0
+		assert 0.0 <= result.zcr <= 1.0
+		assert 0.0 <= result.harmonic_ratio <= 1.0
+		assert 0.0 <= result.spectral_contrast <= 1.0
+		assert 0.0 <= result.voiced_fraction <= 1.0
 
 	def test_matches_analyze_for_integer_input (self) -> None:
 		"""analyze_mono and analyze should agree on the same audio content."""
@@ -425,6 +433,10 @@ class TestAnalyzeMono:
 		assert result.release == 0.0
 		assert result.spectral_centroid == 0.0
 		assert result.spectral_bandwidth == 0.0
+		assert result.zcr == 0.0
+		assert result.harmonic_ratio == 0.0
+		assert result.spectral_contrast == 0.0
+		assert result.voiced_fraction == 0.0
 
 	def test_white_noise_all_metrics_in_range (self) -> None:
 		"""White noise (spectrally complex) should stay within [0.0, 1.0]."""
@@ -462,6 +474,10 @@ class TestFormatResult:
 			release=0.000,
 			spectral_centroid=0.728,
 			spectral_bandwidth=0.757,
+			zcr=0.312,
+			harmonic_ratio=0.845,
+			spectral_contrast=0.210,
+			voiced_fraction=0.933,
 		)
 
 	def test_contains_all_field_names (self) -> None:
@@ -474,6 +490,10 @@ class TestFormatResult:
 		assert "release=" in s
 		assert "centroid=" in s
 		assert "bandwidth=" in s
+		assert "zcr=" in s
+		assert "harmonic=" in s
+		assert "contrast=" in s
+		assert "voiced=" in s
 
 	def test_duration_formatted_correctly (self) -> None:
 		"""Duration should appear as e.g. 'duration=0.07s'."""
@@ -490,6 +510,10 @@ class TestFormatResult:
 		assert "release=0.000" in s
 		assert "centroid=0.728" in s
 		assert "bandwidth=0.757" in s
+		assert "zcr=0.312" in s
+		assert "harmonic=0.845" in s
+		assert "contrast=0.210" in s
+		assert "voiced=0.933" in s
 
 	def test_returns_single_line (self) -> None:
 		"""Output should be a single line with no newlines."""
@@ -551,6 +575,8 @@ class TestAnalyzeRhythm:
 		assert result.beat_times == ()
 		assert result.pulse_peak_times == ()
 		assert result.pulse_curve.shape[0] == 0
+		assert result.onset_times == ()
+		assert result.onset_count == 0
 
 	def test_very_short_signal_no_warning (self) -> None:
 		"""Signals shorter than n_fft should return empty result without UserWarning.
@@ -665,7 +691,7 @@ class TestAnalyzeRhythm:
 	# ------------------------------------------------------------------
 
 	def test_format_contains_all_labels (self) -> None:
-		"""format_rhythm_result() output must include all three labels."""
+		"""format_rhythm_result() output must include all four labels."""
 		audio = self._click_track()
 		result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
 		s = subsample.analysis.format_rhythm_result(result)
@@ -673,6 +699,7 @@ class TestAnalyzeRhythm:
 		assert "tempo=" in s
 		assert "beats=" in s
 		assert "pulses=" in s
+		assert "onsets=" in s
 
 	def test_format_is_single_line (self) -> None:
 		"""format_rhythm_result() should return a single line."""
@@ -691,3 +718,342 @@ class TestAnalyzeRhythm:
 		assert "tempo=0.0bpm" in s
 		assert "beats=0" in s
 		assert "pulses=0" in s
+		assert "onsets=0" in s
+
+
+class TestZeroCrossingRate:
+
+	"""Tests for the zcr metric in AnalysisResult."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _float_sine (self, frequency: float = 440.0) -> numpy.ndarray:
+		n = int(0.5 * 44100)
+		t = numpy.arange(n) / 44100
+		return (numpy.sin(2 * numpy.pi * frequency * t) * 0.9).astype(numpy.float32)
+
+	def _white_noise (self) -> numpy.ndarray:
+		rng = numpy.random.default_rng(seed=7)
+		return rng.random(int(0.5 * 44100)).astype(numpy.float32) * 2.0 - 1.0
+
+	def _dc_signal (self) -> numpy.ndarray:
+		return numpy.full(int(0.5 * 44100), 0.5, dtype=numpy.float32)
+
+	def test_dc_signal_has_zero_zcr (self) -> None:
+		"""A constant (DC) signal never crosses zero — score should be 0."""
+		result = subsample.analysis.analyze_mono(self._dc_signal(), self._params())
+
+		assert result.zcr == 0.0
+
+	def test_white_noise_has_high_zcr (self) -> None:
+		"""White noise alternates sign frequently — score should be high."""
+		result = subsample.analysis.analyze_mono(self._white_noise(), self._params())
+
+		assert result.zcr > 0.5
+
+	def test_noise_higher_zcr_than_sine (self) -> None:
+		"""Noise should have higher ZCR than a smooth sine wave."""
+		sine = subsample.analysis.analyze_mono(self._float_sine(), self._params())
+		noise = subsample.analysis.analyze_mono(self._white_noise(), self._params())
+
+		assert noise.zcr > sine.zcr
+
+	def test_zcr_in_range (self) -> None:
+		"""ZCR must always be in [0.0, 1.0]."""
+		for audio in [self._float_sine(), self._white_noise(), self._dc_signal()]:
+			result = subsample.analysis.analyze_mono(audio, self._params())
+			assert 0.0 <= result.zcr <= 1.0
+
+
+class TestHarmonicRatio:
+
+	"""Tests for the harmonic_ratio metric in AnalysisResult."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _float_sine (self) -> numpy.ndarray:
+		n = int(0.5 * 44100)
+		t = numpy.arange(n) / 44100
+		return (numpy.sin(2 * numpy.pi * 440 * t) * 0.9).astype(numpy.float32)
+
+	def _percussive_click (self) -> numpy.ndarray:
+		"""10 loud samples then silence — highly percussive."""
+		n = int(0.5 * 44100)
+		audio = numpy.zeros(n, dtype=numpy.float32)
+		audio[:10] = 1.0
+		return audio
+
+	def test_sine_is_mostly_harmonic (self) -> None:
+		"""A sustained sine wave should have a high harmonic ratio."""
+		result = subsample.analysis.analyze_mono(self._float_sine(), self._params())
+
+		assert result.harmonic_ratio > 0.5
+
+	def test_harmonic_ratio_in_range (self) -> None:
+		"""harmonic_ratio must always be in [0.0, 1.0]."""
+		for audio in [self._float_sine(), self._percussive_click()]:
+			result = subsample.analysis.analyze_mono(audio, self._params())
+			assert 0.0 <= result.harmonic_ratio <= 1.0
+
+	def test_sine_more_harmonic_than_click (self) -> None:
+		"""A sustained tone should be more harmonic than a percussive click."""
+		sine = subsample.analysis.analyze_mono(self._float_sine(), self._params())
+		click = subsample.analysis.analyze_mono(self._percussive_click(), self._params())
+
+		assert sine.harmonic_ratio > click.harmonic_ratio
+
+
+class TestSpectralContrast:
+
+	"""Tests for the spectral_contrast metric in AnalysisResult."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _float_sine (self) -> numpy.ndarray:
+		n = int(0.5 * 44100)
+		t = numpy.arange(n) / 44100
+		return (numpy.sin(2 * numpy.pi * 440 * t) * 0.9).astype(numpy.float32)
+
+	def _white_noise (self) -> numpy.ndarray:
+		rng = numpy.random.default_rng(seed=11)
+		return rng.random(int(0.5 * 44100)).astype(numpy.float32) * 2.0 - 1.0
+
+	def test_spectral_contrast_in_range (self) -> None:
+		"""spectral_contrast must always be in [0.0, 1.0]."""
+		for audio in [self._float_sine(), self._white_noise()]:
+			result = subsample.analysis.analyze_mono(audio, self._params())
+			assert 0.0 <= result.spectral_contrast <= 1.0
+
+	def test_sine_has_higher_contrast_than_noise (self) -> None:
+		"""A pure tone has sharp spectral peaks; noise has a flat spectrum."""
+		sine = subsample.analysis.analyze_mono(self._float_sine(), self._params())
+		noise = subsample.analysis.analyze_mono(self._white_noise(), self._params())
+
+		assert sine.spectral_contrast > noise.spectral_contrast
+
+
+class TestVoicedFraction:
+
+	"""Tests for the voiced_fraction metric in AnalysisResult."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _float_sine (self) -> numpy.ndarray:
+		n = int(0.5 * 44100)
+		t = numpy.arange(n) / 44100
+		return (numpy.sin(2 * numpy.pi * 440 * t) * 0.9).astype(numpy.float32)
+
+	def _white_noise (self) -> numpy.ndarray:
+		rng = numpy.random.default_rng(seed=13)
+		return rng.random(int(0.5 * 44100)).astype(numpy.float32) * 2.0 - 1.0
+
+	def test_sine_has_high_voiced_fraction (self) -> None:
+		"""A pure 440 Hz tone should be clearly pitched — high voiced fraction."""
+		result = subsample.analysis.analyze_mono(self._float_sine(), self._params())
+
+		assert result.voiced_fraction > 0.5
+
+	def test_voiced_fraction_in_range (self) -> None:
+		"""voiced_fraction must always be in [0.0, 1.0]."""
+		for audio in [self._float_sine(), self._white_noise()]:
+			result = subsample.analysis.analyze_mono(audio, self._params())
+			assert 0.0 <= result.voiced_fraction <= 1.0
+
+	def test_short_signal_returns_zero (self) -> None:
+		"""Signals shorter than pyin's minimum frame requirement should return 0.0.
+
+		pyin requires frame_length > sr / fmin. At 44100 Hz with fmin=65 Hz
+		the minimum is ~680 samples. Signals shorter than this cannot be analysed.
+		"""
+		short = numpy.zeros(10, dtype=numpy.float32)
+		result = subsample.analysis.analyze_mono(short, self._params())
+
+		assert result.voiced_fraction == 0.0
+
+
+class TestAnalyzePitch:
+
+	"""Tests for analyze_pitch() and format_pitch_result()."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _float_sine (self, frequency: float = 440.0) -> numpy.ndarray:
+		n = int(0.5 * 44100)
+		t = numpy.arange(n) / 44100
+		return (numpy.sin(2 * numpy.pi * frequency * t) * 0.9).astype(numpy.float32)
+
+	def _white_noise (self) -> numpy.ndarray:
+		rng = numpy.random.default_rng(seed=17)
+		return rng.random(int(0.5 * 44100)).astype(numpy.float32) * 2.0 - 1.0
+
+	def test_returns_pitch_result_type (self) -> None:
+		"""analyze_pitch() should return a PitchResult instance."""
+		result = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+
+		assert isinstance(result, subsample.analysis.PitchResult)
+
+	def test_sine_440_detects_pitch_near_440 (self) -> None:
+		"""A 440 Hz sine should yield dominant_pitch_hz close to 440."""
+		result = subsample.analysis.analyze_pitch(self._float_sine(440.0), self._params())
+
+		# pyin has some tolerance; accept within ±10 Hz
+		assert abs(result.dominant_pitch_hz - 440.0) < 10.0
+
+	def test_sine_dominant_pitch_class_is_a (self) -> None:
+		"""A 440 Hz tone is A; dominant_pitch_class should be 9 (A = index 9)."""
+		result = subsample.analysis.analyze_pitch(self._float_sine(440.0), self._params())
+
+		assert result.dominant_pitch_class == 9
+
+	def test_chroma_profile_has_12_elements (self) -> None:
+		"""chroma_profile must always have exactly 12 elements (one per pitch class)."""
+		result = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+
+		assert len(result.chroma_profile) == 12
+
+	def test_mfcc_has_correct_count (self) -> None:
+		"""mfcc must have exactly _N_MFCC elements."""
+		result = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+
+		assert len(result.mfcc) == subsample.analysis._N_MFCC
+
+	def test_empty_array_returns_zero_pitch (self) -> None:
+		"""An empty array should return a zero-filled PitchResult without error."""
+		empty = numpy.zeros(0, dtype=numpy.float32)
+		result = subsample.analysis.analyze_pitch(empty, self._params())
+
+		assert result.dominant_pitch_hz == 0.0
+		assert result.pitch_confidence == 0.0
+		assert result.dominant_pitch_class == -1
+		assert len(result.chroma_profile) == 12
+		assert len(result.mfcc) == subsample.analysis._N_MFCC
+
+	def test_noise_has_low_confidence (self) -> None:
+		"""White noise has no clear pitch — confidence should be very low.
+
+		pyin may occasionally detect stray voiced frames in noise (false positives
+		at very low confidence), so we cannot assert dominant_pitch_hz == 0.0.
+		We instead assert that pitch_confidence is below a meaningful threshold.
+		"""
+		result = subsample.analysis.analyze_pitch(self._white_noise(), self._params())
+
+		assert result.pitch_confidence < 0.1
+
+
+class TestOnsetDetection:
+
+	"""Tests for onset_times and onset_count in RhythmResult."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _cfg (self) -> subsample.config.AnalysisConfig:
+		return subsample.config.AnalysisConfig()
+
+	def _click_track (self, bpm: float = 120.0, duration_seconds: float = 2.0) -> numpy.ndarray:
+		n = int(duration_seconds * 44100)
+		audio = numpy.zeros(n, dtype=numpy.float32)
+		beat_interval = int(44100 * 60.0 / bpm)
+		for i in range(0, n, beat_interval):
+			audio[i] = 1.0
+		return audio
+
+	def test_silence_has_no_onsets (self) -> None:
+		"""A silent signal should produce no detected onsets."""
+		silence = numpy.zeros(int(2.0 * 44100), dtype=numpy.float32)
+		result = subsample.analysis.analyze_rhythm(silence, self._params(), self._cfg())
+
+		assert result.onset_count == 0
+		assert result.onset_times == ()
+
+	def test_click_track_detects_onsets (self) -> None:
+		"""A regular click track should produce at least one onset."""
+		audio = self._click_track(bpm=120.0, duration_seconds=2.0)
+		result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert result.onset_count > 0
+
+	def test_onset_count_matches_len (self) -> None:
+		"""onset_count must equal len(onset_times)."""
+		audio = self._click_track(bpm=120.0, duration_seconds=2.0)
+		result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		assert result.onset_count == len(result.onset_times)
+
+	def test_onset_times_within_duration (self) -> None:
+		"""All onset times must fall within the signal duration."""
+		duration = 2.0
+		audio = self._click_track(bpm=120.0, duration_seconds=duration)
+		result = subsample.analysis.analyze_rhythm(audio, self._params(), self._cfg())
+
+		for t in result.onset_times:
+			assert 0.0 <= t <= duration
+
+	def test_empty_array_has_no_onsets (self) -> None:
+		"""A too-short array should return empty onset fields from the early guard."""
+		empty = numpy.zeros(0, dtype=numpy.float32)
+		result = subsample.analysis.analyze_rhythm(empty, self._params(), self._cfg())
+
+		assert result.onset_times == ()
+		assert result.onset_count == 0
+
+
+class TestFormatPitchResult:
+
+	"""Tests for format_pitch_result()."""
+
+	def _pitched_result (self) -> subsample.analysis.PitchResult:
+		return subsample.analysis.PitchResult(
+			dominant_pitch_hz=440.0,
+			pitch_confidence=0.92,
+			chroma_profile=tuple(0.0 for _ in range(12)),
+			dominant_pitch_class=9,
+			mfcc=tuple(0.0 for _ in range(13)),
+		)
+
+	def _unpitched_result (self) -> subsample.analysis.PitchResult:
+		return subsample.analysis.PitchResult(
+			dominant_pitch_hz=0.0,
+			pitch_confidence=0.0,
+			chroma_profile=tuple(0.0 for _ in range(12)),
+			dominant_pitch_class=-1,
+			mfcc=tuple(0.0 for _ in range(13)),
+		)
+
+	def test_contains_all_labels (self) -> None:
+		"""Output must include all field labels."""
+		s = subsample.analysis.format_pitch_result(self._pitched_result())
+
+		assert "pitch=" in s
+		assert "pitch_conf=" in s
+		assert "chroma=" in s
+
+	def test_pitched_shows_frequency (self) -> None:
+		"""A pitched result should show the frequency in Hz."""
+		s = subsample.analysis.format_pitch_result(self._pitched_result())
+
+		assert "440.0Hz" in s
+
+	def test_pitched_shows_pitch_class_name (self) -> None:
+		"""dominant_pitch_class=9 should format as 'A'."""
+		s = subsample.analysis.format_pitch_result(self._pitched_result())
+
+		assert "chroma=A" in s
+
+	def test_unpitched_shows_none (self) -> None:
+		"""An unpitched result should show 'none' for pitch and chroma."""
+		s = subsample.analysis.format_pitch_result(self._unpitched_result())
+
+		assert "pitch=none" in s
+		assert "chroma=none" in s
+
+	def test_is_single_line (self) -> None:
+		"""Output should be a single line with no newlines."""
+		s = subsample.analysis.format_pitch_result(self._pitched_result())
+
+		assert "\n" not in s

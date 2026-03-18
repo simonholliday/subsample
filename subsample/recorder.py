@@ -97,7 +97,7 @@ class WavWriter:
 					tuple[numpy.ndarray, datetime.datetime], item
 				)
 
-				# Convert once; both analyses operate on the same mono float array
+				# Convert once; all three analyses operate on the same mono float array
 				mono = subsample.analysis.to_mono_float(audio, self._cfg.audio.bit_depth)
 
 				rhythm = subsample.analysis.analyze_rhythm(
@@ -108,7 +108,9 @@ class WavWriter:
 
 				result = subsample.analysis.analyze_mono(mono, self._analysis_params)
 
-				self._write_wav(audio, timestamp, rhythm, result)
+				pitch = subsample.analysis.analyze_pitch(mono, self._analysis_params)
+
+				self._write_wav(audio, timestamp, rhythm, result, pitch)
 
 			except Exception as exc:
 				_log.error("Failed to write recording: %s", exc, exc_info=True)
@@ -119,6 +121,7 @@ class WavWriter:
 		timestamp: datetime.datetime,
 		rhythm: subsample.analysis.RhythmResult,
 		result: subsample.analysis.AnalysisResult,
+		pitch: subsample.analysis.PitchResult,
 	) -> None:
 
 		"""Write a single audio segment to a WAV file.
@@ -129,6 +132,7 @@ class WavWriter:
 			timestamp: Used to construct the filename.
 			rhythm:    Rhythm analysis computed before this call.
 			result:    Spectral analysis metrics computed before this call.
+			pitch:     Pitch and timbre analysis computed before this call.
 		"""
 
 		# Generate base filename and find a free path (handle same-second collisions)
@@ -165,10 +169,14 @@ class WavWriter:
 
 		if _log.isEnabledFor(logging.DEBUG):
 			_log.debug(
-				"Stored recording: file=%s  frames=%d  %s  %s",
+				"Stored: %s  frames=%d\n"
+				"  rhythm:   %s\n"
+				"  spectral: %s\n"
+				"  pitch:    %s",
 				filepath.name, n_frames,
 				subsample.analysis.format_rhythm_result(rhythm),
 				subsample.analysis.format_result(result, duration),
+				subsample.analysis.format_pitch_result(pitch),
 			)
 
 
