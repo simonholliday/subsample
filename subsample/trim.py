@@ -75,8 +75,12 @@ def trim_silence (
 		ramp = (1 - numpy.cos(numpy.linspace(0, numpy.pi, fade_in_len))) / 2
 		result[:fade_in_len] = (result[:fade_in_len] * ramp[:, None]).astype(audio.dtype)
 
-	# Fade out: S-curve over the post-signal padding (signal → silence)
-	fade_out_len = end_idx - int(above[-1])
+	# Fade out: S-curve over the last post_samples frames of the output.
+	# Using a fixed window (not end_idx - above[-1]) prevents the fade from
+	# being silently skipped when individual sample peaks exceed the threshold
+	# during the detector's hold period — a peak-vs-RMS mismatch that causes
+	# above[-1] to land at the very last sample, giving fade_out_len = 0.
+	fade_out_len = min(post_samples, len(result))
 	if fade_out_len > 1:
 		ramp = (1 + numpy.cos(numpy.linspace(0, numpy.pi, fade_out_len))) / 2
 		result[-fade_out_len:] = (result[-fade_out_len:] * ramp[:, None]).astype(audio.dtype)

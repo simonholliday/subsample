@@ -212,6 +212,28 @@ class TestTrimFade:
 		assert numpy.all(result[3:] == 5000)
 
 
+	def test_fade_out_applied_when_signal_at_end (self) -> None:
+		"""Fade-out must be applied even when the last sample is above threshold.
+
+		Regression: when individual sample peaks exceed the detection threshold
+		throughout the hold period (peak > RMS mismatch), above[-1] lands at the
+		very last sample giving fade_out_len = 0 under the old threshold-based
+		calculation. The new approach always fades the last post_samples frames.
+		"""
+		# Audio that is loud all the way to the final sample (no trailing silence)
+		audio = _make_audio(_loud(50))
+
+		result = subsample.trim.trim_silence(
+			audio, _THRESHOLD, post_samples=10
+		)
+
+		# Last sample should be near zero (fade-out applied)
+		assert abs(int(result[-1, 0])) < 100
+
+		# Some earlier sample within the fade region should be non-zero
+		assert abs(int(result[-5, 0])) > 0
+
+
 class TestTrimStereo:
 
 	def test_stereo_shape_preserved (self) -> None:
