@@ -7,6 +7,7 @@ Keeps all PyAudio-specific concerns isolated from the rest of the application.
 
 import contextlib
 import os
+import queue
 import typing
 
 import numpy
@@ -86,6 +87,117 @@ def unpack_audio (raw_bytes: bytes, bit_depth: int, channels: int) -> numpy.ndar
 		return numpy.frombuffer(raw_bytes, dtype=numpy.int32).reshape(-1, channels)
 
 	raise ValueError(f"Unsupported bit depth {bit_depth}. Supported: 16, 24, 32")
+
+
+class AudioReader:
+
+	"""Reads audio chunks from a PyAudio stream using PortAudio's callback mode.
+
+	Callback mode delivers audio directly from PortAudio's high-priority audio
+	thread, bypassing the internal ring buffer used in blocking mode. This is
+	more reliable for USB audio devices, which use isochronous USB transfers
+	(no retransmit) and are sensitive to any timing jitter in the delivery path.
+
+	The callback does minimal work — just queue.put_nowait(raw_bytes) — so the
+	audio thread is never blocked by Python processing. Unpacking to numpy
+	happens in the main thread via read().
+
+	The stream is owned by AudioReader and is opened and closed internally.
+
+	Usage:
+		reader = AudioReader(pa, device_index, audio_cfg)
+		chunk = reader.read()   # blocks until next chunk is ready
+		reader.stop()           # stops and closes the stream
+	"""
+
+	_QUEUE_MAX: int = 64  # ~0.74s of headroom at 44100 Hz / 512 frames per chunk
+
+	def __init__ (
+		self,
+		pa: pyaudio.PyAudio,
+		device_index: int,
+		audio_cfg: subsample.config.AudioConfig,
+	) -> None:
+
+		"""Open the audio stream in callback mode.
+
+		Args:
+			pa:          PyAudio instance.
+			device_index: Index of the input device to use.
+			audio_cfg:   Audio configuration (sample rate, bit depth, etc.).
+		"""
+
+		self._bit_depth = audio_cfg.bit_depth
+		self._channels = audio_cfg.channels
+		self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self._QUEUE_MAX)
+		self._overflow_count: int = 0
+
+		self._stream = pa.open(
+			format=get_pyaudio_format(audio_cfg.bit_depth),
+			channels=audio_cfg.channels,
+			rate=audio_cfg.sample_rate,
+			input=True,
+			input_device_index=device_index,
+			frames_per_buffer=audio_cfg.chunk_size,
+			stream_callback=self._callback,
+		)
+
+	def read (self) -> numpy.ndarray:
+
+		"""Return the next audio chunk, blocking until one is available.
+
+		Unpacks raw bytes from the callback queue into a numpy integer array.
+
+		Returns:
+			Array of shape (chunk_size, channels), integer dtype.
+		"""
+
+		raw_bytes = self._queue.get()
+		return unpack_audio(raw_bytes, self._bit_depth, self._channels)
+
+	@property
+	def overflow_count (self) -> int:
+
+		"""Number of overflow/underflow events reported by PortAudio."""
+
+		return self._overflow_count
+
+	def stop (self) -> None:
+
+		"""Stop the stream and release it."""
+
+		self._stream.stop_stream()
+		self._stream.close()
+
+	def _callback (
+		self,
+		in_data: typing.Optional[bytes],
+		frame_count: int,
+		time_info: typing.Mapping[str, float],
+		status_flags: int,
+	) -> tuple[typing.Optional[bytes], int]:
+
+		"""PortAudio callback — called from PortAudio's audio thread.
+
+		Must return quickly and must never block. Overflow/underflow events
+		are counted; the chunk is dropped rather than blocking if the queue
+		is full (which would stall the audio thread).
+		"""
+
+		if status_flags:
+			# status_flags is a bitmask: paInputOverflow=0x2, paOutputUnderflow=0x4.
+			# Any non-zero value means PortAudio discarded or lost data.
+			self._overflow_count += 1
+
+		if in_data is not None:
+			try:
+				self._queue.put_nowait(in_data)
+			except queue.Full:
+				# Main loop has fallen far behind — drop the chunk.
+				# Dropping one chunk is less harmful than stalling the audio thread.
+				pass
+
+		return (None, pyaudio.paContinue)
 
 
 def list_input_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:

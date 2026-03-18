@@ -30,7 +30,7 @@ class TestLoadDefault:
 		assert cfg.audio.sample_rate == 44100
 		assert cfg.audio.bit_depth == 16
 		assert cfg.audio.channels == 1
-		assert cfg.audio.chunk_size == 1024
+		assert cfg.audio.chunk_size == 512
 
 	def test_default_buffer_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -40,7 +40,7 @@ class TestLoadDefault:
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.detection.snr_threshold_db == 6.0
+		assert cfg.detection.snr_threshold_db == 9.0
 		assert cfg.detection.hold_time == 0.5
 		assert cfg.detection.warmup_seconds == 3.0
 		assert cfg.detection.ema_alpha == 0.01

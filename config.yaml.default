@@ -3,27 +3,115 @@
 #   cp config.yaml.default config.yaml
 
 audio:
-  sample_rate: 44100 # Hz — 44100 is standard CD quality
-  bit_depth: 16 # Bits per sample — 16, 24, or 32
-  channels: 1 # 1 = mono, 2 = stereo
-  chunk_size: 1024 # Frames read per buffer cycle
+  sample_rate: 44100
+  # Sample rate in Hz. Standard values: 44100 (CD quality), 48000 (professional), 16000 (speech).
+  # Lower = less CPU, smaller files. Higher = better fidelity for music.
+  # Range: 8000–192000 Hz (device dependent).
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+
+  bit_depth: 16
+  # Bits per sample: 16, 24, or 32. Controls dynamic range and file size.
+  # 16-bit: ±96 dB SNR, sufficient for most recordings. Common for audio devices.
+  # 24-bit: ±144 dB SNR, better for studio-quality audio or very quiet sources.
+  # 32-bit: ±192 dB SNR, rarely needed for recording purposes.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+
+  channels: 1
+  # Number of input channels: 1 = mono, 2 = stereo.
+  # Mono: simpler processing, half the file size. Stereo: spatial information preserved.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+
+  chunk_size: 512
+  # Frames requested per PortAudio callback. PortAudio adapts internally to the
+  # hardware period size, but aligning to it avoids redundant buffering.
+  # Smaller (256, 512): lower latency, more callbacks per second (slight CPU overhead).
+  # Larger (1024, 2048): higher latency, fewer callbacks (less overhead). Default 512 is
+  # optimal for USB audio devices with typical ALSA period sizes.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
 buffer:
-  max_seconds: 60 # Length of the circular recording buffer in seconds
+  max_seconds: 60
+  # Length of the circular recording buffer in seconds. Determines how much audio history
+  # is kept before a trigger event. Larger = more pre-signal context; smaller = less RAM.
+  # At 44100 Hz mono 16-bit, 60s ≈ 5.3 MB. Useful range: 10–120 seconds.
+  # Must be large enough to hold at least one complete expected recording.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_buffer_values
 
 detection:
-  snr_threshold_db: 6.0 # dB above ambient required to trigger a recording
-  hold_time: 0.5 # Seconds to hold recording open after signal drops below threshold
-  warmup_seconds: 3.0 # Seconds of ambient sampling before detection activates
-  ema_alpha: 0.01 # Ambient noise EMA smoothing factor (lower = slower adaptation)
-  trim_pre_samples: 10 # Extra samples to keep before the first loud sample when trimming (S-curve fade applied)
-  trim_post_samples: 25 # Extra samples to keep after the last loud sample when trimming (S-curve fade applied)
+  snr_threshold_db: 9.0
+  # Signal-to-noise ratio (dB) above ambient required to trigger a recording.
+  # Ambient floor is tracked via EMA; trigger fires when chunk_rms > ambient * 10^(threshold/20).
+  # Range: 3–20 dB. Smaller = more sensitive (catches quiet sounds, more false triggers).
+  # Larger = less sensitive (ignores noise, may miss quiet signals).
+  # Typical: 6–12 dB. Set higher for noisy environments, lower for quiet detection.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
+
+  hold_time: 0.5
+  # Seconds to hold the recording open after signal drops below threshold.
+  # Prevents split recordings on brief pauses (e.g. breath between words).
+  # Range: 0.1–2.0 seconds. Larger = longer tail preservation, risk of extra silence/noise.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
+
+  warmup_seconds: 3.0
+  # Seconds of ambient sampling before detection activates. The ambient floor EMA is
+  # initialized during warmup; a longer warmup yields a more stable baseline.
+  # Range: 1–10 seconds. Typical: 2–5 seconds. Longer = slower startup, cleaner detection.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
+
+  ema_alpha: 0.01
+  # Exponential moving average smoothing factor for ambient noise tracking.
+  # Ambient = alpha * chunk_rms + (1 - alpha) * ambient_prev.
+  # Smaller (0.001–0.01) = slower adaptation to changing environment (more stable).
+  # Larger (0.05–0.1) = faster adaptation to rising/falling noise floor.
+  # Range: 0.001–0.1. Default 0.01 ≈ 100-chunk averaging (5s at 44100 Hz, 512 chunk_size).
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
+
+  trim_pre_samples: 10
+  # Extra audio samples to keep before the detected signal onset when trimming silence.
+  # Creates a fade-in envelope (S-curve) over these samples for smooth audio onset.
+  # At 44100 Hz, 10 samples ≈ 0.23 ms. Range: 0–100 samples.
+  # Smaller = abrupt onset. Larger = longer fade-in and pre-signal context.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
+
+  trim_post_samples: 25
+  # Extra audio samples to keep after the detected signal end when trimming silence.
+  # Creates a fade-out envelope (S-curve) over these samples for smooth audio release.
+  # At 44100 Hz, 25 samples ≈ 0.57 ms. Range: 0–100 samples.
+  # Smaller = abrupt cutoff. Larger = longer fade-out and post-signal tail.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
 
 output:
-  directory: "./samples" # Where recorded WAV files are saved
-  filename_format: "%Y-%m-%d_%H-%M-%S" # strftime format for filenames
+  directory: "./samples"
+  # Directory where WAV files are saved. May be absolute or relative to cwd.
+  # Example: "/tmp/recordings", "~/audio_capture", "./samples".
+  # Directory must exist or the program will fail on the first recording.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values
+
+  filename_format: "%Y-%m-%d_%H-%M-%S"
+  # strftime format for output filenames (no extension; .wav is added automatically).
+  # Timestamps are the datetime the recording ended, not started.
+  # Examples:
+  #   "%Y-%m-%d_%H-%M-%S"        → 2026-03-18_14-32-01.wav
+  #   "%H-%M-%S"                  → 14-32-01.wav (time only, overwrites same-second files)
+  #   "%Y%m%d_%H%M%S"             → 20260318_143201.wav (compact, ISO 8601-ish)
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values
 
 analysis:
-  start_bpm: 120.0 # Tempo prior for beat detection — biases but does not constrain the result
-  tempo_min: 30.0 # Minimum tempo (BPM) considered by the pulse detector
-  tempo_max: 300.0 # Maximum tempo (BPM) considered by the pulse detector
+  start_bpm: 120.0
+  # Tempo prior (initial guess) for beat detection in BPM. Biases the rhythm detection
+  # but does not constrain it; librosa.beat.beat_track uses this as a starting point.
+  # Set to the expected tempo of your source material for faster convergence.
+  # Range: 30–300 BPM. Ignored if tempo_min and tempo_max bracket the detected tempo.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_analysis_values
+
+  tempo_min: 30.0
+  # Minimum tempo (BPM) considered during beat detection.
+  # Tempos below this are not detected, even if present in the audio.
+  # Range: 10–100 BPM. Typical: 30–60 BPM for slow music.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_analysis_values
+
+  tempo_max: 300.0
+  # Maximum tempo (BPM) considered during beat detection.
+  # Tempos above this are not detected, even if present in the audio.
+  # Range: 150–300 BPM. Typical: 200–300 BPM for fast music.
+  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_analysis_values

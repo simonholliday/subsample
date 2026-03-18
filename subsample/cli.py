@@ -55,7 +55,7 @@ def main () -> None:
 	try:
 		devices = subsample.audio.list_input_devices(pa)
 		device_index = subsample.audio.select_device(devices)
-		stream = subsample.audio.open_stream(pa, device_index, cfg.audio)
+		reader = subsample.audio.AudioReader(pa, device_index, cfg.audio)
 	except (ValueError, OSError) as exc:
 		print(f"Error opening audio device: {exc}", file=sys.stderr)
 		pa.terminate()
@@ -81,11 +81,7 @@ def main () -> None:
 
 	try:
 		while True:
-			raw_bytes = stream.read(cfg.audio.chunk_size, exception_on_overflow=False)
-
-			chunk = subsample.audio.unpack_audio(
-				raw_bytes, cfg.audio.bit_depth, cfg.audio.channels
-			)
+			chunk = reader.read()
 
 			buf.write(chunk)
 
@@ -95,7 +91,8 @@ def main () -> None:
 
 			if result is not None:
 				start_frame, end_frame = result
-				audio_segment = buf.read_range(start_frame, end_frame)
+				pre = cfg.detection.trim_pre_samples
+				audio_segment = buf.read_range(max(0, start_frame - pre), end_frame)
 
 				amplitude_threshold = detector.ambient_rms * (
 					10.0 ** (cfg.detection.snr_threshold_db / 20.0)
@@ -114,8 +111,14 @@ def main () -> None:
 		print("\nStopping…")
 
 	finally:
-		stream.stop_stream()
-		stream.close()
+		if reader.overflow_count > 0:
+			_log.warning(
+				"Audio overflows detected during capture: %d — "
+				"recordings may contain discontinuities",
+				reader.overflow_count,
+			)
+
+		reader.stop()
 		pa.terminate()
 		writer.shutdown()
 

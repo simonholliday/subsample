@@ -1,9 +1,13 @@
 """Tests for subsample.audio.unpack_audio."""
 
+import typing
+import unittest.mock
+
 import numpy
 import pytest
 
 import subsample.audio
+import subsample.config
 import subsample.recorder
 
 
@@ -110,6 +114,73 @@ class TestUnpackAudio32Bit:
 		result = subsample.audio.unpack_audio(samples.tobytes(), bit_depth=32, channels=1)
 
 		assert result.shape == (6, 1)
+
+
+class TestAudioReader:
+
+	"""Tests for the callback-based audio capture."""
+
+	def _make_audio_cfg (self, chunk_size: int = 16) -> subsample.config.AudioConfig:
+		"""Build a minimal AudioConfig for testing."""
+		return subsample.config.AudioConfig(
+			sample_rate=44100,
+			bit_depth=16,
+			channels=1,
+			chunk_size=chunk_size,
+		)
+
+	def _make_reader (
+		self,
+		chunk_size: int = 16,
+	) -> tuple["subsample.audio.AudioReader", typing.Any]:
+		"""Return (reader, mock_stream) with pa.open() mocked out."""
+		mock_stream = unittest.mock.MagicMock()
+		mock_pa = unittest.mock.MagicMock()
+		mock_pa.open.return_value = mock_stream
+
+		cfg = self._make_audio_cfg(chunk_size=chunk_size)
+		reader = subsample.audio.AudioReader(mock_pa, device_index=0, audio_cfg=cfg)
+
+		return reader, mock_stream
+
+	def test_read_returns_correct_shape (self) -> None:
+		"""read() should unpack raw bytes and return shape (chunk_size, channels)."""
+		chunk_size = 16
+		reader, _ = self._make_reader(chunk_size=chunk_size)
+
+		# Simulate the callback delivering raw int16 bytes
+		raw = numpy.zeros(chunk_size, dtype=numpy.int16).tobytes()
+		reader._callback(raw, chunk_size, {}, 0)
+
+		chunk = reader.read()
+
+		reader.stop()
+
+		assert chunk.shape == (chunk_size, 1)
+		assert chunk.dtype == numpy.int16
+
+	def test_overflow_count_incremented (self) -> None:
+		"""Non-zero status_flags should increment overflow_count."""
+		reader, _ = self._make_reader()
+
+		assert reader.overflow_count == 0
+
+		raw = numpy.zeros(16, dtype=numpy.int16).tobytes()
+		reader._callback(raw, 16, {}, 1)  # status_flags = 1 → overflow
+		reader._callback(raw, 16, {}, 1)
+
+		reader.stop()
+
+		assert reader.overflow_count == 2
+
+	def test_stop_closes_stream (self) -> None:
+		"""stop() should call stop_stream() and close() on the underlying stream."""
+		reader, mock_stream = self._make_reader()
+
+		reader.stop()
+
+		mock_stream.stop_stream.assert_called_once()
+		mock_stream.close.assert_called_once()
 
 
 class TestUnpackAudioErrors:

@@ -6,6 +6,9 @@ __pycache__/
 dist/
 build/
 
+# Config
+config.yaml
+
 # Logs
 *.log
 
