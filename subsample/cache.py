@@ -34,6 +34,15 @@ _log = logging.getLogger(__name__)
 _CACHE_SUFFIX: str = ".analysis.json"
 _MD5_CHUNK_BYTES: int = 8192
 
+# Return type shared by load_cache() and load_sidecar().
+_LoadResult = tuple[
+	subsample.analysis.AnalysisResult,
+	subsample.analysis.RhythmResult,
+	subsample.analysis.PitchResult,
+	subsample.analysis.AnalysisParams,
+	float,
+]
+
 
 def cache_path (audio_path: pathlib.Path) -> pathlib.Path:
 
@@ -126,15 +135,7 @@ def save_cache (
 		raise
 
 
-def load_cache (
-	audio_path: pathlib.Path,
-) -> typing.Optional[tuple[
-	subsample.analysis.AnalysisResult,
-	subsample.analysis.RhythmResult,
-	subsample.analysis.PitchResult,
-	subsample.analysis.AnalysisParams,
-	float,
-]]:
+def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 
 	"""Load cached analysis results if the sidecar is valid.
 
@@ -157,15 +158,8 @@ def load_cache (
 
 	sidecar = cache_path(audio_path)
 
-	if not sidecar.exists():
-		return None
-
-	try:
-		with sidecar.open("r", encoding="utf-8") as f:
-			payload = json.load(f)
-
-	except (json.JSONDecodeError, OSError) as exc:
-		_log.warning("Ignoring malformed cache %s: %s", sidecar.name, exc)
+	payload = _load_payload(sidecar, "cache")
+	if payload is None:
 		return None
 
 	# Version check — must come before the MD5 check (cheaper)
@@ -186,29 +180,10 @@ def load_cache (
 		_log.warning("Re-analyzing %s (audio file has changed)", audio_path.name)
 		return None
 
-	try:
-		spectral = _deserialize_spectral(payload["spectral"])
-		rhythm   = _deserialize_rhythm(payload["rhythm"])
-		pitch    = _deserialize_pitch(payload["pitch"])
-		params   = _deserialize_params(payload["params"])
-		duration = float(payload["duration"])
-
-	except (KeyError, TypeError, ValueError) as exc:
-		_log.warning("Ignoring corrupt cache %s: %s", sidecar.name, exc)
-		return None
-
-	return spectral, rhythm, pitch, params, duration
+	return _deserialize_payload(payload, sidecar.name)
 
 
-def load_sidecar (
-	sidecar_path: pathlib.Path,
-) -> typing.Optional[tuple[
-	subsample.analysis.AnalysisResult,
-	subsample.analysis.RhythmResult,
-	subsample.analysis.PitchResult,
-	subsample.analysis.AnalysisParams,
-	float,
-]]:
+def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 
 	"""Load analysis results directly from a sidecar file without audio MD5 check.
 
@@ -226,16 +201,13 @@ def load_sidecar (
 		(spectral, rhythm, pitch, params, duration) tuple on success, else None.
 	"""
 
+	# Unlike load_cache(), a missing sidecar is unexpected here — warn explicitly.
 	if not sidecar_path.exists():
 		_log.warning("Sidecar not found: %s", sidecar_path)
 		return None
 
-	try:
-		with sidecar_path.open("r", encoding="utf-8") as f:
-			payload = json.load(f)
-
-	except (json.JSONDecodeError, OSError) as exc:
-		_log.warning("Ignoring malformed sidecar %s: %s", sidecar_path.name, exc)
+	payload = _load_payload(sidecar_path, "sidecar")
+	if payload is None:
 		return None
 
 	# Version check — trust the data if the algorithm hasn't changed
@@ -247,6 +219,49 @@ def load_sidecar (
 		)
 		return None
 
+	return _deserialize_payload(payload, sidecar_path.name)
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+def _load_payload (
+	path: pathlib.Path,
+	label: str,
+) -> dict[str, typing.Any] | None:
+
+	"""Open a sidecar path and JSON-parse it.
+
+	Returns None if the file does not exist (silently) or is malformed (with
+	a WARNING). The label string identifies the caller in log messages
+	(e.g. "cache" or "sidecar").
+	"""
+
+	try:
+		with path.open("r", encoding="utf-8") as f:
+			return typing.cast(dict[str, typing.Any], json.load(f))
+
+	except FileNotFoundError:
+		return None
+
+	except (json.JSONDecodeError, OSError) as exc:
+		_log.warning("Ignoring malformed %s %s: %s", label, path.name, exc)
+		return None
+
+
+def _deserialize_payload (
+	payload: dict[str, typing.Any],
+	label: str,
+) -> _LoadResult | None:
+
+	"""Deserialize all analysis result types from a parsed JSON payload dict.
+
+	Returns None (with a WARNING) if any required key is missing or a value
+	cannot be converted to the expected type. The label string is used in the
+	log message to identify which file was corrupt.
+	"""
+
 	try:
 		spectral = _deserialize_spectral(payload["spectral"])
 		rhythm   = _deserialize_rhythm(payload["rhythm"])
@@ -255,15 +270,11 @@ def load_sidecar (
 		duration = float(payload["duration"])
 
 	except (KeyError, TypeError, ValueError) as exc:
-		_log.warning("Ignoring corrupt sidecar %s: %s", sidecar_path.name, exc)
+		_log.warning("Ignoring corrupt %s: %s", label, exc)
 		return None
 
 	return spectral, rhythm, pitch, params, duration
 
-
-# ---------------------------------------------------------------------------
-# Private serialization helpers
-# ---------------------------------------------------------------------------
 
 def _serialize (
 	audio_md5: str,

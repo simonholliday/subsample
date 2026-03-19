@@ -291,27 +291,6 @@ def select_device (devices: list[DeviceInfo]) -> int:
 		print(f"  Please enter a number between 0 and {len(devices) - 1}.")
 
 
-def open_stream (
-	pa: pyaudio.PyAudio,
-	device_index: int,
-	cfg: subsample.config.AudioConfig,
-) -> pyaudio.Stream:
-
-	"""Open and return a blocking input audio stream with the given config."""
-
-	fmt = get_pyaudio_format(cfg.bit_depth)
-
-	stream: pyaudio.Stream = pa.open(
-		format=fmt,
-		channels=cfg.channels,
-		rate=cfg.sample_rate,
-		input=True,
-		input_device_index=device_index,
-		frames_per_buffer=cfg.chunk_size,
-	)
-
-	return stream
-
 
 def get_pyaudio_format (bit_depth: int) -> int:
 

@@ -66,10 +66,9 @@ def _analyze_file (filepath_path: pathlib.Path) -> None:
 		# Use default analysis config (same as live capture defaults)
 		rhythm_cfg = subsample.config.AnalysisConfig()
 
-		# Rhythm, spectral, and pitch analysis
-		rhythm = subsample.analysis.analyze_rhythm(mono, params, rhythm_cfg)
-		result = subsample.analysis.analyze_mono(mono, params)
-		pitch  = subsample.analysis.analyze_pitch(mono, params)
+		# Run all three analyses; analyze_all() shares the pyin computation
+		# between spectral and pitch, avoiding ~200-300 ms of redundant work.
+		result, rhythm, pitch = subsample.analysis.analyze_all(mono, params, rhythm_cfg)
 
 		duration = len(data) / samplerate
 
