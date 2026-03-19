@@ -1128,13 +1128,13 @@ def _compute_spectral_contrast (
 		Contrast score in [0.0, 1.0]. 0 = flat spectrum, 1 = strong peaks.
 	"""
 
-	# spectral_contrast divides the spectrum into n_bands+1=7 sub-bands.
-	# Each band needs at least a few FFT bins to be valid. For very short
-	# signals where n_fft has been clamped to a small value, the frequency
-	# resolution is too coarse to compute meaningful sub-band contrasts.
-	# Return 0.0 (no contrast measurable) rather than crashing with an
-	# IndexError from librosa's internal band indexing logic.
-	if params.n_fft < 64:
+	# spectral_contrast requires the signal to be at least as long as one FFT
+	# window. If the clip is shorter, librosa zero-pads to n_fft but the
+	# internal sub-band peak/valley indexing can find empty frequency bins,
+	# producing NaN or raising an IndexError. Return 0.0 (no contrast
+	# measurable) for clips that are too short to analyse meaningfully.
+	# Also guard against a degenerate n_fft (< 64 bins → resolution too coarse).
+	if len(mono) < params.n_fft or params.n_fft < 64:
 		return 0.0
 
 	contrast = librosa.feature.spectral_contrast(
