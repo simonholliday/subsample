@@ -183,6 +183,27 @@ class AnalysisResult:
 	1.0 = clearly pitched throughout (sustained tone, singing, instrument).
 	Use this to decide whether pitch-related features are meaningful."""
 
+	def as_vector (self) -> numpy.ndarray:
+
+		"""Return the nine spectral metrics as a float32 1-D array.
+
+		This is the **spectral fingerprint** of the sound — a fixed-length
+		vector where every element is normalised to [0.0, 1.0]:
+
+		  [spectral_flatness, attack, release, spectral_centroid,
+		   spectral_bandwidth, zcr, harmonic_ratio, spectral_contrast,
+		   voiced_fraction]
+
+		Use this vector for cosine similarity comparison against reference
+		sample fingerprints (see subsample.similarity).
+		"""
+
+		return numpy.array([
+			self.spectral_flatness, self.attack,          self.release,
+			self.spectral_centroid, self.spectral_bandwidth,
+			self.zcr, self.harmonic_ratio, self.spectral_contrast, self.voiced_fraction,
+		], dtype=numpy.float32)
+
 
 @dataclasses.dataclass(frozen=True)
 class RhythmResult:

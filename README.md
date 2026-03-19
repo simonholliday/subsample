@@ -31,14 +31,24 @@ environment becomes an instant, organized sample pack.
   frequency, pitch class, chroma profile, MFCC timbre fingerprint).
 - **File analysis** - `scripts/analyze_file.py` runs the same analysis pipeline on any
   local audio file (WAV, FLAC, AIFF, OGG, etc.).
+- **Reference sample library** - load pre-analyzed reference sounds from disk; lookups
+  are case-insensitive; audio files not required (only `.analysis.json` sidecars).
+- **Spectral fingerprint similarity** - compare the 9-element [0,1] spectral vector
+  (spectral flatness, attack, release, centroid, bandwidth, ZCR, harmonic ratio,
+  contrast, voiced fraction) against reference samples using cosine similarity; scores
+  are logged for every recording.
+
+## In Progress
+
+- **Full similarity scoring** - spectral fingerprint comparison is done; future work:
+  extend to timbre fingerprints (MFCC cosine distance) and rhythm pattern matching.
+- **Automatic sample classification** - infrastructure in place; next: wire similarity
+  scores to a simple classifier (e.g. "if most similar reference is KICK, classify as KICK").
 
 ## Planned
 
-- **Sample similarity** - compare feature vectors (MFCC, spectral metrics) between
-  recordings using cosine distance to find the most "kick-like", "snare-like", etc.
-  sample from the library.
-- **Canonical sound training** - define reference sounds (kick, snare, hi-hat, …) from
-  example recordings; new samples are automatically classified by similarity.
+- **Interactive classification** - allow live adjustment of classification thresholds;
+  manually reassign samples to categories during recording session.
 - **MIDI note assignment** - allocate MIDI trigger notes based on sample classification;
   notes can be replaced in real time as better examples arrive; manual override supported.
 - **MIDI playback device** - receive MIDI note triggers and play back the assigned sample

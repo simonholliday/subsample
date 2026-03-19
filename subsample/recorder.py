@@ -3,6 +3,11 @@
 Decouples audio I/O from disk I/O by running the WAV writer on a dedicated
 daemon thread. The main capture loop hands off completed recordings via a
 queue, so file writes never block audio capture.
+
+WavWriter's sole responsibility is: receive audio → run analysis → write WAV
+→ save sidecar cache → invoke on_complete callback. It has no knowledge of
+similarity scoring, analysis formatting, or any other presentation concern.
+Those belong in the on_complete callback supplied by the caller (see cli.py).
 """
 
 import datetime
@@ -29,13 +34,15 @@ _SHUTDOWN: typing.Final[object] = object()
 _QueueItem = typing.Union[tuple[numpy.ndarray, datetime.datetime], object]
 
 # Callback type invoked after each recording is written and analyzed.
-# Receives the output path and all three analysis results.
+# Receives the output path, all three analysis results, and the recording duration.
+# Runs on the writer thread - use a queue to hand data back to the main thread safely.
 _OnCompleteCallback = typing.Callable[
 	[
 		pathlib.Path,
 		subsample.analysis.AnalysisResult,
 		subsample.analysis.RhythmResult,
 		subsample.analysis.PitchResult,
+		float,   # duration in seconds
 	],
 	None,
 ]
@@ -70,8 +77,8 @@ class WavWriter:
 			analysis_params: Pre-computed FFT params (from compute_params()).
 			on_complete:     Optional callback invoked on the writer thread after
 			                 each recording is written and analyzed. Receives
-			                 (filepath, spectral, rhythm, pitch). Use a queue to
-			                 hand results back to the main thread safely.
+			                 (filepath, spectral, rhythm, pitch, duration).
+			                 Use a queue to hand results back to the main thread.
 		"""
 
 		self._cfg = cfg
@@ -136,10 +143,11 @@ class WavWriter:
 					self._cfg.analysis,
 				)
 
-				filepath = self._write_wav(audio, timestamp, rhythm, result, pitch)
+				write_result = self._write_wav(audio, timestamp, rhythm, result, pitch)
 
-				if self._on_complete is not None and filepath is not None:
-					self._on_complete(filepath, result, rhythm, pitch)
+				if self._on_complete is not None and write_result is not None:
+					filepath, duration = write_result
+					self._on_complete(filepath, result, rhythm, pitch, duration)
 
 			except Exception as exc:
 				_log.error("Failed to write recording: %s", exc, exc_info=True)
@@ -151,12 +159,12 @@ class WavWriter:
 		rhythm: subsample.analysis.RhythmResult,
 		result: subsample.analysis.AnalysisResult,
 		pitch: subsample.analysis.PitchResult,
-	) -> pathlib.Path | None:
+	) -> tuple[pathlib.Path, float] | None:
 
-		"""Write a single audio segment to a WAV file.
+		"""Write a single audio segment to a WAV file and save its analysis sidecar.
 
-		Returns the path of the written file, or None if a free filename could
-		not be found (more than 999 same-second collisions — practically impossible).
+		Returns (filepath, duration_seconds), or None if a free filename could
+		not be found (more than 999 same-second collisions - practically impossible).
 
 		Args:
 			audio:     PCM samples, shape (n_frames, channels).
@@ -191,7 +199,7 @@ class WavWriter:
 
 		# 24-bit audio is stored internally as left-shifted int32; recover the
 		# original 3-byte values before writing. The sample_width must be set
-		# to 3 explicitly — bit_depth // 8 = 3 only by coincidence for 24-bit,
+		# to 3 explicitly - bit_depth // 8 = 3 only by coincidence for 24-bit,
 		# but the intent is clearer stated directly.
 		if bit_depth == 24:
 			sample_width = 3
@@ -209,17 +217,7 @@ class WavWriter:
 		n_frames = audio.shape[0]
 		duration = n_frames / self._cfg.audio.sample_rate
 
-		if _log.isEnabledFor(logging.DEBUG):
-			_log.debug(
-				"Stored: %s  frames=%d\n"
-				"  rhythm:   %s\n"
-				"  spectral: %s\n"
-				"  pitch:    %s",
-				filepath.name, n_frames,
-				subsample.analysis.format_rhythm_result(rhythm),
-				subsample.analysis.format_result(result, duration),
-				subsample.analysis.format_pitch_result(pitch),
-			)
+		_log.debug("Stored: %s  frames=%d", filepath.name, n_frames)
 
 		# Persist analysis alongside the WAV so future reads (e.g. reference
 		# file loading on startup) can skip re-analysis when nothing changes.
@@ -235,7 +233,7 @@ class WavWriter:
 			duration   = duration,
 		)
 
-		return filepath
+		return filepath, duration
 
 
 def _pack_int24 (audio: numpy.ndarray) -> bytes:

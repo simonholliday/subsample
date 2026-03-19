@@ -8,6 +8,7 @@ import datetime
 import logging
 import pathlib
 import sys
+import typing
 
 import numpy
 
@@ -18,6 +19,7 @@ import subsample.config
 import subsample.detector
 import subsample.library
 import subsample.recorder
+import subsample.similarity
 import subsample.trim
 
 
@@ -78,15 +80,20 @@ def main () -> None:
 	)
 
 	analysis_params = subsample.analysis.compute_params(cfg.audio.sample_rate)
-	writer = subsample.recorder.WavWriter(cfg, analysis_params)
 
+	# Load reference library (if configured) before creating the writer so the
+	# on_complete callback can capture it at construction time.
+	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None
 	if cfg.reference is not None:
 		reference_library = subsample.library.load_reference_library(
 			pathlib.Path(cfg.reference.directory)
 		)
 		print(f"  Reference    : {len(reference_library)} sample(s) loaded from {cfg.reference.directory}")
-	else:
-		reference_library = None  # noqa: F841 — will be used by similarity feature
+
+	writer = subsample.recorder.WavWriter(
+		cfg, analysis_params,
+		on_complete=_make_on_complete(reference_library),
+	)
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
 
@@ -136,6 +143,49 @@ def main () -> None:
 		writer.shutdown()
 
 	print("Done.")
+
+
+def _make_on_complete (
+	library: typing.Optional[subsample.library.ReferenceLibrary],
+) -> subsample.recorder._OnCompleteCallback:
+
+	"""Return an on_complete callback that logs analysis results and similarity scores.
+
+	The returned callback is invoked by the writer thread after each recording is
+	written and analyzed. It logs the full analysis breakdown (rhythm, spectral,
+	pitch) and, if a reference library is provided, similarity scores against
+	each reference sample.
+
+	Args:
+		library: Loaded reference library, or None if not configured.
+	"""
+
+	def _on_complete (
+		filepath: pathlib.Path,
+		spectral: subsample.analysis.AnalysisResult,
+		rhythm:   subsample.analysis.RhythmResult,
+		pitch:    subsample.analysis.PitchResult,
+		duration: float,
+	) -> None:
+
+		_log.debug(
+			"  rhythm:   %s\n"
+			"  spectral: %s\n"
+			"  pitch:    %s",
+			subsample.analysis.format_rhythm_result(rhythm),
+			subsample.analysis.format_result(spectral, duration),
+			subsample.analysis.format_pitch_result(pitch),
+		)
+
+		if library is not None:
+			scores = subsample.similarity.score_against_library(spectral, library)
+			if scores:
+				_log.debug(
+					"  similarity: %s",
+					subsample.similarity.format_similarity_scores(scores),
+				)
+
+	return _on_complete
 
 
 def _print_banner (cfg: subsample.config.Config) -> None:
