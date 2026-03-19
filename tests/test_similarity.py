@@ -47,6 +47,7 @@ def _make_record (name: str, spectral: subsample.analysis.AnalysisResult) -> sub
 	params = subsample.analysis.compute_params(44100)
 
 	return subsample.library.SampleRecord(
+		sample_id=subsample.library._allocate_id(),
 		name=name, spectral=spectral, rhythm=rhythm,
 		pitch=pitch, params=params, duration=1.0,
 	)

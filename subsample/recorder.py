@@ -34,15 +34,17 @@ _SHUTDOWN: typing.Final[object] = object()
 _QueueItem = typing.Union[tuple[numpy.ndarray, datetime.datetime], object]
 
 # Callback type invoked after each recording is written and analyzed.
-# Receives the output path, all three analysis results, and the recording duration.
-# Runs on the writer thread - use a queue to hand data back to the main thread safely.
+# Receives the output path, all three analysis results, the recording duration,
+# and the original capture-format PCM audio array for instrument sample storage.
+# Runs on the writer thread — use a queue to hand data back to the main thread safely.
 _OnCompleteCallback = typing.Callable[
 	[
 		pathlib.Path,
 		subsample.analysis.AnalysisResult,
 		subsample.analysis.RhythmResult,
 		subsample.analysis.PitchResult,
-		float,   # duration in seconds
+		float,           # duration in seconds
+		numpy.ndarray,   # original capture-format PCM (int16/int32, shape n_frames×channels)
 	],
 	None,
 ]
@@ -147,7 +149,7 @@ class WavWriter:
 
 				if self._on_complete is not None and write_result is not None:
 					filepath, duration = write_result
-					self._on_complete(filepath, result, rhythm, pitch, duration)
+					self._on_complete(filepath, result, rhythm, pitch, duration, audio)
 
 			except Exception as exc:
 				_log.error("Failed to write recording: %s", exc, exc_info=True)

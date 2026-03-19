@@ -58,6 +58,13 @@ class TestLoadDefault:
 		assert cfg.analysis.tempo_min == 30.0
 		assert cfg.analysis.tempo_max == 300.0
 
+	def test_default_instrument_values (self) -> None:
+		# TEST DEPENDENCY: config.yaml.default instrument section defaults
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert cfg.instrument.max_memory_mb == 100.0
+		assert cfg.instrument.directory is None
+
 	def test_analysis_defaults_when_section_absent (self, tmp_path: pathlib.Path) -> None:
 		"""A config.yaml without an analysis section should use class defaults."""
 		yaml_content = textwrap.dedent("""\

@@ -81,6 +81,21 @@ def main () -> None:
 
 	analysis_params = subsample.analysis.compute_params(cfg.audio.sample_rate)
 
+	# Create instrument library. If a directory is configured, pre-load samples
+	# from disk; otherwise start empty. Memory limit is always enforced.
+	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
+	if cfg.instrument.directory is not None:
+		instrument_library = subsample.library.load_instrument_library(
+			pathlib.Path(cfg.instrument.directory),
+			max_instrument_bytes,
+		)
+		print(
+			f"  Instruments  : {len(instrument_library)} sample(s) loaded"
+			f" from {cfg.instrument.directory}"
+		)
+	else:
+		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
+
 	# Load reference library (if configured) before creating the writer so the
 	# on_complete callback can capture it at construction time.
 	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None
@@ -92,7 +107,7 @@ def main () -> None:
 
 	writer = subsample.recorder.WavWriter(
 		cfg, analysis_params,
-		on_complete=_make_on_complete(reference_library),
+		on_complete=_make_on_complete(reference_library, instrument_library, analysis_params),
 	)
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
@@ -146,18 +161,23 @@ def main () -> None:
 
 
 def _make_on_complete (
-	library: typing.Optional[subsample.library.ReferenceLibrary],
+	reference_library: typing.Optional[subsample.library.ReferenceLibrary],
+	instrument_library: subsample.library.InstrumentLibrary,
+	analysis_params: subsample.analysis.AnalysisParams,
 ) -> subsample.recorder._OnCompleteCallback:
 
-	"""Return an on_complete callback that logs analysis results and similarity scores.
+	"""Return an on_complete callback that logs analysis results and manages samples.
 
-	The returned callback is invoked by the writer thread after each recording is
-	written and analyzed. It logs the full analysis breakdown (rhythm, spectral,
-	pitch) and, if a reference library is provided, similarity scores against
-	each reference sample.
+	The returned callback runs on the writer thread after each recording is written
+	and analyzed. It:
+	  1. Logs the full analysis breakdown (rhythm, spectral, pitch).
+	  2. Adds the recording to the instrument library (with its original PCM audio).
+	  3. Logs similarity scores against reference samples (if configured).
 
 	Args:
-		library: Loaded reference library, or None if not configured.
+		reference_library: Loaded reference library, or None if not configured.
+		instrument_library: Instrument library to add each new recording to.
+		analysis_params:    FFT parameters used for analysis (for SampleRecord construction).
 	"""
 
 	def _on_complete (
@@ -166,6 +186,7 @@ def _make_on_complete (
 		rhythm:   subsample.analysis.RhythmResult,
 		pitch:    subsample.analysis.PitchResult,
 		duration: float,
+		audio:    numpy.ndarray,
 	) -> None:
 
 		_log.debug(
@@ -177,8 +198,34 @@ def _make_on_complete (
 			subsample.analysis.format_pitch_result(pitch),
 		)
 
-		if library is not None:
-			scores = subsample.similarity.score_against_library(spectral, library)
+		# Build the instrument sample record and add it to the library.
+		# The name is the filename stem (e.g. "2026-03-19_14-00-29").
+		record = subsample.library.SampleRecord(
+			sample_id = subsample.library._allocate_id(),
+			name      = filepath.stem,
+			spectral  = spectral,
+			rhythm    = rhythm,
+			pitch     = pitch,
+			params    = analysis_params,
+			duration  = duration,
+			audio     = audio,
+			filepath  = filepath,
+		)
+
+		evicted = instrument_library.add(record)
+
+		_log.debug(
+			"  instrument: #%d %s (%.1f MB used / %.1f MB limit)",
+			record.sample_id, record.name,
+			instrument_library.memory_used / (1024 * 1024),
+			instrument_library.memory_limit / (1024 * 1024),
+		)
+
+		if evicted:
+			_log.debug("  evicted:    %s", ", ".join(f"#{i}" for i in evicted))
+
+		if reference_library is not None:
+			scores = subsample.similarity.score_against_library(spectral, reference_library)
 			if scores:
 				_log.debug(
 					"  similarity: %s",

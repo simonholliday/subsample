@@ -68,6 +68,22 @@ class ReferenceConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class InstrumentConfig:
+
+	max_memory_mb: float = 100.0
+	"""Maximum audio memory (MB) for in-memory instrument samples.
+
+	When this limit is exceeded the oldest samples are evicted (FIFO) to make
+	room. Only in-memory audio is removed; WAV files on disk are never deleted.
+	At 44100 Hz 16-bit mono, 100 MB ≈ 19 minutes of audio."""
+
+	directory: typing.Optional[str] = None
+	"""Optional path to a directory of pre-analyzed instrument samples to load
+	at startup. Each sample requires both a WAV file and an .analysis.json
+	sidecar. If omitted, the instrument library starts empty."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
 
 	audio: AudioConfig
@@ -75,6 +91,7 @@ class Config:
 	detection: DetectionConfig
 	output: OutputConfig
 	analysis: AnalysisConfig = dataclasses.field(default_factory=AnalysisConfig)
+	instrument: InstrumentConfig = dataclasses.field(default_factory=InstrumentConfig)
 	reference: typing.Optional[ReferenceConfig] = None
 
 
@@ -198,6 +215,12 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		tempo_max=float(analysis_raw.get("tempo_max", 300.0)),
 	)
 
+	instrument_raw: dict[str, typing.Any] = raw.get("instrument", {})
+	instrument = InstrumentConfig(
+		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
+		directory=instrument_raw.get("directory"),
+	)
+
 	reference_raw: typing.Optional[dict[str, typing.Any]] = raw.get("reference")
 	if reference_raw is not None:
 		reference: typing.Optional[ReferenceConfig] = ReferenceConfig(
@@ -212,5 +235,6 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		detection=detection,
 		output=output,
 		analysis=analysis,
+		instrument=instrument,
 		reference=reference,
 	)

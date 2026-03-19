@@ -1,8 +1,9 @@
-"""Tests for subsample/library.py — reference sample library."""
+"""Tests for subsample/library.py — reference and instrument sample libraries."""
 
 import json
 import pathlib
 
+import numpy
 import pytest
 
 import subsample.analysis
@@ -74,6 +75,21 @@ def _write_sidecar (
 	return sidecar_path
 
 
+def _write_wav_and_sidecar (
+	directory: pathlib.Path,
+	audio_stem: str,
+	n_frames: int = 2048,
+) -> tuple[pathlib.Path, pathlib.Path]:
+
+	"""Write a WAV file and its sidecar for instrument library tests."""
+
+	wav_path = directory / (audio_stem + ".wav")
+	_make_wav(wav_path, n_frames=n_frames)
+	sidecar_path = _write_sidecar(directory, audio_stem)
+
+	return wav_path, sidecar_path
+
+
 # ---------------------------------------------------------------------------
 # TestSampleRecord
 # ---------------------------------------------------------------------------
@@ -82,24 +98,67 @@ class TestSampleRecord:
 
 	def test_fields_accessible (self) -> None:
 		record = subsample.library.SampleRecord(
-			name     = "KICK",
-			spectral = _make_spectral(),
-			rhythm   = _make_rhythm(),
-			pitch    = _make_pitch(),
-			params   = _make_params(),
-			duration = 1.23,
+			sample_id = 1,
+			name      = "KICK",
+			spectral  = _make_spectral(),
+			rhythm    = _make_rhythm(),
+			pitch     = _make_pitch(),
+			params    = _make_params(),
+			duration  = 1.23,
 		)
+		assert record.sample_id == 1
 		assert record.name == "KICK"
 		assert record.duration == 1.23
 		assert record.spectral.attack == pytest.approx(0.2)
 
+	def test_audio_and_filepath_default_to_none (self) -> None:
+		record = subsample.library.SampleRecord(
+			sample_id=1, name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
+			pitch=_make_pitch(), params=_make_params(), duration=1.0,
+		)
+		assert record.audio is None
+		assert record.filepath is None
+
+	def test_audio_stored_when_provided (self) -> None:
+		audio = numpy.zeros((1000, 1), dtype=numpy.int16)
+		record = subsample.library.SampleRecord(
+			sample_id=1, name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
+			pitch=_make_pitch(), params=_make_params(), duration=1.0,
+			audio=audio,
+		)
+		assert record.audio is not None
+		assert record.audio.shape == (1000, 1)
+
 	def test_is_frozen (self) -> None:
 		record = subsample.library.SampleRecord(
-			name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
+			sample_id=1, name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
 			pitch=_make_pitch(), params=_make_params(), duration=1.0,
 		)
 		with pytest.raises(Exception):
 			record.name = "Y"  # type: ignore[misc]
+
+	def test_as_vector_delegates_to_spectral (self) -> None:
+		record = subsample.library.SampleRecord(
+			sample_id=1, name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
+			pitch=_make_pitch(), params=_make_params(), duration=1.0,
+		)
+		assert numpy.array_equal(record.as_vector(), record.spectral.as_vector())
+
+
+# ---------------------------------------------------------------------------
+# TestAllocateId
+# ---------------------------------------------------------------------------
+
+class TestAllocateId:
+
+	def test_ids_are_unique (self) -> None:
+		ids = [subsample.library._allocate_id() for _ in range(10)]
+		assert len(set(ids)) == 10
+
+	def test_ids_are_sequential (self) -> None:
+		a = subsample.library._allocate_id()
+		b = subsample.library._allocate_id()
+		assert b == a + 1
 
 
 # ---------------------------------------------------------------------------
@@ -161,14 +220,15 @@ class TestLoadSidecar:
 
 class TestReferenceLibrary:
 
-	def _library_with (self, records: list[subsample.library.SampleRecord]) -> subsample.library.ReferenceLibrary:
-		return subsample.library.ReferenceLibrary(records)
-
 	def _record (self, name: str) -> subsample.library.SampleRecord:
 		return subsample.library.SampleRecord(
+			sample_id=subsample.library._allocate_id(),
 			name=name, spectral=_make_spectral(), rhythm=_make_rhythm(),
 			pitch=_make_pitch(), params=_make_params(), duration=1.0,
 		)
+
+	def _library_with (self, records: list[subsample.library.SampleRecord]) -> subsample.library.ReferenceLibrary:
+		return subsample.library.ReferenceLibrary(records)
 
 	def test_empty_library (self) -> None:
 		lib = self._library_with([])
@@ -232,6 +292,19 @@ class TestLoadReferenceLibrary:
 		lib = subsample.library.load_reference_library(tmp_path)
 		assert lib.get("BD0025") is not None
 
+	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
+		_write_sidecar(tmp_path, "KICK")
+		_write_sidecar(tmp_path, "SNARE")
+		lib = subsample.library.load_reference_library(tmp_path)
+		ids = [r.sample_id for r in lib.all()]
+		assert len(set(ids)) == 2
+
+	def test_audio_is_none_for_reference (self, tmp_path: pathlib.Path) -> None:
+		_write_sidecar(tmp_path, "KICK")
+		lib = subsample.library.load_reference_library(tmp_path)
+		assert lib.get("KICK") is not None
+		assert lib.get("KICK").audio is None  # type: ignore[union-attr]
+
 	def test_nonexistent_directory_returns_empty (
 		self,
 		tmp_path: pathlib.Path,
@@ -254,15 +327,11 @@ class TestLoadReferenceLibrary:
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
 		import logging
-		# Valid sidecar
 		_write_sidecar(tmp_path, "KICK")
-		# Invalid sidecar
 		bad = tmp_path / "BAD.wav.analysis.json"
 		bad.write_text("not json", encoding="utf-8")
-
 		with caplog.at_level(logging.WARNING, logger="subsample.cache"):
 			lib = subsample.library.load_reference_library(tmp_path)
-
 		assert len(lib) == 1
 		assert lib.get("KICK") is not None
 
@@ -274,20 +343,220 @@ class TestLoadReferenceLibrary:
 		import logging
 		_write_sidecar(tmp_path, "KICK")
 		_write_sidecar(tmp_path, "SNARE")
-
 		with caplog.at_level(logging.INFO, logger="subsample.library"):
 			subsample.library.load_reference_library(tmp_path)
-
 		assert any("2" in r.message for r in caplog.records)
 
 	def test_does_not_recurse_into_subdirectories (self, tmp_path: pathlib.Path) -> None:
-		# Sidecar in a subdirectory should be ignored
 		subdir = tmp_path / "Roland TR-808"
 		subdir.mkdir()
 		_write_sidecar(subdir, "SD0000")
-		# Sidecar at top level should load
 		_write_sidecar(tmp_path, "KICK")
-
 		lib = subsample.library.load_reference_library(tmp_path)
 		assert len(lib) == 1
 		assert lib.get("KICK") is not None
+
+
+# ---------------------------------------------------------------------------
+# TestInstrumentLibrary
+# ---------------------------------------------------------------------------
+
+def _make_instrument_record (
+	name: str,
+	n_frames: int = 1000,
+	channels: int = 1,
+) -> subsample.library.SampleRecord:
+
+	"""Return a SampleRecord with audio data for instrument library tests."""
+
+	audio = numpy.zeros((n_frames, channels), dtype=numpy.int16)
+	return subsample.library.SampleRecord(
+		sample_id = subsample.library._allocate_id(),
+		name      = name,
+		spectral  = _make_spectral(),
+		rhythm    = _make_rhythm(),
+		pitch     = _make_pitch(),
+		params    = _make_params(),
+		duration  = n_frames / 44100.0,
+		audio     = audio,
+	)
+
+
+class TestInstrumentLibrary:
+
+	def test_empty_library (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=1024 * 1024)
+		assert len(lib) == 0
+		assert lib.all() == []
+		assert lib.memory_used == 0
+
+	def test_add_and_get (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=1024 * 1024)
+		record = _make_instrument_record("KICK")
+		lib.add(record)
+		assert lib.get(record.sample_id) is record
+
+	def test_get_missing_returns_none (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=1024 * 1024)
+		assert lib.get(99999) is None
+
+	def test_all_returns_insertion_order (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		r1 = _make_instrument_record("A")
+		r2 = _make_instrument_record("B")
+		r3 = _make_instrument_record("C")
+		lib.add(r1)
+		lib.add(r2)
+		lib.add(r3)
+		names = [r.name for r in lib.all()]
+		assert names == ["A", "B", "C"]
+
+	def test_len (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		lib.add(_make_instrument_record("A"))
+		lib.add(_make_instrument_record("B"))
+		assert len(lib) == 2
+
+	def test_memory_used_reflects_audio_bytes (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		record = _make_instrument_record("KICK", n_frames=1000)
+		expected_bytes = record.audio.nbytes  # type: ignore[union-attr]
+		lib.add(record)
+		assert lib.memory_used == expected_bytes
+
+	def test_fifo_eviction_removes_oldest (self) -> None:
+		# Each record is 1000 int16 samples = 2000 bytes; limit = 4000 bytes → fits 2
+		limit = 4000
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=limit)
+		r1 = _make_instrument_record("A", n_frames=1000)
+		r2 = _make_instrument_record("B", n_frames=1000)
+		r3 = _make_instrument_record("C", n_frames=1000)
+		lib.add(r1)
+		lib.add(r2)
+		evicted = lib.add(r3)
+		# r1 should be evicted (oldest)
+		assert r1.sample_id in evicted
+		assert lib.get(r1.sample_id) is None
+		assert lib.get(r2.sample_id) is r2
+		assert lib.get(r3.sample_id) is r3
+
+	def test_add_returns_evicted_ids (self) -> None:
+		limit = 2000  # fits one 1000-frame int16 record
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=limit)
+		r1 = _make_instrument_record("A", n_frames=1000)
+		r2 = _make_instrument_record("B", n_frames=1000)
+		lib.add(r1)
+		evicted = lib.add(r2)
+		assert r1.sample_id in evicted
+
+	def test_no_eviction_when_within_limit (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		evicted = lib.add(_make_instrument_record("A"))
+		assert evicted == []
+
+	def test_add_no_audio_no_eviction (self) -> None:
+		# Records with audio=None contribute 0 bytes
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=1)
+		record = subsample.library.SampleRecord(
+			sample_id=subsample.library._allocate_id(),
+			name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
+			pitch=_make_pitch(), params=_make_params(), duration=1.0,
+		)
+		evicted = lib.add(record)
+		assert evicted == []
+		assert len(lib) == 1
+
+	def test_repr_contains_count_and_memory (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=1024 * 1024)
+		lib.add(_make_instrument_record("KICK"))
+		r = repr(lib)
+		assert "1" in r
+
+	def test_memory_limit_property (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=5 * 1024 * 1024)
+		assert lib.memory_limit == 5 * 1024 * 1024
+
+
+# ---------------------------------------------------------------------------
+# TestLoadInstrumentLibrary
+# ---------------------------------------------------------------------------
+
+class TestLoadInstrumentLibrary:
+
+	def test_loads_wav_and_sidecar (self, tmp_path: pathlib.Path) -> None:
+		_write_wav_and_sidecar(tmp_path, "KICK")
+		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		assert len(lib) == 1
+		record = lib.all()[0]
+		assert record.name == "KICK"
+		assert record.audio is not None
+
+	def test_audio_has_correct_shape (self, tmp_path: pathlib.Path) -> None:
+		_write_wav_and_sidecar(tmp_path, "KICK", n_frames=2048)
+		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		record = lib.all()[0]
+		assert record.audio is not None
+		assert record.audio.shape[0] == 2048  # n_frames
+		assert record.audio.shape[1] == 1     # mono
+
+	def test_skips_missing_wav (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		# Write sidecar only — no WAV
+		_write_sidecar(tmp_path, "KICK")
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		assert len(lib) == 0
+		assert any("not found" in r.message.lower() for r in caplog.records)
+
+	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
+		_write_wav_and_sidecar(tmp_path, "KICK")
+		_write_wav_and_sidecar(tmp_path, "SNARE")
+		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		ids = [r.sample_id for r in lib.all()]
+		assert len(set(ids)) == 2
+
+	def test_nonexistent_directory_returns_empty (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		missing = tmp_path / "no_such_dir"
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			lib = subsample.library.load_instrument_library(missing, 10 * 1024 * 1024)
+		assert len(lib) == 0
+
+	def test_filepath_populated (self, tmp_path: pathlib.Path) -> None:
+		wav_path, _ = _write_wav_and_sidecar(tmp_path, "KICK")
+		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		record = lib.all()[0]
+		assert record.filepath == wav_path
+
+
+# ---------------------------------------------------------------------------
+# TestLoadWavAudio
+# ---------------------------------------------------------------------------
+
+class TestLoadWavAudio:
+
+	def test_loads_16bit_wav (self, tmp_path: pathlib.Path) -> None:
+		path = tmp_path / "test.wav"
+		_make_wav(path, n_frames=512)
+		audio = subsample.library._load_wav_audio(path)
+		assert audio is not None
+		assert audio.dtype == numpy.int16
+		assert audio.shape == (512, 1)
+
+	def test_missing_file_returns_none (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			result = subsample.library._load_wav_audio(tmp_path / "missing.wav")
+		assert result is None

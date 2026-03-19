@@ -37,6 +37,10 @@ environment becomes an instant, organized sample pack.
   (spectral flatness, attack, release, centroid, bandwidth, ZCR, harmonic ratio,
   contrast, voiced fraction) against reference samples using cosine similarity; scores
   are logged for every recording.
+- **Instrument sample library** - every recording is added to an in-memory library
+  with its PCM audio and full analysis; a configurable memory cap (default 100 MB)
+  keeps the newest samples in RAM using FIFO eviction; an optional startup directory
+  pre-populates the library from previously recorded files.
 
 ## In Progress
 
@@ -106,6 +110,26 @@ samples/
   2026-03-17_14-32-01.wav
   2026-03-17_14-35-44.wav
 ```
+
+## Instrument sample library
+
+Every recording is automatically added to an in-memory instrument library alongside its full analysis data. The library is the foundation for MIDI playback: samples will be assigned to notes as classification develops.
+
+A configurable memory cap (default 100 MB, `instrument.max_memory_mb`) prevents unbounded growth. When a new sample would push usage over the limit, the oldest samples are evicted from memory — newest captures are always retained. WAV files on disk are never deleted.
+
+### Persistent library across sessions
+
+Point `instrument.directory` at the same path as `output.directory` to get a library that grows on disk and stays fresh in memory:
+
+```yaml
+output:
+  directory: "./samples"
+
+instrument:
+  directory: "./samples"
+```
+
+On startup, Subsample pre-loads all existing WAV files from `./samples` into memory. As new recordings arrive they are written to disk and added to the in-memory library in one step. The memory cap keeps only the most recent `max_memory_mb` worth of audio in RAM; the full archive on disk is unaffected. Across sessions the collection on disk grows indefinitely; in memory it always holds the freshest window of captures.
 
 ## Analyzing recorded files
 
