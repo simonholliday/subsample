@@ -28,28 +28,55 @@ _SHUTDOWN: typing.Final[object] = object()
 # Type alias for items placed on the queue: (audio, timestamp) or the sentinel
 _QueueItem = typing.Union[tuple[numpy.ndarray, datetime.datetime], object]
 
+# Callback type invoked after each recording is written and analyzed.
+# Receives the output path and all three analysis results.
+_OnCompleteCallback = typing.Callable[
+	[
+		pathlib.Path,
+		subsample.analysis.AnalysisResult,
+		subsample.analysis.RhythmResult,
+		subsample.analysis.PitchResult,
+	],
+	None,
+]
+
 
 class WavWriter:
 
 	"""Writes audio recordings to WAV files on a background daemon thread.
 
 	Usage:
-		writer = WavWriter(config)
+		writer = WavWriter(config, analysis_params)
 		writer.enqueue(audio_array, datetime.datetime.now())
 		# … later …
 		writer.shutdown()
+
+	IMPORTANT: shutdown() must be called before the process exits. The writer
+	thread is a daemon, so if the main thread exits without calling shutdown(),
+	any recordings still in the queue will be silently lost.
 	"""
 
 	def __init__ (
 		self,
 		cfg: subsample.config.Config,
 		analysis_params: subsample.analysis.AnalysisParams,
+		on_complete: typing.Optional[_OnCompleteCallback] = None,
 	) -> None:
 
-		"""Start the writer thread and ensure the output directory exists."""
+		"""Start the writer thread and ensure the output directory exists.
+
+		Args:
+			cfg:             Full application config.
+			analysis_params: Pre-computed FFT params (from compute_params()).
+			on_complete:     Optional callback invoked on the writer thread after
+			                 each recording is written and analyzed. Receives
+			                 (filepath, spectral, rhythm, pitch). Use a queue to
+			                 hand results back to the main thread safely.
+		"""
 
 		self._cfg = cfg
 		self._analysis_params = analysis_params
+		self._on_complete = on_complete
 		self._queue: queue.Queue[_QueueItem] = queue.Queue()
 
 		output_dir = pathlib.Path(cfg.output.directory)
@@ -98,20 +125,21 @@ class WavWriter:
 					tuple[numpy.ndarray, datetime.datetime], item
 				)
 
-				# Convert once; all three analyses operate on the same mono float array
+				# Convert once; all three analyses operate on the same mono float array.
+				# analyze_all() shares the pyin computation between spectral and pitch
+				# analysis, avoiding running it twice (~200-300 ms saving per recording).
 				mono = subsample.analysis.to_mono_float(audio, self._cfg.audio.bit_depth)
 
-				rhythm = subsample.analysis.analyze_rhythm(
+				result, rhythm, pitch = subsample.analysis.analyze_all(
 					mono,
 					self._analysis_params,
 					self._cfg.analysis,
 				)
 
-				result = subsample.analysis.analyze_mono(mono, self._analysis_params)
+				filepath = self._write_wav(audio, timestamp, rhythm, result, pitch)
 
-				pitch = subsample.analysis.analyze_pitch(mono, self._analysis_params)
-
-				self._write_wav(audio, timestamp, rhythm, result, pitch)
+				if self._on_complete is not None and filepath is not None:
+					self._on_complete(filepath, result, rhythm, pitch)
 
 			except Exception as exc:
 				_log.error("Failed to write recording: %s", exc, exc_info=True)
@@ -123,9 +151,12 @@ class WavWriter:
 		rhythm: subsample.analysis.RhythmResult,
 		result: subsample.analysis.AnalysisResult,
 		pitch: subsample.analysis.PitchResult,
-	) -> None:
+	) -> pathlib.Path | None:
 
 		"""Write a single audio segment to a WAV file.
+
+		Returns the path of the written file, or None if a free filename could
+		not be found (more than 999 same-second collisions — practically impossible).
 
 		Args:
 			audio:     PCM samples, shape (n_frames, channels).
@@ -136,11 +167,18 @@ class WavWriter:
 			pitch:     Pitch and timbre analysis computed before this call.
 		"""
 
-		# Generate base filename and find a free path (handle same-second collisions)
+		# Find a free filename; cap the loop to prevent spinning forever on a
+		# pathological filesystem full of same-timestamp files.
 		filename_base = timestamp.strftime(self._cfg.output.filename_format)
 		filepath = self._output_dir / (filename_base + ".wav")
 		suffix_counter = 2
 		while filepath.exists():
+			if suffix_counter > 999:
+				_log.error(
+					"Could not find a free filename for %s (>999 collisions); "
+					"recording discarded.", filename_base,
+				)
+				return None
 			filepath = self._output_dir / (filename_base + f"_{suffix_counter}.wav")
 			suffix_counter += 1
 
@@ -150,13 +188,16 @@ class WavWriter:
 
 		n_channels = audio.shape[1]
 		bit_depth = self._cfg.audio.bit_depth
-		sample_width = bit_depth // 8
 
 		# 24-bit audio is stored internally as left-shifted int32; recover the
-		# original 3-byte values before writing.
+		# original 3-byte values before writing. The sample_width must be set
+		# to 3 explicitly — bit_depth // 8 = 3 only by coincidence for 24-bit,
+		# but the intent is clearer stated directly.
 		if bit_depth == 24:
+			sample_width = 3
 			frame_bytes = _pack_int24(audio)
 		else:
+			sample_width = bit_depth // 8
 			frame_bytes = audio.tobytes()
 
 		with wave.open(str(filepath), "wb") as wf:
@@ -193,6 +234,8 @@ class WavWriter:
 			pitch      = pitch,
 			duration   = duration,
 		)
+
+		return filepath
 
 
 def _pack_int24 (audio: numpy.ndarray) -> bytes:

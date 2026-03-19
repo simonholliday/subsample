@@ -117,13 +117,29 @@ def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
 
 	"""Read and parse a YAML file, returning a plain dict."""
 
-	with path.open("r", encoding="utf-8") as fh:
-		data = yaml.safe_load(fh)
+	try:
+		with path.open("r", encoding="utf-8") as fh:
+			data = yaml.safe_load(fh)
+	except yaml.YAMLError as exc:
+		raise ValueError(f"Config file {path} contains invalid YAML: {exc}") from exc
 
 	if not isinstance(data, dict):
 		raise ValueError(f"Config file {path} must contain a YAML mapping at top level")
 
 	return data
+
+
+def _require (section: dict[str, typing.Any], key: str, section_name: str) -> typing.Any:
+
+	"""Return section[key], raising a clear ValueError if the key is absent."""
+
+	if key not in section:
+		raise ValueError(
+			f"Missing required config key '{section_name}.{key}'. "
+			f"Check your config.yaml against config.yaml.default."
+		)
+
+	return section[key]
 
 
 def _build_config (raw: dict[str, typing.Any]) -> Config:
@@ -137,10 +153,10 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	analysis_raw: dict[str, typing.Any] = raw.get("analysis", {})
 
 	audio = AudioConfig(
-		sample_rate=int(audio_raw["sample_rate"]),
-		bit_depth=int(audio_raw["bit_depth"]),
-		channels=int(audio_raw["channels"]),
-		chunk_size=int(audio_raw["chunk_size"]),
+		sample_rate=int(_require(audio_raw, "sample_rate", "audio")),
+		bit_depth=int(_require(audio_raw, "bit_depth", "audio")),
+		channels=int(_require(audio_raw, "channels", "audio")),
+		chunk_size=int(_require(audio_raw, "chunk_size", "audio")),
 		device=audio_raw.get("device"),
 	)
 
@@ -151,21 +167,21 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		)
 
 	buffer = BufferConfig(
-		max_seconds=int(buffer_raw["max_seconds"]),
+		max_seconds=int(_require(buffer_raw, "max_seconds", "buffer")),
 	)
 
 	detection = DetectionConfig(
-		snr_threshold_db=float(detection_raw["snr_threshold_db"]),
-		hold_time=float(detection_raw["hold_time"]),
-		warmup_seconds=float(detection_raw["warmup_seconds"]),
-		ema_alpha=float(detection_raw["ema_alpha"]),
+		snr_threshold_db=float(_require(detection_raw, "snr_threshold_db", "detection")),
+		hold_time=float(_require(detection_raw, "hold_time", "detection")),
+		warmup_seconds=float(_require(detection_raw, "warmup_seconds", "detection")),
+		ema_alpha=float(_require(detection_raw, "ema_alpha", "detection")),
 		trim_pre_samples=int(detection_raw.get("trim_pre_samples", 0)),
 		trim_post_samples=int(detection_raw.get("trim_post_samples", 0)),
 	)
 
 	output = OutputConfig(
-		directory=str(output_raw["directory"]),
-		filename_format=str(output_raw["filename_format"]),
+		directory=str(_require(output_raw, "directory", "output")),
+		filename_format=str(_require(output_raw, "filename_format", "output")),
 	)
 
 	analysis = AnalysisConfig(

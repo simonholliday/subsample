@@ -112,6 +112,10 @@ _PITCH_CLASSES: tuple[str, ...] = (
 	"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
 )
 
+# Type alias for the three-array result returned by librosa.pyin.
+# (f0_hz, voiced_flag, voiced_probs) — see _run_pyin() in the helpers section.
+_PYINResult = tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+
 
 @dataclasses.dataclass(frozen=True)
 class AnalysisParams:
@@ -343,6 +347,8 @@ def analyze (
 def analyze_mono (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
+	*,
+	_pyin_voiced_flag: numpy.ndarray | None = None,
 ) -> AnalysisResult:
 
 	"""Compute analysis metrics from a pre-normalised float32 mono array.
@@ -393,7 +399,7 @@ def analyze_mono (
 	zcr = _compute_zcr(mono, params)
 	harmonic_ratio = _compute_harmonic_ratio(mono, params)
 	contrast = _compute_spectral_contrast(mono, params)
-	voiced_fraction = _compute_voiced_fraction(mono, params)
+	voiced_fraction = _compute_voiced_fraction(mono, params, pyin_voiced_flag=_pyin_voiced_flag)
 
 	return AnalysisResult(
 		spectral_flatness=_log_normalize(
@@ -616,6 +622,8 @@ def format_pitch_result (result: PitchResult) -> str:
 def analyze_pitch (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
+	*,
+	_pyin_result: _PYINResult | None = None,
 ) -> PitchResult:
 
 	"""Detect pitch and timbre properties from a pre-normalised float32 mono array.
@@ -632,19 +640,21 @@ def analyze_pitch (
 	fields are meaningful before relying on dominant_pitch_hz or chroma_profile.
 
 	Args:
-		mono:   Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
-		params: Pre-computed FFT parameters from compute_params().
+		mono:         Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+		params:       Pre-computed FFT parameters from compute_params().
+		_pyin_result: Pre-computed pyin output from _run_pyin(). When provided,
+		              the pyin call is skipped (used by analyze_all() to share
+		              the computation with analyze_mono()).
 
 	Returns:
 		PitchResult with pitch, chroma, and MFCC data.
 	"""
 
-	# pyin requires frame_length > sr / fmin so at least one period of the
-	# lowest frequency fits in the analysis window. At 44100 Hz with fmin=65 Hz
-	# this is ≈ 680 samples. If the signal is shorter than this, there is not
-	# enough data for meaningful pitch analysis.
-	pyin_min_frame = int(math.ceil(params.sample_rate / _PYIN_FMIN)) + 1
-	if mono.shape[0] < pyin_min_frame:
+	# pyin requires at least one period of fmin to fit in the frame.
+	# Use _run_pyin() so this check and the pyin call are in one place.
+	pyin = _pyin_result if _pyin_result is not None else _run_pyin(mono, params)
+
+	if pyin is None:
 		return PitchResult(
 			dominant_pitch_hz=0.0,
 			pitch_confidence=0.0,
@@ -654,17 +664,9 @@ def analyze_pitch (
 		)
 
 	# --- pyin: probabilistic fundamental frequency estimation ---
-	# Returns per-frame (f0_hz, voiced_flag, voiced_probs).
 	# voiced_flag is True for frames where a pitch was detected with reasonable
 	# confidence. f0_hz is NaN for unvoiced frames — we ignore those.
-	f0_hz, voiced_flag, voiced_probs = librosa.pyin(
-		mono,
-		fmin=_PYIN_FMIN,
-		fmax=_PYIN_FMAX,
-		sr=params.sample_rate,
-		frame_length=params.n_fft,
-		hop_length=params.hop_length,
-	)
+	f0_hz, voiced_flag, voiced_probs = pyin
 
 	voiced_f0 = f0_hz[voiced_flag]
 	dominant_pitch_hz = float(numpy.median(voiced_f0)) if voiced_f0.size > 0 else 0.0
@@ -684,7 +686,9 @@ def analyze_pitch (
 	# is an expected, harmless implementation detail — librosa zero-pads
 	# internally and produces correct output. Suppress the warning here.
 	with warnings.catch_warnings():
-		warnings.simplefilter("ignore", UserWarning)
+		# Suppress only the "n_fft too large" warning from librosa's internal CQT
+		# downsampling. Other UserWarnings (e.g. deprecated parameters) remain visible.
+		warnings.filterwarnings("ignore", message="n_fft=", category=UserWarning)
 		chroma_raw = librosa.feature.chroma_cqt(
 			y=mono,
 			sr=params.sample_rate,
@@ -721,9 +725,81 @@ def analyze_pitch (
 	)
 
 
+def analyze_all (
+	mono: numpy.ndarray,
+	params: AnalysisParams,
+	rhythm_cfg: subsample.config.AnalysisConfig,
+) -> tuple[AnalysisResult, RhythmResult, PitchResult]:
+
+	"""Run all three analyses (spectral, rhythm, pitch) with shared pyin computation.
+
+	Preferred entry point for the recorder and any code that needs all three
+	results. Runs pyin once and passes the result to both analyze_mono() and
+	analyze_pitch(), avoiding the ~200–300 ms double computation.
+
+	Args:
+		mono:       Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+		params:     Pre-computed FFT parameters from compute_params().
+		rhythm_cfg: Configurable tempo priors from AnalysisConfig.
+
+	Returns:
+		(spectral, rhythm, pitch) — a triple of result dataclasses.
+	"""
+
+	# Run pyin once; share the result between spectral (voiced_fraction) and pitch.
+	pyin = _run_pyin(mono, params)
+
+	rhythm = analyze_rhythm(mono, params, rhythm_cfg)
+	spectral = analyze_mono(mono, params, _pyin_voiced_flag=pyin[1] if pyin is not None else None)
+	pitch = analyze_pitch(mono, params, _pyin_result=pyin)
+
+	return spectral, rhythm, pitch
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _pyin_min_frame_length (params: AnalysisParams) -> int:
+
+	"""Minimum signal length (samples) for pyin to run at the configured fmin.
+
+	pyin requires frame_length > sr / fmin so at least one period of the lowest
+	frequency fits in the analysis window. At 44100 Hz with fmin=65 Hz (C2)
+	this is ≈ 680 samples.
+	"""
+
+	return int(math.ceil(params.sample_rate / _PYIN_FMIN)) + 1
+
+
+def _run_pyin (mono: numpy.ndarray, params: AnalysisParams) -> _PYINResult | None:
+
+	"""Run pyin (probabilistic YIN) pitch detection on a mono float32 signal.
+
+	Returns (f0_hz, voiced_flag, voiced_probs) — the three arrays produced by
+	librosa.pyin. voiced_flag is a boolean array (True = pitch detected).
+	f0_hz is NaN for unvoiced frames.
+
+	Returns None if the signal is shorter than _pyin_min_frame_length() — in
+	that case the caller should treat the signal as unpitched.
+
+	This is the single shared pyin call site. Both analyze_pitch() and
+	_compute_voiced_fraction() call this function so pyin is never run twice
+	for the same signal.
+	"""
+
+	if mono.shape[0] < _pyin_min_frame_length(params):
+		return None
+
+	return librosa.pyin(
+		mono,
+		fmin=_PYIN_FMIN,
+		fmax=_PYIN_FMAX,
+		sr=params.sample_rate,
+		frame_length=params.n_fft,
+		hop_length=params.hop_length,
+	)
+
 
 def to_mono_float (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
 
@@ -1056,6 +1132,8 @@ def _compute_spectral_contrast (
 def _compute_voiced_fraction (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
+	*,
+	pyin_voiced_flag: numpy.ndarray | None = None,
 ) -> float:
 
 	"""Measure the fraction of frames where a fundamental frequency was detected.
@@ -1070,32 +1148,26 @@ def _compute_voiced_fraction (
 	This is the [0, 1] companion to PitchResult.dominant_pitch_hz: use it to
 	decide whether pitch-related features are meaningful for a given sample.
 
-	Note: pyin also runs inside analyze_pitch(). Running it twice is accepted
-	for short samples (<1 s); both calls are fast (<100 ms). If performance
-	becomes a concern, extract pyin into a shared cache.
-
 	Args:
-		mono:   Float32 audio, shape (n_frames,).
-		params: FFT params.
+		mono:             Float32 audio, shape (n_frames,).
+		params:           FFT params.
+		pyin_voiced_flag: Pre-computed voiced_flag array from _run_pyin(). When
+		                  provided by analyze_all(), the pyin call is skipped.
 
 	Returns:
 		Voiced fraction in [0.0, 1.0].
 	"""
 
-	# pyin requires frame_length > sr / fmin (at least one period of fmin must fit
-	# in the frame). At 44100 Hz with fmin=65 Hz: minimum frame_length ≈ 680.
-	# If params.n_fft has been clamped to a short signal's length, bail out.
-	pyin_min_frame = int(math.ceil(params.sample_rate / _PYIN_FMIN)) + 1
-	if params.n_fft < pyin_min_frame:
+	# Fast path: caller already has the pyin result (e.g. from analyze_all).
+	if pyin_voiced_flag is not None:
+		return float(numpy.mean(pyin_voiced_flag))
+
+	# Slow path: run pyin independently (e.g. when analyze_mono is called alone).
+	result = _run_pyin(mono, params)
+
+	if result is None:
 		return 0.0
 
-	_f0, voiced_flag, _voiced_probs = librosa.pyin(
-		mono,
-		fmin=_PYIN_FMIN,
-		fmax=_PYIN_FMAX,
-		sr=params.sample_rate,
-		frame_length=params.n_fft,
-		hop_length=params.hop_length,
-	)
+	_f0, voiced_flag, _probs = result
 
 	return float(numpy.mean(voiced_flag))

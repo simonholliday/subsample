@@ -28,12 +28,18 @@ def _suppress_c_stderr () -> typing.Generator[None, None, None]:
 	Python's sys.stderr redirection does not affect C library output; this
 	operates at the file-descriptor level so it catches ALSA/JACK noise too.
 	Restores the original stderr even if an exception is raised.
-
-	fd_null is opened first so that if it fails, no fd_saved leak occurs.
+	fd_null is opened before fd_saved so that if os.dup(2) fails, fd_null
+	is closed before re-raising and no file descriptor leaks.
 	"""
 
+	# Open fd_null first. If os.dup(2) then fails, we close fd_null before
+	# re-raising so no file descriptor leaks.
 	fd_null = os.open(os.devnull, os.O_WRONLY)
-	fd_saved = os.dup(2)
+	try:
+		fd_saved = os.dup(2)
+	except OSError:
+		os.close(fd_null)
+		raise
 
 	try:
 		os.dup2(fd_null, 2)

@@ -250,18 +250,25 @@ def _serialize (
 
 def _deserialize_spectral (data: dict[str, typing.Any]) -> subsample.analysis.AnalysisResult:
 
-	"""Reconstruct an AnalysisResult from a JSON dict."""
+	"""Reconstruct an AnalysisResult from a JSON dict.
+
+	Uses .get() with sensible defaults for every field so that sidecar files
+	written by older versions of the code (before a field was added) can still
+	be loaded without a KeyError. When the ANALYSIS_VERSION is bumped for a
+	structural change, old caches are automatically invalidated before reaching
+	this point, so defaults here only guard against forward-compatible additions.
+	"""
 
 	return subsample.analysis.AnalysisResult(
-		spectral_flatness  = float(data["spectral_flatness"]),
-		attack             = float(data["attack"]),
-		release            = float(data["release"]),
-		spectral_centroid  = float(data["spectral_centroid"]),
-		spectral_bandwidth = float(data["spectral_bandwidth"]),
-		zcr                = float(data["zcr"]),
-		harmonic_ratio     = float(data["harmonic_ratio"]),
-		spectral_contrast  = float(data["spectral_contrast"]),
-		voiced_fraction    = float(data["voiced_fraction"]),
+		spectral_flatness  = float(data.get("spectral_flatness", 0.0)),
+		attack             = float(data.get("attack", 0.0)),
+		release            = float(data.get("release", 0.0)),
+		spectral_centroid  = float(data.get("spectral_centroid", 0.0)),
+		spectral_bandwidth = float(data.get("spectral_bandwidth", 0.0)),
+		zcr                = float(data.get("zcr", 0.0)),
+		harmonic_ratio     = float(data.get("harmonic_ratio", 0.0)),
+		spectral_contrast  = float(data.get("spectral_contrast", 0.0)),
+		voiced_fraction    = float(data.get("voiced_fraction", 0.0)),
 	)
 
 
@@ -270,16 +277,17 @@ def _deserialize_rhythm (data: dict[str, typing.Any]) -> subsample.analysis.Rhyt
 	"""Reconstruct a RhythmResult from a JSON dict.
 
 	Converts the pulse_curve list back to a float32 numpy array, and
-	beat/pulse/onset lists back to tuples.
+	beat/pulse/onset lists back to tuples. Uses .get() with empty defaults
+	for forward-compatible field additions (see _deserialize_spectral).
 	"""
 
 	return subsample.analysis.RhythmResult(
-		tempo_bpm        = float(data["tempo_bpm"]),
-		beat_times       = tuple(float(t) for t in data["beat_times"]),
-		pulse_curve      = numpy.array(data["pulse_curve"], dtype=numpy.float32),
-		pulse_peak_times = tuple(float(t) for t in data["pulse_peak_times"]),
-		onset_times      = tuple(float(t) for t in data["onset_times"]),
-		onset_count      = int(data["onset_count"]),
+		tempo_bpm        = float(data.get("tempo_bpm", 0.0)),
+		beat_times       = tuple(float(t) for t in data.get("beat_times", [])),
+		pulse_curve      = numpy.array(data.get("pulse_curve", []), dtype=numpy.float32),
+		pulse_peak_times = tuple(float(t) for t in data.get("pulse_peak_times", [])),
+		onset_times      = tuple(float(t) for t in data.get("onset_times", [])),
+		onset_count      = int(data.get("onset_count", 0)),
 	)
 
 
@@ -287,24 +295,27 @@ def _deserialize_pitch (data: dict[str, typing.Any]) -> subsample.analysis.Pitch
 
 	"""Reconstruct a PitchResult from a JSON dict.
 
-	Converts chroma_profile and mfcc lists back to tuples.
+	Converts chroma_profile and mfcc lists back to tuples. Uses .get() with
+	empty defaults for forward-compatible field additions (see _deserialize_spectral).
 	"""
 
 	return subsample.analysis.PitchResult(
-		dominant_pitch_hz    = float(data["dominant_pitch_hz"]),
-		pitch_confidence     = float(data["pitch_confidence"]),
-		chroma_profile       = tuple(float(v) for v in data["chroma_profile"]),
-		dominant_pitch_class = int(data["dominant_pitch_class"]),
-		mfcc                 = tuple(float(v) for v in data["mfcc"]),
+		dominant_pitch_hz    = float(data.get("dominant_pitch_hz", 0.0)),
+		pitch_confidence     = float(data.get("pitch_confidence", 0.0)),
+		chroma_profile       = tuple(float(v) for v in data.get("chroma_profile", [0.0] * 12)),
+		dominant_pitch_class = int(data.get("dominant_pitch_class", -1)),
+		mfcc                 = tuple(float(v) for v in data.get("mfcc", [0.0] * 13)),
 	)
 
 
 def _deserialize_params (data: dict[str, typing.Any]) -> subsample.analysis.AnalysisParams:
 
-	"""Reconstruct AnalysisParams from a JSON dict."""
+	"""Reconstruct AnalysisParams from a JSON dict. Uses .get() with sensible
+	defaults for forward-compatible field additions (see _deserialize_spectral).
+	"""
 
 	return subsample.analysis.AnalysisParams(
-		n_fft       = int(data["n_fft"]),
-		hop_length  = int(data["hop_length"]),
-		sample_rate = int(data["sample_rate"]),
+		n_fft       = int(data.get("n_fft", 2048)),
+		hop_length  = int(data.get("hop_length", 512)),
+		sample_rate = int(data.get("sample_rate", 44100)),
 	)

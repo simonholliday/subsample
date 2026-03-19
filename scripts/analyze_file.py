@@ -102,16 +102,26 @@ def main () -> None:
 		sys.exit(1)
 
 	# Expand each argument with glob so quoted wildcards work (e.g. "*.wav").
-	# If a pattern matches nothing, treat it as a literal path so exact
-	# filenames still produce a useful error rather than silently disappearing.
+	# If an argument contains glob metacharacters but matches nothing, report
+	# it immediately — the literal string is not a valid file path and soundfile
+	# would produce a cryptic "System error" message.
+	# If there are no metacharacters, treat it as a literal path so that the
+	# normal "file not found" error is produced by the audio reader.
+	_GLOB_CHARS = frozenset("*?[")
+
 	paths: list[pathlib.Path] = []
 	for arg in sys.argv[1:]:
 		matches = sorted(glob.glob(arg))
 
 		if matches:
 			paths.extend(pathlib.Path(m) for m in matches)
+		elif any(c in arg for c in _GLOB_CHARS):
+			print(f"No files matched: {arg}", file=sys.stderr)
 		else:
 			paths.append(pathlib.Path(arg))
+
+	if not paths:
+		sys.exit(1)
 
 	multi = len(paths) > 1
 
