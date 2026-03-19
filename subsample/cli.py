@@ -6,6 +6,7 @@ the level detector, and the WAV writer. Press Ctrl+C to stop cleanly.
 
 import datetime
 import logging
+import pathlib
 import sys
 
 import numpy
@@ -15,6 +16,7 @@ import subsample.audio
 import subsample.buffer
 import subsample.config
 import subsample.detector
+import subsample.library
 import subsample.recorder
 import subsample.trim
 
@@ -77,6 +79,14 @@ def main () -> None:
 
 	analysis_params = subsample.analysis.compute_params(cfg.audio.sample_rate)
 	writer = subsample.recorder.WavWriter(cfg, analysis_params)
+
+	if cfg.reference is not None:
+		reference_library = subsample.library.load_reference_library(
+			pathlib.Path(cfg.reference.directory)
+		)
+		print(f"  Reference    : {len(reference_library)} sample(s) loaded from {cfg.reference.directory}")
+	else:
+		reference_library = None  # noqa: F841 — will be used by similarity feature
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
 

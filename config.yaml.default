@@ -127,3 +127,15 @@ analysis:
   # Tempos above this are not detected, even if present in the audio.
   # Range: 150–300 BPM. Typical: 200–300 BPM for fast music.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_analysis_values
+
+# reference:
+#   directory: "./reference"
+#   Path to a directory containing pre-analyzed reference sounds. Each
+#   .analysis.json sidecar file found at the top level defines one canonical
+#   sample used for similarity classification (e.g. "kick", "snare", "hat").
+#   The audio file does not need to be present — only the sidecar is required.
+#   The sample name is derived from the audio filename stem:
+#     BD0025.WAV.analysis.json  →  "BD0025"
+#     kick.wav.analysis.json    →  "kick"
+#   Lookup is case-insensitive. If this section is omitted, reference
+#   classification is disabled and no library is loaded at startup.

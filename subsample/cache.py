@@ -200,6 +200,67 @@ def load_cache (
 	return spectral, rhythm, pitch, params, duration
 
 
+def load_sidecar (
+	sidecar_path: pathlib.Path,
+) -> typing.Optional[tuple[
+	subsample.analysis.AnalysisResult,
+	subsample.analysis.RhythmResult,
+	subsample.analysis.PitchResult,
+	subsample.analysis.AnalysisParams,
+	float,
+]]:
+
+	"""Load analysis results directly from a sidecar file without audio MD5 check.
+
+	Used for reference (canonical) samples which are treated as trusted static
+	assets — the audio file does not need to exist. Only the analysis_version
+	is validated.
+
+	Returns None (and logs a warning) if the sidecar is missing, malformed, or
+	from an incompatible analysis version.
+
+	Args:
+		sidecar_path: Path to the .analysis.json sidecar file directly.
+
+	Returns:
+		(spectral, rhythm, pitch, params, duration) tuple on success, else None.
+	"""
+
+	if not sidecar_path.exists():
+		_log.warning("Sidecar not found: %s", sidecar_path)
+		return None
+
+	try:
+		with sidecar_path.open("r", encoding="utf-8") as f:
+			payload = json.load(f)
+
+	except (json.JSONDecodeError, OSError) as exc:
+		_log.warning("Ignoring malformed sidecar %s: %s", sidecar_path.name, exc)
+		return None
+
+	# Version check — trust the data if the algorithm hasn't changed
+	cached_version = payload.get("analysis_version")
+	if cached_version != subsample.analysis.ANALYSIS_VERSION:
+		_log.warning(
+			"Skipping %s (analysis version mismatch: %s vs current %s)",
+			sidecar_path.name, cached_version, subsample.analysis.ANALYSIS_VERSION,
+		)
+		return None
+
+	try:
+		spectral = _deserialize_spectral(payload["spectral"])
+		rhythm   = _deserialize_rhythm(payload["rhythm"])
+		pitch    = _deserialize_pitch(payload["pitch"])
+		params   = _deserialize_params(payload["params"])
+		duration = float(payload["duration"])
+
+	except (KeyError, TypeError, ValueError) as exc:
+		_log.warning("Ignoring corrupt sidecar %s: %s", sidecar_path.name, exc)
+		return None
+
+	return spectral, rhythm, pitch, params, duration
+
+
 # ---------------------------------------------------------------------------
 # Private serialization helpers
 # ---------------------------------------------------------------------------

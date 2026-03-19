@@ -61,6 +61,13 @@ class AnalysisConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class ReferenceConfig:
+
+	directory: str
+	"""Path to the directory containing reference .analysis.json sidecar files."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
 
 	audio: AudioConfig
@@ -68,6 +75,7 @@ class Config:
 	detection: DetectionConfig
 	output: OutputConfig
 	analysis: AnalysisConfig = dataclasses.field(default_factory=AnalysisConfig)
+	reference: typing.Optional[ReferenceConfig] = None
 
 
 def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
@@ -190,4 +198,19 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		tempo_max=float(analysis_raw.get("tempo_max", 300.0)),
 	)
 
-	return Config(audio=audio, buffer=buffer, detection=detection, output=output, analysis=analysis)
+	reference_raw: typing.Optional[dict[str, typing.Any]] = raw.get("reference")
+	if reference_raw is not None:
+		reference: typing.Optional[ReferenceConfig] = ReferenceConfig(
+			directory=str(_require(reference_raw, "directory", "reference")),
+		)
+	else:
+		reference = None
+
+	return Config(
+		audio=audio,
+		buffer=buffer,
+		detection=detection,
+		output=output,
+		analysis=analysis,
+		reference=reference,
+	)
