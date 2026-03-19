@@ -48,6 +48,11 @@ import scipy.signal
 import subsample.config
 
 
+# Bump this string whenever the analysis algorithm changes in a way that
+# would produce different results for the same audio. The cache module uses
+# it to detect stale sidecar files and trigger re-analysis.
+ANALYSIS_VERSION: str = "1"
+
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
 # ---------------------------------------------------------------------------

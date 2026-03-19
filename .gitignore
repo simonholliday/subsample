@@ -9,7 +9,8 @@ build/
 # Config
 config.yaml
 
-# Reference Audio
+# Audio
+samples/
 reference/
 
 # Logs
@@ -19,6 +20,7 @@ reference/
 *.wav
 *.flac
 *.mp3
+*.analysis.json
 
 # Documentation build output
 docs/html/

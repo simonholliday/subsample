@@ -16,6 +16,7 @@ import wave
 import numpy
 
 import subsample.analysis
+import subsample.cache
 import subsample.config
 
 
@@ -178,6 +179,20 @@ class WavWriter:
 				subsample.analysis.format_result(result, duration),
 				subsample.analysis.format_pitch_result(pitch),
 			)
+
+		# Persist analysis alongside the WAV so future reads (e.g. reference
+		# file loading on startup) can skip re-analysis when nothing changes.
+		audio_md5 = subsample.cache.compute_audio_md5(filepath)
+
+		subsample.cache.save_cache(
+			audio_path = filepath,
+			audio_md5  = audio_md5,
+			params     = self._analysis_params,
+			spectral   = result,
+			rhythm     = rhythm,
+			pitch      = pitch,
+			duration   = duration,
+		)
 
 
 def _pack_int24 (audio: numpy.ndarray) -> bytes:
