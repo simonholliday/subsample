@@ -81,6 +81,15 @@ def main () -> None:
 
 	analysis_params = subsample.analysis.compute_params(cfg.audio.sample_rate)
 
+	# Load reference library first — before instrument samples — so that similarity
+	# comparisons against reference sounds are available as instrument samples load.
+	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None
+	if cfg.reference is not None:
+		reference_library = subsample.library.load_reference_library(
+			pathlib.Path(cfg.reference.directory)
+		)
+		print(f"  Reference    : {len(reference_library)} sample(s) loaded from {cfg.reference.directory}")
+
 	# Create instrument library. If a directory is configured, pre-load samples
 	# from disk; otherwise start empty. Memory limit is always enforced.
 	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
@@ -95,15 +104,6 @@ def main () -> None:
 		)
 	else:
 		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
-
-	# Load reference library (if configured) before creating the writer so the
-	# on_complete callback can capture it at construction time.
-	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None
-	if cfg.reference is not None:
-		reference_library = subsample.library.load_reference_library(
-			pathlib.Path(cfg.reference.directory)
-		)
-		print(f"  Reference    : {len(reference_library)} sample(s) loaded from {cfg.reference.directory}")
 
 	writer = subsample.recorder.WavWriter(
 		cfg, analysis_params,

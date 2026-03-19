@@ -100,6 +100,8 @@ All settings live in `config.yaml`. The defaults are:
 | `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
+| `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory instrument samples; oldest evicted (FIFO) when exceeded |
+| `instrument.directory` | `none` | Optional directory to pre-load instrument samples from at startup (WAV + sidecar required) |
 
 ## Output
 
