@@ -69,8 +69,16 @@ def trim_silence (
 	# Copy so the caller owns the data and we can apply fades in-place
 	result = audio[start_idx : end_idx + 1].copy()
 
-	# Fade in: S-curve over the pre-signal padding (silence → signal)
-	fade_in_len = int(above[0]) - start_idx
+	# Fade in: S-curve over the pre-signal padding (silence → signal).
+	# When there is silence before the signal (above[0] > start_idx), fade only
+	# that region, preserving the signal's own attack envelope.
+	# When the signal is loud from sample 0 (above[0] == start_idx), use a
+	# fixed pre_samples window to avoid a hard click — the same peak-vs-RMS
+	# mismatch that required the fixed fade-out window also affects fade-in for
+	# fast-attack sounds (hi-hat, snare) whose transient falls within the
+	# pre-read buffer, placing above[0] at position 0.
+	fade_in_silence = int(above[0]) - start_idx
+	fade_in_len = fade_in_silence if fade_in_silence > 0 else min(pre_samples, len(result))
 	if fade_in_len > 1:
 		ramp = (1 - numpy.cos(numpy.linspace(0, numpy.pi, fade_in_len))) / 2
 		result[:fade_in_len] = (result[:fade_in_len] * ramp[:, None]).astype(audio.dtype)

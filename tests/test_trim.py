@@ -212,6 +212,25 @@ class TestTrimFade:
 		assert numpy.all(result[3:] == 5000)
 
 
+	def test_fade_in_applied_when_signal_at_start (self) -> None:
+		"""Fade-in must be applied even when the first sample is above threshold.
+
+		Regression: fast-attack sounds (hi-hat, snare) place their transient onset
+		within the last few samples of the quiet chunk, so above[0] lands at or near
+		index 0 giving fade_in_len = 0 under the old threshold-based calculation.
+		The fixed-window approach always fades the first pre_samples frames,
+		symmetric with the fade-out fix.
+		"""
+		# Audio that is loud all the way from the first sample (no leading silence)
+		audio = _make_audio(_loud(50))
+
+		result = subsample.trim.trim_silence(
+			audio, _THRESHOLD, pre_samples=10
+		)
+
+		# First sample should be near zero (fade-in applied)
+		assert abs(int(result[0, 0])) < 100
+
 	def test_fade_out_applied_when_signal_at_end (self) -> None:
 		"""Fade-out must be applied even when the last sample is above threshold.
 
