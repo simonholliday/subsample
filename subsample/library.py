@@ -208,7 +208,6 @@ class InstrumentLibrary:
 		evicted: list[int] = []
 		while self._order and self._total_bytes + sample_bytes > self._max_bytes:
 			oldest_id = self._order.popleft()
-
 			old_record = self._index.pop(oldest_id, None)
 
 			if old_record is not None:

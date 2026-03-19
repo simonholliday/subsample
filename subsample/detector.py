@@ -230,7 +230,7 @@ class LevelDetector:
 
 		snr_db = 20.0 * math.log10(chunk_rms / ambient)
 
-		return float(snr_db) >= self._cfg.snr_threshold_db
+		return snr_db >= self._cfg.snr_threshold_db
 
 
 def _compute_rms (chunk: numpy.ndarray) -> float:

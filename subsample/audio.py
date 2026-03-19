@@ -65,8 +65,7 @@ def unpack_audio (raw_bytes: bytes, bit_depth: int, channels: int) -> numpy.ndar
 	Returns shape (n_frames, channels). For 24-bit audio, samples are stored
 	as int32 with the 24-bit value occupying the upper 3 bytes (left-shifted
 	by 8). This avoids NumPy's lack of a native int24 type while preserving
-	full precision. Use pack_int24() to recover the original 24-bit values
-	when writing to disk.
+	full precision. recorder._pack_int24() reverses this when writing to disk.
 
 	Args:
 		raw_bytes: Raw bytes from stream.read().

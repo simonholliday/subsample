@@ -476,6 +476,49 @@ class TestInstrumentLibrary:
 		lib = subsample.library.InstrumentLibrary(max_memory_bytes=5 * 1024 * 1024)
 		assert lib.memory_limit == 5 * 1024 * 1024
 
+	def test_oversized_sample_logs_warning_and_is_still_added (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		# 1-byte limit, 2000-byte sample — should warn but still be added
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=1)
+		record = _make_instrument_record("HUGE", n_frames=1000)
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			lib.add(record)
+		assert any("exceeds" in r.message for r in caplog.records)
+		assert lib.get(record.sample_id) is record
+
+	def test_zero_memory_limit_adds_sample (self) -> None:
+		# max_memory_bytes=0: the oversized-sample guard (`> 0`) is not triggered,
+		# and the eviction loop condition (`> self._max_bytes`) is always True but
+		# the queue starts empty, so the first sample is added without eviction.
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=0)
+		record = _make_instrument_record("A")
+		evicted = lib.add(record)
+		assert lib.get(record.sample_id) is record
+		assert evicted == []
+
+	def test_single_add_evicts_multiple_old_samples (self) -> None:
+		# Three small records: 500 int16 frames × 1 channel = 1000 bytes each (3000 total).
+		# One large record: 2000 int16 frames = 4000 bytes.
+		# Limit = 4500. After filling with smalls, 3000 + 4000 > 4500 → evict r1,
+		# 2000 + 4000 > 4500 → evict r2, 1000 + 4000 > 4500 → evict r3,
+		# 0 + 4000 ≤ 4500 → stop. All three evicted in one add() call.
+		limit = 4500
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=limit)
+		r1 = _make_instrument_record("A", n_frames=500)
+		r2 = _make_instrument_record("B", n_frames=500)
+		r3 = _make_instrument_record("C", n_frames=500)
+		r_large = _make_instrument_record("BIG", n_frames=2000)
+		lib.add(r1)
+		lib.add(r2)
+		lib.add(r3)
+		evicted = lib.add(r_large)
+		assert set(evicted) == {r1.sample_id, r2.sample_id, r3.sample_id}
+		assert lib.get(r_large.sample_id) is r_large
+		assert len(lib) == 1
+
 
 # ---------------------------------------------------------------------------
 # TestLoadInstrumentLibrary
