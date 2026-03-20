@@ -1,5 +1,6 @@
 """Tests for subsample/similarity.py — spectral fingerprint similarity scoring."""
 
+import dataclasses
 import threading
 
 import numpy
@@ -178,7 +179,7 @@ class TestScoreAgainstLibrary:
 
 	def test_score_is_frozen (self) -> None:
 		score = subsample.similarity.SimilarityScore(name="KICK", score=0.9)
-		with pytest.raises(Exception):
+		with pytest.raises(dataclasses.FrozenInstanceError):
 			score.name = "SNARE"  # type: ignore[misc]
 
 

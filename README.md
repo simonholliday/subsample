@@ -42,6 +42,13 @@ environment becomes an instant, organized sample pack.
   with its PCM audio and full analysis; a configurable memory cap (default 100 MB)
   keeps the newest samples in RAM using FIFO eviction; an optional startup directory
   pre-populates the library from previously recorded files.
+- **File input mode** - process WAV files through the detector pipeline; specify files
+  as positional arguments on the command line (e.g. `subsample recording.wav` or
+  `subsample ./recordings/*.wav`); files are processed using their native sample rate,
+  bit depth, and channel count; detected segments are saved with the original filename
+  stem plus an index (e.g. field_recording_1.wav, field_recording_2.wav); useful for
+  batch processing, testing on known material, and building sample libraries without
+  live capture hardware.
 
 ## In Progress
 
@@ -52,9 +59,6 @@ environment becomes an instant, organized sample pack.
 
 ## Planned
 
-- **File input mode** - process WAV/FLAC/AIFF/OGG files through the detector and classifier
-  pipeline as if they were live input; batch process multiple files; useful for testing and
-  analyzing existing audio collections without live capture hardware.
 - **Interactive classification** - allow live adjustment of classification thresholds;
   manually reassign samples to categories during recording session.
 - **MIDI note assignment** - allocate MIDI trigger notes based on sample classification;
@@ -81,11 +85,17 @@ environment becomes an instant, organized sample pack.
 # Copy the default config and adjust to taste
 cp config.yaml.default config.yaml
 
-# Run
+# Stream from a live audio input device
 subsample
+
+# Or process audio files through the detection pipeline
+subsample recording.wav                # Single file
+subsample ./recordings/*.wav           # Multiple files (glob expansion)
 ```
 
-On first run, Subsample will list available audio input devices and let you choose one (or auto-select if only one is present). It then calibrates ambient noise for a few seconds before listening for events.
+**Live capture mode:** Subsample will list available audio input devices and let you choose one (or auto-select if only one is present). It then calibrates ambient noise for a few seconds before listening for events.
+
+**File input mode:** Provide one or more WAV file paths as positional arguments. Each file is processed using its native sample rate, bit depth, and channel count; detected segments are saved to the output directory with names like `recording_1.wav`, `recording_2.wav`, etc. File processing happens before live capture starts (if configured).
 
 ## Configuration
 
@@ -116,13 +126,26 @@ All settings live in `config.yaml`. The defaults are:
 
 ## Output
 
-Recordings are saved as uncompressed 16, 24, or 32-bit WAV files (depending on the `audio.bit_depth` setting) in the configured output directory, named by the datetime the recording ended:
+Recordings are saved as uncompressed 16, 24, or 32-bit WAV files (depending on the `audio.bit_depth` setting) in the configured output directory.
+
+**Live capture mode** - filenames are generated from the datetime the recording ended (strftime format controlled by `output.filename_format`):
 
 ```
 samples/
   2026-03-17_14-32-01.wav
   2026-03-17_14-35-44.wav
 ```
+
+**File input mode** - filenames are derived from the original audio file's stem plus a segment index:
+
+```
+samples/
+  field_recording_1.wav
+  field_recording_2.wav
+  field_recording_3.wav
+```
+
+Both modes write to the same output directory, which is typical when pointing `instrument.directory` at the same path (see **Persistent library across sessions** below).
 
 ## Instrument sample library
 

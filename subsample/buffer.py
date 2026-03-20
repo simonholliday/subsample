@@ -5,8 +5,8 @@ to buffer positions via modulo internally. This keeps the detector and the
 buffer implementation cleanly decoupled — the detector never needs to know
 about wrap-around.
 
-Memory footprint at defaults (44100 Hz, mono, 16-bit, 60s): ~5.2 MB.
-For 24-bit audio the internal dtype is int32 (4 bytes/sample), giving ~10.4 MB.
+Memory footprint at defaults (44100 Hz, mono, 16-bit, 60s): ~5.0 MB.
+For 24-bit audio the internal dtype is int32 (4 bytes/sample), giving ~10.1 MB.
 """
 
 import numpy
@@ -69,6 +69,7 @@ class CircularBuffer:
 
 		Args:
 			chunk: Array of shape (n_frames, channels) or (n_frames,) for mono.
+			       chunk must not be larger than the buffer's max_frames capacity.
 		"""
 
 		# Normalise mono chunks to shape (n, 1) so the buffer is always 2-D
@@ -76,6 +77,10 @@ class CircularBuffer:
 			chunk = chunk.reshape(-1, 1)
 
 		n_frames = chunk.shape[0]
+		assert n_frames <= self._max_frames, (
+			f"Chunk ({n_frames} frames) exceeds buffer capacity ({self._max_frames} frames). "
+			"Use a smaller chunk_size or a larger buffer."
+		)
 		head = self.write_head
 		space_to_end = self._max_frames - head
 

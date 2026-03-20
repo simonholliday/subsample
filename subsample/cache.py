@@ -32,7 +32,7 @@ import subsample.analysis
 _log = logging.getLogger(__name__)
 
 _CACHE_SUFFIX: str = ".analysis.json"
-_MD5_CHUNK_BYTES: int = 8192
+_MD5_CHUNK_BYTES: int = 65536
 
 # Return type shared by load_cache() and load_sidecar().
 _LoadResult = tuple[
@@ -174,7 +174,11 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 	# MD5 check — reads the audio file; done after version check to skip
 	# disk I/O when the version alone invalidates the cache
 	cached_md5 = payload.get("audio_md5")
-	current_md5 = compute_audio_md5(audio_path)
+	try:
+		current_md5 = compute_audio_md5(audio_path)
+	except OSError:
+		_log.warning("Re-analyzing %s (audio file not readable)", audio_path.name)
+		return None
 
 	if cached_md5 != current_md5:
 		_log.warning("Re-analyzing %s (audio file has changed)", audio_path.name)
@@ -294,10 +298,8 @@ def _serialize (
 	params_dict   = dataclasses.asdict(params)
 	pitch_dict    = dataclasses.asdict(pitch)
 
-	# Convert tuples-within-pitch to plain lists (asdict already does this
-	# for tuple fields on Python dataclasses, but be explicit for clarity)
-	pitch_dict["chroma_profile"] = list(pitch.chroma_profile)
-	pitch_dict["mfcc"]           = list(pitch.mfcc)
+	# dataclasses.asdict() already converts tuple fields to lists, so
+	# pitch_dict["chroma_profile"] and pitch_dict["mfcc"] are already lists.
 
 	rhythm_dict: dict[str, typing.Any] = {
 		"tempo_bpm":       rhythm.tempo_bpm,
@@ -369,14 +371,29 @@ def _deserialize_pitch (data: dict[str, typing.Any]) -> subsample.analysis.Pitch
 
 	Converts chroma_profile and mfcc lists back to tuples. Uses .get() with
 	empty defaults for forward-compatible field additions (see _deserialize_spectral).
+
+	Raises ValueError if chroma_profile or mfcc have unexpected lengths, so
+	that _deserialize_payload can catch and report the corruption.
 	"""
+
+	chroma_profile = tuple(float(v) for v in data.get("chroma_profile", [0.0] * 12))
+	mfcc           = tuple(float(v) for v in data.get("mfcc", [0.0] * 13))
+
+	if len(chroma_profile) != 12:
+		raise ValueError(
+			f"chroma_profile has {len(chroma_profile)} elements (expected 12)"
+		)
+	if len(mfcc) != 13:
+		raise ValueError(
+			f"mfcc has {len(mfcc)} elements (expected 13)"
+		)
 
 	return subsample.analysis.PitchResult(
 		dominant_pitch_hz    = float(data.get("dominant_pitch_hz", 0.0)),
 		pitch_confidence     = float(data.get("pitch_confidence", 0.0)),
-		chroma_profile       = tuple(float(v) for v in data.get("chroma_profile", [0.0] * 12)),
+		chroma_profile       = chroma_profile,
 		dominant_pitch_class = int(data.get("dominant_pitch_class", -1)),
-		mfcc                 = tuple(float(v) for v in data.get("mfcc", [0.0] * 13)),
+		mfcc                 = mfcc,
 	)
 
 

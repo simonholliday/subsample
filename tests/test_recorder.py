@@ -1,10 +1,19 @@
-"""Tests for subsample.recorder._pack_int24."""
+"""Tests for subsample.recorder."""
+
+import datetime
+import pathlib
+import tempfile
+import wave
 
 import numpy
 import pytest
 
+import subsample.analysis
 import subsample.audio
+import subsample.config
 import subsample.recorder
+
+from .helpers import _make_params
 
 
 class TestPackInt24:
@@ -68,3 +77,130 @@ class TestPackInt24:
 		# tobytes() on shape (1, 2) flattens row-major: L bytes, then R bytes
 		assert result[:3] == bytes([0x03, 0x02, 0x01])
 		assert result[3:] == bytes([0x06, 0x05, 0x04])
+
+
+def _make_config (output_dir: pathlib.Path) -> subsample.config.Config:
+	"""Return a minimal Config pointing output at output_dir."""
+	return subsample.config.Config(
+		audio=subsample.config.AudioConfig(
+			sample_rate=44100, bit_depth=16, channels=1, chunk_size=512,
+		),
+		buffer=subsample.config.BufferConfig(max_seconds=10),
+		detection=subsample.config.DetectionConfig(
+			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
+			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,
+		),
+		output=subsample.config.OutputConfig(
+			directory=str(output_dir),
+			filename_format="%Y-%m-%d_%H-%M-%S",
+		),
+	)
+
+
+class TestWavWriterFilenameBase:
+
+	"""Tests for the filename_base parameter in WavWriter.enqueue()."""
+
+	def test_filename_base_used_as_stem (self) -> None:
+		"""When filename_base is provided, the output file should use it as the stem."""
+		audio = numpy.zeros((4410, 1), dtype=numpy.int16)  # 0.1 s at 44100 Hz
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_config(out_dir)
+			writer = subsample.recorder.WavWriter(cfg, _make_params())
+
+			writer.enqueue(
+				audio,
+				datetime.datetime.now(),
+				filename_base="my_segment_1",
+			)
+			writer.flush()
+			writer.shutdown()
+
+			files = list(out_dir.glob("*.wav"))
+
+		assert len(files) == 1
+		assert files[0].stem == "my_segment_1"
+
+	def test_without_filename_base_uses_timestamp_format (self) -> None:
+		"""Without filename_base, the output filename should match the timestamp format."""
+		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_config(out_dir)
+			writer = subsample.recorder.WavWriter(cfg, _make_params())
+
+			writer.enqueue(audio, datetime.datetime(2026, 3, 20, 12, 0, 0))
+			writer.flush()
+			writer.shutdown()
+
+			files = list(out_dir.glob("*.wav"))
+
+		assert len(files) == 1
+		assert files[0].stem == "2026-03-20_12-00-00"
+
+	def test_collision_overwrites (self) -> None:
+		"""If filename_base.wav already exists, the second file overwrites it."""
+		audio1 = numpy.full((4410, 1), 100, dtype=numpy.int16)
+		audio2 = numpy.full((4410, 1), 200, dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_config(out_dir)
+			writer = subsample.recorder.WavWriter(cfg, _make_params())
+
+			ts = datetime.datetime.now()
+			writer.enqueue(audio1, ts, filename_base="segment_1")
+			writer.enqueue(audio2, ts, filename_base="segment_1")
+			writer.flush()
+			writer.shutdown()
+
+			files = list(out_dir.glob("*.wav"))
+			assert len(files) == 1
+			assert files[0].stem == "segment_1"
+
+			# Verify the *second* write (audio2, value=200) is the one that persisted,
+			# not the first. Read back the first PCM sample to confirm.
+			with wave.open(str(files[0]), "rb") as wf:
+				raw = wf.readframes(1)
+			first_sample = numpy.frombuffer(raw, dtype=numpy.int16)[0]
+
+		assert first_sample == 200
+
+
+class TestWavWriterFlush:
+
+	"""Tests for WavWriter.flush()."""
+
+	def test_flush_blocks_until_queue_empty (self) -> None:
+		"""flush() should block until all enqueued items are written."""
+		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_config(out_dir)
+			writer = subsample.recorder.WavWriter(cfg, _make_params())
+
+			for i in range(3):
+				writer.enqueue(audio, datetime.datetime.now(), filename_base=f"seg_{i}")
+
+			writer.flush()
+
+			# After flush(), all files must exist on disk
+			files = list(out_dir.glob("*.wav"))
+			assert len(files) == 3
+
+			writer.shutdown()
+
+	def test_flush_then_shutdown_safe (self) -> None:
+		"""flush() followed by shutdown() should not raise or hang."""
+		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			cfg = _make_config(pathlib.Path(tmp))
+			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			writer.enqueue(audio, datetime.datetime.now())
+			writer.flush()
+			writer.shutdown()  # should not raise

@@ -234,7 +234,7 @@ class TestReferenceLibrary:
 		lib = self._library_with([])
 		assert len(lib) == 0
 		assert lib.names() == []
-		assert lib.all() == []
+		assert lib.samples() == []
 
 	def test_get_by_exact_name (self) -> None:
 		lib = self._library_with([self._record("KICK")])
@@ -262,7 +262,7 @@ class TestReferenceLibrary:
 		lib = self._library_with([
 			self._record("SNARE"), self._record("KICK"), self._record("HAT"),
 		])
-		assert [r.name for r in lib.all()] == ["HAT", "KICK", "SNARE"]
+		assert [r.name for r in lib.samples()] == ["HAT", "KICK", "SNARE"]
 
 	def test_len (self) -> None:
 		lib = self._library_with([self._record("A"), self._record("B")])
@@ -296,7 +296,7 @@ class TestLoadReferenceLibrary:
 		_write_sidecar(tmp_path, "KICK")
 		_write_sidecar(tmp_path, "SNARE")
 		lib = subsample.library.load_reference_library(tmp_path)
-		ids = [r.sample_id for r in lib.all()]
+		ids = [r.sample_id for r in lib.samples()]
 		assert len(set(ids)) == 2
 
 	def test_audio_is_none_for_reference (self, tmp_path: pathlib.Path) -> None:
@@ -387,7 +387,7 @@ class TestInstrumentLibrary:
 	def test_empty_library (self) -> None:
 		lib = subsample.library.InstrumentLibrary(max_memory_bytes=1024 * 1024)
 		assert len(lib) == 0
-		assert lib.all() == []
+		assert lib.samples() == []
 		assert lib.memory_used == 0
 
 	def test_add_and_get (self) -> None:
@@ -408,7 +408,7 @@ class TestInstrumentLibrary:
 		lib.add(r1)
 		lib.add(r2)
 		lib.add(r3)
-		names = [r.name for r in lib.all()]
+		names = [r.name for r in lib.samples()]
 		assert names == ["A", "B", "C"]
 
 	def test_len (self) -> None:
@@ -530,14 +530,14 @@ class TestLoadInstrumentLibrary:
 		_write_wav_and_sidecar(tmp_path, "KICK")
 		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
 		assert len(lib) == 1
-		record = lib.all()[0]
+		record = lib.samples()[0]
 		assert record.name == "KICK"
 		assert record.audio is not None
 
 	def test_audio_has_correct_shape (self, tmp_path: pathlib.Path) -> None:
 		_write_wav_and_sidecar(tmp_path, "KICK", n_frames=2048)
 		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
-		record = lib.all()[0]
+		record = lib.samples()[0]
 		assert record.audio is not None
 		assert record.audio.shape[0] == 2048  # n_frames
 		assert record.audio.shape[1] == 1     # mono
@@ -559,7 +559,7 @@ class TestLoadInstrumentLibrary:
 		_write_wav_and_sidecar(tmp_path, "KICK")
 		_write_wav_and_sidecar(tmp_path, "SNARE")
 		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
-		ids = [r.sample_id for r in lib.all()]
+		ids = [r.sample_id for r in lib.samples()]
 		assert len(set(ids)) == 2
 
 	def test_nonexistent_directory_returns_empty (
@@ -576,7 +576,7 @@ class TestLoadInstrumentLibrary:
 	def test_filepath_populated (self, tmp_path: pathlib.Path) -> None:
 		wav_path, _ = _write_wav_and_sidecar(tmp_path, "KICK")
 		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
-		record = lib.all()[0]
+		record = lib.samples()[0]
 		assert record.filepath == wav_path
 
 

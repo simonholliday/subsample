@@ -108,7 +108,8 @@ class LevelDetector:
 		(start_frame, end_frame) pair when a recording segment completes.
 
 		Args:
-			chunk:         Audio samples for this chunk (int16).
+			chunk:         Integer PCM samples for this chunk (int16 for 16-bit
+			               audio, int32 for 24/32-bit audio).
 			current_frame: Absolute frame index of the *end* of this chunk.
 
 		Returns:
@@ -153,7 +154,7 @@ class LevelDetector:
 
 		if self._exceeds_threshold(chunk_rms):
 			self._state = DetectorState.RECORDING
-			self._recording_start_frame = current_frame - self._chunk_size
+			self._recording_start_frame = max(0, current_frame - self._chunk_size)
 			self._hold_chunks_remaining = self._hold_chunks_total
 
 		return None
@@ -237,8 +238,10 @@ def _compute_rms (chunk: numpy.ndarray) -> float:
 
 	"""Compute the root-mean-square of an audio chunk.
 
-	Converts to float64 before squaring to avoid int16 overflow.
+	Converts to float32 before squaring to avoid int16/int32 overflow while
+	using half the memory of float64 (int16 max is 32767, fits in float32's
+	23-bit mantissa without loss).
 	"""
 
-	samples = chunk.astype(numpy.float64)
+	samples = chunk.astype(numpy.float32)
 	return float(numpy.sqrt(numpy.mean(samples ** 2)))

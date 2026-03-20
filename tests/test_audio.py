@@ -1,7 +1,10 @@
-"""Tests for subsample.audio.unpack_audio."""
+"""Tests for subsample.audio."""
 
+import pathlib
+import tempfile
 import typing
 import unittest.mock
+import wave
 
 import numpy
 import pytest
@@ -233,3 +236,84 @@ class TestUnpackAudioErrors:
 	def test_unsupported_bit_depth_raises (self) -> None:
 		with pytest.raises(ValueError, match="Unsupported bit depth"):
 			subsample.audio.unpack_audio(bytes(2), bit_depth=8, channels=1)
+
+
+class TestReadAudioFile:
+
+	"""Tests for subsample.audio.read_audio_file()."""
+
+	def _write_wav (
+		self,
+		path: pathlib.Path,
+		samples: numpy.ndarray,
+		sample_rate: int,
+		sample_width: int,
+	) -> None:
+		"""Write a minimal WAV file containing the given samples."""
+		with wave.open(str(path), "wb") as wf:
+			wf.setnchannels(1)
+			wf.setsampwidth(sample_width)
+			wf.setframerate(sample_rate)
+			wf.writeframes(samples.tobytes())
+
+	def test_16bit_mono_fields (self) -> None:
+		"""read_audio_file() should return correct metadata for a 16-bit mono WAV."""
+		samples = numpy.array([0, 100, -100, 32767, -32768], dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			path = pathlib.Path(tmp) / "test.wav"
+			self._write_wav(path, samples, sample_rate=44100, sample_width=2)
+
+			info = subsample.audio.read_audio_file(path)
+
+		assert info.sample_rate == 44100
+		assert info.bit_depth == 16
+		assert info.channels == 1
+		assert info.audio.dtype == numpy.int16
+		assert info.audio.shape == (len(samples), 1)
+		assert numpy.array_equal(info.audio.flatten(), samples)
+
+	def test_stereo_shape (self) -> None:
+		"""Stereo WAV should produce channels=2 and correct array shape."""
+		samples = numpy.zeros(20, dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			path = pathlib.Path(tmp) / "stereo.wav"
+			with wave.open(str(path), "wb") as wf:
+				wf.setnchannels(2)
+				wf.setsampwidth(2)
+				wf.setframerate(48000)
+				wf.writeframes(samples.tobytes())
+
+			info = subsample.audio.read_audio_file(path)
+
+		assert info.channels == 2
+		assert info.sample_rate == 48000
+		assert info.audio.shape == (10, 2)
+
+	def test_audio_matches_unpack_audio (self) -> None:
+		"""read_audio_file() audio should match unpack_audio() on the same bytes."""
+		samples = numpy.array([1000, -1000, 0, 32767], dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			path = pathlib.Path(tmp) / "match.wav"
+			self._write_wav(path, samples, sample_rate=44100, sample_width=2)
+
+			info = subsample.audio.read_audio_file(path)
+			expected = subsample.audio.unpack_audio(samples.tobytes(), bit_depth=16, channels=1)
+
+		assert numpy.array_equal(info.audio, expected)
+
+	def test_nonexistent_file_raises (self) -> None:
+		"""read_audio_file() should raise OSError for a nonexistent path."""
+		with pytest.raises(OSError):
+			subsample.audio.read_audio_file(pathlib.Path("/nonexistent/path.wav"))
+
+	def test_non_wav_raises (self) -> None:
+		"""read_audio_file() should raise wave.Error for a non-WAV file."""
+		with tempfile.TemporaryDirectory() as tmp:
+			path = pathlib.Path(tmp) / "notawav.wav"
+			path.write_bytes(b"this is not a wav file")
+
+			with pytest.raises(wave.Error):
+				subsample.audio.read_audio_file(path)

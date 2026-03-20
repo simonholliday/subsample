@@ -1,14 +1,20 @@
-"""Audio device management for Subsample.
+"""Audio device management and file I/O for Subsample.
 
 Handles PyAudio lifecycle, input device enumeration, interactive device
 selection, stream creation, and bit-depth-aware sample unpacking.
-Keeps all PyAudio-specific concerns isolated from the rest of the application.
+Also provides read_audio_file() for reading WAV files into the same
+integer array format used by the capture pipeline.
+Keeps all audio I/O concerns isolated from the rest of the application.
 """
 
 import contextlib
+import dataclasses
 import os
+import pathlib
 import queue
+import sys
 import typing
+import wave
 
 import numpy
 import pyaudio
@@ -18,6 +24,61 @@ import subsample.config
 
 # Type returned by PyAudio for device info mappings
 DeviceInfo = typing.Mapping[str, typing.Union[str, int, float]]
+
+
+@dataclasses.dataclass(frozen=True)
+class AudioFileInfo:
+
+	"""Metadata and PCM data read from an audio file.
+
+	The audio array uses the same integer format as the capture pipeline:
+	  16-bit  →  int16
+	  24-bit  →  int32 (left-shifted by 8, matching unpack_audio())
+	  32-bit  →  int32
+	Shape is (n_frames, channels).
+	"""
+
+	audio: numpy.ndarray
+	sample_rate: int
+	bit_depth: int       # 16, 24, or 32
+	channels: int
+
+
+def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
+
+	"""Read a WAV file and return its audio data with format metadata.
+
+	Reads using the wave module for header parsing and delegates to
+	unpack_audio() for dtype conversion (including the 24-bit left-shift),
+	so the returned array is identical in format to what AudioReader produces.
+
+	Args:
+		path: Path to the WAV file.
+
+	Returns:
+		AudioFileInfo with audio array, sample_rate, bit_depth, and channels.
+
+	Raises:
+		wave.Error: If the file is not a valid WAV file.
+		OSError:    If the file cannot be opened or read.
+		ValueError: If the bit depth is not 16, 24, or 32.
+	"""
+
+	with wave.open(str(path), "rb") as wf:
+		channels     = wf.getnchannels()
+		sample_width = wf.getsampwidth()
+		sample_rate  = wf.getframerate()
+		raw_bytes    = wf.readframes(wf.getnframes())
+
+	bit_depth = sample_width * 8
+	audio = unpack_audio(raw_bytes, bit_depth, channels)
+
+	return AudioFileInfo(
+		audio       = audio,
+		sample_rate = sample_rate,
+		bit_depth   = bit_depth,
+		channels    = channels,
+	)
 
 
 @contextlib.contextmanager
@@ -80,6 +141,15 @@ def unpack_audio (raw_bytes: bytes, bit_depth: int, channels: int) -> numpy.ndar
 		return numpy.frombuffer(raw_bytes, dtype=numpy.int16).reshape(-1, channels)
 
 	if bit_depth == 24:
+		# The zero-byte padding trick (zero at column 0, audio bytes at 1–3)
+		# relies on little-endian byte order: the zero lands at the LSB of the
+		# int32, producing a left-shift by 8. On a big-endian machine the zero
+		# would be at the MSB, giving completely wrong values.
+		if sys.byteorder != "little":
+			raise RuntimeError(
+				"24-bit audio unpacking requires a little-endian system; "
+				f"this machine is {sys.byteorder}-endian."
+			)
 		# Reshape to (n_samples, 3) byte view, then pad each sample to 4 bytes
 		# by inserting a zero at the LSB position — equivalent to << 8.
 		raw = numpy.frombuffer(raw_bytes, dtype=numpy.uint8).reshape(-1, 3)

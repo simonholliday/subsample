@@ -48,6 +48,21 @@ import scipy.signal
 import subsample.config
 
 
+# Suppress librosa's UserWarning that fires when pyin finds no voiced frames
+# (e.g. silent or completely unpitched audio). This is expected and handled
+# downstream — pyin returns an all-NaN f0 array which the pitch analysis
+# treats as "no pitch detected". The warning would otherwise clutter logs
+# every time a near-silent or purely percussive sample is recorded.
+# The filter is set at module level so it applies to all threads, including
+# the background WavWriter thread that runs analysis on captured recordings.
+warnings.filterwarnings(
+	"ignore",
+	message="Trying to estimate tuning from empty frequency set",
+	category=UserWarning,
+	module="librosa",
+)
+
+
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
@@ -379,8 +394,13 @@ def analyze_mono (
 	capture pipeline, use analyze() instead, which handles the conversion.
 
 	Args:
-		mono:   Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
-		params: Pre-computed FFT parameters from compute_params().
+		mono:               Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+		params:             Pre-computed FFT parameters from compute_params().
+		_pyin_voiced_flag:  Internal — pre-computed voiced/unvoiced boolean flag
+		                    array from pyin, injected by analyze_all() to share the
+		                    pyin computation between spectral and pitch analysis.
+		                    External callers should omit this argument; it will be
+		                    computed automatically when None.
 
 	Returns:
 		AnalysisResult with all computed metrics in [0.0, 1.0].
@@ -408,18 +428,24 @@ def analyze_mono (
 	effective_hop = min(params.hop_length, effective_n_fft)
 	params = dataclasses.replace(params, n_fft=effective_n_fft, hop_length=effective_hop)
 
-	flatness = librosa.feature.spectral_flatness(
-		y=mono,
-		n_fft=params.n_fft,
-		hop_length=params.hop_length,
-	)
+	# Pre-compute the STFT once and share it across all spectral feature helpers.
+	# Each helper previously called librosa internals that recomputed the STFT
+	# independently, causing 5+ redundant FFT passes per recording.
+	# - D: complex STFT, needed for HPSS (to reconstruct harmonic time-domain)
+	# - S_magnitude: |D|, needed for centroid, bandwidth, contrast, flatness
+	# - S_power: |D|^2, needed for spectral_flatness (expects power spectrogram)
+	D = librosa.stft(mono, n_fft=params.n_fft, hop_length=params.hop_length)
+	S_magnitude = numpy.abs(D)
+	S_power = S_magnitude ** 2
+
+	flatness = librosa.feature.spectral_flatness(S=S_power)
 
 	attack, release = _compute_attack_release(mono, params)
-	centroid = _compute_spectral_centroid(mono, params)
-	bandwidth = _compute_spectral_bandwidth(mono, params)
+	centroid = _compute_spectral_centroid(params, S_magnitude)
+	bandwidth = _compute_spectral_bandwidth(params, S_magnitude)
 	zcr = _compute_zcr(mono, params)
-	harmonic_ratio = _compute_harmonic_ratio(mono, params)
-	contrast = _compute_spectral_contrast(mono, params)
+	harmonic_ratio = _compute_harmonic_ratio(mono, params, D)
+	contrast = _compute_spectral_contrast(params, S_magnitude)
 	voiced_fraction = _compute_voiced_fraction(mono, params, pyin_voiced_flag=_pyin_voiced_flag)
 
 	return AnalysisResult(
@@ -956,8 +982,8 @@ def _compute_attack_release (
 
 
 def _compute_spectral_centroid (
-	mono: numpy.ndarray,
 	params: AnalysisParams,
+	S_magnitude: numpy.ndarray,
 ) -> float:
 
 	"""Measure the centre of mass of the frequency spectrum (bassy vs trebly).
@@ -969,18 +995,16 @@ def _compute_spectral_centroid (
 	musical range (~1 kHz at 44.1 kHz sample rate).
 
 	Args:
-		mono:   Float32 audio, shape (n_frames,).
-		params: FFT params.
+		params:      FFT params (sample_rate used for Hz normalisation).
+		S_magnitude: Pre-computed magnitude spectrogram |STFT|, shape (n_fft//2+1, n_frames).
 
 	Returns:
 		Centroid score in [0.0, 1.0]. 0 = bassy, 1 = trebly.
 	"""
 
 	centroid = librosa.feature.spectral_centroid(
-		y=mono,
+		S=S_magnitude,
 		sr=params.sample_rate,
-		n_fft=params.n_fft,
-		hop_length=params.hop_length,
 	)
 
 	# centroid has shape (1, n_frames); mean over frames gives a single Hz value
@@ -992,8 +1016,8 @@ def _compute_spectral_centroid (
 
 
 def _compute_spectral_bandwidth (
-	mono: numpy.ndarray,
 	params: AnalysisParams,
+	S_magnitude: numpy.ndarray,
 ) -> float:
 
 	"""Measure how spread out the frequency content is (narrow vs wide).
@@ -1006,18 +1030,16 @@ def _compute_spectral_bandwidth (
 	two metrics are directly comparable in magnitude.
 
 	Args:
-		mono:   Float32 audio, shape (n_frames,).
-		params: FFT params.
+		params:      FFT params (sample_rate used for Hz normalisation).
+		S_magnitude: Pre-computed magnitude spectrogram |STFT|, shape (n_fft//2+1, n_frames).
 
 	Returns:
 		Bandwidth score in [0.0, 1.0]. 0 = narrow/tonal, 1 = wide/complex.
 	"""
 
 	bandwidth = librosa.feature.spectral_bandwidth(
-		y=mono,
+		S=S_magnitude,
 		sr=params.sample_rate,
-		n_fft=params.n_fft,
-		hop_length=params.hop_length,
 	)
 
 	# bandwidth has shape (1, n_frames); mean over frames gives a single Hz value
@@ -1065,6 +1087,7 @@ def _compute_zcr (
 def _compute_harmonic_ratio (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
+	D: numpy.ndarray,
 ) -> float:
 
 	"""Measure the fraction of total energy in the harmonic component.
@@ -1079,19 +1102,21 @@ def _compute_harmonic_ratio (
 	structure (sustained vs transient).
 
 	Args:
-		mono:   Float32 audio, shape (n_frames,).
-		params: FFT params — n_fft is passed to hpss so it matches the clamped
-		        window size used by all other helpers (avoids spurious warnings on
-		        short signals).
+		mono:   Float32 audio, shape (n_frames,). Used only for total energy.
+		params: FFT params (hop_length used for istft reconstruction).
+		D:      Pre-computed complex STFT, shape (n_fft//2+1, n_frames). Passing
+		        the complex STFT allows librosa.decompose.hpss to restore phase
+		        information when reconstructing the harmonic time-domain signal,
+		        avoiding a redundant stft() call inside librosa.effects.hpss().
 
 	Returns:
 		Harmonic ratio in [0.0, 1.0]. 0 = purely percussive, 1 = purely harmonic.
 	"""
 
-	# Pass n_fft so hpss uses the same (possibly clamped) window as the other
-	# spectral helpers. Without this, hpss defaults to n_fft=2048 and emits a
-	# UserWarning when the signal is shorter than that.
-	harmonic, _ = librosa.effects.hpss(mono, n_fft=params.n_fft)
+	# librosa.decompose.hpss accepts the complex STFT directly; it separates
+	# based on |D| and restores phase, returning complex harmonic/percussive STFTs.
+	harmonic_D, _ = librosa.decompose.hpss(D)
+	harmonic = librosa.istft(harmonic_D, hop_length=params.hop_length, length=len(mono))
 
 	energy_total = float(numpy.sum(mono ** 2))
 
@@ -1105,8 +1130,8 @@ def _compute_harmonic_ratio (
 
 
 def _compute_spectral_contrast (
-	mono: numpy.ndarray,
 	params: AnalysisParams,
+	S_magnitude: numpy.ndarray,
 ) -> float:
 
 	"""Measure the mean spectral contrast across all frequency sub-bands.
@@ -1121,27 +1146,25 @@ def _compute_spectral_contrast (
 	(which is itself a log scale).
 
 	Args:
-		mono:   Float32 audio, shape (n_frames,).
-		params: FFT params.
+		params:      FFT params (sample_rate for sub-band Hz boundaries; n_fft for
+		             degenerate-window guard).
+		S_magnitude: Pre-computed magnitude spectrogram |STFT|, shape (n_fft//2+1, n_frames).
 
 	Returns:
 		Contrast score in [0.0, 1.0]. 0 = flat spectrum, 1 = strong peaks.
 	"""
 
-	# spectral_contrast requires the signal to be at least as long as one FFT
-	# window. If the clip is shorter, librosa zero-pads to n_fft but the
-	# internal sub-band peak/valley indexing can find empty frequency bins,
-	# producing NaN or raising an IndexError. Return 0.0 (no contrast
-	# measurable) for clips that are too short to analyse meaningfully.
-	# Also guard against a degenerate n_fft (< 64 bins → resolution too coarse).
-	if len(mono) < params.n_fft or params.n_fft < 64:
+	# Guard against a degenerate n_fft (< 64 bins → frequency resolution too
+	# coarse for spectral_contrast's sub-band indexing).
+	# Note: the n_fft < signal_length check from the y= path is not needed here
+	# because analyze_mono already clamps params.n_fft to len(mono), so the
+	# pre-computed S_magnitude always has at least n_fft frames of coverage.
+	if params.n_fft < 64:
 		return 0.0
 
 	contrast = librosa.feature.spectral_contrast(
-		y=mono,
+		S=S_magnitude,
 		sr=params.sample_rate,
-		n_fft=params.n_fft,
-		hop_length=params.hop_length,
 	)
 
 	# contrast has shape (n_bands, n_frames); mean across both axes

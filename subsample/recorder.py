@@ -10,7 +10,10 @@ similarity scoring, analysis formatting, or any other presentation concern.
 Those belong in the on_complete callback supplied by the caller (see cli.py).
 """
 
+import dataclasses
 import datetime
+import hashlib
+import io
 import logging
 import pathlib
 import queue
@@ -30,9 +33,6 @@ _log = logging.getLogger(__name__)
 # Sentinel used to signal the writer thread to shut down cleanly
 _SHUTDOWN: typing.Final[object] = object()
 
-# Type alias for items placed on the queue: (audio, timestamp) or the sentinel
-_QueueItem = typing.Union[tuple[numpy.ndarray, datetime.datetime], object]
-
 # Callback type invoked after each recording is written and analyzed.
 # Receives the output path, all three analysis results, the recording duration,
 # and the original capture-format PCM audio array for instrument sample storage.
@@ -48,6 +48,27 @@ _OnCompleteCallback = typing.Callable[
 	],
 	None,
 ]
+
+
+@dataclasses.dataclass(frozen=True)
+class _WriteRequest:
+
+	"""A single audio segment queued for writing to disk.
+
+	filename_base, sample_rate, and bit_depth are optional overrides used when
+	processing audio files rather than live stream chunks. When None, the writer
+	falls back to the values from the application config.
+	"""
+
+	audio: numpy.ndarray
+	timestamp: datetime.datetime
+	filename_base: typing.Optional[str] = None   # None → timestamp-based filename
+	sample_rate: typing.Optional[int] = None      # None → use config sample rate
+	bit_depth: typing.Optional[int] = None        # None → use config bit depth
+
+
+# Type alias for items placed on the queue
+_QueueItem = typing.Union[_WriteRequest, object]
 
 
 class WavWriter:
@@ -99,21 +120,53 @@ class WavWriter:
 		)
 		self._thread.start()
 
-	def enqueue (self, audio: numpy.ndarray, timestamp: datetime.datetime) -> None:
+	def enqueue (
+		self,
+		audio: numpy.ndarray,
+		timestamp: datetime.datetime,
+		filename_base: typing.Optional[str] = None,
+		sample_rate: typing.Optional[int] = None,
+		bit_depth: typing.Optional[int] = None,
+	) -> None:
 
 		"""Queue an audio array for writing to disk.
 
 		Args:
-			audio:     PCM samples as a NumPy integer array, shape (n_frames, channels).
-			           For 24-bit audio this is int32 with samples left-shifted by 8.
-			timestamp: Datetime used to generate the output filename.
+			audio:         PCM samples as a NumPy integer array, shape (n_frames, channels).
+			               For 24-bit audio this is int32 with samples left-shifted by 8.
+			timestamp:     Datetime used to generate the output filename when
+			               filename_base is None.
+			filename_base: If provided, use this as the filename stem (e.g.
+			               "field_recording_1") instead of the timestamp format.
+			               If the file exists, it will be overwritten.
+			sample_rate:   Sample rate for the WAV header. Defaults to config value.
+			bit_depth:     Bit depth for WAV writing and mono conversion. Defaults
+			               to config value.
 		"""
 
-		self._queue.put((audio, timestamp))
+		self._queue.put(_WriteRequest(audio, timestamp, filename_base, sample_rate, bit_depth))
+
+	def flush (self) -> None:
+
+		"""Block until all queued recordings have been written.
+
+		Unlike shutdown(), the writer thread continues running after this returns.
+		Use this to ensure file-input segments are on disk before loading the
+		instrument library.
+		"""
+
+		self._queue.join()
 
 	def shutdown (self) -> None:
 
-		"""Flush remaining recordings and stop the writer thread gracefully."""
+		"""Flush remaining recordings and stop the writer thread gracefully.
+
+		Safe to call more than once — subsequent calls after the thread has
+		already exited are no-ops.
+		"""
+
+		if not self._thread.is_alive():
+			return
 
 		self._queue.put(_SHUTDOWN)
 		self._thread.join()
@@ -126,18 +179,20 @@ class WavWriter:
 			item = self._queue.get()
 
 			if item is _SHUTDOWN:
+				self._queue.task_done()
 				break
 
 			try:
-				# Safe to unpack now that we've ruled out the sentinel
-				audio, timestamp = typing.cast(
-					tuple[numpy.ndarray, datetime.datetime], item
-				)
+				req = typing.cast(_WriteRequest, item)
+
+				# Use per-request overrides when provided (file-input mode); otherwise
+				# fall back to the config values set for the live capture stream.
+				effective_bit_depth = req.bit_depth if req.bit_depth is not None else self._cfg.audio.bit_depth
 
 				# Convert once; all three analyses operate on the same mono float array.
 				# analyze_all() shares the pyin computation between spectral and pitch
 				# analysis, avoiding running it twice (~200-300 ms saving per recording).
-				mono = subsample.analysis.to_mono_float(audio, self._cfg.audio.bit_depth)
+				mono = subsample.analysis.to_mono_float(req.audio, effective_bit_depth)
 
 				result, rhythm, pitch = subsample.analysis.analyze_all(
 					mono,
@@ -145,14 +200,22 @@ class WavWriter:
 					self._cfg.analysis,
 				)
 
-				write_result = self._write_wav(audio, timestamp, rhythm, result, pitch)
+				write_result = self._write_wav(
+					req.audio, req.timestamp, rhythm, result, pitch,
+					filename_base=req.filename_base,
+					sample_rate=req.sample_rate,
+					bit_depth=req.bit_depth,
+				)
 
 				if self._on_complete is not None and write_result is not None:
 					filepath, duration = write_result
-					self._on_complete(filepath, result, rhythm, pitch, duration, audio)
+					self._on_complete(filepath, result, rhythm, pitch, duration, req.audio)
 
 			except Exception as exc:
-				_log.error("Failed to write recording: %s", exc, exc_info=True)
+				_log.error("Failed to analyse/cache recording: %s — WAV may be intact", exc, exc_info=True)
+
+			finally:
+				self._queue.task_done()
 
 	def _write_wav (
 		self,
@@ -161,70 +224,81 @@ class WavWriter:
 		rhythm: subsample.analysis.RhythmResult,
 		result: subsample.analysis.AnalysisResult,
 		pitch: subsample.analysis.PitchResult,
+		filename_base: typing.Optional[str] = None,
+		sample_rate: typing.Optional[int] = None,
+		bit_depth: typing.Optional[int] = None,
 	) -> tuple[pathlib.Path, float] | None:
 
 		"""Write a single audio segment to a WAV file and save its analysis sidecar.
 
-		Returns (filepath, duration_seconds), or None if a free filename could
-		not be found (more than 999 same-second collisions - practically impossible).
+		If the target file already exists, it is overwritten (with INFO-level logging).
+		If a filesystem error occurs during write, an ERROR is logged and None is returned.
+
+		Returns (filepath, duration_seconds), or None on write failure.
 
 		Args:
-			audio:     PCM samples, shape (n_frames, channels).
-			           16-bit: int16. 24-bit: int32 (left-shifted by 8). 32-bit: int32.
-			timestamp: Used to construct the filename.
-			rhythm:    Rhythm analysis computed before this call.
-			result:    Spectral analysis metrics computed before this call.
-			pitch:     Pitch and timbre analysis computed before this call.
+			audio:         PCM samples, shape (n_frames, channels).
+			               16-bit: int16. 24-bit: int32 (left-shifted by 8). 32-bit: int32.
+			timestamp:     Used to construct the filename when filename_base is None.
+			rhythm:        Rhythm analysis computed before this call.
+			result:        Spectral analysis metrics computed before this call.
+			pitch:         Pitch and timbre analysis computed before this call.
+			filename_base: If provided, used as the filename stem instead of the
+			               timestamp format. Collision handling still applies.
+			sample_rate:   Sample rate for the WAV header. Defaults to config value.
+			bit_depth:     Bit depth for WAV writing. Defaults to config value.
 		"""
 
-		# Find a free filename; cap the loop to prevent spinning forever on a
-		# pathological filesystem full of same-timestamp files.
-		filename_base = timestamp.strftime(self._cfg.output.filename_format)
-		filepath = self._output_dir / (filename_base + ".wav")
-		suffix_counter = 2
-		while filepath.exists():
-			if suffix_counter > 999:
-				_log.error(
-					"Could not find a free filename for %s (>999 collisions); "
-					"recording discarded.", filename_base,
-				)
-				return None
-			filepath = self._output_dir / (filename_base + f"_{suffix_counter}.wav")
-			suffix_counter += 1
+		# Resolve effective format values; per-request overrides take precedence.
+		effective_sample_rate = sample_rate if sample_rate is not None else self._cfg.audio.sample_rate
+		effective_bit_depth   = bit_depth   if bit_depth   is not None else self._cfg.audio.bit_depth
+
+		fname_base = filename_base if filename_base is not None else timestamp.strftime(self._cfg.output.filename_format)
+		filepath = self._output_dir / (fname_base + ".wav")
 
 		# Ensure the array is 2-D (n_frames, channels) before writing
 		if audio.ndim == 1:
 			audio = audio.reshape(-1, 1)
 
 		n_channels = audio.shape[1]
-		bit_depth = self._cfg.audio.bit_depth
 
 		# 24-bit audio is stored internally as left-shifted int32; recover the
 		# original 3-byte values before writing. The sample_width must be set
 		# to 3 explicitly - bit_depth // 8 = 3 only by coincidence for 24-bit,
 		# but the intent is clearer stated directly.
-		if bit_depth == 24:
+		if effective_bit_depth == 24:
 			sample_width = 3
 			frame_bytes = _pack_int24(audio)
 		else:
-			sample_width = bit_depth // 8
+			sample_width = effective_bit_depth // 8
 			frame_bytes = audio.tobytes()
 
-		with wave.open(str(filepath), "wb") as wf:
+		# Build the complete WAV in memory so we can compute the MD5 from the
+		# in-memory bytes rather than re-reading the file from disk after writing.
+		buf = io.BytesIO()
+		with wave.open(buf, "wb") as wf:
 			wf.setnchannels(n_channels)
 			wf.setsampwidth(sample_width)
-			wf.setframerate(self._cfg.audio.sample_rate)
+			wf.setframerate(effective_sample_rate)
 			wf.writeframes(frame_bytes)
+		wav_bytes = buf.getvalue()
+		audio_md5 = hashlib.md5(wav_bytes).hexdigest()
+
+		try:
+			if filepath.exists():
+				_log.info("Overwriting: %s", filepath.name)
+			filepath.write_bytes(wav_bytes)
+		except OSError as exc:
+			_log.error("Failed to write %s: %s", filepath.name, exc)
+			return None
 
 		n_frames = audio.shape[0]
-		duration = n_frames / self._cfg.audio.sample_rate
+		duration = n_frames / effective_sample_rate
 
 		_log.debug("Stored: %s  frames=%d", filepath.name, n_frames)
 
 		# Persist analysis alongside the WAV so future reads (e.g. reference
 		# file loading on startup) can skip re-analysis when nothing changes.
-		audio_md5 = subsample.cache.compute_audio_md5(filepath)
-
 		subsample.cache.save_cache(
 			audio_path = filepath,
 			audio_md5  = audio_md5,

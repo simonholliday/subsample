@@ -177,12 +177,19 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	output_raw: dict[str, typing.Any] = raw.get("output", {})
 	analysis_raw: dict[str, typing.Any] = raw.get("analysis", {})
 
+	device_raw = audio_raw.get("device")
+	if device_raw is not None and not isinstance(device_raw, str):
+		raise ValueError(
+			f"audio.device must be a string (got {type(device_raw).__name__}: {device_raw!r}). "
+			"Check your config.yaml."
+		)
+
 	audio = AudioConfig(
 		sample_rate=int(_require(audio_raw, "sample_rate", "audio")),
 		bit_depth=int(_require(audio_raw, "bit_depth", "audio")),
 		channels=int(_require(audio_raw, "channels", "audio")),
 		chunk_size=int(_require(audio_raw, "chunk_size", "audio")),
-		device=audio_raw.get("device"),
+		device=device_raw,
 	)
 
 	if audio.bit_depth not in {16, 24, 32}:
@@ -190,10 +197,19 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"Unsupported bit_depth {audio.bit_depth}. "
 			"Supported values: 16, 24, 32"
 		)
+	if audio.sample_rate <= 0:
+		raise ValueError(f"audio.sample_rate must be > 0 (got {audio.sample_rate})")
+	if audio.channels <= 0:
+		raise ValueError(f"audio.channels must be > 0 (got {audio.channels})")
+	if audio.chunk_size <= 0:
+		raise ValueError(f"audio.chunk_size must be > 0 (got {audio.chunk_size})")
 
 	buffer = BufferConfig(
 		max_seconds=int(_require(buffer_raw, "max_seconds", "buffer")),
 	)
+
+	if buffer.max_seconds <= 0:
+		raise ValueError(f"buffer.max_seconds must be > 0 (got {buffer.max_seconds})")
 
 	detection = DetectionConfig(
 		snr_threshold_db=float(_require(detection_raw, "snr_threshold_db", "detection")),
@@ -203,6 +219,13 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		trim_pre_samples=int(detection_raw.get("trim_pre_samples", 0)),
 		trim_post_samples=int(detection_raw.get("trim_post_samples", 0)),
 	)
+
+	if not (0.0 < detection.ema_alpha <= 1.0):
+		raise ValueError(
+			f"detection.ema_alpha must be in (0, 1] (got {detection.ema_alpha})"
+		)
+	if detection.hold_time <= 0:
+		raise ValueError(f"detection.hold_time must be > 0 (got {detection.hold_time})")
 
 	output = OutputConfig(
 		directory=str(_require(output_raw, "directory", "output")),
@@ -214,6 +237,17 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		tempo_min=float(analysis_raw.get("tempo_min", 30.0)),
 		tempo_max=float(analysis_raw.get("tempo_max", 300.0)),
 	)
+
+	if analysis.tempo_min <= 0 or analysis.tempo_max <= 0:
+		raise ValueError(
+			f"analysis.tempo_min and tempo_max must be > 0 "
+			f"(got {analysis.tempo_min}, {analysis.tempo_max})"
+		)
+	if analysis.tempo_min >= analysis.tempo_max:
+		raise ValueError(
+			f"analysis.tempo_min must be < tempo_max "
+			f"(got {analysis.tempo_min} >= {analysis.tempo_max})"
+		)
 
 	instrument_raw: dict[str, typing.Any] = raw.get("instrument", {})
 	instrument = InstrumentConfig(

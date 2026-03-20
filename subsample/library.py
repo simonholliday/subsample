@@ -26,8 +26,11 @@ import dataclasses
 import itertools
 import logging
 import pathlib
+import threading
 import typing
 import wave
+
+import subsample.audio
 
 import numpy
 
@@ -133,7 +136,7 @@ class ReferenceLibrary:
 
 		return sorted(r.name for r in self._index.values())
 
-	def all (self) -> list[SampleRecord]:
+	def samples (self) -> list[SampleRecord]:
 
 		"""Return all loaded sample records sorted by name (case-insensitive)."""
 
@@ -180,6 +183,9 @@ class InstrumentLibrary:
 		self._order: collections.deque[int] = collections.deque()
 		self._total_bytes: int = 0
 		self._max_bytes: int = max_memory_bytes
+		# Protects multi-step add/evict operations: the recorder's writer thread
+		# calls add() while the main thread may call samples() or get().
+		self._lock = threading.Lock()
 
 	def add (self, record: SampleRecord) -> list[int]:
 
@@ -204,20 +210,24 @@ class InstrumentLibrary:
 				sample_bytes / (1024 * 1024), self._max_bytes / (1024 * 1024),
 			)
 
-		# Evict oldest samples until there is room for the new one
+		# Evict oldest samples until there is room for the new one.
+		# Held under lock: this is a multi-step operation (popleft + pop + counter
+		# decrement) that must be atomic with respect to samples()/get() on the
+		# main thread.
 		evicted: list[int] = []
-		while self._order and self._total_bytes + sample_bytes > self._max_bytes:
-			oldest_id = self._order.popleft()
-			old_record = self._index.pop(oldest_id, None)
+		with self._lock:
+			while self._order and self._total_bytes + sample_bytes > self._max_bytes:
+				oldest_id = self._order.popleft()
+				old_record = self._index.pop(oldest_id, None)
 
-			if old_record is not None:
-				old_bytes = old_record.audio.nbytes if old_record.audio is not None else 0
-				self._total_bytes -= old_bytes
-				evicted.append(oldest_id)
+				if old_record is not None:
+					old_bytes = old_record.audio.nbytes if old_record.audio is not None else 0
+					self._total_bytes -= old_bytes
+					evicted.append(oldest_id)
 
-		self._index[record.sample_id] = record
-		self._order.append(record.sample_id)
-		self._total_bytes += sample_bytes
+			self._index[record.sample_id] = record
+			self._order.append(record.sample_id)
+			self._total_bytes += sample_bytes
 
 		return evicted
 
@@ -225,13 +235,15 @@ class InstrumentLibrary:
 
 		"""Return the sample with the given ID, or None if not present."""
 
-		return self._index.get(sample_id)
+		with self._lock:
+			return self._index.get(sample_id)
 
-	def all (self) -> list[SampleRecord]:
+	def samples (self) -> list[SampleRecord]:
 
 		"""Return all samples in insertion order (oldest first)."""
 
-		return [self._index[sid] for sid in self._order if sid in self._index]
+		with self._lock:
+			return [self._index[sid] for sid in self._order if sid in self._index]
 
 	@property
 	def memory_used (self) -> int:
@@ -404,44 +416,15 @@ def _load_wav_audio (path: pathlib.Path) -> numpy.ndarray | None:
 	"""Read a WAV file into a numpy array matching the capture pipeline format.
 
 	Returns an array of shape (n_frames, channels) using the dtype that matches
-	the capture pipeline:
-	  16-bit  →  int16
-	  24-bit  →  int32, samples left-shifted by 8 (matching unpack_audio())
-	  32-bit  →  int32
+	the capture pipeline (int16 for 16-bit, left-shifted int32 for 24-bit, int32
+	for 32-bit). Returns None and logs a WARNING on any read error.
 
-	Returns None and logs a WARNING on any read error or unsupported bit depth.
+	Delegates to subsample.audio.read_audio_file() for the actual reading.
 	"""
 
 	try:
-		with wave.open(str(path), "rb") as wf:
-			channels     = wf.getnchannels()
-			sample_width = wf.getsampwidth()   # bytes per sample
-			n_frames     = wf.getnframes()
-			raw_bytes    = wf.readframes(n_frames)
+		return subsample.audio.read_audio_file(path).audio
 
-	except (wave.Error, OSError) as exc:
+	except (wave.Error, OSError, ValueError) as exc:
 		_log.warning("Could not read audio from %s: %s", path.name, exc)
 		return None
-
-	bit_depth = sample_width * 8
-
-	if bit_depth == 16:
-		return numpy.frombuffer(raw_bytes, dtype=numpy.int16).reshape(-1, channels)
-
-	if bit_depth == 24:
-		# Match unpack_audio() in audio.py: left-shift each 3-byte sample into
-		# the upper 3 bytes of an int32 (equivalent to shifting left by 8 bits).
-		raw = numpy.frombuffer(raw_bytes, dtype=numpy.uint8).reshape(-1, 3)
-		n_samples = raw.shape[0]
-		padded = numpy.zeros((n_samples, 4), dtype=numpy.uint8)
-		padded[:, 1:] = raw
-		return padded.view(numpy.int32).reshape(-1, channels)
-
-	if bit_depth == 32:
-		return numpy.frombuffer(raw_bytes, dtype=numpy.int32).reshape(-1, channels)
-
-	_log.warning(
-		"Unsupported bit depth %d in %s — skipping (supported: 16, 24, 32)",
-		bit_depth, path.name,
-	)
-	return None

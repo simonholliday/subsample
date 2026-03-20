@@ -33,3 +33,8 @@ strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+	# librosa emits this when pyin finds no voiced frames (e.g. silent test audio).
+	# Expected and handled downstream; suppressed here to keep test output clean.
+	"ignore::UserWarning:librosa",
+]

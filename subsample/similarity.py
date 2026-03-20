@@ -13,7 +13,7 @@ Why cosine similarity?
 
 Primary usage — per-reference ranked lists:
   matrix = SimilarityMatrix(reference_library)
-  matrix.bulk_add(instrument_library.all())     # populate at startup
+  matrix.bulk_add(instrument_library.samples())     # populate at startup
   matrix.add(new_record)                         # update after each capture
   matrix.remove(evicted_ids)                     # sync with FIFO eviction
   sample_id = matrix.get_match("BD", 0)          # most BD-like instrument
@@ -90,7 +90,7 @@ def score_against_library (
 			name  = record.name,
 			score = _cosine_similarity(query, record.spectral.as_vector()),
 		)
-		for record in library.all()
+		for record in library.samples()
 	]
 
 	# Sort best match first so the first element is always the closest reference
@@ -131,7 +131,10 @@ class SimilarityMatrix:
 		_rankings:    Per-reference ranked lists {name_upper: [RankedMatch, ...]}.
 		              Always sorted descending by score.
 		_scores:      Score cache {sample_id: {name_upper: score}}.
-		              Also acts as a reverse index for O(M) eviction.
+		              Also acts as a reverse index for eviction: pop the entry
+		              here, then do a linear scan of each ranking list to remove
+		              the matching entry. True eviction cost is O(M × N) where
+		              M = references, N = instrument samples per list.
 	"""
 
 	def __init__ (self, reference_library: subsample.library.ReferenceLibrary) -> None:
@@ -141,7 +144,7 @@ class SimilarityMatrix:
 		# Precompute reference vectors once — references never change after init
 		self._ref_vectors: dict[str, numpy.ndarray] = {
 			rec.name.upper(): rec.spectral.as_vector()
-			for rec in reference_library.all()
+			for rec in reference_library.samples()
 		}
 		self._rankings: dict[str, list[RankedMatch]] = {
 			name: [] for name in self._ref_vectors
@@ -156,16 +159,27 @@ class SimilarityMatrix:
 
 		"""Add many instrument samples using vectorised similarity computation.
 
-		Intended for startup: call after load_instrument_library() to populate
-		the matrix from all pre-loaded samples in a single batch. Uses matrix
-		multiplication to compute all N × M scores at once.
+		Intended for startup: call once on a fresh (empty) SimilarityMatrix,
+		after load_instrument_library() has run. Uses matrix multiplication
+		to compute all N × M scores at once.
+
+		IMPORTANT: This method replaces the ranking lists entirely from the
+		supplied batch. Calling it on a non-empty matrix (i.e. after add() has
+		already run) will desync _scores and _rankings. Always call on a fresh
+		matrix before any add() calls.
 
 		Args:
-			records: Instrument samples to add. Duplicates are overwritten.
+			records: Instrument samples to add (no duplicates expected).
 		"""
 
 		if not records or not self._ref_vectors:
 			return
+
+		assert not self._scores, (
+			"bulk_add() called on a non-empty SimilarityMatrix — "
+			"this would desync _scores and _rankings. "
+			"Only call bulk_add() on a freshly constructed matrix."
+		)
 
 		ref_names = list(self._ref_vectors.keys())
 		ref_matrix = numpy.array(
@@ -363,7 +377,7 @@ def _cosine_similarity (a: numpy.ndarray, b: numpy.ndarray) -> float:
 	norm_a = float(numpy.linalg.norm(a))
 	norm_b = float(numpy.linalg.norm(b))
 
-	if norm_a == 0.0 or norm_b == 0.0:
+	if norm_a < 1e-9 or norm_b < 1e-9:
 		return 0.0
 
 	return float(numpy.dot(a, b) / (norm_a * norm_b))

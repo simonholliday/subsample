@@ -53,8 +53,11 @@ def trim_silence (
 	if n_frames == 0:
 		return audio
 
-	# Per-frame magnitude: max absolute value across channels
-	# Shape (n_frames,) regardless of mono or stereo
+	# Per-frame magnitude: max absolute value across channels.
+	# Shape (n_frames,) regardless of mono or stereo.
+	# float64 is required for correctness: int16 cannot represent abs(INT16_MIN),
+	# and int32 cannot represent abs(INT32_MIN) (which appears in 24-bit left-shifted
+	# and native 32-bit audio). float64 covers the full range of all supported dtypes.
 	magnitude = numpy.max(numpy.abs(audio.astype(numpy.float64)), axis=-1)
 
 	above = numpy.where(magnitude >= amplitude_threshold)[0]
