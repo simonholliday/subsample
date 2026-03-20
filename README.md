@@ -52,6 +52,9 @@ environment becomes an instant, organized sample pack.
 
 ## Planned
 
+- **File input mode** - process WAV/FLAC/AIFF/OGG files through the detector and classifier
+  pipeline as if they were live input; batch process multiple files; useful for testing and
+  analyzing existing audio collections without live capture hardware.
 - **Interactive classification** - allow live adjustment of classification thresholds;
   manually reassign samples to categories during recording session.
 - **MIDI note assignment** - allocate MIDI trigger notes based on sample classification;
