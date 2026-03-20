@@ -1,5 +1,7 @@
 """Tests for subsample/similarity.py — spectral fingerprint similarity scoring."""
 
+import threading
+
 import numpy
 import pytest
 
@@ -207,3 +209,224 @@ class TestFormatSimilarityScores:
 		assert "HAT"   in result
 		# KICK should appear before SNARE (preserves input order)
 		assert result.index("KICK") < result.index("SNARE")
+
+
+# ---------------------------------------------------------------------------
+# TestSimilarityMatrix
+# ---------------------------------------------------------------------------
+
+class TestSimilarityMatrix:
+
+	# ----- helpers ----------------------------------------------------------
+
+	def _matrix (self, *ref_names: str) -> subsample.similarity.SimilarityMatrix:
+		"""Return a SimilarityMatrix with the given reference sample names (all at 0.5)."""
+		refs = [_make_record(n, _make_spectral()) for n in ref_names]
+		return subsample.similarity.SimilarityMatrix(_library_with(*refs))
+
+	# ----- construction -----------------------------------------------------
+
+	def test_empty_reference_library (self) -> None:
+		matrix = self._matrix()
+		assert len(matrix) == 0
+		assert matrix.get_match("BD", 0) is None
+
+	def test_repr_reflects_sizes (self) -> None:
+		matrix = self._matrix("BD", "SN")
+		r = _make_record("A", _make_spectral())
+		matrix.add(r)
+		assert "2" in repr(matrix)  # 2 refs
+		assert "1" in repr(matrix)  # 1 instrument
+
+	# ----- add / get_match --------------------------------------------------
+
+	def test_single_add_is_retrievable (self) -> None:
+		matrix = self._matrix("BD")
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+		assert matrix.get_match("BD", 0) == inst.sample_id
+
+	def test_get_match_case_insensitive (self) -> None:
+		matrix = self._matrix("BD")
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+		assert matrix.get_match("bd", 0) == inst.sample_id
+		assert matrix.get_match("Bd", 0) == inst.sample_id
+
+	def test_get_match_unknown_reference_returns_none (self) -> None:
+		matrix = self._matrix("BD")
+		assert matrix.get_match("UNKNOWN", 0) is None
+
+	def test_get_match_out_of_bounds_returns_none (self) -> None:
+		matrix = self._matrix("BD")
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+		assert matrix.get_match("BD", 1) is None  # only rank 0 exists
+
+	def test_get_match_empty_library_returns_none (self) -> None:
+		matrix = self._matrix("BD")
+		assert matrix.get_match("BD", 0) is None
+
+	# ----- ranking order ----------------------------------------------------
+
+	def test_ranking_order_most_similar_first (self) -> None:
+		# BD ref has high spectral_flatness. i_high matches it; i_low does not.
+		bd_ref  = _make_record("BD",    _make_spectral(spectral_flatness=0.9))
+		i_high  = _make_record("HIGH",  _make_spectral(spectral_flatness=0.9))
+		i_low   = _make_record("LOW",   _make_spectral(spectral_flatness=0.1))
+		matrix  = subsample.similarity.SimilarityMatrix(_library_with(bd_ref))
+		matrix.add(i_low)
+		matrix.add(i_high)
+		assert matrix.get_match("BD", 0) == i_high.sample_id
+		assert matrix.get_match("BD", 1) == i_low.sample_id
+
+	def test_identical_fingerprint_scores_highest (self) -> None:
+		spectral = _make_spectral(spectral_flatness=0.8, attack=0.2)
+		ref  = _make_record("BD", spectral)
+		inst = _make_record("I1", spectral)
+		other = _make_record("I2", _make_spectral(spectral_flatness=0.0))
+		matrix = subsample.similarity.SimilarityMatrix(_library_with(ref))
+		matrix.add(other)
+		matrix.add(inst)
+		assert matrix.get_match("BD", 0) == inst.sample_id
+
+	# ----- bulk_add ---------------------------------------------------------
+
+	def test_bulk_add_populates_rankings (self) -> None:
+		bd_ref = _make_record("BD", _make_spectral(spectral_flatness=0.9))
+		i1 = _make_record("I1", _make_spectral(spectral_flatness=0.9))
+		i2 = _make_record("I2", _make_spectral(spectral_flatness=0.1))
+		matrix = subsample.similarity.SimilarityMatrix(_library_with(bd_ref))
+		matrix.bulk_add([i1, i2])
+		assert matrix.get_match("BD", 0) == i1.sample_id
+		assert matrix.get_match("BD", 1) == i2.sample_id
+
+	def test_bulk_add_empty_list_is_noop (self) -> None:
+		matrix = self._matrix("BD")
+		matrix.bulk_add([])
+		assert len(matrix) == 0
+
+	def test_bulk_add_matches_incremental_add_order (self) -> None:
+		# bulk_add and successive add() should produce the same ranking
+		bd_ref = _make_record("BD", _make_spectral(spectral_flatness=0.9))
+		i1 = _make_record("A", _make_spectral(spectral_flatness=0.9))
+		i2 = _make_record("B", _make_spectral(spectral_flatness=0.5))
+		i3 = _make_record("C", _make_spectral(spectral_flatness=0.1))
+
+		lib = _library_with(bd_ref)
+		m_bulk = subsample.similarity.SimilarityMatrix(lib)
+		m_bulk.bulk_add([i1, i2, i3])
+
+		m_incr = subsample.similarity.SimilarityMatrix(lib)
+		m_incr.add(i1)
+		m_incr.add(i2)
+		m_incr.add(i3)
+
+		assert m_bulk.get_match("BD", 0) == m_incr.get_match("BD", 0)
+		assert m_bulk.get_match("BD", 1) == m_incr.get_match("BD", 1)
+		assert m_bulk.get_match("BD", 2) == m_incr.get_match("BD", 2)
+
+	# ----- remove (eviction) ------------------------------------------------
+
+	def test_remove_clears_from_rankings (self) -> None:
+		matrix = self._matrix("BD")
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+		matrix.remove([inst.sample_id])
+		assert matrix.get_match("BD", 0) is None
+		assert len(matrix) == 0
+
+	def test_remove_unknown_id_is_noop (self) -> None:
+		matrix = self._matrix("BD")
+		matrix.remove([99999])  # should not raise
+
+	def test_remove_updates_rankings_for_all_references (self) -> None:
+		refs = [_make_record("BD", _make_spectral()), _make_record("SN", _make_spectral())]
+		matrix = subsample.similarity.SimilarityMatrix(_library_with(*refs))
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+		matrix.remove([inst.sample_id])
+		assert matrix.get_match("BD", 0) is None
+		assert matrix.get_match("SN", 0) is None
+
+	def test_remove_preserves_remaining_instruments (self) -> None:
+		matrix = self._matrix("BD")
+		i1 = _make_record("I1", _make_spectral(spectral_flatness=0.9))
+		i2 = _make_record("I2", _make_spectral(spectral_flatness=0.1))
+		matrix.add(i1)
+		matrix.add(i2)
+		matrix.remove([i1.sample_id])
+		assert matrix.get_match("BD", 0) == i2.sample_id
+		assert matrix.get_match("BD", 1) is None
+
+	# ----- get_matches / get_scores -----------------------------------------
+
+	def test_get_matches_returns_all (self) -> None:
+		matrix = self._matrix("BD")
+		for i in range(3):
+			matrix.add(_make_record(f"I{i}", _make_spectral()))
+		assert len(matrix.get_matches("BD")) == 3
+
+	def test_get_matches_limit (self) -> None:
+		matrix = self._matrix("BD")
+		for i in range(5):
+			matrix.add(_make_record(f"I{i}", _make_spectral()))
+		assert len(matrix.get_matches("BD", limit=2)) == 2
+
+	def test_get_matches_unknown_reference_returns_empty (self) -> None:
+		matrix = self._matrix("BD")
+		assert matrix.get_matches("UNKNOWN") == []
+
+	def test_get_scores_returns_scores_for_all_references (self) -> None:
+		refs = [_make_record("BD", _make_spectral()), _make_record("SN", _make_spectral())]
+		matrix = subsample.similarity.SimilarityMatrix(_library_with(*refs))
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+		scores = matrix.get_scores(inst.sample_id)
+		assert len(scores) == 2
+		names = {s.name for s in scores}
+		assert "BD" in names
+		assert "SN" in names
+
+	def test_get_scores_unknown_sample_returns_empty (self) -> None:
+		matrix = self._matrix("BD")
+		assert matrix.get_scores(99999) == []
+
+	def test_get_scores_sorted_descending (self) -> None:
+		bd_ref = _make_record("BD", _make_spectral(spectral_flatness=0.9))
+		sn_ref = _make_record("SN", _make_spectral(spectral_flatness=0.1))
+		# Instrument matches BD much better than SN
+		inst = _make_record("I1", _make_spectral(spectral_flatness=0.9))
+		matrix = subsample.similarity.SimilarityMatrix(_library_with(bd_ref, sn_ref))
+		matrix.add(inst)
+		scores = matrix.get_scores(inst.sample_id)
+		assert scores[0].score >= scores[1].score
+		assert scores[0].name == "BD"
+
+	# ----- thread safety ----------------------------------------------------
+
+	def test_concurrent_add_and_get_match_do_not_raise (self) -> None:
+		matrix = self._matrix("BD")
+		errors: list[Exception] = []
+
+		def writer () -> None:
+			for i in range(50):
+				try:
+					matrix.add(_make_record(f"W{i}", _make_spectral()))
+				except Exception as exc:
+					errors.append(exc)
+
+		def reader () -> None:
+			for _ in range(100):
+				try:
+					matrix.get_match("BD", 0)
+				except Exception as exc:
+					errors.append(exc)
+
+		t1 = threading.Thread(target=writer)
+		t2 = threading.Thread(target=reader)
+		t1.start()
+		t2.start()
+		t1.join()
+		t2.join()
+		assert errors == []

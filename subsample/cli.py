@@ -105,9 +105,21 @@ def main () -> None:
 	else:
 		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
 
+	# Build the similarity matrix now that both libraries are populated.
+	# bulk_add() is vectorised (single matrix multiply for N × M scores),
+	# so loading hundreds of pre-existing instrument samples is fast.
+	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix] = None
+	if reference_library is not None:
+		similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library)
+		if len(instrument_library) > 0:
+			similarity_matrix.bulk_add(instrument_library.all())
+		print(f"  Similarity   : {similarity_matrix}")
+
 	writer = subsample.recorder.WavWriter(
 		cfg, analysis_params,
-		on_complete=_make_on_complete(reference_library, instrument_library, analysis_params),
+		on_complete=_make_on_complete(
+			reference_library, instrument_library, analysis_params, similarity_matrix,
+		),
 	)
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
@@ -164,6 +176,7 @@ def _make_on_complete (
 	reference_library: typing.Optional[subsample.library.ReferenceLibrary],
 	instrument_library: subsample.library.InstrumentLibrary,
 	analysis_params: subsample.analysis.AnalysisParams,
+	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
 ) -> subsample.recorder._OnCompleteCallback:
 
 	"""Return an on_complete callback that logs analysis results and manages samples.
@@ -172,12 +185,13 @@ def _make_on_complete (
 	and analyzed. It:
 	  1. Logs the full analysis breakdown (rhythm, spectral, pitch).
 	  2. Adds the recording to the instrument library (with its original PCM audio).
-	  3. Logs similarity scores against reference samples (if configured).
+	  3. Updates the similarity matrix (remove evicted, add new) and logs scores.
 
 	Args:
-		reference_library: Loaded reference library, or None if not configured.
+		reference_library:  Loaded reference library, or None if not configured.
 		instrument_library: Instrument library to add each new recording to.
 		analysis_params:    FFT parameters used for analysis (for SampleRecord construction).
+		similarity_matrix:  Similarity matrix to keep in sync, or None if no reference library.
 	"""
 
 	def _on_complete (
@@ -224,8 +238,11 @@ def _make_on_complete (
 		if evicted:
 			_log.debug("  evicted:    %s", ", ".join(f"#{i}" for i in evicted))
 
-		if reference_library is not None:
-			scores = subsample.similarity.score_against_library(spectral, reference_library)
+		if similarity_matrix is not None:
+			if evicted:
+				similarity_matrix.remove(evicted)
+			similarity_matrix.add(record)
+			scores = similarity_matrix.get_scores(record.sample_id)
 			if scores:
 				_log.debug(
 					"  similarity: %s",

@@ -35,8 +35,9 @@ environment becomes an instant, organized sample pack.
   are case-insensitive; audio files not required (only `.analysis.json` sidecars).
 - **Spectral fingerprint similarity** - compare the 9-element [0,1] spectral vector
   (spectral flatness, attack, release, centroid, bandwidth, ZCR, harmonic ratio,
-  contrast, voiced fraction) against reference samples using cosine similarity; scores
-  are logged for every recording.
+  contrast, voiced fraction) against reference samples using cosine similarity; for each
+  reference, an in-memory ranked list of instrument matches is maintained and updated
+  incrementally as new recordings arrive or old ones are evicted.
 - **Instrument sample library** - every recording is added to an in-memory library
   with its PCM audio and full analysis; a configurable memory cap (default 100 MB)
   keeps the newest samples in RAM using FIFO eviction; an optional startup directory
@@ -44,10 +45,10 @@ environment becomes an instant, organized sample pack.
 
 ## In Progress
 
-- **Full similarity scoring** - spectral fingerprint comparison is done; future work:
+- **Extended similarity** - spectral fingerprint ranked lists are in place; future work:
   extend to timbre fingerprints (MFCC cosine distance) and rhythm pattern matching.
-- **Automatic sample classification** - infrastructure in place; next: wire similarity
-  scores to a simple classifier (e.g. "if most similar reference is KICK, classify as KICK").
+- **Automatic sample classification** - infrastructure in place; next: wire ranked match
+  results to a simple classifier (e.g. "if top reference match is KICK, classify as KICK").
 
 ## Planned
 
@@ -102,6 +103,7 @@ All settings live in `config.yaml`. The defaults are:
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory instrument samples; oldest evicted (FIFO) when exceeded |
 | `instrument.directory` | `none` | Optional directory to pre-load instrument samples from at startup (WAV + sidecar required) |
+| `reference.directory` | `none` | Optional directory of reference sounds for similarity classification (sidecar only, no audio required); if unset, similarity features are disabled |
 
 ## Output
 
@@ -117,7 +119,7 @@ samples/
 
 Every recording is automatically added to an in-memory instrument library alongside its full analysis data. The library is the foundation for MIDI playback: samples will be assigned to notes as classification develops.
 
-A configurable memory cap (default 100 MB, `instrument.max_memory_mb`) prevents unbounded growth. When a new sample would push usage over the limit, the oldest samples are evicted from memory — newest captures are always retained. WAV files on disk are never deleted.
+A configurable memory cap (default 100 MB, `instrument.max_memory_mb`) prevents unbounded growth. When a new sample would push usage over the limit, the oldest samples are evicted from memory - newest captures are always retained. WAV files on disk are never deleted.
 
 ### Persistent library across sessions
 
@@ -132,6 +134,35 @@ instrument:
 ```
 
 On startup, Subsample pre-loads all existing WAV files from `./samples` into memory. As new recordings arrive they are written to disk and added to the in-memory library in one step. The memory cap keeps only the most recent `max_memory_mb` worth of audio in RAM; the full archive on disk is unaffected. Across sessions the collection on disk grows indefinitely; in memory it always holds the freshest window of captures.
+
+## Reference sample library
+
+Reference samples define the canonical sound classes you want to match against - kick drum, snare, hi-hat, etc. Each reference is represented by its `.analysis.json` sidecar file only; the original audio is not required.
+
+```yaml
+reference:
+  directory: "./reference"
+```
+
+Place one sidecar per sound class in the reference directory. The name is taken from the audio filename stem:
+
+```
+reference/
+  BD0025.wav.analysis.json   →  "BD0025"
+  SD5075.wav.analysis.json   →  "SD5075"
+  CH.wav.analysis.json       →  "CH"
+```
+
+At startup, reference samples are loaded before instrument samples. For every instrument sample (pre-loaded at startup or captured live), Subsample computes cosine similarity against every reference and maintains a ranked list per reference - most similar instrument first. When a sample is evicted from the instrument library, it is also removed from the ranked lists.
+
+You can query the ranked lists programmatically:
+
+```python
+# Most kick-like instrument in memory
+sample_id = similarity_matrix.get_match("BD0025", rank=0)
+```
+
+Lookup is case-insensitive.
 
 ## Analyzing recorded files
 

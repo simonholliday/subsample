@@ -1,8 +1,8 @@
 """Spectral fingerprint similarity scoring for Subsample.
 
-Compares a newly recorded sound against a set of reference samples using
-cosine similarity on their spectral fingerprints — the 9-element [0, 1]
-vector returned by AnalysisResult.as_vector().
+Compares recordings against reference samples using cosine similarity on
+their spectral fingerprints — the 9-element [0, 1] vector returned by
+AnalysisResult.as_vector().
 
 Why cosine similarity?
   Cosine similarity measures the angle between two vectors, ignoring
@@ -11,17 +11,40 @@ Why cosine similarity?
   whether it was loud or quiet. Because all values are in [0, 1] (non-
   negative), cosine similarity is guaranteed to lie in [0, 1].
 
-Typical usage:
-    scores = score_against_library(spectral_result, reference_library)
-    _log.debug("Similarity: %s", format_similarity_scores(scores))
+Primary usage — per-reference ranked lists:
+  matrix = SimilarityMatrix(reference_library)
+  matrix.bulk_add(instrument_library.all())     # populate at startup
+  matrix.add(new_record)                         # update after each capture
+  matrix.remove(evicted_ids)                     # sync with FIFO eviction
+  sample_id = matrix.get_match("BD", 0)          # most BD-like instrument
 """
 
+import bisect
 import dataclasses
+import threading
+import typing
 
 import numpy
 
 import subsample.analysis
 import subsample.library
+
+
+@dataclasses.dataclass(frozen=True)
+class RankedMatch:
+
+	"""An instrument sample's cosine similarity to one reference sample.
+
+	Used in SimilarityMatrix ranked lists. Sorted descending by score so the
+	best-matching instrument is always at index 0.
+
+	Fields:
+		sample_id: Session-unique ID of the instrument sample.
+		score:     Cosine similarity in [0.0, 1.0].
+	"""
+
+	sample_id: int
+	score:     float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,6 +111,245 @@ def format_similarity_scores (scores: list[SimilarityScore]) -> str:
 		return ""
 
 	return "  ".join(f"{s.name} {s.score:.2f}" for s in scores)
+
+
+class SimilarityMatrix:
+
+	"""Per-reference ranked lists of instrument samples by cosine similarity.
+
+	For every reference sample, maintains a ranked list of instrument samples
+	ordered by cosine similarity (most similar first). Pairwise scores are
+	cached in _scores so they are never recomputed.
+
+	Thread-safe: bulk_add(), add(), and remove() are called from the writer
+	thread; get_match() and get_scores() may be called from any thread.
+
+	Attributes:
+		_lock:        Mutex protecting all mutable state.
+		_ref_vectors: Precomputed reference vectors {name_upper: 9-element array}.
+		              Set once at construction; never mutated.
+		_rankings:    Per-reference ranked lists {name_upper: [RankedMatch, ...]}.
+		              Always sorted descending by score.
+		_scores:      Score cache {sample_id: {name_upper: score}}.
+		              Also acts as a reverse index for O(M) eviction.
+	"""
+
+	def __init__ (self, reference_library: subsample.library.ReferenceLibrary) -> None:
+
+		self._lock = threading.Lock()
+
+		# Precompute reference vectors once — references never change after init
+		self._ref_vectors: dict[str, numpy.ndarray] = {
+			rec.name.upper(): rec.spectral.as_vector()
+			for rec in reference_library.all()
+		}
+		self._rankings: dict[str, list[RankedMatch]] = {
+			name: [] for name in self._ref_vectors
+		}
+
+		# Maps sample_id → {ref_name_upper → score}.
+		# Doubles as a reverse index: to evict a sample, pop its entry here
+		# and remove it from each referenced ranking list.
+		self._scores: dict[int, dict[str, float]] = {}
+
+	def bulk_add (self, records: list[subsample.library.SampleRecord]) -> None:
+
+		"""Add many instrument samples using vectorised similarity computation.
+
+		Intended for startup: call after load_instrument_library() to populate
+		the matrix from all pre-loaded samples in a single batch. Uses matrix
+		multiplication to compute all N × M scores at once.
+
+		Args:
+			records: Instrument samples to add. Duplicates are overwritten.
+		"""
+
+		if not records or not self._ref_vectors:
+			return
+
+		ref_names = list(self._ref_vectors.keys())
+		ref_matrix = numpy.array(
+			[self._ref_vectors[n] for n in ref_names], dtype=numpy.float32
+		)  # M × 9
+
+		inst_matrix = numpy.array(
+			[r.spectral.as_vector() for r in records], dtype=numpy.float32
+		)  # N × 9
+
+		# Normalise rows; zero vectors remain zero (cosine score will be 0.0)
+		inst_norms = numpy.linalg.norm(inst_matrix, axis=1, keepdims=True)
+		ref_norms  = numpy.linalg.norm(ref_matrix,  axis=1, keepdims=True)
+
+		inst_normed = numpy.where(inst_norms > 0, inst_matrix / inst_norms, 0.0)
+		ref_normed  = numpy.where(ref_norms  > 0, ref_matrix  / ref_norms,  0.0)
+
+		scores_matrix = (inst_normed @ ref_normed.T).astype(numpy.float64)  # N × M
+
+		with self._lock:
+
+			# Populate score cache for each instrument
+			for i, record in enumerate(records):
+				self._scores[record.sample_id] = {
+					ref_names[j]: float(scores_matrix[i, j])
+					for j in range(len(ref_names))
+				}
+
+			# Build each reference's ranked list via argsort descending
+			for j, ref_name in enumerate(ref_names):
+				col   = scores_matrix[:, j]
+				order = numpy.argsort(-col)
+				self._rankings[ref_name] = [
+					RankedMatch(
+						sample_id = records[int(k)].sample_id,
+						score     = float(col[int(k)]),
+					)
+					for k in order
+				]
+
+	def add (self, record: subsample.library.SampleRecord) -> None:
+
+		"""Add one instrument sample and insert it into each reference's ranked list.
+
+		Called after each live capture. Computes similarity against all M
+		references and inserts at the correct position (O(M log N)).
+
+		Args:
+			record: The newly captured instrument sample.
+		"""
+
+		if not self._ref_vectors:
+			return
+
+		vec = record.spectral.as_vector()
+		sid = record.sample_id
+
+		with self._lock:
+			score_row: dict[str, float] = {}
+
+			for ref_name, ref_vec in self._ref_vectors.items():
+				score = _cosine_similarity(vec, ref_vec)
+				score_row[ref_name] = score
+				bisect.insort(
+					self._rankings[ref_name],
+					RankedMatch(sample_id=sid, score=score),
+					key=lambda m: -m.score,
+				)
+
+			self._scores[sid] = score_row
+
+	def remove (self, sample_ids: list[int]) -> None:
+
+		"""Remove evicted instrument samples from all ranked lists.
+
+		Call with the list of IDs returned by InstrumentLibrary.add() to keep
+		the matrix consistent with the instrument library.
+
+		Args:
+			sample_ids: Instrument sample IDs to remove.
+		"""
+
+		if not sample_ids:
+			return
+
+		with self._lock:
+			for sid in sample_ids:
+				ref_scores = self._scores.pop(sid, {})
+
+				for ref_name in ref_scores:
+					ranked = self._rankings.get(ref_name)
+					if ranked is None:
+						continue
+
+					for i, m in enumerate(ranked):
+						if m.sample_id == sid:
+							del ranked[i]
+							break
+
+	def get_match (
+		self,
+		reference_name: str,
+		rank: int = 0,
+	) -> typing.Optional[int]:
+
+		"""Return the sample_id of the instrument at a given rank for a reference.
+
+		Args:
+			reference_name: Reference sample name (case-insensitive).
+			rank:           0 = most similar, 1 = second most similar, etc.
+
+		Returns:
+			sample_id of the instrument at the given rank, or None if the
+			reference name is unknown, rank is out of bounds, or no instrument
+			samples have been added yet.
+		"""
+
+		with self._lock:
+			ranked = self._rankings.get(reference_name.upper())
+			if ranked is None or rank >= len(ranked):
+				return None
+			return ranked[rank].sample_id
+
+	def get_matches (
+		self,
+		reference_name: str,
+		limit: int = 0,
+	) -> list[RankedMatch]:
+
+		"""Return the top-ranked instrument matches for a reference.
+
+		Args:
+			reference_name: Reference sample name (case-insensitive).
+			limit:          Maximum number of results (0 = all).
+
+		Returns:
+			Shallow copy of the ranked list, sliced to limit. Empty if the
+			reference name is unknown or no instruments have been added.
+		"""
+
+		with self._lock:
+			ranked = self._rankings.get(reference_name.upper(), [])
+			if limit > 0:
+				return ranked[:limit]
+			return ranked[:]
+
+	def get_scores (self, sample_id: int) -> list[SimilarityScore]:
+
+		"""Return similarity scores of one instrument against all references.
+
+		Uses cached scores — no recomputation. Equivalent to
+		score_against_library() but reads from the matrix.
+
+		Args:
+			sample_id: Instrument sample ID (must have been added via add() or
+			           bulk_add()).
+
+		Returns:
+			List of SimilarityScore sorted descending by score.
+			Empty if the sample_id is not in the matrix.
+		"""
+
+		with self._lock:
+			ref_scores = self._scores.get(sample_id, {})
+
+		return sorted(
+			[SimilarityScore(name=name, score=score) for name, score in ref_scores.items()],
+			key=lambda s: s.score,
+			reverse=True,
+		)
+
+	def __len__ (self) -> int:
+
+		"""Number of instrument samples currently tracked."""
+
+		with self._lock:
+			return len(self._scores)
+
+	def __repr__ (self) -> str:
+
+		with self._lock:
+			n_refs = len(self._rankings)
+			n_inst = len(self._scores)
+		return f"SimilarityMatrix({n_refs} refs × {n_inst} instruments)"
 
 
 def _cosine_similarity (a: numpy.ndarray, b: numpy.ndarray) -> float:
