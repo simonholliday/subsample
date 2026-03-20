@@ -56,8 +56,14 @@ environment becomes an instant, organized sample pack.
   manually reassign samples to categories during recording session.
 - **MIDI note assignment** - allocate MIDI trigger notes based on sample classification;
   notes can be replaced in real time as better examples arrive; manual override supported.
+- **Audio output device selection** - choose a playback interface by name in config,
+  with the same auto-select / interactive-menu fallback used for audio input.
 - **MIDI playback device** - receive MIDI note triggers and play back the assigned sample
-  for each note.
+  for each note; MIDI note velocity mapped to playback volume at the point of output.
+- **Polyphonic playback** - multiple samples can play simultaneously; each active voice
+  contributes to the output mix.
+- **Mix management** - per-voice gain staging to prevent clipping when multiple samples
+  overlap; configurable mixing strategy (e.g. normalise to peak, fixed headroom).
 - **Pitch re-mapping** - recognise tonal samples and map them across a keyboard range
   centered on their recorded pitch, so a single sample can be played at any pitch.
 - **BPM time-stretching** - warp rhythmic samples to a target tempo to fit a song or loop.
