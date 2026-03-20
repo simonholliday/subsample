@@ -117,7 +117,8 @@ class LevelDetector:
 		"""
 
 		chunk_rms = _compute_rms(chunk)
-		self._update_ambient(chunk_rms)
+		if self._state != DetectorState.RECORDING:
+			self._update_ambient(chunk_rms)
 
 		if self._state == DetectorState.WARMUP:
 			return self._handle_warmup()

@@ -126,8 +126,46 @@ class TestHoldTime:
 		assert result is not None
 		assert detector.state == subsample.detector.DetectorState.IDLE
 
+	def test_ambient_not_updated_during_recording (self) -> None:
+		"""Ambient EMA must not track the signal while recording is active.
+
+		ema_alpha=0.2: without the freeze, ambient drifts toward the signal level
+		and SNR drops below 6 dB after ~4 loud chunks, ending the recording early.
+		With the freeze, the 14 dB SNR established at trigger is preserved and the
+		recording continues for as long as the signal is present.
+
+		Note: ema_alpha must not be too high (e.g. 0.9), because _update_ambient
+		runs on the trigger chunk while still in IDLE — a very high alpha would push
+		ambient so close to signal that the threshold is never exceeded.
+		"""
+		detector = _make_detector(
+			snr_threshold_db=6.0,
+			hold_time=0.5,
+			ema_alpha=0.2,
+			sample_rate=1000,
+			chunk_size=100,
+		)
+
+		# Seed a quiet ambient
+		detector.process_chunk(_silent_chunk(), current_frame=100)
+
+		# Trigger recording (ambient updates in IDLE, then state → RECORDING)
+		detector.process_chunk(_loud_chunk(), current_frame=200)
+		assert detector.state == subsample.detector.DetectorState.RECORDING
+		ambient_after_trigger = detector.ambient_rms
+
+		# Feed 20 more loud chunks — ambient must remain frozen during RECORDING
+		for i in range(2, 22):
+			result = detector.process_chunk(_loud_chunk(), current_frame=100 + i * 100)
+			assert result is None, "Recording ended early — ambient EMA is still drifting"
+			assert detector.ambient_rms == ambient_after_trigger, (
+				"Ambient EMA changed during recording"
+			)
+
+		assert detector.state == subsample.detector.DetectorState.RECORDING
+
 	def test_recording_extends_while_signal_present (self) -> None:
-		# hold_time=0.2 → 2 hold chunks; ema_alpha=0.01 so ambient adapts slowly
+		# hold_time=0.2 → 2 hold chunks
 		detector = _make_detector(hold_time=0.2, sample_rate=1000, chunk_size=100, ema_alpha=0.01)
 
 		# Seed ambient
@@ -198,7 +236,7 @@ class TestBufferOverflow:
 
 	def test_force_end_when_max_frames_reached (self) -> None:
 		# chunk_size=100, max_recording_frames=500 → force-end after 5 loud chunks
-		cfg = _make_detection_config(ema_alpha=0.01)
+		cfg = _make_detection_config()
 		detector = subsample.detector.LevelDetector(
 			cfg,
 			sample_rate=1000,
@@ -226,7 +264,7 @@ class TestBufferOverflow:
 
 	def test_no_force_end_when_limit_is_zero (self) -> None:
 		# max_recording_frames=0 disables the overflow check
-		cfg = _make_detection_config(ema_alpha=0.01)
+		cfg = _make_detection_config()
 		detector = subsample.detector.LevelDetector(
 			cfg,
 			sample_rate=1000,
