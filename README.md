@@ -214,15 +214,49 @@ The third line shows pitch and timbre data (raw values, not normalised):
 - Python 3.12+
 - PortAudio (required by PyAudio - install via your system package manager: `apt install portaudio19-dev` or `brew install portaudio`)
 
-## Development
+## Tests
+
+This project uses `pytest`. Install test dependencies and run with:
 
 ```bash
-# Install with dev dependencies
 pip install -e ".[dev]"
-
-# Run tests
 pytest
+```
 
-# Type check
+## Type Checking
+
+This project uses mypy for static type checking. Run locally with:
+
+```bash
+pip install -e ".[dev]"
 mypy subsample
 ```
+
+## Dependencies and Credits
+
+Subsample makes use of these excellent open-source libraries:
+
+| Library | Purpose | License |
+|---------|---------|---------|
+| [PyAudio ↗](https://people.csail.mit.edu/hubert/pyaudio/) | Audio device I/O (PortAudio bindings) | MIT |
+| [PyYAML ↗](https://github.com/yaml/pyyaml) | YAML config loading | MIT |
+| [NumPy ↗](https://numpy.org/) | Numerical array operations | BSD-3-Clause |
+| [librosa ↗](https://librosa.org/) | Audio analysis (spectral, rhythm, pitch) | ISC |
+| [SciPy ↗](https://scipy.org/) | Signal processing (onset detection, filtering) | BSD-3-Clause |
+| [SoundFile ↗](https://python-soundfile.readthedocs.io/) | WAV file reading for library pre-load | BSD-3-Clause |
+
+## About the Author
+
+Subsample was created by me, Simon Holliday ([simonholliday.com ↗](https://simonholliday.com/)), a senior technologist and a junior (but trying) musician. From running an electronic music label in the 2000s to prototyping new passive SONAR techniques for defence research, my work has often explored the intersection of code and sound.
+
+## License
+
+Subsample is released under the [GNU Affero General Public License v3.0](LICENSE) (AGPLv3).
+
+You are free to use, modify, and distribute this software under the terms of the AGPL. If you run a modified version of Subsample as part of a network service, you must make the source code available to its users.
+
+All runtime dependencies are permissively licensed (MIT, ISC, BSD-3-Clause) and compatible with AGPLv3.
+
+## Commercial licensing
+
+If you wish to use Subsample in a proprietary or closed-source product without the obligations of the AGPL, please contact [simon.holliday@protonmail.com] to discuss a commercial license.
