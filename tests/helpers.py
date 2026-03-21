@@ -38,6 +38,8 @@ def _make_spectral () -> subsample.analysis.AnalysisResult:
 		harmonic_ratio     = 0.7,
 		spectral_contrast  = 0.8,
 		voiced_fraction    = 0.9,
+		log_attack_time    = 0.15,
+		spectral_flux      = 0.45,
 	)
 
 
@@ -64,7 +66,17 @@ def _make_pitch () -> subsample.analysis.PitchResult:
 		pitch_confidence     = 0.92,
 		chroma_profile       = tuple(float(i) / 12.0 for i in range(12)),
 		dominant_pitch_class = 9,
-		mfcc                 = tuple(float(i) for i in range(13)),
+	)
+
+
+def _make_timbre () -> subsample.analysis.TimbreResult:
+
+	"""Return a representative TimbreResult with distinct per-field values."""
+
+	return subsample.analysis.TimbreResult(
+		mfcc       = tuple(float(i) for i in range(13)),
+		mfcc_delta = tuple(float(i) * 0.1 for i in range(13)),
+		mfcc_onset = tuple(float(i) * 0.5 for i in range(13)),
 	)
 
 

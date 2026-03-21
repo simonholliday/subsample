@@ -360,7 +360,6 @@ def select_device (devices: list[DeviceInfo]) -> int:
 		print(f"  Please enter a number between 0 and {len(devices) - 1}.")
 
 
-
 def get_pyaudio_format (bit_depth: int) -> int:
 
 	"""Map a bit depth integer to the corresponding PyAudio format constant.

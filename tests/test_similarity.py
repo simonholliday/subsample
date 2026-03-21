@@ -23,6 +23,7 @@ def _make_spectral (**overrides: float) -> subsample.analysis.AnalysisResult:
 		spectral_flatness=0.5, attack=0.5, release=0.5,
 		spectral_centroid=0.5, spectral_bandwidth=0.5,
 		zcr=0.5, harmonic_ratio=0.5, spectral_contrast=0.5, voiced_fraction=0.5,
+		log_attack_time=0.5, spectral_flux=0.5,
 	)
 	defaults.update(overrides)
 	return subsample.analysis.AnalysisResult(**defaults)
@@ -45,14 +46,18 @@ def _make_record (name: str, spectral: subsample.analysis.AnalysisResult) -> sub
 		pitch_confidence=0.0,
 		chroma_profile=tuple(0.0 for _ in range(12)),
 		dominant_pitch_class=-1,
+	)
+	timbre = subsample.analysis.TimbreResult(
 		mfcc=tuple(0.0 for _ in range(13)),
+		mfcc_delta=tuple(0.0 for _ in range(13)),
+		mfcc_onset=tuple(0.0 for _ in range(13)),
 	)
 	params = subsample.analysis.compute_params(44100)
 
 	return subsample.library.SampleRecord(
-		sample_id=subsample.library._allocate_id(),
+		sample_id=subsample.library.allocate_id(),
 		name=name, spectral=spectral, rhythm=rhythm,
-		pitch=pitch, params=params, duration=1.0,
+		pitch=pitch, timbre=timbre, params=params, duration=1.0,
 	)
 
 

@@ -390,6 +390,7 @@ def _make_on_complete (
 		spectral: subsample.analysis.AnalysisResult,
 		rhythm: subsample.analysis.RhythmResult,
 		pitch: subsample.analysis.PitchResult,
+		timbre: subsample.analysis.TimbreResult,
 		duration: float,
 		audio: numpy.ndarray,
 	) -> None:
@@ -403,11 +404,12 @@ def _make_on_complete (
 		)
 
 		record = subsample.library.SampleRecord(
-			sample_id = subsample.library._allocate_id(),
+			sample_id = subsample.library.allocate_id(),
 			name      = filepath.stem,
 			spectral  = spectral,
 			rhythm    = rhythm,
 			pitch     = pitch,
+			timbre    = timbre,
 			params    = analysis_params,
 			duration  = duration,
 			audio     = audio,

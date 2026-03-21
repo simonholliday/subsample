@@ -25,10 +25,11 @@ environment becomes an instant, organized sample pack.
   timestamped WAV output.
 - **Device selection** - specify the input device by name in `config.yaml`; falls back to
   interactive menu or auto-select when one device is present.
-- **Feature analysis** - 9 normalised spectral metrics (flatness, attack, release,
+- **Feature analysis** - 11 normalised spectral metrics (flatness, attack, release,
   centroid, bandwidth, zero-crossing rate, harmonic ratio, spectral contrast, voiced
-  fraction); rhythm analysis (BPM, beats, pulses, onsets); pitch analysis (fundamental
-  frequency, pitch class, chroma profile, MFCC timbre fingerprint).
+  fraction, log-attack time, spectral flux); rhythm analysis (BPM, beats, pulses,
+  onsets); pitch analysis (fundamental frequency, pitch class, chroma profile, MFCC
+  timbre fingerprint, delta-MFCC timbre trajectory, onset-weighted MFCC).
 - **File analysis** - `scripts/analyze_file.py` runs the same analysis pipeline on any
   local audio file (WAV, FLAC, AIFF, OGG, etc.).
 - **Reference sample library** - load pre-analyzed reference sounds from disk; lookups
@@ -52,13 +53,18 @@ environment becomes an instant, organized sample pack.
 
 ## In Progress
 
-- **Extended similarity** - spectral fingerprint ranked lists are in place; future work:
-  extend to timbre fingerprints (MFCC cosine distance) and rhythm pattern matching.
+- **Extended similarity** - spectral fingerprint ranked lists are in place; next: integrate
+  the new percussive features (delta-MFCC, onset-weighted MFCC, log-attack time, spectral
+  flux) into the comparison vector to improve snare/cymbal/kick discrimination.
 - **Automatic sample classification** - infrastructure in place; next: wire ranked match
   results to a simple classifier (e.g. "if top reference match is KICK, classify as KICK").
 
 ## Planned
 
+- **Multi-band energy envelope** - split the spectrum into 3–5 frequency bands (sub-bass,
+  low-mid, mid, presence, air) and compute per-band peak energy and decay rate; would
+  directly encode the physical signature of drum types (kick = sub-bass dominant; snare =
+  mid + presence; hi-hat = air) and improve classification and similarity for percussion.
 - **Interactive classification** - allow live adjustment of classification thresholds;
   manually reassign samples to categories during recording session.
 - **MIDI note assignment** - allocate MIDI trigger notes based on sample classification;
@@ -208,7 +214,7 @@ This runs the same analysis pipeline used during live capture and prints three l
 
 ```
 rhythm:   tempo=120.2bpm  beats=4  pulses=12  onsets=4
-spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001  zcr=0.120  harmonic=0.821  contrast=0.310  voiced=0.940
+spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001  zcr=0.120  harmonic=0.821  contrast=0.310  voiced=0.940  log_attack=0.000  flux=0.312
 pitch:    pitch=440.0Hz  chroma=A  pitch_conf=0.89
 ```
 
@@ -221,7 +227,7 @@ The first line shows rhythm properties (not normalised):
 The second line shows spectral metrics, each in the range [0.0, 1.0]:
 - **duration** - Recording length in seconds
 - **flatness** - 0 = tonal (e.g. sine wave), 1 = noisy
-- **attack** - 0 = instant/percussive onset, 1 = gradual build-up
+- **attack** - 0 = instant/percussive onset, 1 = gradual build-up (RMS energy based)
 - **release** - 0 = sudden stop, 1 = long sustain/decay tail
 - **centroid** - 0 = bassy/low-frequency, 1 = trebly/high-frequency
 - **bandwidth** - 0 = narrow/pure tone, 1 = wide/spectrally complex
@@ -229,11 +235,19 @@ The second line shows spectral metrics, each in the range [0.0, 1.0]:
 - **harmonic** - Harmonic energy fraction (HPSS): 0 = percussive, 1 = harmonic/tonal
 - **contrast** - Spectral peak-vs-valley contrast: 0 = flat spectrum, 1 = strong peaks
 - **voiced** - Fraction of frames with detected pitch: 0 = unpitched, 1 = clearly pitched
+- **log_attack** - 0 = instant spectral onset, 1 = very slow (spectral flux based)
+- **flux** - Mean spectral flux: 0 = static/barely-changing spectrum, 1 = rapidly evolving
 
 The third line shows pitch and timbre data (raw values, not normalised):
 - **pitch** - Dominant fundamental frequency in Hz, or "none" for unpitched audio
 - **chroma** - Dominant pitch class (C, C#, D, … B), or "none" for unpitched audio
 - **pitch_conf** - pyin pitch detection confidence [0, 1] (use with `voiced` to judge reliability)
+
+Three MFCC timbre fingerprints are computed and stored in each sample's `.analysis.json`
+sidecar (not shown in the analysis script output - used for similarity matching):
+- **mfcc** - 13 mean MFCC coefficients; captures average timbral character
+- **mfcc_delta** - 13 mean delta-MFCC coefficients; captures timbre trajectory (attack-to-decay shift)
+- **mfcc_onset** - 13 onset-weighted MFCC coefficients; emphasises the attack portion of the sound
 
 ## Requirements
 

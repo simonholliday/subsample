@@ -407,6 +407,8 @@ class TestAnalyzeMono:
 		assert 0.0 <= result.harmonic_ratio <= 1.0
 		assert 0.0 <= result.spectral_contrast <= 1.0
 		assert 0.0 <= result.voiced_fraction <= 1.0
+		assert 0.0 <= result.log_attack_time <= 1.0
+		assert 0.0 <= result.spectral_flux <= 1.0
 
 	def test_matches_analyze_for_integer_input (self) -> None:
 		"""analyze_mono and analyze should agree on the same audio content."""
@@ -463,6 +465,57 @@ class TestAnalyzeMono:
 		assert isinstance(result, subsample.analysis.AnalysisResult)
 
 
+class TestSpectralOnsetFeatures:
+
+	"""Tests for log_attack_time and spectral_flux in AnalysisResult."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _percussive_click (self, n: int = 22050) -> numpy.ndarray:
+		"""Sharp transient: single high-amplitude frame then silence."""
+		signal = numpy.zeros(n, dtype=numpy.float32)
+		signal[0:10] = 0.9
+		return signal
+
+	def _sustained_tone (self, n: int = 22050) -> numpy.ndarray:
+		"""Sustained sine wave: constant amplitude throughout."""
+		t = numpy.arange(n) / 44100
+		return (numpy.sin(2 * numpy.pi * 440 * t) * 0.9).astype(numpy.float32)
+
+	def _gradual_ramp (self, n: int = 22050) -> numpy.ndarray:
+		"""Linear fade-in from silence to full amplitude."""
+		return numpy.linspace(0.0, 0.9, n).astype(numpy.float32)
+
+	def test_log_attack_time_in_range (self) -> None:
+		"""log_attack_time must be in [0.0, 1.0] for all signal types."""
+		for signal in [self._percussive_click(), self._sustained_tone(), self._gradual_ramp()]:
+			result = subsample.analysis.analyze_mono(signal, self._params())
+			assert 0.0 <= result.log_attack_time <= 1.0
+
+	def test_spectral_flux_in_range (self) -> None:
+		"""spectral_flux must be in [0.0, 1.0] for all signal types."""
+		for signal in [self._percussive_click(), self._sustained_tone(), self._gradual_ramp()]:
+			result = subsample.analysis.analyze_mono(signal, self._params())
+			assert 0.0 <= result.spectral_flux <= 1.0
+
+	def test_percussive_has_lower_log_attack_than_ramp (self) -> None:
+		"""A sharp click should have a shorter log_attack_time than a slow ramp."""
+		click_result = subsample.analysis.analyze_mono(self._percussive_click(), self._params())
+		ramp_result = subsample.analysis.analyze_mono(self._gradual_ramp(), self._params())
+
+		assert click_result.log_attack_time < ramp_result.log_attack_time
+
+	def test_empty_returns_zero_onset_features (self) -> None:
+		"""Empty audio should produce zero log_attack_time and spectral_flux."""
+		result = subsample.analysis.analyze_mono(
+			numpy.zeros(0, dtype=numpy.float32), self._params()
+		)
+
+		assert result.log_attack_time == 0.0
+		assert result.spectral_flux == 0.0
+
+
 class TestFormatResult:
 
 	"""Tests for the shared result formatting function."""
@@ -478,6 +531,8 @@ class TestFormatResult:
 			harmonic_ratio=0.845,
 			spectral_contrast=0.210,
 			voiced_fraction=0.933,
+			log_attack_time=0.123,
+			spectral_flux=0.456,
 		)
 
 	def test_contains_all_field_names (self) -> None:
@@ -494,6 +549,8 @@ class TestFormatResult:
 		assert "harmonic=" in s
 		assert "contrast=" in s
 		assert "voiced=" in s
+		assert "log_attack=" in s
+		assert "flux=" in s
 
 	def test_duration_formatted_correctly (self) -> None:
 		"""Duration should appear as e.g. 'duration=0.07s'."""
@@ -514,6 +571,8 @@ class TestFormatResult:
 		assert "harmonic=0.845" in s
 		assert "contrast=0.210" in s
 		assert "voiced=0.933" in s
+		assert "log_attack=0.123" in s
+		assert "flux=0.456" in s
 
 	def test_returns_single_line (self) -> None:
 		"""Output should be a single line with no newlines."""
@@ -891,47 +950,83 @@ class TestAnalyzePitch:
 		rng = numpy.random.default_rng(seed=17)
 		return rng.random(int(0.5 * 44100)).astype(numpy.float32) * 2.0 - 1.0
 
-	def test_returns_pitch_result_type (self) -> None:
-		"""analyze_pitch() should return a PitchResult instance."""
-		result = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+	def test_returns_pitch_and_timbre_types (self) -> None:
+		"""analyze_pitch() should return a (PitchResult, TimbreResult) tuple."""
+		pitch, timbre = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
 
-		assert isinstance(result, subsample.analysis.PitchResult)
+		assert isinstance(pitch, subsample.analysis.PitchResult)
+		assert isinstance(timbre, subsample.analysis.TimbreResult)
 
 	def test_sine_440_detects_pitch_near_440 (self) -> None:
 		"""A 440 Hz sine should yield dominant_pitch_hz close to 440."""
-		result = subsample.analysis.analyze_pitch(self._float_sine(440.0), self._params())
+		pitch, _ = subsample.analysis.analyze_pitch(self._float_sine(440.0), self._params())
 
 		# pyin has some tolerance; accept within ±10 Hz
-		assert abs(result.dominant_pitch_hz - 440.0) < 10.0
+		assert abs(pitch.dominant_pitch_hz - 440.0) < 10.0
 
 	def test_sine_dominant_pitch_class_is_a (self) -> None:
 		"""A 440 Hz tone is A; dominant_pitch_class should be 9 (A = index 9)."""
-		result = subsample.analysis.analyze_pitch(self._float_sine(440.0), self._params())
+		pitch, _ = subsample.analysis.analyze_pitch(self._float_sine(440.0), self._params())
 
-		assert result.dominant_pitch_class == 9
+		assert pitch.dominant_pitch_class == 9
 
 	def test_chroma_profile_has_12_elements (self) -> None:
 		"""chroma_profile must always have exactly 12 elements (one per pitch class)."""
-		result = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+		pitch, _ = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
 
-		assert len(result.chroma_profile) == 12
+		assert len(pitch.chroma_profile) == 12
 
 	def test_mfcc_has_correct_count (self) -> None:
 		"""mfcc must have exactly _N_MFCC elements."""
-		result = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+		_, timbre = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
 
-		assert len(result.mfcc) == subsample.analysis._N_MFCC
+		assert len(timbre.mfcc) == subsample.analysis._N_MFCC
+
+	def test_mfcc_delta_has_correct_count (self) -> None:
+		"""mfcc_delta must have exactly _N_MFCC elements."""
+		_, timbre = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+
+		assert len(timbre.mfcc_delta) == subsample.analysis._N_MFCC
+
+	def test_mfcc_onset_has_correct_count (self) -> None:
+		"""mfcc_onset must have exactly _N_MFCC elements."""
+		_, timbre = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+
+		assert len(timbre.mfcc_onset) == subsample.analysis._N_MFCC
+
+	def test_mfcc_delta_differs_from_mfcc (self) -> None:
+		"""mfcc_delta should be meaningfully different from the plain mfcc vector."""
+		_, timbre = subsample.analysis.analyze_pitch(self._float_sine(), self._params())
+
+		# Delta MFCCs encode temporal change, not absolute timbre — they will
+		# differ from the mean MFCCs (though both are small for a steady sine)
+		assert timbre.mfcc_delta != timbre.mfcc
+
+	def test_mfcc_onset_differs_from_mfcc (self) -> None:
+		"""mfcc_onset should differ from plain mfcc for signals with a clear attack."""
+		# Use a decaying tone so that onset and tail have distinct timbres
+		n = int(0.5 * 44100)
+		t = numpy.arange(n) / 44100
+		envelope = numpy.exp(-5 * t).astype(numpy.float32)
+		decaying = (numpy.sin(2 * numpy.pi * 440 * t) * 0.9 * envelope).astype(numpy.float32)
+
+		_, timbre = subsample.analysis.analyze_pitch(decaying, self._params())
+
+		# Onset-weighted vector weights attack frames more than the mean does
+		assert timbre.mfcc_onset != timbre.mfcc
 
 	def test_empty_array_returns_zero_pitch (self) -> None:
-		"""An empty array should return a zero-filled PitchResult without error."""
+		"""An empty array should return zero-filled PitchResult and TimbreResult."""
 		empty = numpy.zeros(0, dtype=numpy.float32)
-		result = subsample.analysis.analyze_pitch(empty, self._params())
+		pitch, timbre = subsample.analysis.analyze_pitch(empty, self._params())
 
-		assert result.dominant_pitch_hz == 0.0
-		assert result.pitch_confidence == 0.0
-		assert result.dominant_pitch_class == -1
-		assert len(result.chroma_profile) == 12
-		assert len(result.mfcc) == subsample.analysis._N_MFCC
+		assert pitch.dominant_pitch_hz == 0.0
+		assert pitch.pitch_confidence == 0.0
+		assert pitch.dominant_pitch_class == -1
+		assert len(pitch.chroma_profile) == 12
+		assert len(timbre.mfcc) == subsample.analysis._N_MFCC
+		assert len(timbre.mfcc_delta) == subsample.analysis._N_MFCC
+		assert len(timbre.mfcc_onset) == subsample.analysis._N_MFCC
 
 	def test_noise_has_low_confidence (self) -> None:
 		"""White noise has no clear pitch — confidence should be very low.
@@ -940,9 +1035,9 @@ class TestAnalyzePitch:
 		at very low confidence), so we cannot assert dominant_pitch_hz == 0.0.
 		We instead assert that pitch_confidence is below a meaningful threshold.
 		"""
-		result = subsample.analysis.analyze_pitch(self._white_noise(), self._params())
+		pitch, _ = subsample.analysis.analyze_pitch(self._white_noise(), self._params())
 
-		assert result.pitch_confidence < 0.1
+		assert pitch.pitch_confidence < 0.1
 
 
 class TestOnsetDetection:
@@ -1013,7 +1108,6 @@ class TestFormatPitchResult:
 			pitch_confidence=0.92,
 			chroma_profile=tuple(0.0 for _ in range(12)),
 			dominant_pitch_class=9,
-			mfcc=tuple(0.0 for _ in range(13)),
 		)
 
 	def _unpitched_result (self) -> subsample.analysis.PitchResult:
@@ -1022,7 +1116,6 @@ class TestFormatPitchResult:
 			pitch_confidence=0.0,
 			chroma_profile=tuple(0.0 for _ in range(12)),
 			dominant_pitch_class=-1,
-			mfcc=tuple(0.0 for _ in range(13)),
 		)
 
 	def test_contains_all_labels (self) -> None:

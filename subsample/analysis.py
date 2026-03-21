@@ -18,6 +18,8 @@ Spectral metrics (AnalysisResult) — normalised to [0.0, 1.0]:
   harmonic_ratio     — 0 = purely percussive, 1 = purely harmonic (HPSS energy ratio)
   spectral_contrast  — 0 = flat spectrum, 1 = strong spectral peaks-vs-valleys
   voiced_fraction    — 0 = unpitched/noise, 1 = clearly pitched throughout (pyin)
+  log_attack_time    — 0 = instant spectral onset, 1 = very slow onset (flux-based)
+  spectral_flux      — 0 = static spectrum (tone/drone), 1 = rapidly changing spectrum
 
 Rhythm metrics (RhythmResult) — raw values, NOT normalised:
 
@@ -34,7 +36,12 @@ Pitch metrics (PitchResult) — raw structured data, NOT normalised:
   pitch_confidence   — mean pyin voiced probability across voiced frames (0.0–1.0)
   chroma_profile     — 12-element tuple: mean energy per pitch class C through B
   dominant_pitch_class — index 0-11 of strongest pitch class (C=0, C#=1, …, B=11); -1 if unpitched
+
+Timbre metrics (TimbreResult) — timbral fingerprints, NOT normalised:
+
   mfcc               — 13 mean MFCC coefficients for timbre fingerprinting / similarity
+  mfcc_delta         — 13 mean delta-MFCC coefficients (first-order temporal difference)
+  mfcc_onset         — 13 onset-weighted MFCC coefficients (exponential decay from attack)
 """
 
 import dataclasses
@@ -61,12 +68,16 @@ warnings.filterwarnings(
 	category=UserWarning,
 	module="librosa",
 )
+# numpy emits these when analysis runs on very short or silent audio (empty
+# arrays produced by librosa). They are expected and not actionable.
+warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+warnings.filterwarnings("ignore", message="invalid value encountered in divide", category=RuntimeWarning)
 
 
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "1"
+ANALYSIS_VERSION: str = "3"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -121,6 +132,21 @@ _PYIN_FMAX: float = 2093.0   # C7
 # individual harmonics. MFCCs are used for similarity comparison (cosine
 # distance between vectors), not as individual human-readable metrics.
 _N_MFCC: int = 13
+
+# Onset-weighted MFCC: exponential decay time constant in milliseconds.
+# Frames near the onset (attack) are weighted by exp(-t / decay), so the
+# first ~50 ms contribute most. Percussive identity is concentrated at
+# onset; the tail is decay and room, which is less discriminative.
+_ONSET_DECAY_MS: float = 50.0
+
+# Spectral flux normalisation range. librosa.onset.onset_strength() output
+# is in arbitrary units (roughly proportional to mean absolute spectral
+# change per frame). Empirical range for typical audio:
+#   0.01 — near-static tone, barely changing spectrum
+#   5.0  — busy percussive audio with frequent large spectral jumps
+# Log normalisation spreads the useful range; values outside are clamped.
+_FLUX_MIN: float = 0.01
+_FLUX_MAX: float = 5.0
 
 # Pitch class names for formatting: index 0=C, 1=C#, …, 11=B.
 _PITCH_CLASSES: tuple[str, ...] = (
@@ -198,6 +224,20 @@ class AnalysisResult:
 	1.0 = clearly pitched throughout (sustained tone, singing, instrument).
 	Use this to decide whether pitch-related features are meaningful."""
 
+	log_attack_time: float
+	"""Time from first spectral activity to peak spectral flux, log-mapped to [0, 1].
+	0.0 = instant spectral onset (≤ 1 ms — a sharp click or drum hit),
+	1.0 = very gradual spectral build (≥ 2 s — a slow reverb swell).
+	Complements attack (which is RMS-based): spectral flux detects the snare
+	wire rattle before the body resonance appears in the energy envelope."""
+
+	spectral_flux: float
+	"""Mean spectral flux (onset_strength), log-mapped to [0, 1].
+	0.0 = static / barely changing spectrum (drone, sustained tone),
+	1.0 = rapidly and continuously evolving spectrum (busy percussion, brushes).
+	High values indicate sounds where the spectral shape changes frequently,
+	not just at a single transient."""
+
 	def as_vector (self) -> numpy.ndarray:
 
 		"""Return the nine spectral metrics as a float32 1-D array.
@@ -263,12 +303,11 @@ class RhythmResult:
 @dataclasses.dataclass(frozen=True)
 class PitchResult:
 
-	"""Pitch and timbre properties detected from a single recording.
+	"""Pitch properties detected from a single recording.
 
-	Values are NOT normalised to [0, 1]. They represent raw pitch data and
-	timbre fingerprints intended for downstream musical use: deciding which
-	key a sample belongs to, pitch-shifting to a target note, or finding
-	similar-sounding samples via MFCC cosine similarity.
+	Values are NOT normalised to [0, 1]. They represent raw pitch data
+	intended for downstream musical use: deciding which key a sample belongs
+	to, or pitch-shifting to a target note.
 
 	All fields return sensible defaults (0.0, empty tuples, -1) for unpitched
 	or silent audio — check voiced_fraction in AnalysisResult before relying
@@ -297,11 +336,39 @@ class PitchResult:
 	-1 if no chroma energy was detected. Maps to _PITCH_CLASSES for display.
 	Example: A = 9, C = 0, F# = 6. Does not encode octave information."""
 
+
+@dataclasses.dataclass(frozen=True)
+class TimbreResult:
+
+	"""Timbral fingerprints for similarity matching.
+
+	All three fields are 13-element tuples (one value per MFCC coefficient),
+	computed from the mel spectrogram of a recording. They are independent of
+	pitch — two sounds at different pitches with the same timbral character
+	will produce similar MFCC vectors.
+
+	Use cosine distance between vectors of the same type to find similar-sounding
+	samples. See subsample.similarity for the comparison infrastructure.
+	"""
+
 	mfcc: tuple[float, ...]
 	"""13 mean MFCC (Mel-frequency cepstral coefficient) values across all frames.
-	MFCCs capture the coarse spectral shape (timbre) of a sound, independent
-	of pitch. Use cosine distance between mfcc vectors to find similar-sounding
-	samples. Individual coefficients are not humanly interpretable."""
+	Captures the coarse spectral shape (timbre) of a sound, independent of pitch.
+	The most stable fingerprint — good for general timbral similarity."""
+
+	mfcc_delta: tuple[float, ...]
+	"""13 mean delta-MFCC values (first-order temporal differences).
+	Captures how the timbre changes over time rather than its average value.
+	For percussive sounds, the attack-to-decay timbre shift is the primary
+	identity signal — a snare and a tom can have similar mean MFCCs but very
+	different delta-MFCC trajectories."""
+
+	mfcc_onset: tuple[float, ...]
+	"""13 onset-weighted MFCC values (exponential decay weighting from attack).
+	MFCC frames near the onset contribute more than the decay tail, so the
+	vector reflects the timbral character of the attack rather than the
+	average. For short percussive sounds, this is usually more discriminative
+	than the plain mean MFCCs."""
 
 
 def compute_params (sample_rate: int) -> AnalysisParams:
@@ -373,6 +440,8 @@ def analyze (
 			harmonic_ratio=0.0,
 			spectral_contrast=0.0,
 			voiced_fraction=0.0,
+			log_attack_time=0.0,
+			spectral_flux=0.0,
 		)
 
 	mono = to_mono_float(audio, bit_depth)
@@ -417,6 +486,8 @@ def analyze_mono (
 			harmonic_ratio=0.0,
 			spectral_contrast=0.0,
 			voiced_fraction=0.0,
+			log_attack_time=0.0,
+			spectral_flux=0.0,
 		)
 
 	# Clamp n_fft to the signal length for short recordings. librosa zero-pads
@@ -447,6 +518,7 @@ def analyze_mono (
 	harmonic_ratio = _compute_harmonic_ratio(mono, params, D)
 	contrast = _compute_spectral_contrast(params, S_magnitude)
 	voiced_fraction = _compute_voiced_fraction(mono, params, pyin_voiced_flag=_pyin_voiced_flag)
+	log_attack_time, spectral_flux = _compute_spectral_onset_features(params, S_magnitude)
 
 	return AnalysisResult(
 		spectral_flatness=_log_normalize(
@@ -460,6 +532,8 @@ def analyze_mono (
 		harmonic_ratio=harmonic_ratio,
 		spectral_contrast=contrast,
 		voiced_fraction=voiced_fraction,
+		log_attack_time=log_attack_time,
+		spectral_flux=spectral_flux,
 	)
 
 
@@ -613,6 +687,8 @@ def format_result (result: AnalysisResult, duration: float) -> str:
 		f"  harmonic={result.harmonic_ratio:.3f}"
 		f"  contrast={result.spectral_contrast:.3f}"
 		f"  voiced={result.voiced_fraction:.3f}"
+		f"  log_attack={result.log_attack_time:.3f}"
+		f"  flux={result.spectral_flux:.3f}"
 	)
 
 
@@ -671,7 +747,7 @@ def analyze_pitch (
 	params: AnalysisParams,
 	*,
 	_pyin_result: _PYINResult | None = None,
-) -> PitchResult:
+) -> tuple[PitchResult, TimbreResult]:
 
 	"""Detect pitch and timbre properties from a pre-normalised float32 mono array.
 
@@ -694,20 +770,36 @@ def analyze_pitch (
 		              the computation with analyze_mono()).
 
 	Returns:
-		PitchResult with pitch, chroma, and MFCC data.
+		(PitchResult, TimbreResult) — pitch properties and timbral fingerprints.
 	"""
+
+	_empty_timbre = TimbreResult(
+		mfcc=tuple(0.0 for _ in range(_N_MFCC)),
+		mfcc_delta=tuple(0.0 for _ in range(_N_MFCC)),
+		mfcc_onset=tuple(0.0 for _ in range(_N_MFCC)),
+	)
+
+	# Clamp n_fft to signal length, matching the same guard in analyze_mono().
+	# Without this, librosa.feature.mfcc() emits a UserWarning for short
+	# recordings when n_fft exceeds the signal length.
+	if len(mono) > 0:
+		effective_n_fft = min(params.n_fft, len(mono))
+		effective_hop = min(params.hop_length, effective_n_fft)
+		params = dataclasses.replace(params, n_fft=effective_n_fft, hop_length=effective_hop)
 
 	# pyin requires at least one period of fmin to fit in the frame.
 	# Use _run_pyin() so this check and the pyin call are in one place.
 	pyin = _pyin_result if _pyin_result is not None else _run_pyin(mono, params)
 
 	if pyin is None:
-		return PitchResult(
-			dominant_pitch_hz=0.0,
-			pitch_confidence=0.0,
-			chroma_profile=tuple(0.0 for _ in range(12)),
-			dominant_pitch_class=-1,
-			mfcc=tuple(0.0 for _ in range(_N_MFCC)),
+		return (
+			PitchResult(
+				dominant_pitch_hz=0.0,
+				pitch_confidence=0.0,
+				chroma_profile=tuple(0.0 for _ in range(12)),
+				dominant_pitch_class=-1,
+			),
+			_empty_timbre,
 		)
 
 	# --- pyin: probabilistic fundamental frequency estimation ---
@@ -750,9 +842,21 @@ def analyze_pitch (
 	dominant_pitch_class = int(numpy.argmax(chroma_mean)) if chroma_sum > 1e-8 else -1
 
 	# --- mfcc: timbre fingerprint ---
-	# Returns shape (_N_MFCC, n_frames). Mean across time gives a compact
-	# descriptor of the overall timbral character. Not meaningful per-coefficient,
-	# but cosine distance between two mfcc vectors is a good timbre similarity measure.
+	# Returns shape (_N_MFCC, n_frames). Three aggregations are computed:
+	#
+	#   mfcc       — mean across time: coarse timbral character, stable for
+	#                sustained tones; use cosine distance for similarity.
+	#
+	#   mfcc_delta — mean of first-order temporal differences: captures how
+	#                the timbre changes over time rather than its average. A
+	#                snare and a tom can have similar mean MFCCs but diverge
+	#                strongly in delta-MFCC, which encodes the attack-to-decay
+	#                spectral shift.
+	#
+	#   mfcc_onset — exponential decay weighting from the first frame: onset
+	#                frames contribute most; the decay tail is downweighted.
+	#                For percussive sounds the first ~50 ms carry the identity;
+	#                for sustained tones this converges toward mfcc.
 	mfcc_raw = librosa.feature.mfcc(
 		y=mono,
 		sr=params.sample_rate,
@@ -761,14 +865,57 @@ def analyze_pitch (
 		hop_length=params.hop_length,
 	)
 
+	n_mfcc_frames = mfcc_raw.shape[1]
+
+	# Guard: a signal shorter than one MFCC frame produces an empty mfcc_raw.
+	# numpy.mean on an empty axis emits "Mean of empty slice"; just return zeros.
+	if n_mfcc_frames == 0:
+		return (
+			PitchResult(
+				dominant_pitch_hz=dominant_pitch_hz,
+				pitch_confidence=pitch_confidence,
+				chroma_profile=chroma_profile,
+				dominant_pitch_class=dominant_pitch_class,
+			),
+			_empty_timbre,
+		)
+
 	mfcc: tuple[float, ...] = tuple(float(v) for v in numpy.mean(mfcc_raw, axis=1))
 
-	return PitchResult(
-		dominant_pitch_hz=dominant_pitch_hz,
-		pitch_confidence=pitch_confidence,
-		chroma_profile=chroma_profile,
-		dominant_pitch_class=dominant_pitch_class,
-		mfcc=mfcc,
+	# Delta MFCCs: frame-to-frame first-order differences, then time-averaged.
+	# librosa.feature.delta() requires width ≥ 3 (odd) and ≤ n_frames.
+	# Very short recordings can have fewer than 3 MFCC frames — in that case
+	# there is no meaningful temporal gradient, so return all zeros.
+	if n_mfcc_frames < 3:
+		mfcc_delta: tuple[float, ...] = tuple(0.0 for _ in range(_N_MFCC))
+	else:
+		delta_width = min(9, n_mfcc_frames)
+		if delta_width % 2 == 0:
+			delta_width -= 1
+		mfcc_delta_raw = librosa.feature.delta(mfcc_raw, width=delta_width)
+		mfcc_delta = tuple(float(v) for v in numpy.mean(mfcc_delta_raw, axis=1))
+
+	# Onset-weighted MFCCs: exponential decay from frame 0.
+	# decay_frames ≈ how many MFCC frames span _ONSET_DECAY_MS milliseconds.
+	decay_frames = max(1.0, _ONSET_DECAY_MS * params.sample_rate / (1000.0 * params.hop_length))
+	weights = numpy.exp(-numpy.arange(n_mfcc_frames) / decay_frames)
+	weights /= weights.sum()
+	mfcc_onset: tuple[float, ...] = tuple(
+		float(v) for v in (mfcc_raw * weights[numpy.newaxis, :]).sum(axis=1)
+	)
+
+	return (
+		PitchResult(
+			dominant_pitch_hz=dominant_pitch_hz,
+			pitch_confidence=pitch_confidence,
+			chroma_profile=chroma_profile,
+			dominant_pitch_class=dominant_pitch_class,
+		),
+		TimbreResult(
+			mfcc=mfcc,
+			mfcc_delta=mfcc_delta,
+			mfcc_onset=mfcc_onset,
+		),
 	)
 
 
@@ -776,12 +923,12 @@ def analyze_all (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
 	rhythm_cfg: subsample.config.AnalysisConfig,
-) -> tuple[AnalysisResult, RhythmResult, PitchResult]:
+) -> tuple[AnalysisResult, RhythmResult, PitchResult, TimbreResult]:
 
-	"""Run all three analyses (spectral, rhythm, pitch) with shared pyin computation.
+	"""Run all analyses (spectral, rhythm, pitch, timbre) with shared pyin computation.
 
-	Preferred entry point for the recorder and any code that needs all three
-	results. Runs pyin once and passes the result to both analyze_mono() and
+	Preferred entry point for the recorder and any code that needs all results.
+	Runs pyin once and passes the result to both analyze_mono() and
 	analyze_pitch(), avoiding the ~200–300 ms double computation.
 
 	Args:
@@ -790,7 +937,7 @@ def analyze_all (
 		rhythm_cfg: Configurable tempo priors from AnalysisConfig.
 
 	Returns:
-		(spectral, rhythm, pitch) — a triple of result dataclasses.
+		(spectral, rhythm, pitch, timbre) — four result dataclasses.
 	"""
 
 	# Run pyin once; share the result between spectral (voiced_fraction) and pitch.
@@ -798,9 +945,9 @@ def analyze_all (
 
 	rhythm = analyze_rhythm(mono, params, rhythm_cfg)
 	spectral = analyze_mono(mono, params, _pyin_voiced_flag=pyin[1] if pyin is not None else None)
-	pitch = analyze_pitch(mono, params, _pyin_result=pyin)
+	pitch, timbre = analyze_pitch(mono, params, _pyin_result=pyin)
 
-	return spectral, rhythm, pitch
+	return spectral, rhythm, pitch, timbre
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +1051,64 @@ def _log_normalize (value: float, min_ref: float, max_ref: float) -> float:
 		return 1.0
 
 	return math.log(value / min_ref) / math.log(max_ref / min_ref)
+
+
+def _compute_spectral_onset_features (
+	params: AnalysisParams,
+	S_magnitude: numpy.ndarray,
+) -> tuple[float, float]:
+
+	"""Compute log-attack time and mean spectral flux from onset strength.
+
+	Both use librosa.onset.onset_strength() — the spectral flux (half-wave
+	rectified frame-to-frame spectral difference) — rather than RMS energy.
+	Spectral flux detects the start of spectral change (e.g. the snare wire
+	rattle) before that energy peaks in the RMS envelope, making it more
+	sensitive to percussive transients.
+
+	log_attack_time: time from first active onset_strength frame to the peak,
+	    measured in seconds, log-normalised the same way as attack.
+	    0.0 = instantaneous spectral onset (≤ 1 ms), 1.0 = very slow (≥ 2 s).
+
+	spectral_flux: mean onset strength across all frames, log-normalised.
+	    0.0 = barely changing spectrum (static tone), 1.0 = rapidly changing
+	    spectrum (busy percussive audio with frequent spectral jumps).
+
+	Args:
+		params:      FFT params — hop_length and sample_rate control frame timing.
+		S_magnitude: Pre-computed magnitude spectrogram |STFT|, passed from
+		             analyze_mono() to avoid a redundant STFT computation.
+
+	Returns:
+		(log_attack_time, spectral_flux), both in [0.0, 1.0].
+	"""
+
+	# Pass the pre-computed spectrogram directly so no STFT is re-run here.
+	# onset_strength expects a power spectrogram or mel spectrogram but accepts
+	# magnitude; it internally normalises anyway so the result is comparable.
+	onset_env = librosa.onset.onset_strength(
+		S=S_magnitude,
+		sr=params.sample_rate,
+	)
+
+	if onset_env.size == 0 or float(numpy.max(onset_env)) < 1e-8:
+		return (0.0, 0.0)
+
+	# --- log attack time from spectral flux peak ---
+	peak_idx = int(numpy.argmax(onset_env))
+	peak_val = float(onset_env[peak_idx])
+	threshold = peak_val * _ACTIVE_THRESHOLD_RATIO
+
+	active = numpy.where(onset_env >= threshold)[0]
+	seconds_per_frame = params.hop_length / params.sample_rate
+	first_active = int(active[0])
+	attack_seconds = (peak_idx - first_active) * seconds_per_frame
+	log_attack_time = _log_normalize(attack_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
+
+	# --- mean spectral flux, log-normalised ---
+	spectral_flux = _log_normalize(float(numpy.mean(onset_env)), _FLUX_MIN, _FLUX_MAX)
+
+	return (log_attack_time, spectral_flux)
 
 
 def _compute_attack_release (

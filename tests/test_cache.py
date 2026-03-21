@@ -9,7 +9,7 @@ import pytest
 import subsample.analysis
 import subsample.cache
 
-from .helpers import _make_params, _make_pitch, _make_rhythm, _make_spectral, _make_wav
+from .helpers import _make_params, _make_pitch, _make_rhythm, _make_spectral, _make_timbre, _make_wav
 
 
 # ---------------------------------------------------------------------------
@@ -67,18 +67,20 @@ class TestSaveAndLoadRoundTrip:
 		spectral = _make_spectral()
 		rhythm   = _make_rhythm()
 		pitch    = _make_pitch()
+		timbre   = _make_timbre()
 		params   = _make_params()
 		duration = 1.23
 		md5      = subsample.cache.compute_audio_md5(wav)
 
-		subsample.cache.save_cache(wav, md5, params, spectral, rhythm, pitch, duration)
+		subsample.cache.save_cache(wav, md5, params, spectral, rhythm, pitch, timbre, duration)
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		r_spectral, r_rhythm, r_pitch, r_params, r_duration = result
+		r_spectral, r_rhythm, r_pitch, r_timbre, r_params, r_duration = result
 
 		assert r_spectral == spectral
 		assert r_pitch    == pitch
+		assert r_timbre   == timbre
 		assert r_params   == params
 		assert abs(r_duration - duration) < 1e-9
 
@@ -90,7 +92,7 @@ class TestSaveAndLoadRoundTrip:
 		params = _make_params()
 		md5    = subsample.cache.compute_audio_md5(wav)
 
-		subsample.cache.save_cache(wav, md5, params, _make_spectral(), rhythm, _make_pitch(), 1.0)
+		subsample.cache.save_cache(wav, md5, params, _make_spectral(), rhythm, _make_pitch(), _make_timbre(), 1.0)
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
 
@@ -106,7 +108,7 @@ class TestSaveAndLoadRoundTrip:
 		wav = tmp_path / "kick.wav"
 		_make_wav(wav)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
 		assert subsample.cache.cache_path(wav).exists()
 
 
@@ -121,63 +123,86 @@ class TestCacheInvalidation:
 		_make_wav(wav)
 		assert subsample.cache.load_cache(wav) is None
 
-	def test_version_mismatch_returns_none (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+	def test_version_mismatch_reanalyzes_and_returns_result (
+		self,
+		tmp_path: pathlib.Path,
+		monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""Version mismatch with audio present should re-analyze and return a result."""
 		wav = tmp_path / "kick.wav"
-		_make_wav(wav)
+		# Use a long enough WAV for all librosa analysis functions to work
+		_make_wav(wav, n_frames=22050)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
 
 		# Simulate the analysis algorithm being updated
 		monkeypatch.setattr(subsample.analysis, "ANALYSIS_VERSION", "999")
-		assert subsample.cache.load_cache(wav) is None
+		result = subsample.cache.load_cache(wav)
 
-	def test_version_mismatch_logs_warning (
+		# Re-analysis should succeed and return a valid result tuple
+		assert result is not None
+		spectral, rhythm, pitch, timbre, params, duration = result
+		assert isinstance(spectral, subsample.analysis.AnalysisResult)
+
+	def test_version_mismatch_logs_info (
 		self,
 		tmp_path: pathlib.Path,
 		monkeypatch: pytest.MonkeyPatch,
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
+		"""Re-analysis triggered by version mismatch should log at INFO, not WARNING."""
 		wav = tmp_path / "kick.wav"
-		_make_wav(wav)
+		_make_wav(wav, n_frames=22050)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
 
 		monkeypatch.setattr(subsample.analysis, "ANALYSIS_VERSION", "999")
 
 		import logging
-		with caplog.at_level(logging.WARNING, logger="subsample.cache"):
+		with caplog.at_level(logging.INFO, logger="subsample.cache"):
 			subsample.cache.load_cache(wav)
 
-		assert any("Re-analyzing" in r.message for r in caplog.records)
+		assert any(
+			r.levelno == logging.INFO and "Re-analyzing" in r.message
+			for r in caplog.records
+		)
 
-	def test_md5_mismatch_returns_none (self, tmp_path: pathlib.Path) -> None:
+	def test_md5_mismatch_reanalyzes_and_returns_result (self, tmp_path: pathlib.Path) -> None:
+		"""MD5 mismatch (audio changed) should re-analyze and return a result."""
 		wav = tmp_path / "kick.wav"
-		_make_wav(wav, n_frames=1024)
+		_make_wav(wav, n_frames=22050)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
 
 		# Overwrite the WAV with different content
-		_make_wav(wav, n_frames=2048)
+		_make_wav(wav, n_frames=22050)
+		result = subsample.cache.load_cache(wav)
 
-		assert subsample.cache.load_cache(wav) is None
+		assert result is not None
+		spectral, rhythm, pitch, timbre, params, duration = result
+		assert isinstance(spectral, subsample.analysis.AnalysisResult)
 
-	def test_md5_mismatch_logs_warning (
+	def test_md5_mismatch_logs_info (
 		self,
 		tmp_path: pathlib.Path,
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
+		"""Re-analysis triggered by MD5 mismatch should log at INFO, not WARNING."""
 		wav = tmp_path / "kick.wav"
-		_make_wav(wav, n_frames=1024)
+		_make_wav(wav, n_frames=22050)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
 
-		_make_wav(wav, n_frames=2048)
+		_make_wav(wav, n_frames=44100)  # different content → different MD5
 
 		import logging
-		with caplog.at_level(logging.WARNING, logger="subsample.cache"):
+		with caplog.at_level(logging.INFO, logger="subsample.cache"):
 			subsample.cache.load_cache(wav)
 
-		assert any("Re-analyzing" in r.message for r in caplog.records)
+		assert any(
+			r.levelno == logging.INFO and "Re-analyzing" in r.message
+			for r in caplog.records
+		)
 
 	def test_malformed_json_returns_none (self, tmp_path: pathlib.Path) -> None:
 		wav = tmp_path / "kick.wav"
@@ -208,7 +233,7 @@ class TestAtomicWrite:
 		wav = tmp_path / "kick.wav"
 		_make_wav(wav)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
 
 		tmp_files = list(tmp_path.glob("*.tmp*"))
 		assert tmp_files == [], f"Temp files left behind: {tmp_files}"

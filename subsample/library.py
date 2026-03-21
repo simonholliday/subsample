@@ -12,7 +12,7 @@ Provides two distinct in-memory collections:
       prevents unbounded growth. Looked up by numeric ID.
 
 Both collections share the same SampleRecord dataclass. Each record has a
-session-unique numeric ID allocated by _allocate_id().
+session-unique numeric ID allocated by allocate_id().
 
 Name derivation (both libraries):
   BD0025.WAV.analysis.json  →  audio file "BD0025.WAV"  →  name "BD0025"
@@ -44,11 +44,11 @@ _SIDECAR_SUFFIX: str = ".analysis.json"
 
 # Session-unique ID counter. itertools.count is thread-safe (C extension;
 # next() is atomic under the GIL), so callbacks on the writer thread and
-# startup loading on the main thread can both call _allocate_id() safely.
+# startup loading on the main thread can both call allocate_id() safely.
 _id_counter: "itertools.count[int]" = itertools.count(1)
 
 
-def _allocate_id () -> int:
+def allocate_id () -> int:
 
 	"""Return the next session-unique sample ID (1, 2, 3, …).
 
@@ -68,12 +68,13 @@ class SampleRecord:
 	samples (audio contains original-format PCM for playback).
 
 	Fields:
-		sample_id: Session-unique numeric ID (allocated by _allocate_id()).
+		sample_id: Session-unique numeric ID (allocated by allocate_id()).
 		name:      Stem of the audio filename (e.g. "BD0025", "kick").
 		           Preserves original casing from the filename.
-		spectral:  Nine normalised [0, 1] spectral metrics (the spectral fingerprint).
+		spectral:  Eleven normalised [0, 1] spectral metrics (the spectral fingerprint).
 		rhythm:    Tempo, beat grid, pulse curve, onset times.
-		pitch:     Fundamental frequency, chroma profile, MFCC timbre vector.
+		pitch:     Fundamental frequency, chroma profile, pitch class.
+		timbre:    MFCC timbral fingerprints (mfcc, mfcc_delta, mfcc_onset).
 		params:    FFT parameters used when the analysis was computed.
 		duration:  Recording length in seconds.
 		audio:     Original capture-format PCM as a numpy array, shape
@@ -88,6 +89,7 @@ class SampleRecord:
 	spectral:  subsample.analysis.AnalysisResult
 	rhythm:    subsample.analysis.RhythmResult
 	pitch:     subsample.analysis.PitchResult
+	timbre:    subsample.analysis.TimbreResult
 	params:    subsample.analysis.AnalysisParams
 	duration:  float
 	audio:     typing.Optional[numpy.ndarray] = None
@@ -117,7 +119,7 @@ class ReferenceLibrary:
 		"""Build the index from a list of SampleRecords.
 
 		Use load_reference_library() rather than calling this directly.
-		Each record is assigned a session-unique ID via _allocate_id().
+		Each record is assigned a session-unique ID via allocate_id().
 		"""
 
 		# Store records keyed by uppercased name for O(1) case-insensitive lookup.
@@ -307,18 +309,19 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 			# load_sidecar already logged the reason
 			continue
 
-		spectral, rhythm, pitch, params, duration = result
+		spectral, rhythm, pitch, timbre, params, duration = result
 
 		# Derive name: strip ".analysis.json" → audio filename → strip extension
 		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
 		name = pathlib.Path(audio_name).stem
 
 		records.append(SampleRecord(
-			sample_id = _allocate_id(),
+			sample_id = allocate_id(),
 			name      = name,
 			spectral  = spectral,
 			rhythm    = rhythm,
 			pitch     = pitch,
+			timbre    = timbre,
 			params    = params,
 			duration  = duration,
 			audio     = None,
@@ -370,7 +373,7 @@ def load_instrument_library (
 			# load_sidecar already logged the reason
 			continue
 
-		spectral, rhythm, pitch, params, duration = result
+		spectral, rhythm, pitch, timbre, params, duration = result
 
 		# Derive the audio filename from the sidecar name
 		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
@@ -392,11 +395,12 @@ def load_instrument_library (
 			continue
 
 		record = SampleRecord(
-			sample_id = _allocate_id(),
+			sample_id = allocate_id(),
 			name      = name,
 			spectral  = spectral,
 			rhythm    = rhythm,
 			pitch     = pitch,
+			timbre    = timbre,
 			params    = params,
 			duration  = duration,
 			audio     = audio,

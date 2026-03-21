@@ -8,8 +8,13 @@ Cache validity is verified in two ways:
   1. MD5 hash of the audio file — detects if the audio content has changed.
   2. ANALYSIS_VERSION string — detects if the analysis algorithm has changed.
 
-If either check fails, the caller is expected to re-analyze and overwrite the
-cache. A WARNING is logged in that case because re-analysis can be slow.
+On a version mismatch the sidecar is automatically re-analyzed and overwritten,
+provided the corresponding WAV file is present alongside it. Each re-analyzed
+file is logged at INFO level so the user understands the startup delay.
+If the WAV file is absent (e.g. reference sidecars without audio), the stale
+sidecar is skipped and a WARNING is logged.
+
+On an MD5 mismatch (audio content changed) the same re-analysis path is used.
 
 Sidecar filename: <audio_file>.analysis.json
 Example: kick.wav  →  kick.wav.analysis.json
@@ -27,6 +32,8 @@ import typing
 import numpy
 
 import subsample.analysis
+import subsample.audio
+import subsample.config
 
 
 _log = logging.getLogger(__name__)
@@ -39,6 +46,7 @@ _LoadResult = tuple[
 	subsample.analysis.AnalysisResult,
 	subsample.analysis.RhythmResult,
 	subsample.analysis.PitchResult,
+	subsample.analysis.TimbreResult,
 	subsample.analysis.AnalysisParams,
 	float,
 ]
@@ -88,6 +96,7 @@ def save_cache (
 	spectral: subsample.analysis.AnalysisResult,
 	rhythm: subsample.analysis.RhythmResult,
 	pitch: subsample.analysis.PitchResult,
+	timbre: subsample.analysis.TimbreResult,
 	duration: float,
 ) -> None:
 
@@ -102,11 +111,12 @@ def save_cache (
 		params:     FFT parameters used during analysis.
 		spectral:   Spectral analysis result.
 		rhythm:     Rhythm analysis result.
-		pitch:      Pitch and timbre analysis result.
+		pitch:      Pitch analysis result.
+		timbre:     Timbral fingerprint result.
 		duration:   Recording duration in seconds.
 	"""
 
-	payload = _serialize(audio_md5, params, spectral, rhythm, pitch, duration)
+	payload = _serialize(audio_md5, params, spectral, rhythm, pitch, timbre, duration)
 	json_str = json.dumps(payload, indent=2)
 
 	sidecar = cache_path(audio_path)
@@ -153,7 +163,7 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 		audio_path: Path to the audio file.
 
 	Returns:
-		(spectral, rhythm, pitch, params, duration) tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration) tuple on success, else None.
 	"""
 
 	sidecar = cache_path(audio_path)
@@ -162,29 +172,69 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 	if payload is None:
 		return None
 
-	# Version check — must come before the MD5 check (cheaper)
+	# Version check — must come before the MD5 check (cheaper).
+	# When stale, re-analyze and overwrite the sidecar immediately.
 	cached_version = payload.get("analysis_version")
 	if cached_version != subsample.analysis.ANALYSIS_VERSION:
-		_log.warning(
-			"Re-analyzing %s (analysis version changed: %s → %s)",
-			audio_path.name, cached_version, subsample.analysis.ANALYSIS_VERSION,
-		)
-		return None
+		return _reanalyze_and_save(audio_path)
 
 	# MD5 check — reads the audio file; done after version check to skip
-	# disk I/O when the version alone invalidates the cache
+	# disk I/O when the version alone invalidates the cache.
+	# Only re-analyze if audio_md5 is actually present and mismatched — a
+	# missing key means the sidecar is corrupt, which falls through to
+	# _deserialize_payload (which fails with a KeyError and returns None).
 	cached_md5 = payload.get("audio_md5")
 	try:
 		current_md5 = compute_audio_md5(audio_path)
 	except OSError:
-		_log.warning("Re-analyzing %s (audio file not readable)", audio_path.name)
-		return None
+		return _reanalyze_and_save(audio_path)
 
-	if cached_md5 != current_md5:
-		_log.warning("Re-analyzing %s (audio file has changed)", audio_path.name)
-		return None
+	if cached_md5 is not None and cached_md5 != current_md5:
+		return _reanalyze_and_save(audio_path)
 
 	return _deserialize_payload(payload, sidecar.name)
+
+
+def _reanalyze_and_save (audio_path: pathlib.Path) -> _LoadResult | None:
+
+	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
+
+	Called when a sidecar is stale (version or MD5 mismatch) and the audio
+	file is available. Uses default AnalysisConfig values — the same defaults
+	used by the main capture pipeline when no explicit config is given.
+
+	Logs at INFO level so the user understands the per-file analysis delay.
+
+	Args:
+		audio_path: Path to the audio file to re-analyze.
+
+	Returns:
+		(spectral, rhythm, pitch, timbre, params, duration) on success, None on error.
+	"""
+
+	_log.info("Re-analyzing %s (analysis version updated)…", audio_path.name)
+
+	try:
+		file_info = subsample.audio.read_audio_file(audio_path)
+	except (OSError, ValueError) as exc:
+		_log.warning("Could not read %s for re-analysis: %s", audio_path.name, exc)
+		return None
+
+	mono = subsample.analysis.to_mono_float(file_info.audio, file_info.bit_depth)
+	params = subsample.analysis.compute_params(file_info.sample_rate)
+	duration = len(mono) / file_info.sample_rate
+
+	spectral, rhythm, pitch, timbre = subsample.analysis.analyze_all(
+		mono, params, subsample.config.AnalysisConfig(),
+	)
+
+	try:
+		audio_md5 = compute_audio_md5(audio_path)
+		save_cache(audio_path, audio_md5, params, spectral, rhythm, pitch, timbre, duration)
+	except OSError as exc:
+		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
+
+	return (spectral, rhythm, pitch, timbre, params, duration)
 
 
 def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
@@ -202,7 +252,7 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 		sidecar_path: Path to the .analysis.json sidecar file directly.
 
 	Returns:
-		(spectral, rhythm, pitch, params, duration) tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration) tuple on success, else None.
 	"""
 
 	# Unlike load_cache(), a missing sidecar is unexpected here — warn explicitly.
@@ -214,11 +264,18 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 	if payload is None:
 		return None
 
-	# Version check — trust the data if the algorithm hasn't changed
+	# Version check — trust the data if the algorithm hasn't changed.
+	# If stale, re-analyze from the corresponding audio file when available.
 	cached_version = payload.get("analysis_version")
 	if cached_version != subsample.analysis.ANALYSIS_VERSION:
+		audio_name = sidecar_path.name[: -len(_CACHE_SUFFIX)]
+		audio_path = sidecar_path.parent / audio_name
+
+		if audio_path.exists():
+			return _reanalyze_and_save(audio_path)
+
 		_log.warning(
-			"Skipping %s (analysis version mismatch: %s vs current %s)",
+			"Skipping %s (analysis version mismatch: %s → %s; audio file not found)",
 			sidecar_path.name, cached_version, subsample.analysis.ANALYSIS_VERSION,
 		)
 		return None
@@ -270,6 +327,7 @@ def _deserialize_payload (
 		spectral = _deserialize_spectral(payload["spectral"])
 		rhythm   = _deserialize_rhythm(payload["rhythm"])
 		pitch    = _deserialize_pitch(payload["pitch"])
+		timbre   = _deserialize_timbre(payload["timbre"])
 		params   = _deserialize_params(payload["params"])
 		duration = float(payload["duration"])
 
@@ -277,7 +335,7 @@ def _deserialize_payload (
 		_log.warning("Ignoring corrupt %s: %s", label, exc)
 		return None
 
-	return spectral, rhythm, pitch, params, duration
+	return spectral, rhythm, pitch, timbre, params, duration
 
 
 def _serialize (
@@ -286,6 +344,7 @@ def _serialize (
 	spectral: subsample.analysis.AnalysisResult,
 	rhythm: subsample.analysis.RhythmResult,
 	pitch: subsample.analysis.PitchResult,
+	timbre: subsample.analysis.TimbreResult,
 	duration: float,
 ) -> dict[str, typing.Any]:
 
@@ -297,9 +356,10 @@ def _serialize (
 	spectral_dict = dataclasses.asdict(spectral)
 	params_dict   = dataclasses.asdict(params)
 	pitch_dict    = dataclasses.asdict(pitch)
+	timbre_dict   = dataclasses.asdict(timbre)
 
 	# dataclasses.asdict() already converts tuple fields to lists, so
-	# pitch_dict["chroma_profile"] and pitch_dict["mfcc"] are already lists.
+	# pitch_dict["chroma_profile"] and timbre_dict["mfcc"] are already lists.
 
 	rhythm_dict: dict[str, typing.Any] = {
 		"tempo_bpm":       rhythm.tempo_bpm,
@@ -319,6 +379,7 @@ def _serialize (
 		"spectral":         spectral_dict,
 		"rhythm":           rhythm_dict,
 		"pitch":            pitch_dict,
+		"timbre":           timbre_dict,
 	}
 
 
@@ -343,6 +404,8 @@ def _deserialize_spectral (data: dict[str, typing.Any]) -> subsample.analysis.An
 		harmonic_ratio     = float(data.get("harmonic_ratio", 0.0)),
 		spectral_contrast  = float(data.get("spectral_contrast", 0.0)),
 		voiced_fraction    = float(data.get("voiced_fraction", 0.0)),
+		log_attack_time    = float(data.get("log_attack_time", 0.0)),
+		spectral_flux      = float(data.get("spectral_flux", 0.0)),
 	)
 
 
@@ -369,23 +432,18 @@ def _deserialize_pitch (data: dict[str, typing.Any]) -> subsample.analysis.Pitch
 
 	"""Reconstruct a PitchResult from a JSON dict.
 
-	Converts chroma_profile and mfcc lists back to tuples. Uses .get() with
-	empty defaults for forward-compatible field additions (see _deserialize_spectral).
+	Converts chroma_profile list back to a tuple. Uses .get() with empty
+	defaults for forward-compatible field additions (see _deserialize_spectral).
 
-	Raises ValueError if chroma_profile or mfcc have unexpected lengths, so
-	that _deserialize_payload can catch and report the corruption.
+	Raises ValueError if chroma_profile has an unexpected length, so that
+	_deserialize_payload can catch and report the corruption.
 	"""
 
 	chroma_profile = tuple(float(v) for v in data.get("chroma_profile", [0.0] * 12))
-	mfcc           = tuple(float(v) for v in data.get("mfcc", [0.0] * 13))
 
 	if len(chroma_profile) != 12:
 		raise ValueError(
 			f"chroma_profile has {len(chroma_profile)} elements (expected 12)"
-		)
-	if len(mfcc) != 13:
-		raise ValueError(
-			f"mfcc has {len(mfcc)} elements (expected 13)"
 		)
 
 	return subsample.analysis.PitchResult(
@@ -393,7 +451,35 @@ def _deserialize_pitch (data: dict[str, typing.Any]) -> subsample.analysis.Pitch
 		pitch_confidence     = float(data.get("pitch_confidence", 0.0)),
 		chroma_profile       = chroma_profile,
 		dominant_pitch_class = int(data.get("dominant_pitch_class", -1)),
-		mfcc                 = mfcc,
+	)
+
+
+def _deserialize_timbre (data: dict[str, typing.Any]) -> subsample.analysis.TimbreResult:
+
+	"""Reconstruct a TimbreResult from a JSON dict.
+
+	Converts mfcc, mfcc_delta, and mfcc_onset lists back to tuples. Uses .get()
+	with zero defaults for forward-compatible field additions.
+
+	Raises ValueError if any MFCC tuple has an unexpected length, so that
+	_deserialize_payload can catch and report the corruption.
+	"""
+
+	mfcc       = tuple(float(v) for v in data.get("mfcc",       [0.0] * 13))
+	mfcc_delta = tuple(float(v) for v in data.get("mfcc_delta", [0.0] * 13))
+	mfcc_onset = tuple(float(v) for v in data.get("mfcc_onset", [0.0] * 13))
+
+	if len(mfcc) != 13:
+		raise ValueError(f"mfcc has {len(mfcc)} elements (expected 13)")
+	if len(mfcc_delta) != 13:
+		raise ValueError(f"mfcc_delta has {len(mfcc_delta)} elements (expected 13)")
+	if len(mfcc_onset) != 13:
+		raise ValueError(f"mfcc_onset has {len(mfcc_onset)} elements (expected 13)")
+
+	return subsample.analysis.TimbreResult(
+		mfcc       = mfcc,
+		mfcc_delta = mfcc_delta,
+		mfcc_onset = mfcc_onset,
 	)
 
 
