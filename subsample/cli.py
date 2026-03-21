@@ -348,7 +348,7 @@ def main () -> None:
 	# so loading hundreds of pre-existing instrument samples is fast.
 	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix] = None
 	if reference_library is not None:
-		similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library)
+		similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
 		if len(instrument_library) > 0:
 			similarity_matrix.bulk_add(instrument_library.samples())
 		print(f"  Similarity   : {similarity_matrix}")

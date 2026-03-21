@@ -68,6 +68,34 @@ class ReferenceConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class SimilarityConfig:
+
+	weight_spectral: float = 1.0
+	"""Weight applied to the spectral feature group (11 normalised [0, 1] values:
+	flatness, attack, release, centroid, bandwidth, ZCR, harmonic ratio, contrast,
+	voiced fraction, log-attack time, spectral flux). Higher weight = spectral shape
+	dominates the comparison. Range: 0.0–2.0. Set to 0.0 to disable entirely."""
+
+	weight_timbre: float = 1.0
+	"""Weight applied to the sustained-timbre MFCC group (12 mel-frequency cepstral
+	coefficients, coeff 1–12). Captures the steady-state timbral character of a sound —
+	useful for distinguishing instrument families (pad vs pluck vs brass). Higher weight
+	= sustained timbre dominates. Range: 0.0–2.0. Set to 0.0 to disable."""
+
+	weight_timbre_delta: float = 0.5
+	"""Weight applied to the delta-MFCC group (12 first-order differences of the MFCCs).
+	Encodes how the timbre *changes* over the duration of the sound — useful for sounds
+	with an evolving character (attack-to-sustain shift). Secondary signal; default 0.5
+	gives it half the influence of the primary timbre group. Range: 0.0–2.0."""
+
+	weight_timbre_onset: float = 1.0
+	"""Weight applied to the onset-weighted MFCC group (12 MFCCs weighted toward the
+	first ~50 ms of the sound). Captures attack character — critical for percussive
+	discrimination (kick vs snare vs hi-hat all have similar sustain but different
+	attacks). Higher weight = attack character dominates. Range: 0.0–2.0."""
+
+
+@dataclasses.dataclass(frozen=True)
 class InstrumentConfig:
 
 	max_memory_mb: float = 100.0
@@ -92,6 +120,7 @@ class Config:
 	output: OutputConfig
 	analysis: AnalysisConfig = dataclasses.field(default_factory=AnalysisConfig)
 	instrument: InstrumentConfig = dataclasses.field(default_factory=InstrumentConfig)
+	similarity: SimilarityConfig = dataclasses.field(default_factory=SimilarityConfig)
 	reference: typing.Optional[ReferenceConfig] = None
 
 
@@ -255,6 +284,26 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		directory=instrument_raw.get("directory"),
 	)
 
+	similarity_raw: dict[str, typing.Any] = raw.get("similarity", {})
+	similarity = SimilarityConfig(
+		weight_spectral     = float(similarity_raw.get("weight_spectral",      1.0)),
+		weight_timbre       = float(similarity_raw.get("weight_timbre",        1.0)),
+		weight_timbre_delta = float(similarity_raw.get("weight_timbre_delta",  0.5)),
+		weight_timbre_onset = float(similarity_raw.get("weight_timbre_onset",  1.0)),
+	)
+
+	for name, value in [
+		("similarity.weight_spectral",      similarity.weight_spectral),
+		("similarity.weight_timbre",        similarity.weight_timbre),
+		("similarity.weight_timbre_delta",  similarity.weight_timbre_delta),
+		("similarity.weight_timbre_onset",  similarity.weight_timbre_onset),
+	]:
+		if value < 0.0:
+			raise ValueError(
+				f"{name} must be >= 0.0 (got {value}). "
+				"Set to 0.0 to disable a feature group entirely."
+			)
+
 	reference_raw: typing.Optional[dict[str, typing.Any]] = raw.get("reference")
 	if reference_raw is not None:
 		reference: typing.Optional[ReferenceConfig] = ReferenceConfig(
@@ -270,5 +319,6 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		output=output,
 		analysis=analysis,
 		instrument=instrument,
+		similarity=similarity,
 		reference=reference,
 	)

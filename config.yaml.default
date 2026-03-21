@@ -128,6 +128,39 @@ analysis:
   # Range: 150–300 BPM. Typical: 200–300 BPM for fast music.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_analysis_values
 
+# similarity:
+#   weight_spectral: 1.0
+#   # Influence of the spectral feature group on similarity scoring.
+#   # This group covers 11 normalised [0, 1] values: spectral flatness, attack time,
+#   # release time, spectral centroid, spectral bandwidth, zero-crossing rate,
+#   # harmonic ratio, spectral contrast, voiced fraction, log-attack time, and
+#   # spectral flux. It captures the overall character of the sound (bright/dark,
+#   # sharp/soft, tonal/noisy). This is the proven baseline fingerprint.
+#   # Range: 0.0–2.0. Set to 0.0 to disable spectral features entirely.
+#
+#   weight_timbre: 1.0
+#   # Influence of the sustained-timbre MFCC group on similarity scoring.
+#   # 12 mel-frequency cepstral coefficients (coeff 1–12) averaged across the
+#   # full duration of the recording. Captures the steady-state timbral colour —
+#   # useful for distinguishing instrument families (pad vs pluck, strings vs brass).
+#   # Range: 0.0–2.0. Increase for libraries of sustained tonal sounds.
+#   # Set to 0.0 to disable.
+#
+#   weight_timbre_delta: 0.5
+#   # Influence of the delta-MFCC (timbre dynamics) group on similarity scoring.
+#   # 12 first-order frame-to-frame differences of the MFCCs. Encodes how the
+#   # timbre evolves over time — e.g. the attack-to-sustain shift in a plucked
+#   # string. A secondary signal; default 0.5 gives it half the influence of the
+#   # primary timbre groups. Range: 0.0–2.0. Set to 0.0 to disable.
+#
+#   weight_timbre_onset: 1.0
+#   # Influence of the onset-weighted MFCC group on similarity scoring.
+#   # 12 MFCCs computed with exponential emphasis on the first ~50 ms of the
+#   # sound — the attack. This is the most important group for distinguishing
+#   # percussive sounds: kick, snare, and hi-hat all share similar sustained
+#   # timbre but have clearly different attacks. Increase for percussion-heavy
+#   # libraries. Range: 0.0–2.0. Set to 0.0 to disable.
+
 # reference:
 #   directory: "./reference"
 #   Path to a directory containing pre-analyzed reference sounds. Each

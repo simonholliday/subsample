@@ -1,18 +1,36 @@
 """Spectral fingerprint similarity scoring for Subsample.
 
-Compares recordings against reference samples using cosine similarity on
-their spectral fingerprints — the 9-element [0, 1] vector returned by
-AnalysisResult.as_vector().
+Compares recordings against reference samples using cosine similarity on a
+composite feature vector built from four independently-weighted groups:
+
+  Spectral (11)        — all AnalysisResult fields, already normalised [0, 1]
+  Timbre / sustained (12) — MFCC coefficients 1–12 (mean across duration)
+  Timbre / delta (12)  — delta-MFCC coefficients 1–12 (timbre trajectory)
+  Timbre / onset (12)  — onset-weighted MFCC coefficients 1–12 (attack)
+
+Each group is L2-normalised independently before being scaled by its
+configured weight and concatenated. Cosine similarity on the result is
+mathematically equivalent to a weighted average of the per-group cosine
+similarities:
+
+  sim = (w₁²·cos_spectral + w₂²·cos_timbre + w₃²·cos_delta + w₄²·cos_onset)
+      / (w₁² + w₂² + w₃² + w₄²)
+
+MFCC coefficient 0 is excluded from all groups because it encodes overall
+log-energy (loudness). Within a group, including the energy coefficient would
+bias similarity toward louder = more similar — cosine similarity on the full
+concatenated vector already ignores global magnitude.
 
 Why cosine similarity?
   Cosine similarity measures the angle between two vectors, ignoring
   magnitude. For timbral comparison the *shape* of the fingerprint matters
   more than its overall scale: a kick drum always looks like a kick drum
-  whether it was loud or quiet. Because all values are in [0, 1] (non-
-  negative), cosine similarity is guaranteed to lie in [0, 1].
+  whether it was loud or quiet. Because the spectral group values are in
+  [0, 1] (non-negative) and the MFCC groups are L2-normalised, the result
+  is guaranteed to lie in [0, 1].
 
 Primary usage — per-reference ranked lists:
-  matrix = SimilarityMatrix(reference_library)
+  matrix = SimilarityMatrix(reference_library, cfg.similarity)
   matrix.bulk_add(instrument_library.samples())     # populate at startup
   matrix.add(new_record)                         # update after each capture
   matrix.remove(evicted_ids)                     # sync with FIFO eviction
@@ -27,6 +45,7 @@ import typing
 import numpy
 
 import subsample.analysis
+import subsample.config
 import subsample.library
 
 
@@ -55,7 +74,7 @@ class SimilarityScore:
 	Fields:
 		name:  Reference sample name (original casing from filename stem).
 		score: Cosine similarity in [0.0, 1.0].
-		       1.0 = identical spectral fingerprint.
+		       1.0 = identical composite fingerprint.
 		       0.0 = maximally dissimilar (orthogonal fingerprints).
 	"""
 
@@ -64,33 +83,35 @@ class SimilarityScore:
 
 
 def score_against_library (
-	spectral: subsample.analysis.AnalysisResult,
-	library:  subsample.library.ReferenceLibrary,
+	record:  subsample.library.SampleRecord,
+	library: subsample.library.ReferenceLibrary,
+	cfg:     subsample.config.SimilarityConfig,
 ) -> list[SimilarityScore]:
 
-	"""Compare a spectral fingerprint against every reference sample.
+	"""Compare a sample record against every reference sample.
 
-	Computes cosine similarity between the given result's spectral fingerprint
-	and each reference sample's fingerprint. Returns scores sorted by
-	similarity descending so the best match appears first.
+	Computes cosine similarity between the given record's composite feature
+	vector and each reference sample's feature vector. Returns scores sorted
+	by similarity descending so the best match appears first.
 
 	Args:
-		spectral: AnalysisResult from the newly recorded sample.
-		library:  Reference library loaded at startup.
+		record:  The newly recorded sample (spectral + timbre data used).
+		library: Reference library loaded at startup.
+		cfg:     Similarity weights controlling each feature group's influence.
 
 	Returns:
 		List of SimilarityScore, sorted descending by score.
 		Empty if the library is empty.
 	"""
 
-	query = spectral.as_vector()
+	query = _build_feature_vector(record, cfg)
 
 	scores = [
 		SimilarityScore(
-			name  = record.name,
-			score = _cosine_similarity(query, record.spectral.as_vector()),
+			name  = ref.name,
+			score = _cosine_similarity(query, _build_feature_vector(ref, cfg)),
 		)
-		for record in library.samples()
+		for ref in library.samples()
 	]
 
 	# Sort best match first so the first element is always the closest reference
@@ -125,25 +146,33 @@ class SimilarityMatrix:
 	thread; get_match() and get_scores() may be called from any thread.
 
 	Attributes:
-		_lock:        Mutex protecting all mutable state.
-		_ref_vectors: Precomputed reference vectors {name_upper: 9-element array}.
-		              Set once at construction; never mutated.
-		_rankings:    Per-reference ranked lists {name_upper: [RankedMatch, ...]}.
-		              Always sorted descending by score.
-		_scores:      Score cache {sample_id: {name_upper: score}}.
-		              Also acts as a reverse index for eviction: pop the entry
-		              here, then do a linear scan of each ranking list to remove
-		              the matching entry. True eviction cost is O(M × N) where
-		              M = references, N = instrument samples per list.
+		_lock:          Mutex protecting all mutable state.
+		_similarity_cfg: Similarity weights used when building feature vectors.
+		                 Stored here so all vectors (reference and instrument)
+		                 are built consistently with the same weights.
+		_ref_vectors:   Precomputed reference vectors {name_upper: array}.
+		                Set once at construction; never mutated.
+		_rankings:      Per-reference ranked lists {name_upper: [RankedMatch, ...]}.
+		                Always sorted descending by score.
+		_scores:        Score cache {sample_id: {name_upper: score}}.
+		                Also acts as a reverse index for eviction: pop the entry
+		                here, then do a linear scan of each ranking list to remove
+		                the matching entry. True eviction cost is O(M × N) where
+		                M = references, N = instrument samples per list.
 	"""
 
-	def __init__ (self, reference_library: subsample.library.ReferenceLibrary) -> None:
+	def __init__ (
+		self,
+		reference_library: subsample.library.ReferenceLibrary,
+		similarity_cfg:    subsample.config.SimilarityConfig,
+	) -> None:
 
 		self._lock = threading.Lock()
+		self._similarity_cfg = similarity_cfg
 
 		# Precompute reference vectors once — references never change after init
 		self._ref_vectors: dict[str, numpy.ndarray] = {
-			rec.name.upper(): rec.spectral.as_vector()
+			rec.name.upper(): _build_feature_vector(rec, similarity_cfg)
 			for rec in reference_library.samples()
 		}
 		self._rankings: dict[str, list[RankedMatch]] = {
@@ -184,11 +213,12 @@ class SimilarityMatrix:
 		ref_names = list(self._ref_vectors.keys())
 		ref_matrix = numpy.array(
 			[self._ref_vectors[n] for n in ref_names], dtype=numpy.float32
-		)  # M × 9
+		)  # M × D
 
 		inst_matrix = numpy.array(
-			[r.spectral.as_vector() for r in records], dtype=numpy.float32
-		)  # N × 9
+			[_build_feature_vector(r, self._similarity_cfg) for r in records],
+			dtype=numpy.float32,
+		)  # N × D
 
 		# Normalise rows; zero vectors remain zero (cosine score will be 0.0)
 		inst_norms = numpy.linalg.norm(inst_matrix, axis=1, keepdims=True)
@@ -234,7 +264,7 @@ class SimilarityMatrix:
 		if not self._ref_vectors:
 			return
 
-		vec = record.spectral.as_vector()
+		vec = _build_feature_vector(record, self._similarity_cfg)
 		sid = record.sample_id
 
 		with self._lock:
@@ -366,9 +396,97 @@ class SimilarityMatrix:
 		return f"SimilarityMatrix({n_refs} refs × {n_inst} instruments)"
 
 
+def _build_feature_vector (
+	record: subsample.library.SampleRecord,
+	cfg:    subsample.config.SimilarityConfig,
+) -> numpy.ndarray:
+
+	"""Build the composite similarity feature vector for a sample record.
+
+	Assembles up to four feature groups, each independently L2-normalised and
+	scaled by its configured weight, then concatenates them into a single 1-D
+	float32 array. Groups with weight 0.0 are omitted entirely.
+
+	Groups:
+	  Spectral (11):        all AnalysisResult fields, already in [0, 1].
+	  Timbre / sustained (12): MFCC coefficients 1–12 (mean over duration).
+	  Timbre / delta (12):  delta-MFCC coefficients 1–12 (timbre trajectory).
+	  Timbre / onset (12):  onset-weighted MFCC coefficients 1–12 (attack).
+
+	MFCC coefficient 0 is excluded from all groups because it encodes overall
+	log-energy. Within a group, coeff 0 would bias similarity toward loudness
+	rather than spectral shape; coeff 1–12 carry the timbral information.
+
+	When all four groups are active the result is a 47-element vector. Cosine
+	similarity on this vector equals a weighted average of per-group cosine
+	similarities (weights squared, renormalised). See module docstring.
+
+	Args:
+		record: SampleRecord to convert.
+		cfg:    Weight configuration for each feature group.
+
+	Returns:
+		1-D float32 array. Empty array if all weights are 0.0.
+	"""
+
+	parts: list[numpy.ndarray] = []
+
+	# --- Spectral group (11 values, already [0, 1]) ---
+	if cfg.weight_spectral > 0.0:
+		spectral = numpy.array([
+			record.spectral.spectral_flatness,
+			record.spectral.attack,
+			record.spectral.release,
+			record.spectral.spectral_centroid,
+			record.spectral.spectral_bandwidth,
+			record.spectral.zcr,
+			record.spectral.harmonic_ratio,
+			record.spectral.spectral_contrast,
+			record.spectral.voiced_fraction,
+			record.spectral.log_attack_time,
+			record.spectral.spectral_flux,
+		], dtype=numpy.float32)
+		parts.append(_l2_normalize(spectral) * cfg.weight_spectral)
+
+	# --- Timbre groups (coefficients 1–12 from each MFCC variant) ---
+	# Coeff 0 encodes overall log-energy and is excluded; see docstring.
+	if cfg.weight_timbre > 0.0:
+		mfcc = numpy.array(record.timbre.mfcc[1:], dtype=numpy.float32)
+		parts.append(_l2_normalize(mfcc) * cfg.weight_timbre)
+
+	if cfg.weight_timbre_delta > 0.0:
+		delta = numpy.array(record.timbre.mfcc_delta[1:], dtype=numpy.float32)
+		parts.append(_l2_normalize(delta) * cfg.weight_timbre_delta)
+
+	if cfg.weight_timbre_onset > 0.0:
+		onset = numpy.array(record.timbre.mfcc_onset[1:], dtype=numpy.float32)
+		parts.append(_l2_normalize(onset) * cfg.weight_timbre_onset)
+
+	if not parts:
+		return numpy.array([], dtype=numpy.float32)
+
+	return numpy.concatenate(parts)
+
+
+def _l2_normalize (v: numpy.ndarray) -> numpy.ndarray:
+
+	"""Return v divided by its L2 norm, or a zero vector if the norm is negligible.
+
+	A zero input (e.g. silent audio producing all-zero MFCCs) returns a zero
+	vector rather than NaN; its cosine contribution will be 0.0.
+	"""
+
+	norm = float(numpy.linalg.norm(v))
+
+	if norm < 1e-9:
+		return numpy.zeros_like(v)
+
+	return v / norm
+
+
 def _cosine_similarity (a: numpy.ndarray, b: numpy.ndarray) -> float:
 
-	"""Cosine similarity between two 1-D non-negative arrays.
+	"""Cosine similarity between two 1-D arrays.
 
 	Returns 0.0 if either vector is all-zero (degenerate case — a silent or
 	perfectly flat recording produces a zero spectral fingerprint).

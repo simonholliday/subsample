@@ -65,6 +65,16 @@ class TestLoadDefault:
 		assert cfg.instrument.max_memory_mb == 100.0
 		assert cfg.instrument.directory is None
 
+	def test_default_similarity_values (self) -> None:
+		# Similarity section is commented-out in config.yaml.default so defaults
+		# come from SimilarityConfig class defaults.
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert cfg.similarity.weight_spectral     == 1.0
+		assert cfg.similarity.weight_timbre       == 1.0
+		assert cfg.similarity.weight_timbre_delta == 0.5
+		assert cfg.similarity.weight_timbre_onset == 1.0
+
 	def test_analysis_defaults_when_section_absent (self, tmp_path: pathlib.Path) -> None:
 		"""A config.yaml without an analysis section should use class defaults."""
 		yaml_content = textwrap.dedent("""\
@@ -144,6 +154,64 @@ class TestLoadCustomConfig:
 
 		with pytest.raises(FileNotFoundError):
 			subsample.config.load_config(nonexistent)
+
+	def test_similarity_custom_weights (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			audio:
+			  sample_rate: 44100
+			  bit_depth: 16
+			  channels: 1
+			  chunk_size: 512
+			buffer:
+			  max_seconds: 60
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			similarity:
+			  weight_spectral: 2.0
+			  weight_timbre: 0.0
+			  weight_timbre_delta: 1.5
+			  weight_timbre_onset: 0.0
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.similarity.weight_spectral     == 2.0
+		assert cfg.similarity.weight_timbre       == 0.0
+		assert cfg.similarity.weight_timbre_delta == 1.5
+		assert cfg.similarity.weight_timbre_onset == 0.0
+
+	def test_similarity_negative_weight_raises (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			audio:
+			  sample_rate: 44100
+			  bit_depth: 16
+			  channels: 1
+			  chunk_size: 512
+			buffer:
+			  max_seconds: 60
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			similarity:
+			  weight_spectral: -1.0
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		with pytest.raises(ValueError, match="weight_spectral"):
+			subsample.config.load_config(config_file)
 
 	def test_invalid_bit_depth_raises (self, tmp_path: pathlib.Path) -> None:
 		"""Loading a config with unsupported bit_depth should raise ValueError."""
