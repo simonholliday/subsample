@@ -82,10 +82,12 @@ class TestPackInt24:
 def _make_config (output_dir: pathlib.Path) -> subsample.config.Config:
 	"""Return a minimal Config pointing output at output_dir."""
 	return subsample.config.Config(
-		audio=subsample.config.AudioConfig(
-			sample_rate=44100, bit_depth=16, channels=1, chunk_size=512,
+		streamer=subsample.config.StreamerConfig(
+			audio=subsample.config.AudioConfig(
+				sample_rate=44100, bit_depth=16, channels=1, chunk_size=512,
+			),
+			buffer=subsample.config.BufferConfig(max_seconds=10),
 		),
-		buffer=subsample.config.BufferConfig(max_seconds=10),
 		detection=subsample.config.DetectionConfig(
 			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
 			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,

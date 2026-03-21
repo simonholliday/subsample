@@ -2,48 +2,76 @@
 # Copy this file to config.yaml and adjust to your needs:
 #   cp config.yaml.default config.yaml
 
-audio:
+# ---------------------------------------------------------------------------
+# streamer — real-time audio capture from an input device
+# ---------------------------------------------------------------------------
+# Set enabled: false to skip live streaming and only process files given on
+# the command line. When enabled, the device, buffer, and sample format
+# settings below must be configured for your hardware.
 
-  # device: "Samson Go Mic: USB Audio (hw:1,0)"
-  # Name (or substring) of the audio input device to use.
-  # Case-insensitive substring match — "Samson" matches the full device name above.
-  # If omitted, subsample auto-selects when only one input device is present,
-  # or shows an interactive numbered menu when multiple devices are found.
-  # Run subsample once without this set to see available device names.
+streamer:
+  enabled: true
 
-  sample_rate: 44100
-  # Sample rate in Hz. Standard values: 44100 (CD quality), 48000 (professional), 16000 (speech).
-  # Lower = less CPU, smaller files. Higher = better fidelity for music.
-  # Range: 8000–192000 Hz (device dependent).
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+  audio:
 
-  bit_depth: 16
-  # Bits per sample: 16, 24, or 32. Controls dynamic range and file size.
-  # 16-bit: ±96 dB SNR, sufficient for most recordings. Common for audio devices.
-  # 24-bit: ±144 dB SNR, better for studio-quality audio or very quiet sources.
-  # 32-bit: ±192 dB SNR, rarely needed for recording purposes.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+    # device: "Samson Go Mic: USB Audio (hw:1,0)"
+    # Name (or substring) of the audio input device to use.
+    # Case-insensitive substring match — "Samson" matches the full device name above.
+    # If omitted, subsample auto-selects when only one input device is present,
+    # or shows an interactive numbered menu when multiple devices are found.
+    # Run subsample once without this set to see available device names.
 
-  channels: 1
-  # Number of input channels: 1 = mono, 2 = stereo.
-  # Mono: simpler processing, half the file size. Stereo: spatial information preserved.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+    sample_rate: 44100
+    # Sample rate in Hz. Standard values: 44100 (CD quality), 48000 (professional), 16000 (speech).
+    # Lower = less CPU, smaller files. Higher = better fidelity for music.
+    # Range: 8000–192000 Hz (device dependent).
+    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
-  chunk_size: 512
-  # Frames requested per PortAudio callback. PortAudio adapts internally to the
-  # hardware period size, but aligning to it avoids redundant buffering.
-  # Smaller (256, 512): lower latency, more callbacks per second (slight CPU overhead).
-  # Larger (1024, 2048): higher latency, fewer callbacks (less overhead). Default 512 is
-  # optimal for USB audio devices with typical ALSA period sizes.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+    bit_depth: 16
+    # Bits per sample: 16, 24, or 32. Controls dynamic range and file size.
+    # 16-bit: ±96 dB SNR, sufficient for most recordings. Common for audio devices.
+    # 24-bit: ±144 dB SNR, better for studio-quality audio or very quiet sources.
+    # 32-bit: ±192 dB SNR, rarely needed for recording purposes.
+    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
-buffer:
-  max_seconds: 60
-  # Length of the circular recording buffer in seconds. Determines how much audio history
-  # is kept before a trigger event. Larger = more pre-signal context; smaller = less RAM.
-  # At 44100 Hz mono 16-bit, 60s ≈ 5.3 MB. Useful range: 10–120 seconds.
-  # Must be large enough to hold at least one complete expected recording.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_buffer_values
+    channels: 1
+    # Number of input channels: 1 = mono, 2 = stereo.
+    # Mono: simpler processing, half the file size. Stereo: spatial information preserved.
+    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+
+    chunk_size: 512
+    # Frames requested per PortAudio callback. PortAudio adapts internally to the
+    # hardware period size, but aligning to it avoids redundant buffering.
+    # Smaller (256, 512): lower latency, more callbacks per second (slight CPU overhead).
+    # Larger (1024, 2048): higher latency, fewer callbacks (less overhead). Default 512 is
+    # optimal for USB audio devices with typical ALSA period sizes.
+    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+
+  buffer:
+    max_seconds: 60
+    # Length of the circular recording buffer in seconds. Determines how much audio history
+    # is kept before a trigger event. Larger = more pre-signal context; smaller = less RAM.
+    # At 44100 Hz mono 16-bit, 60s ≈ 5.3 MB. Useful range: 10–120 seconds.
+    # Must be large enough to hold at least one complete expected recording.
+    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_buffer_values
+
+# ---------------------------------------------------------------------------
+# player — MIDI-triggered sample playback (not yet implemented)
+# ---------------------------------------------------------------------------
+# Set enabled: true when the player is implemented. When enabled, the audio
+# output device below must be configured.
+
+player:
+  enabled: false
+
+  audio:
+    device: null
+    # Name (or substring) of the audio output device to use for playback.
+    # Leave null to use the system default output device.
+
+# ---------------------------------------------------------------------------
+# detection — level-based trigger for recording segments
+# ---------------------------------------------------------------------------
 
 detection:
   snr_threshold_db: 12.0
@@ -92,6 +120,10 @@ detection:
   # Smaller = abrupt cutoff. Larger = longer fade-out and post-signal tail.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
 
+# ---------------------------------------------------------------------------
+# output — WAV file writing
+# ---------------------------------------------------------------------------
+
 output:
   directory: "./samples"
   # Directory where WAV files are saved. May be absolute or relative to cwd.
@@ -107,6 +139,10 @@ output:
   #   "%H-%M-%S"                  → 14-32-01.wav (time only, overwrites same-second files)
   #   "%Y%m%d_%H%M%S"             → 20260318_143201.wav (compact, ISO 8601-ish)
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values
+
+# ---------------------------------------------------------------------------
+# analysis — rhythm and pitch analysis parameters
+# ---------------------------------------------------------------------------
 
 analysis:
   start_bpm: 120.0

@@ -166,13 +166,13 @@ def _process_input_files (
 			)
 			continue
 
-		max_frames = file_info.sample_rate * cfg.buffer.max_seconds
+		max_frames = file_info.sample_rate * cfg.streamer.buffer.max_seconds
 		buf = subsample.buffer.CircularBuffer(max_frames, file_info.channels, dtype=audio_dtype)
 
 		detector = subsample.detector.LevelDetector(
 			cfg.detection,
 			file_info.sample_rate,
-			cfg.audio.chunk_size,
+			cfg.streamer.audio.chunk_size,
 			max_recording_frames=max_frames,
 		)
 
@@ -181,7 +181,7 @@ def _process_input_files (
 		writer = subsample.recorder.WavWriter(cfg, analysis_params, on_complete=None)
 
 		segment_index = 1
-		chunk_size = cfg.audio.chunk_size
+		chunk_size = cfg.streamer.audio.chunk_size
 		n_frames = file_info.audio.shape[0]
 
 		for offset in range(0, n_frames, chunk_size):
@@ -224,32 +224,32 @@ def _stream_from_device (
 		cfg:                Full application config.
 		reference_library:  Loaded reference samples, or None if not configured.
 		instrument_library: Instrument sample library to update in real time.
-		analysis_params:    Pre-computed FFT params matching cfg.audio.sample_rate.
+		analysis_params:    Pre-computed FFT params matching cfg.streamer.audio.sample_rate.
 		similarity_matrix:  Similarity index to update as new samples arrive, or None.
 	"""
 
 	pa = subsample.audio.create_pyaudio()
 
 	try:
-		if cfg.audio.device is not None:
-			device_index = subsample.audio.find_device_by_name(pa, cfg.audio.device)
+		if cfg.streamer.audio.device is not None:
+			device_index = subsample.audio.find_device_by_name(pa, cfg.streamer.audio.device)
 		else:
 			devices = subsample.audio.list_input_devices(pa)
 			device_index = subsample.audio.select_device(devices)
-		reader = subsample.audio.AudioReader(pa, device_index, cfg.audio)
+		reader = subsample.audio.AudioReader(pa, device_index, cfg.streamer.audio)
 	except (ValueError, OSError) as exc:
 		print(f"Error opening audio device: {exc}", file=sys.stderr)
 		pa.terminate()
 		sys.exit(1)
 
-	audio_dtype = _AUDIO_DTYPE[cfg.audio.bit_depth]
-	max_frames = cfg.audio.sample_rate * cfg.buffer.max_seconds
-	buf = subsample.buffer.CircularBuffer(max_frames, cfg.audio.channels, dtype=audio_dtype)
+	audio_dtype = _AUDIO_DTYPE[cfg.streamer.audio.bit_depth]
+	max_frames = cfg.streamer.audio.sample_rate * cfg.streamer.buffer.max_seconds
+	buf = subsample.buffer.CircularBuffer(max_frames, cfg.streamer.audio.channels, dtype=audio_dtype)
 
 	detector = subsample.detector.LevelDetector(
 		cfg.detection,
-		cfg.audio.sample_rate,
-		cfg.audio.chunk_size,
+		cfg.streamer.audio.sample_rate,
+		cfg.streamer.audio.chunk_size,
 		max_recording_frames=max_frames,
 	)
 
@@ -341,7 +341,7 @@ def main () -> None:
 	else:
 		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
 
-	analysis_params = subsample.analysis.compute_params(cfg.audio.sample_rate)
+	analysis_params = subsample.analysis.compute_params(cfg.streamer.audio.sample_rate)
 
 	# Build the similarity matrix now that both libraries are populated.
 	# bulk_add() is vectorised (single matrix multiply for N × M scores),
@@ -362,10 +362,10 @@ def _print_banner (cfg: subsample.config.Config) -> None:
 
 	print(
 		f"Subsample  |  "
-		f"{cfg.audio.sample_rate} Hz  "
-		f"{cfg.audio.bit_depth}-bit  "
-		f"{cfg.audio.channels}ch  |  "
-		f"buffer {cfg.buffer.max_seconds}s  |  "
+		f"{cfg.streamer.audio.sample_rate} Hz  "
+		f"{cfg.streamer.audio.bit_depth}-bit  "
+		f"{cfg.streamer.audio.channels}ch  |  "
+		f"buffer {cfg.streamer.buffer.max_seconds}s  |  "
 		f"SNR ≥ {cfg.detection.snr_threshold_db} dB  |  "
 		f"→ {cfg.output.directory}"
 	)

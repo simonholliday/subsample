@@ -18,8 +18,10 @@ class TestLoadDefault:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
 		assert isinstance(cfg, subsample.config.Config)
-		assert isinstance(cfg.audio, subsample.config.AudioConfig)
-		assert isinstance(cfg.buffer, subsample.config.BufferConfig)
+		assert isinstance(cfg.streamer, subsample.config.StreamerConfig)
+		assert isinstance(cfg.streamer.audio, subsample.config.AudioConfig)
+		assert isinstance(cfg.streamer.buffer, subsample.config.BufferConfig)
+		assert isinstance(cfg.player, subsample.config.PlayerConfig)
 		assert isinstance(cfg.detection, subsample.config.DetectionConfig)
 		assert isinstance(cfg.output, subsample.config.OutputConfig)
 		assert isinstance(cfg.analysis, subsample.config.AnalysisConfig)
@@ -27,15 +29,26 @@ class TestLoadDefault:
 	def test_default_audio_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.audio.sample_rate == 44100
-		assert cfg.audio.bit_depth == 16
-		assert cfg.audio.channels == 1
-		assert cfg.audio.chunk_size == 512
+		assert cfg.streamer.audio.sample_rate == 44100
+		assert cfg.streamer.audio.bit_depth == 16
+		assert cfg.streamer.audio.channels == 1
+		assert cfg.streamer.audio.chunk_size == 512
 
 	def test_default_buffer_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.buffer.max_seconds == 60
+		assert cfg.streamer.buffer.max_seconds == 60
+
+	def test_default_streamer_enabled (self) -> None:
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert cfg.streamer.enabled is True
+
+	def test_default_player_disabled (self) -> None:
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert cfg.player.enabled is False
+		assert cfg.player.audio.device is None
 
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -78,13 +91,14 @@ class TestLoadDefault:
 	def test_analysis_defaults_when_section_absent (self, tmp_path: pathlib.Path) -> None:
 		"""A config.yaml without an analysis section should use class defaults."""
 		yaml_content = textwrap.dedent("""\
-			audio:
-			  sample_rate: 44100
-			  bit_depth: 16
-			  channels: 1
-			  chunk_size: 1024
-			buffer:
-			  max_seconds: 60
+			streamer:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 1024
+			  buffer:
+			    max_seconds: 60
 			detection:
 			  snr_threshold_db: 6.0
 			  hold_time: 0.5
@@ -113,13 +127,14 @@ class TestLoadCustomConfig:
 
 	def test_loads_custom_yaml (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			audio:
-			  sample_rate: 48000
-			  bit_depth: 24
-			  channels: 2
-			  chunk_size: 2048
-			buffer:
-			  max_seconds: 30
+			streamer:
+			  audio:
+			    sample_rate: 48000
+			    bit_depth: 24
+			    channels: 2
+			    chunk_size: 2048
+			  buffer:
+			    max_seconds: 30
 			detection:
 			  snr_threshold_db: 10.0
 			  hold_time: 1.0
@@ -134,19 +149,80 @@ class TestLoadCustomConfig:
 
 		cfg = subsample.config.load_config(config_file)
 
-		assert cfg.audio.sample_rate == 48000
-		assert cfg.audio.bit_depth == 24
-		assert cfg.audio.channels == 2
-		assert cfg.buffer.max_seconds == 30
+		assert cfg.streamer.audio.sample_rate == 48000
+		assert cfg.streamer.audio.bit_depth == 24
+		assert cfg.streamer.audio.channels == 2
+		assert cfg.streamer.buffer.max_seconds == 30
 		assert cfg.detection.snr_threshold_db == 10.0
 		assert cfg.output.directory == "/tmp/my_samples"
+
+	def test_streamer_enabled_flag (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			streamer:
+			  enabled: false
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.streamer.enabled is False
+
+	def test_player_enabled_flag (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			streamer:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			player:
+			  enabled: true
+			  audio:
+			    device: "Focusrite Output"
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.player.enabled is True
+		assert cfg.player.audio.device == "Focusrite Output"
 
 	def test_config_is_frozen (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
 		with pytest.raises(dataclasses.FrozenInstanceError):
-			cfg.audio = subsample.config.AudioConfig(  # type: ignore[misc]
-				sample_rate=99, bit_depth=16, channels=1, chunk_size=1024
+			cfg.streamer = subsample.config.StreamerConfig(  # type: ignore[misc]
+				audio=subsample.config.AudioConfig(
+					sample_rate=99, bit_depth=16, channels=1, chunk_size=1024
+				),
+				buffer=subsample.config.BufferConfig(max_seconds=60),
 			)
 
 	def test_missing_file_raises (self, tmp_path: pathlib.Path) -> None:
@@ -157,13 +233,14 @@ class TestLoadCustomConfig:
 
 	def test_similarity_custom_weights (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			audio:
-			  sample_rate: 44100
-			  bit_depth: 16
-			  channels: 1
-			  chunk_size: 512
-			buffer:
-			  max_seconds: 60
+			streamer:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
 			detection:
 			  snr_threshold_db: 12.0
 			  hold_time: 0.5
@@ -189,13 +266,14 @@ class TestLoadCustomConfig:
 
 	def test_similarity_negative_weight_raises (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			audio:
-			  sample_rate: 44100
-			  bit_depth: 16
-			  channels: 1
-			  chunk_size: 512
-			buffer:
-			  max_seconds: 60
+			streamer:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
 			detection:
 			  snr_threshold_db: 12.0
 			  hold_time: 0.5
@@ -216,13 +294,14 @@ class TestLoadCustomConfig:
 	def test_invalid_bit_depth_raises (self, tmp_path: pathlib.Path) -> None:
 		"""Loading a config with unsupported bit_depth should raise ValueError."""
 		yaml_content = textwrap.dedent("""\
-			audio:
-			  sample_rate: 44100
-			  bit_depth: 8
-			  channels: 1
-			  chunk_size: 1024
-			buffer:
-			  max_seconds: 60
+			streamer:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 8
+			    channels: 1
+			    chunk_size: 1024
+			  buffer:
+			    max_seconds: 60
 			detection:
 			  snr_threshold_db: 6.0
 			  hold_time: 0.5

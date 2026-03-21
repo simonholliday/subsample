@@ -112,12 +112,15 @@ All settings live in `config.yaml`. The defaults are:
 
 | Setting | Default | Description |
 |---|---|---|
-| `audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
-| `audio.sample_rate` | `44100` | Sample rate in Hz |
-| `audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
-| `audio.channels` | `1` | 1 = mono, 2 = stereo |
-| `audio.chunk_size` | `512` | Frames per buffer read |
-| `buffer.max_seconds` | `60` | Circular buffer length |
+| `streamer.enabled` | `true` | Enable live audio capture; set to `false` to process files only |
+| `streamer.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
+| `streamer.audio.sample_rate` | `44100` | Sample rate in Hz |
+| `streamer.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
+| `streamer.audio.channels` | `1` | 1 = mono, 2 = stereo |
+| `streamer.audio.chunk_size` | `512` | Frames per buffer read |
+| `streamer.buffer.max_seconds` | `60` | Circular buffer length |
+| `player.enabled` | `false` | Enable MIDI-triggered playback (not yet implemented) |
+| `player.audio.device` | `none` | Audio output device name for playback |
 | `detection.snr_threshold_db` | `12.0` | dB above ambient to trigger recording |
 | `detection.hold_time` | `0.5` | Seconds to hold recording open after signal drops |
 | `detection.warmup_seconds` | `1.0` | Calibration period before detection activates |
@@ -139,7 +142,7 @@ All settings live in `config.yaml`. The defaults are:
 
 ## Output
 
-Recordings are saved as uncompressed 16, 24, or 32-bit WAV files (depending on the `audio.bit_depth` setting) in the configured output directory.
+Recordings are saved as uncompressed 16, 24, or 32-bit WAV files (depending on the `streamer.audio.bit_depth` setting) in the configured output directory.
 
 **Live capture mode** - filenames are generated from the datetime the recording ended (strftime format controlled by `output.filename_format`):
 
