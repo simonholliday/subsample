@@ -34,11 +34,17 @@ environment becomes an instant, organized sample pack.
   local audio file (WAV, FLAC, AIFF, OGG, etc.).
 - **Reference sample library** - load pre-analyzed reference sounds from disk; lookups
   are case-insensitive; audio files not required (only `.analysis.json` sidecars).
-- **Spectral fingerprint similarity** - compare the 9-element [0,1] spectral vector
-  (spectral flatness, attack, release, centroid, bandwidth, ZCR, harmonic ratio,
-  contrast, voiced fraction) against reference samples using cosine similarity; for each
-  reference, an in-memory ranked list of instrument matches is maintained and updated
-  incrementally as new recordings arrive or old ones are evicted.
+- **Composite similarity matching** - compare each recording against reference samples using
+  cosine similarity on a 47-element weighted feature vector built from four independently
+  normalised groups: spectral shape (all 11 metrics), sustained MFCC timbre (coefficients
+  1–12), delta-MFCC timbre trajectory (coefficients 1–12), and onset-weighted MFCC attack
+  character (coefficients 1–12); each group's influence is configurable via
+  `similarity.weight_*` in `config.yaml`; for each reference, an in-memory ranked list of
+  instrument matches is maintained and updated incrementally as new recordings arrive or old
+  ones are evicted.
+- **Similarity report** - `scripts/similarity_report.py` prints the top-N most similar
+  instrument samples for each reference, using the same config and the same sample IDs as
+  the live application.
 - **Instrument sample library** - every recording is added to an in-memory library
   with its PCM audio and full analysis; a configurable memory cap (default 100 MB)
   keeps the newest samples in RAM using FIFO eviction; an optional startup directory
@@ -53,9 +59,6 @@ environment becomes an instant, organized sample pack.
 
 ## In Progress
 
-- **Extended similarity** - spectral fingerprint ranked lists are in place; next: integrate
-  the new percussive features (delta-MFCC, onset-weighted MFCC, log-attack time, spectral
-  flux) into the comparison vector to improve snare/cymbal/kick discrimination.
 - **Automatic sample classification** - infrastructure in place; next: wire ranked match
   results to a simple classifier (e.g. "if top reference match is KICK, classify as KICK").
 
@@ -129,6 +132,10 @@ All settings live in `config.yaml`. The defaults are:
 | `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory instrument samples; oldest evicted (FIFO) when exceeded |
 | `instrument.directory` | `none` | Optional directory to pre-load instrument samples from at startup (WAV + sidecar required) |
 | `reference.directory` | `none` | Optional directory of reference sounds for similarity classification (sidecar only, no audio required); if unset, similarity features are disabled |
+| `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (11 metrics, [0,1] normalised); set to 0.0 to disable |
+| `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1–12); captures steady-state timbral colour |
+| `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory (coefficients 1–12); how timbre evolves over time |
+| `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack (coefficients 1–12); most useful for percussive discrimination |
 
 ## Output
 
@@ -191,7 +198,9 @@ reference/
   CH.wav.analysis.json       →  "CH"
 ```
 
-At startup, reference samples are loaded before instrument samples. For every instrument sample (pre-loaded at startup or captured live), Subsample computes cosine similarity against every reference and maintains a ranked list per reference - most similar instrument first. When a sample is evicted from the instrument library, it is also removed from the ranked lists.
+At startup, reference samples are loaded before instrument samples. For every instrument sample (pre-loaded at startup or captured live), Subsample computes cosine similarity on a 47-element composite feature vector against every reference and maintains a ranked list per reference — most similar instrument first. When a sample is evicted from the instrument library, it is also removed from the ranked lists.
+
+The feature vector is built from four independently L2-normalised groups, each scaled by a configurable weight (see `similarity.*` in `config.yaml`). This means the same comparison method works for both percussive sounds (attack character dominates) and tonal sounds (sustained timbre dominates) without needing to classify them first.
 
 You can query the ranked lists programmatically:
 
@@ -202,7 +211,9 @@ sample_id = similarity_matrix.get_match("BD0025", rank=0)
 
 Lookup is case-insensitive.
 
-## Analyzing recorded files
+## Scripts
+
+### Analyzing recorded files
 
 You can analyze any WAV file (recorded by Subsample or elsewhere) using the `analyze_file` script:
 
@@ -248,6 +259,34 @@ sidecar (not shown in the analysis script output - used for similarity matching)
 - **mfcc** - 13 mean MFCC coefficients; captures average timbral character
 - **mfcc_delta** - 13 mean delta-MFCC coefficients; captures timbre trajectory (attack-to-decay shift)
 - **mfcc_onset** - 13 onset-weighted MFCC coefficients; emphasises the attack portion of the sound
+
+### Similarity report
+
+With a reference library and instrument library configured, print the top-N most similar instrument samples for each reference:
+
+```bash
+python scripts/similarity_report.py           # top 5 per reference (default)
+python scripts/similarity_report.py --top 10  # top 10 per reference
+```
+
+Example output:
+
+```
+Reference: BD0025
+  1.  #5     0.9412  BD0025          ./samples/BD0025.wav
+  2.  #7     0.8134  kick_hard       ./samples/kick_hard.wav
+  3.  #8     0.7601  kick_soft       ./samples/kick_soft.wav
+  4.  #6     0.5218  snare_rim       ./samples/snare_rim.wav
+  5.  #9     0.4103  hat_closed      ./samples/hat_closed.wav
+
+Reference: SNARE
+  1.  #6     0.9701  snare_rim       ./samples/snare_rim.wav
+  ...
+```
+
+The numeric IDs match exactly what the live application assigns (references first in sorted
+order, then instruments in sorted order). The script uses the same `config.yaml` and the
+same similarity weights as the live application.
 
 ## Requirements
 
