@@ -13,6 +13,7 @@ import os
 import pathlib
 import queue
 import sys
+import threading
 import typing
 import wave
 
@@ -24,6 +25,11 @@ import subsample.config
 
 # Type returned by PyAudio for device info mappings
 DeviceInfo = typing.Mapping[str, typing.Union[str, int, float]]
+
+# Serialise PyAudio initialisation across threads.
+# _suppress_c_stderr() redirects file descriptor 2 at the OS level; concurrent
+# calls from different threads corrupt each other's fd state and crash.
+_pyaudio_init_lock = threading.Lock()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,8 +121,9 @@ def create_pyaudio () -> pyaudio.PyAudio:
 
 	"""Create a PyAudio instance, suppressing ALSA/JACK diagnostic noise."""
 
-	with _suppress_c_stderr():
-		return pyaudio.PyAudio()
+	with _pyaudio_init_lock:
+		with _suppress_c_stderr():
+			return pyaudio.PyAudio()
 
 
 def unpack_audio (raw_bytes: bytes, bit_depth: int, channels: int) -> numpy.ndarray:
@@ -353,6 +360,80 @@ def select_device (devices: list[DeviceInfo]) -> int:
 		name = device["name"]
 		rate = int(device["defaultSampleRate"])
 		print(f"  [{i}] {name}  (default {rate} Hz)")
+
+	while True:
+		raw = input(f"Select device [0–{len(devices) - 1}]: ").strip()
+
+		try:
+			choice = int(raw)
+		except ValueError:
+			print("  Please enter a number.")
+			continue
+
+		if 0 <= choice < len(devices):
+			return int(devices[choice]["index"])
+
+		print(f"  Please enter a number between 0 and {len(devices) - 1}.")
+
+
+def list_output_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:
+
+	"""Return all audio devices that have at least one output channel."""
+
+	devices: list[DeviceInfo] = []
+
+	for i in range(pa.get_device_count()):
+		info: DeviceInfo = pa.get_device_info_by_index(i)
+
+		if int(info["maxOutputChannels"]) > 0:
+			devices.append(info)
+
+	return devices
+
+
+def find_output_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
+
+	"""Return the index of the first output device whose name contains *name*.
+
+	Matching is case-insensitive substring search.
+
+	Raises:
+		ValueError: If no output device name contains *name*.
+	"""
+
+	devices = list_output_devices(pa)
+	name_lower = name.lower()
+
+	for device in devices:
+		if name_lower in str(device["name"]).lower():
+			return int(device["index"])
+
+	available = "\n  ".join(str(d["name"]) for d in devices) if devices else "(none found)"
+	raise ValueError(
+		f"No audio output device matching {name!r}.\n"
+		f"Available output devices:\n  {available}"
+	)
+
+
+def select_output_device (devices: list[DeviceInfo]) -> int:
+
+	"""Return the output device index to use, prompting the user if there are multiple.
+
+	Auto-selects when only one output device is available.
+	Raises ValueError if no output devices are found.
+	"""
+
+	if not devices:
+		raise ValueError("No audio output devices found.")
+
+	if len(devices) == 1:
+		print(f"Using audio output: {devices[0]['name']}")
+		return int(devices[0]["index"])
+
+	print("Available audio output devices:")
+	for i, device in enumerate(devices):
+		rate = int(device["defaultSampleRate"])
+		print(f"  [{i}] {device['name']}  (default {rate} Hz)")
 
 	while True:
 		raw = input(f"Select device [0–{len(devices) - 1}]: ").strip()

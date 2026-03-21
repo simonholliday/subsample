@@ -255,8 +255,10 @@ class AnalysisResult:
 		   spectral_bandwidth, zcr, harmonic_ratio, spectral_contrast,
 		   voiced_fraction]
 
-		Use this vector for cosine similarity comparison against reference
-		sample fingerprints (see subsample.similarity).
+		Used for display and export (e.g. sidecar JSON, analysis output).
+		For similarity scoring, see `_build_feature_vector()` in
+		`subsample.similarity`, which uses all 11 AnalysisResult fields
+		directly and does not call this method.
 		"""
 
 		return numpy.array([

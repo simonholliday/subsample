@@ -58,12 +58,14 @@ environment becomes an instant, organized sample pack.
   stem plus an index (e.g. field_recording_1.wav, field_recording_2.wav); useful for
   batch processing, testing on known material, and building sample libraries without
   live capture hardware.
-- **MIDI input skeleton** - `player.enabled: true` opens a MIDI input device and logs
-  received messages; device selected by name substring match, auto-select, or interactive
-  menu — the same pattern used for audio device selection; runs concurrently with the
-  recorder on its own thread. When the player is enabled, instrument samples are loaded
-  with their PCM audio in memory (`load_audio=True`) so they are ready for playback
-  without any further disk reads.
+- **MIDI-triggered polyphonic sample playback** - `player.enabled: true` opens a MIDI
+  input device, maps notes to reference classes, and plays back the best-matching
+  instrument sample for each note trigger via a callback-based mix buffer; multiple
+  voices play simultaneously; device selected by name substring match, auto-select, or
+  interactive menu; runs concurrently with the recorder on its own thread. When the
+  player is enabled, instrument samples are loaded with their PCM audio in memory
+  (`load_audio=True`). Note mapping, MIDI channel, and target RMS are currently
+  hard-coded and will move to config in a future iteration.
 - **Playback level metadata** - every sample carries `LevelResult` (peak and RMS
   amplitude, measured on the normalised float32 signal). This enables per-sample gain
   normalisation at playback time: `gain = target_rms / sample.level.rms`, scaled by
@@ -89,18 +91,11 @@ environment becomes an instant, organized sample pack.
   mid + presence; hi-hat = air) and improve classification and similarity for percussion.
 - **Interactive classification** - allow live adjustment of classification thresholds;
   manually reassign samples to categories during recording session.
-- **MIDI note assignment** - allocate MIDI trigger notes based on sample classification;
-  the `SimilarityMatrix.get_match()` routing is already implemented — what remains is
-  a config mapping from MIDI note number to reference name (e.g. note 36 → "KICK"), and
-  the trigger dispatch in `MidiPlayer.run()`.
-- **Audio output device selection** - `player.audio.device` config key is already
-  parsed and available as `cfg.player.audio.device`; the device selection logic from
-  `audio.py` is the model to follow.
-- **MIDI playback** - receive MIDI note triggers and play back the assigned sample
-  for each note; MIDI velocity maps to playback volume using the `LevelResult`
-  normalisation gain formula already implemented (see Implemented above).
-- **Polyphonic playback** - multiple samples can play simultaneously; each active voice
-  contributes to the output mix.
+- **Config-driven note mapping** - move MIDI channel, note range, and note→reference
+  mapping from hard-coded constants in `player.py` to `config.yaml`; allows different
+  pad layouts and instruments without code changes.
+- **Velocity sensitivity** - use incoming MIDI velocity instead of the current
+  hard-coded value of 100; the gain formula (`(velocity/127)²`) is already implemented.
 - **Mix management** - per-voice gain staging to prevent clipping when multiple samples
   overlap; configurable mixing strategy (e.g. normalise to peak, fixed headroom).
 - **Pitch re-mapping** - recognise tonal samples and map them across a keyboard range

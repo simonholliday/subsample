@@ -308,6 +308,9 @@ def _run_recorder (
 def _start_player (
 	cfg: subsample.config.Config,
 	shutdown_event: threading.Event,
+	instrument_library: subsample.library.InstrumentLibrary,
+	similarity_matrix: subsample.similarity.SimilarityMatrix,
+	reference_library: subsample.library.ReferenceLibrary,
 ) -> None:
 
 	"""Select a MIDI input device, create a MidiPlayer, and run it.
@@ -316,8 +319,11 @@ def _start_player (
 	user to select one interactively. Runs until shutdown_event is set.
 
 	Args:
-		cfg:            Full application config (reads cfg.player.midi_device).
-		shutdown_event: Set this to stop the player cleanly.
+		cfg:                Full application config (reads cfg.player.midi_device).
+		shutdown_event:     Set this to stop the player cleanly.
+		instrument_library: Loaded instrument samples (must have audio in memory).
+		similarity_matrix:  Similarity index for note → sample lookup.
+		reference_library:  Reference library; provides sorted names for note mapping.
 	"""
 
 	try:
@@ -332,7 +338,16 @@ def _start_player (
 		print(f"Error opening MIDI device: {exc}", file=sys.stderr)
 		return
 
-	player = subsample.player.MidiPlayer(device_name, shutdown_event)
+	player = subsample.player.MidiPlayer(
+		device_name,
+		shutdown_event,
+		instrument_library=instrument_library,
+		similarity_matrix=similarity_matrix,
+		reference_names=reference_library.names(),
+		sample_rate=cfg.recorder.audio.sample_rate,
+		bit_depth=cfg.recorder.audio.bit_depth,
+		output_device_name=cfg.player.audio.device,
+	)
 	player.run()
 
 
@@ -420,11 +435,19 @@ def main () -> None:
 		))
 
 	if cfg.player.enabled:
-		threads.append(threading.Thread(
-			target=_start_player,
-			args=(cfg, shutdown_event),
-			name="player",
-		))
+		if similarity_matrix is None or reference_library is None:
+			print(
+				"Player enabled but no reference library configured — "
+				"note-to-sample routing requires a reference library. "
+				"Add a reference.directory to config.yaml.",
+				file=sys.stderr,
+			)
+		else:
+			threads.append(threading.Thread(
+				target=_start_player,
+				args=(cfg, shutdown_event, instrument_library, similarity_matrix, reference_library),
+				name="player",
+			))
 
 	if not threads:
 		print("Neither recorder nor player is enabled. Nothing to do.")

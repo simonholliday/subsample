@@ -5,7 +5,9 @@ import unittest.mock
 
 import pytest
 
+import subsample.library
 import subsample.player
+import subsample.similarity
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +111,35 @@ class TestSelectMidiDevice:
 
 class TestMidiPlayer:
 
+	def _make_player (self, shutdown_event: threading.Event) -> subsample.player.MidiPlayer:
+		"""Return a MidiPlayer with minimal mocked dependencies."""
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			shutdown_event,
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			reference_names=["KICK", "SNARE"],
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _make_mock_pyaudio (self) -> unittest.mock.MagicMock:
+		"""Return a mock PyAudio instance with one output device and a usable stream."""
+		mock_stream = unittest.mock.MagicMock()
+		mock_pa = unittest.mock.MagicMock()
+		mock_pa.open.return_value = mock_stream
+		# One output device — select_output_device() auto-selects without prompting.
+		mock_pa.get_device_count.return_value = 1
+		mock_pa.get_device_info_by_index.return_value = {
+			"name": "Mock Output",
+			"maxOutputChannels": 2,
+			"defaultSampleRate": 44100,
+			"index": 0,
+		}
+		return mock_pa
+
 	def _make_mock_port (self, messages: list[object]) -> unittest.mock.MagicMock:
 		"""Return a mock mido port that yields messages in order then None."""
 		responses = iter(messages + [None] * 1000)
@@ -121,12 +152,14 @@ class TestMidiPlayer:
 	def test_exits_on_shutdown_event (self) -> None:
 		shutdown_event = threading.Event()
 		port = self._make_mock_port([])
+		mock_pa = self._make_mock_pyaudio()
 
 		with unittest.mock.patch("mido.open_input", return_value=port):
-			# Set shutdown_event before run() so the loop exits immediately.
-			shutdown_event.set()
-			player = subsample.player.MidiPlayer("Test Device", shutdown_event)
-			player.run()
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+				# Set shutdown_event before run() so the loop exits immediately.
+				shutdown_event.set()
+				player = self._make_player(shutdown_event)
+				player.run()
 
 		# run() should have returned without hanging
 		assert not threading.current_thread().daemon
@@ -138,13 +171,15 @@ class TestMidiPlayer:
 		mock_msg = unittest.mock.MagicMock()
 		mock_msg.__str__ = lambda self: "note_on channel=0 note=60 velocity=64 time=0"
 		port = self._make_mock_port([mock_msg])
+		mock_pa = self._make_mock_pyaudio()
 
 		with caplog.at_level(logging.INFO, logger="subsample.player"):
 			with unittest.mock.patch("mido.open_input", return_value=port):
-				# Set shutdown after one iteration by making wait() set the event.
-				shutdown_event.set()
-				player = subsample.player.MidiPlayer("Test Device", shutdown_event)
-				player.run()
+				with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+					# Set shutdown after one iteration by making wait() set the event.
+					shutdown_event.set()
+					player = self._make_player(shutdown_event)
+					player.run()
 
 		# At minimum the port open/close should be logged; message log may not
 		# fire if event was already set before the loop body ran.
@@ -153,25 +188,29 @@ class TestMidiPlayer:
 	def test_port_closed_on_shutdown (self) -> None:
 		shutdown_event = threading.Event()
 		port = self._make_mock_port([])
+		mock_pa = self._make_mock_pyaudio()
 
 		with unittest.mock.patch("mido.open_input", return_value=port):
-			shutdown_event.set()
-			player = subsample.player.MidiPlayer("Test Device", shutdown_event)
-			player.run()
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+				shutdown_event.set()
+				player = self._make_player(shutdown_event)
+				player.run()
 
 		port.__exit__.assert_called_once()
 
 	def test_run_on_thread_exits_cleanly (self) -> None:
 		shutdown_event = threading.Event()
 		port = self._make_mock_port([])
+		mock_pa = self._make_mock_pyaudio()
 
 		with unittest.mock.patch("mido.open_input", return_value=port):
-			player = subsample.player.MidiPlayer("Test Device", shutdown_event)
-			t = threading.Thread(target=player.run)
-			t.start()
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+				player = self._make_player(shutdown_event)
+				t = threading.Thread(target=player.run)
+				t.start()
 
-			# Give thread time to start, then signal shutdown.
-			shutdown_event.set()
-			t.join(timeout=2.0)
+				# Give thread time to start, then signal shutdown.
+				shutdown_event.set()
+				t.join(timeout=2.0)
 
 		assert not t.is_alive()
