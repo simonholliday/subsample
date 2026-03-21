@@ -110,6 +110,11 @@ class WavWriter:
 		self._on_complete = on_complete
 		self._queue: queue.Queue[_QueueItem] = queue.Queue()
 
+		# Set to True when queue depth ≥ 3; cleared when the queue drains to
+		# zero. Used to emit a single INFO log when a backlog clears, rather
+		# than flooding the log on every item.
+		self._was_backed_up: bool = False
+
 		output_dir = pathlib.Path(cfg.output.directory)
 		output_dir.mkdir(parents=True, exist_ok=True)
 		self._output_dir = output_dir
@@ -146,6 +151,22 @@ class WavWriter:
 		"""
 
 		self._queue.put(_WriteRequest(audio, timestamp, filename_base, sample_rate, bit_depth))
+
+		depth = self._queue.qsize()
+
+		if depth >= 3:
+			_log.warning(
+				"wav-writer queue depth: %d — analysis may be falling behind captures",
+				depth,
+			)
+			self._was_backed_up = True
+
+	@property
+	def queue_depth (self) -> int:
+
+		"""Number of recordings currently waiting to be analysed and written."""
+
+		return self._queue.qsize()
 
 	def flush (self) -> None:
 
@@ -216,6 +237,13 @@ class WavWriter:
 				_log.error("Failed to analyse/cache recording: %s — WAV may be intact", exc, exc_info=True)
 
 			finally:
+				# After get() the item is already removed from the queue, so
+				# qsize() here reflects remaining items. Emit a one-shot INFO
+				# when a backlog drains to zero.
+				if self._was_backed_up and self._queue.empty():
+					_log.info("wav-writer queue drained")
+					self._was_backed_up = False
+
 				self._queue.task_done()
 
 	def _write_wav (

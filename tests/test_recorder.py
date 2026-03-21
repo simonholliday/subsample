@@ -1,6 +1,7 @@
 """Tests for subsample.recorder."""
 
 import datetime
+import logging
 import pathlib
 import tempfile
 import wave
@@ -206,3 +207,120 @@ class TestWavWriterFlush:
 			writer.enqueue(audio, datetime.datetime.now())
 			writer.flush()
 			writer.shutdown()  # should not raise
+
+
+class TestWavWriterQueueDepth:
+
+	"""Tests for the queue_depth property and backlog warning logging."""
+
+	def test_queue_depth_zero_on_creation (self) -> None:
+		"""queue_depth should be 0 immediately after construction."""
+		with tempfile.TemporaryDirectory() as tmp:
+			cfg = _make_config(pathlib.Path(tmp))
+			writer = subsample.recorder.WavWriter(cfg, _make_params())
+
+			assert writer.queue_depth == 0
+
+			writer.shutdown()
+
+	def test_queue_depth_zero_after_flush (self) -> None:
+		"""queue_depth should be 0 after flush() completes."""
+		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			cfg = _make_config(pathlib.Path(tmp))
+			writer = subsample.recorder.WavWriter(cfg, _make_params())
+
+			writer.enqueue(audio, datetime.datetime.now())
+			writer.flush()
+
+			assert writer.queue_depth == 0
+
+			writer.shutdown()
+
+	def test_backlog_warning_emitted_at_depth_three (
+		self, caplog: pytest.LogCaptureFixture
+	) -> None:
+		"""A WARNING should be logged when queue depth reaches 3."""
+		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
+		received: list[subsample.analysis.AnalysisResult] = []
+
+		def on_complete (path, spectral, rhythm, pitch, timbre, duration, raw_audio):
+			received.append(spectral)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			cfg = _make_config(pathlib.Path(tmp))
+
+			# Pause the writer thread so the queue can build up before processing.
+			# Use an Event to gate the first analysis call.
+			import threading
+			gate = threading.Event()
+			original_analyze = subsample.analysis.analyze_all
+
+			call_count = 0
+
+			def gated_analyze (*args, **kwargs):
+				nonlocal call_count
+				call_count += 1
+				if call_count == 1:
+					gate.wait()
+				return original_analyze(*args, **kwargs)
+
+			writer = subsample.recorder.WavWriter(cfg, _make_params(), on_complete=on_complete)
+
+			with caplog.at_level(logging.WARNING, logger="subsample.recorder"):
+				import unittest.mock
+				with unittest.mock.patch("subsample.analysis.analyze_all", side_effect=gated_analyze):
+					# Enqueue enough items that the queue builds up while the first is held
+					for i in range(4):
+						writer.enqueue(audio, datetime.datetime.now(), filename_base=f"seg_{i}")
+
+					# Allow processing to continue
+					gate.set()
+					writer.flush()
+
+			writer.shutdown()
+
+		warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+		assert any("queue depth" in m for m in warning_messages), (
+			f"Expected a queue-depth WARNING; got: {warning_messages}"
+		)
+
+	def test_drain_info_logged_after_backlog (
+		self, caplog: pytest.LogCaptureFixture
+	) -> None:
+		"""An INFO 'queue drained' log should appear once the backlog clears."""
+		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			cfg = _make_config(pathlib.Path(tmp))
+
+			import threading
+			import unittest.mock
+
+			gate = threading.Event()
+			original_analyze = subsample.analysis.analyze_all
+			call_count = 0
+
+			def gated_analyze (*args, **kwargs):
+				nonlocal call_count
+				call_count += 1
+				if call_count == 1:
+					gate.wait()
+				return original_analyze(*args, **kwargs)
+
+			writer = subsample.recorder.WavWriter(cfg, _make_params())
+
+			with caplog.at_level(logging.INFO, logger="subsample.recorder"):
+				with unittest.mock.patch("subsample.analysis.analyze_all", side_effect=gated_analyze):
+					for i in range(4):
+						writer.enqueue(audio, datetime.datetime.now(), filename_base=f"seg_{i}")
+					gate.set()
+					writer.flush()
+
+			writer.shutdown()
+
+		info_messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
+		assert any("drained" in m for m in info_messages), (
+			f"Expected a 'queue drained' INFO; got: {info_messages}"
+		)
