@@ -18,9 +18,9 @@ class TestLoadDefault:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
 		assert isinstance(cfg, subsample.config.Config)
-		assert isinstance(cfg.streamer, subsample.config.StreamerConfig)
-		assert isinstance(cfg.streamer.audio, subsample.config.AudioConfig)
-		assert isinstance(cfg.streamer.buffer, subsample.config.BufferConfig)
+		assert isinstance(cfg.recorder, subsample.config.RecorderConfig)
+		assert isinstance(cfg.recorder.audio, subsample.config.AudioConfig)
+		assert isinstance(cfg.recorder.buffer, subsample.config.BufferConfig)
 		assert isinstance(cfg.player, subsample.config.PlayerConfig)
 		assert isinstance(cfg.detection, subsample.config.DetectionConfig)
 		assert isinstance(cfg.output, subsample.config.OutputConfig)
@@ -29,20 +29,20 @@ class TestLoadDefault:
 	def test_default_audio_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.streamer.audio.sample_rate == 44100
-		assert cfg.streamer.audio.bit_depth == 16
-		assert cfg.streamer.audio.channels == 1
-		assert cfg.streamer.audio.chunk_size == 512
+		assert cfg.recorder.audio.sample_rate == 44100
+		assert cfg.recorder.audio.bit_depth == 16
+		assert cfg.recorder.audio.channels == 1
+		assert cfg.recorder.audio.chunk_size == 512
 
 	def test_default_buffer_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.streamer.buffer.max_seconds == 60
+		assert cfg.recorder.buffer.max_seconds == 60
 
-	def test_default_streamer_enabled (self) -> None:
+	def test_default_recorder_enabled (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.streamer.enabled is True
+		assert cfg.recorder.enabled is True
 
 	def test_default_player_disabled (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -92,7 +92,7 @@ class TestLoadDefault:
 	def test_analysis_defaults_when_section_absent (self, tmp_path: pathlib.Path) -> None:
 		"""A config.yaml without an analysis section should use class defaults."""
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  audio:
 			    sample_rate: 44100
 			    bit_depth: 16
@@ -128,7 +128,7 @@ class TestLoadCustomConfig:
 
 	def test_loads_custom_yaml (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  audio:
 			    sample_rate: 48000
 			    bit_depth: 24
@@ -150,16 +150,16 @@ class TestLoadCustomConfig:
 
 		cfg = subsample.config.load_config(config_file)
 
-		assert cfg.streamer.audio.sample_rate == 48000
-		assert cfg.streamer.audio.bit_depth == 24
-		assert cfg.streamer.audio.channels == 2
-		assert cfg.streamer.buffer.max_seconds == 30
+		assert cfg.recorder.audio.sample_rate == 48000
+		assert cfg.recorder.audio.bit_depth == 24
+		assert cfg.recorder.audio.channels == 2
+		assert cfg.recorder.buffer.max_seconds == 30
 		assert cfg.detection.snr_threshold_db == 10.0
 		assert cfg.output.directory == "/tmp/my_samples"
 
-	def test_streamer_enabled_flag (self, tmp_path: pathlib.Path) -> None:
+	def test_recorder_enabled_flag (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  enabled: false
 			  audio:
 			    sample_rate: 44100
@@ -182,11 +182,11 @@ class TestLoadCustomConfig:
 
 		cfg = subsample.config.load_config(config_file)
 
-		assert cfg.streamer.enabled is False
+		assert cfg.recorder.enabled is False
 
 	def test_player_enabled_flag (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  audio:
 			    sample_rate: 44100
 			    bit_depth: 16
@@ -217,7 +217,7 @@ class TestLoadCustomConfig:
 
 	def test_player_midi_device_custom (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  audio:
 			    sample_rate: 44100
 			    bit_depth: 16
@@ -246,7 +246,7 @@ class TestLoadCustomConfig:
 
 	def test_player_midi_device_non_string_raises (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  audio:
 			    sample_rate: 44100
 			    bit_depth: 16
@@ -275,7 +275,7 @@ class TestLoadCustomConfig:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
 		with pytest.raises(dataclasses.FrozenInstanceError):
-			cfg.streamer = subsample.config.StreamerConfig(  # type: ignore[misc]
+			cfg.recorder = subsample.config.RecorderConfig(  # type: ignore[misc]
 				audio=subsample.config.AudioConfig(
 					sample_rate=99, bit_depth=16, channels=1, chunk_size=1024
 				),
@@ -290,7 +290,7 @@ class TestLoadCustomConfig:
 
 	def test_similarity_custom_weights (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  audio:
 			    sample_rate: 44100
 			    bit_depth: 16
@@ -323,7 +323,7 @@ class TestLoadCustomConfig:
 
 	def test_similarity_negative_weight_raises (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  audio:
 			    sample_rate: 44100
 			    bit_depth: 16
@@ -351,7 +351,7 @@ class TestLoadCustomConfig:
 	def test_invalid_bit_depth_raises (self, tmp_path: pathlib.Path) -> None:
 		"""Loading a config with unsupported bit_depth should raise ValueError."""
 		yaml_content = textwrap.dedent("""\
-			streamer:
+			recorder:
 			  audio:
 			    sample_rate: 44100
 			    bit_depth: 8

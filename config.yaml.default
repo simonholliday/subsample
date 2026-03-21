@@ -3,13 +3,13 @@
 #   cp config.yaml.default config.yaml
 
 # ---------------------------------------------------------------------------
-# streamer — real-time audio capture from an input device
+# recorder — real-time audio capture from an input device
 # ---------------------------------------------------------------------------
-# Set enabled: false to skip live streaming and only process files given on
+# Set enabled: false to skip live recording and only process files given on
 # the command line. When enabled, the device, buffer, and sample format
 # settings below must be configured for your hardware.
 
-streamer:
+recorder:
   enabled: true
 
   audio:

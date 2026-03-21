@@ -210,7 +210,7 @@ class WavWriter:
 
 				# Use per-request overrides when provided (file-input mode); otherwise
 				# fall back to the config values set for the live capture stream.
-				effective_bit_depth = req.bit_depth if req.bit_depth is not None else self._cfg.streamer.audio.bit_depth
+				effective_bit_depth = req.bit_depth if req.bit_depth is not None else self._cfg.recorder.audio.bit_depth
 
 				# Convert once; all three analyses operate on the same mono float array.
 				# analyze_all() shares the pyin computation between spectral and pitch
@@ -284,8 +284,8 @@ class WavWriter:
 		"""
 
 		# Resolve effective format values; per-request overrides take precedence.
-		effective_sample_rate = sample_rate if sample_rate is not None else self._cfg.streamer.audio.sample_rate
-		effective_bit_depth   = bit_depth   if bit_depth   is not None else self._cfg.streamer.audio.bit_depth
+		effective_sample_rate = sample_rate if sample_rate is not None else self._cfg.recorder.audio.sample_rate
+		effective_bit_depth   = bit_depth   if bit_depth   is not None else self._cfg.recorder.audio.bit_depth
 
 		fname_base = filename_base if filename_base is not None else timestamp.strftime(self._cfg.output.filename_format)
 		filepath = self._output_dir / (fname_base + ".wav")

@@ -61,7 +61,7 @@ environment becomes an instant, organized sample pack.
 - **MIDI input skeleton** - `player.enabled: true` opens a MIDI input device and logs
   received messages; device selected by name substring match, auto-select, or interactive
   menu — the same pattern used for audio device selection; runs concurrently with the
-  streamer on its own thread. When the player is enabled, instrument samples are loaded
+  recorder on its own thread. When the player is enabled, instrument samples are loaded
   with their PCM audio in memory (`load_audio=True`) so they are ready for playback
   without any further disk reads.
 - **Playback level metadata** - every sample carries `LevelResult` (peak and RMS
@@ -135,13 +135,13 @@ All settings live in `config.yaml`. The defaults are:
 
 | Setting | Default | Description |
 |---|---|---|
-| `streamer.enabled` | `true` | Enable live audio capture; set to `false` to process files only |
-| `streamer.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
-| `streamer.audio.sample_rate` | `44100` | Sample rate in Hz |
-| `streamer.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
-| `streamer.audio.channels` | `1` | 1 = mono, 2 = stereo |
-| `streamer.audio.chunk_size` | `512` | Frames per buffer read |
-| `streamer.buffer.max_seconds` | `60` | Circular buffer length |
+| `recorder.enabled` | `true` | Enable live audio capture; set to `false` to process files only |
+| `recorder.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
+| `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
+| `recorder.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
+| `recorder.audio.channels` | `1` | 1 = mono, 2 = stereo |
+| `recorder.audio.chunk_size` | `512` | Frames per buffer read |
+| `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
 | `player.midi_device` | `none` | MIDI input device name (substring match); if unset, auto-select or prompt |
 | `player.audio.device` | `none` | Audio output device name for playback |
@@ -166,7 +166,7 @@ All settings live in `config.yaml`. The defaults are:
 
 ## Output
 
-Recordings are saved as uncompressed 16, 24, or 32-bit WAV files (depending on the `streamer.audio.bit_depth` setting) in the configured output directory.
+Recordings are saved as uncompressed 16, 24, or 32-bit WAV files (depending on the `recorder.audio.bit_depth` setting) in the configured output directory.
 
 **Live capture mode** - filenames are generated from the datetime the recording ended (strftime format controlled by `output.filename_format`):
 

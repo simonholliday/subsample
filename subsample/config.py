@@ -29,7 +29,7 @@ class BufferConfig:
 
 
 @dataclasses.dataclass(frozen=True)
-class StreamerConfig:
+class RecorderConfig:
 
 	audio: AudioConfig
 	buffer: BufferConfig
@@ -139,7 +139,7 @@ class InstrumentConfig:
 @dataclasses.dataclass(frozen=True)
 class Config:
 
-	streamer: StreamerConfig
+	recorder: RecorderConfig
 	detection: DetectionConfig
 	output: OutputConfig
 	analysis: AnalysisConfig = dataclasses.field(default_factory=AnalysisConfig)
@@ -225,9 +225,9 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	"""Construct the Config dataclass tree from a raw YAML dict."""
 
-	streamer_raw: dict[str, typing.Any] = raw.get("streamer", {})
-	audio_raw: dict[str, typing.Any] = streamer_raw.get("audio", {})
-	buffer_raw: dict[str, typing.Any] = streamer_raw.get("buffer", {})
+	recorder_raw: dict[str, typing.Any] = raw.get("recorder", {})
+	audio_raw: dict[str, typing.Any] = recorder_raw.get("audio", {})
+	buffer_raw: dict[str, typing.Any] = recorder_raw.get("buffer", {})
 	detection_raw: dict[str, typing.Any] = raw.get("detection", {})
 	output_raw: dict[str, typing.Any] = raw.get("output", {})
 	analysis_raw: dict[str, typing.Any] = raw.get("analysis", {})
@@ -235,15 +235,15 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	device_raw = audio_raw.get("device")
 	if device_raw is not None and not isinstance(device_raw, str):
 		raise ValueError(
-			f"streamer.audio.device must be a string (got {type(device_raw).__name__}: {device_raw!r}). "
+			f"recorder.audio.device must be a string (got {type(device_raw).__name__}: {device_raw!r}). "
 			"Check your config.yaml."
 		)
 
 	audio = AudioConfig(
-		sample_rate=int(_require(audio_raw, "sample_rate", "streamer.audio")),
-		bit_depth=int(_require(audio_raw, "bit_depth", "streamer.audio")),
-		channels=int(_require(audio_raw, "channels", "streamer.audio")),
-		chunk_size=int(_require(audio_raw, "chunk_size", "streamer.audio")),
+		sample_rate=int(_require(audio_raw, "sample_rate", "recorder.audio")),
+		bit_depth=int(_require(audio_raw, "bit_depth", "recorder.audio")),
+		channels=int(_require(audio_raw, "channels", "recorder.audio")),
+		chunk_size=int(_require(audio_raw, "chunk_size", "recorder.audio")),
 		device=device_raw,
 	)
 
@@ -253,23 +253,23 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			"Supported values: 16, 24, 32"
 		)
 	if audio.sample_rate <= 0:
-		raise ValueError(f"streamer.audio.sample_rate must be > 0 (got {audio.sample_rate})")
+		raise ValueError(f"recorder.audio.sample_rate must be > 0 (got {audio.sample_rate})")
 	if audio.channels <= 0:
-		raise ValueError(f"streamer.audio.channels must be > 0 (got {audio.channels})")
+		raise ValueError(f"recorder.audio.channels must be > 0 (got {audio.channels})")
 	if audio.chunk_size <= 0:
-		raise ValueError(f"streamer.audio.chunk_size must be > 0 (got {audio.chunk_size})")
+		raise ValueError(f"recorder.audio.chunk_size must be > 0 (got {audio.chunk_size})")
 
 	buffer = BufferConfig(
-		max_seconds=int(_require(buffer_raw, "max_seconds", "streamer.buffer")),
+		max_seconds=int(_require(buffer_raw, "max_seconds", "recorder.buffer")),
 	)
 
 	if buffer.max_seconds <= 0:
-		raise ValueError(f"streamer.buffer.max_seconds must be > 0 (got {buffer.max_seconds})")
+		raise ValueError(f"recorder.buffer.max_seconds must be > 0 (got {buffer.max_seconds})")
 
-	streamer = StreamerConfig(
+	recorder = RecorderConfig(
 		audio=audio,
 		buffer=buffer,
-		enabled=bool(streamer_raw.get("enabled", True)),
+		enabled=bool(recorder_raw.get("enabled", True)),
 	)
 
 	player_raw: dict[str, typing.Any] = raw.get("player", {})
@@ -366,7 +366,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		reference = None
 
 	return Config(
-		streamer=streamer,
+		recorder=recorder,
 		detection=detection,
 		output=output,
 		analysis=analysis,
