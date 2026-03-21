@@ -1,17 +1,24 @@
 """Entry point and main orchestration loop for Subsample.
 
 Ties together config loading, device selection, the circular buffer,
-the level detector, and the WAV writer. Supports two input modes:
+the level detector, the WAV writer, and the MIDI player. Supports two
+input modes and two run modes:
 
   File input   — pass WAV file paths as positional arguments; each file
                  is processed through the detection pipeline and segments
                  saved to the output directory, then picked up by the
                  instrument library loader.
 
-  Live capture — stream from an audio input device (always runs after
-                 file input, if a device is configured).
+  Live capture — stream from an audio input device (streamer.enabled: true).
 
-Press Ctrl+C to stop the live capture loop cleanly.
+  MIDI player  — listen for MIDI input and play instrument samples
+                 (player.enabled: true).
+
+Streamer and player run as threads so they can operate concurrently.
+The main thread handles KeyboardInterrupt and coordinates shutdown via
+a shared threading.Event.
+
+Press Ctrl+C to stop cleanly.
 """
 
 import argparse
@@ -19,6 +26,7 @@ import datetime
 import logging
 import pathlib
 import sys
+import threading
 import typing
 
 import numpy
@@ -29,6 +37,7 @@ import subsample.buffer
 import subsample.config
 import subsample.detector
 import subsample.library
+import subsample.player
 import subsample.recorder
 import subsample.similarity
 import subsample.trim
@@ -206,19 +215,22 @@ def _process_input_files (
 		print(f"  → {count} segment(s) written from {path.name}")
 
 
-def _stream_from_device (
+def _run_streamer (
 	cfg: subsample.config.Config,
 	reference_library: typing.Optional[subsample.library.ReferenceLibrary],
 	instrument_library: subsample.library.InstrumentLibrary,
 	analysis_params: subsample.analysis.AnalysisParams,
 	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
+	shutdown_event: threading.Event,
+	store_audio: bool,
 ) -> None:
 
 	"""Set up an audio input device and run the real-time capture loop.
 
 	Streams audio from the configured device (or interactively selected device)
 	into a circular buffer. Detected recordings are trimmed, queued for WAV
-	output, analyzed, and added to the instrument library. Press Ctrl+C to stop.
+	output, analyzed, and added to the instrument library. Runs until
+	shutdown_event is set.
 
 	Args:
 		cfg:                Full application config.
@@ -226,6 +238,8 @@ def _stream_from_device (
 		instrument_library: Instrument sample library to update in real time.
 		analysis_params:    Pre-computed FFT params matching cfg.streamer.audio.sample_rate.
 		similarity_matrix:  Similarity index to update as new samples arrive, or None.
+		shutdown_event:     Set this to stop the capture loop cleanly.
+		store_audio:        When True, keep PCM data in SampleRecord for playback.
 	"""
 
 	pa = subsample.audio.create_pyaudio()
@@ -236,11 +250,13 @@ def _stream_from_device (
 		else:
 			devices = subsample.audio.list_input_devices(pa)
 			device_index = subsample.audio.select_device(devices)
+
 		reader = subsample.audio.AudioReader(pa, device_index, cfg.streamer.audio)
+
 	except (ValueError, OSError) as exc:
 		print(f"Error opening audio device: {exc}", file=sys.stderr)
 		pa.terminate()
-		sys.exit(1)
+		return
 
 	audio_dtype = _AUDIO_DTYPE[cfg.streamer.audio.bit_depth]
 	max_frames = cfg.streamer.audio.sample_rate * cfg.streamer.buffer.max_seconds
@@ -257,23 +273,24 @@ def _stream_from_device (
 		cfg,
 		analysis_params,
 		on_complete=_make_on_complete(
-			reference_library, instrument_library, analysis_params, similarity_matrix,
+			reference_library, instrument_library, analysis_params, similarity_matrix, store_audio,
 		),
 	)
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
 
 	try:
-		while True:
-			chunk = reader.read()
+		while not shutdown_event.is_set():
+			chunk = reader.read(timeout=0.5)
+
+			if chunk is None:
+				# Timeout — loop back to check shutdown_event.
+				continue
 
 			trimmed = _process_chunk(chunk, buf, detector, cfg.detection)
 
 			if trimmed is not None:
 				writer.enqueue(trimmed, datetime.datetime.now())
-
-	except KeyboardInterrupt:
-		print("\nStopping…")
 
 	finally:
 		if reader.overflow_count > 0:
@@ -287,7 +304,36 @@ def _stream_from_device (
 		pa.terminate()
 		writer.shutdown()
 
-	print("Done.")
+
+def _start_player (
+	cfg: subsample.config.Config,
+	shutdown_event: threading.Event,
+) -> None:
+
+	"""Select a MIDI input device, create a MidiPlayer, and run it.
+
+	Resolves the MIDI device from config (substring match) or prompts the
+	user to select one interactively. Runs until shutdown_event is set.
+
+	Args:
+		cfg:            Full application config (reads cfg.player.midi_device).
+		shutdown_event: Set this to stop the player cleanly.
+	"""
+
+	try:
+		devices = subsample.player.list_midi_input_devices()
+
+		if cfg.player.midi_device is not None:
+			device_name = subsample.player.find_midi_device_by_name(cfg.player.midi_device)
+		else:
+			device_name = subsample.player.select_midi_device(devices)
+
+	except ValueError as exc:
+		print(f"Error opening MIDI device: {exc}", file=sys.stderr)
+		return
+
+	player = subsample.player.MidiPlayer(device_name, shutdown_event)
+	player.run()
 
 
 def main () -> None:
@@ -295,7 +341,8 @@ def main () -> None:
 	"""Run the ambient audio sampler.
 
 	Processes any input files first (if given on the command line), then
-	loads libraries and starts live capture from an audio input device.
+	loads libraries and starts the streamer and/or player as configured.
+	Both run as threads; the main thread coordinates shutdown on Ctrl+C.
 	"""
 
 	logging.basicConfig(
@@ -326,13 +373,14 @@ def main () -> None:
 	if args.files:
 		_process_input_files(args.files, cfg)
 
-	# Create instrument library. If a directory is configured, pre-load samples
-	# from disk; otherwise start empty. Memory limit is always enforced.
+	# Create instrument library. PCM audio is only needed when the player is
+	# active — skipping it saves memory when player is disabled.
 	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
 	if cfg.instrument.directory is not None:
 		instrument_library = subsample.library.load_instrument_library(
 			pathlib.Path(cfg.instrument.directory),
 			max_instrument_bytes,
+			load_audio=cfg.player.enabled,
 		)
 		print(
 			f"  Instruments  : {len(instrument_library)} sample(s) loaded"
@@ -353,15 +401,67 @@ def main () -> None:
 			similarity_matrix.bulk_add(instrument_library.samples())
 		print(f"  Similarity   : {similarity_matrix}")
 
-	_stream_from_device(cfg, reference_library, instrument_library, analysis_params, similarity_matrix)
+	# --- Thread-based orchestration ---
+	# Both the streamer and player have blocking loops, so each runs on its own
+	# thread. The main thread waits on shutdown_event and forwards Ctrl+C.
+
+	shutdown_event = threading.Event()
+	threads: list[threading.Thread] = []
+
+	if cfg.streamer.enabled:
+		threads.append(threading.Thread(
+			target=_run_streamer,
+			args=(
+				cfg, reference_library, instrument_library,
+				analysis_params, similarity_matrix,
+				shutdown_event, cfg.player.enabled,
+			),
+			name="streamer",
+		))
+
+	if cfg.player.enabled:
+		threads.append(threading.Thread(
+			target=_start_player,
+			args=(cfg, shutdown_event),
+			name="player",
+		))
+
+	if not threads:
+		print("Neither streamer nor player is enabled. Nothing to do.")
+		return
+
+	for t in threads:
+		t.start()
+
+	try:
+		# Block the main thread without spinning. Event.wait() releases the GIL
+		# and responds to KeyboardInterrupt between intervals.
+		while not shutdown_event.is_set():
+			shutdown_event.wait(timeout=1.0)
+
+	except KeyboardInterrupt:
+		print("\nStopping…")
+		shutdown_event.set()
+
+	for t in threads:
+		t.join(timeout=10.0)
+
+	print("Done.")
 
 
 def _print_banner (cfg: subsample.config.Config) -> None:
 
 	"""Print the startup summary line."""
 
+	modes = []
+	if cfg.streamer.enabled:
+		modes.append("streamer")
+	if cfg.player.enabled:
+		modes.append("player")
+	mode_str = " + ".join(modes) if modes else "file-only"
+
 	print(
-		f"Subsample  |  "
+		f"Subsample  |  {mode_str}  |  "
 		f"{cfg.streamer.audio.sample_rate} Hz  "
 		f"{cfg.streamer.audio.bit_depth}-bit  "
 		f"{cfg.streamer.audio.channels}ch  |  "
@@ -376,6 +476,7 @@ def _make_on_complete (
 	instrument_library: subsample.library.InstrumentLibrary,
 	analysis_params: subsample.analysis.AnalysisParams,
 	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
+	store_audio: bool,
 ) -> subsample.recorder._OnCompleteCallback:
 
 	"""Return the on_complete callback for the live-capture WavWriter.
@@ -383,6 +484,10 @@ def _make_on_complete (
 	The returned callback runs on the writer thread and must not block.
 	It logs the analysis result, adds the recording to the instrument
 	library, and updates the similarity matrix.
+
+	Args:
+		store_audio: When True, keep PCM data in the SampleRecord. Set to
+		             cfg.player.enabled — audio is only needed for playback.
 	"""
 
 	def on_complete (
@@ -412,7 +517,7 @@ def _make_on_complete (
 			timbre    = timbre,
 			params    = analysis_params,
 			duration  = duration,
-			audio     = audio,
+			audio     = audio if store_audio else None,
 			filepath  = filepath,
 		)
 

@@ -56,6 +56,10 @@ environment becomes an instant, organized sample pack.
   stem plus an index (e.g. field_recording_1.wav, field_recording_2.wav); useful for
   batch processing, testing on known material, and building sample libraries without
   live capture hardware.
+- **MIDI input skeleton** - `player.enabled: true` opens a MIDI input device and logs
+  received messages; device selected by name substring match, auto-select, or interactive
+  menu — the same pattern used for audio device selection; runs concurrently with the
+  streamer on its own thread.
 
 ## In Progress
 
@@ -74,7 +78,7 @@ environment becomes an instant, organized sample pack.
   notes can be replaced in real time as better examples arrive; manual override supported.
 - **Audio output device selection** - choose a playback interface by name in config,
   with the same auto-select / interactive-menu fallback used for audio input.
-- **MIDI playback device** - receive MIDI note triggers and play back the assigned sample
+- **MIDI playback** - receive MIDI note triggers and play back the assigned sample
   for each note; MIDI note velocity mapped to playback volume at the point of output.
 - **Polyphonic playback** - multiple samples can play simultaneously; each active voice
   contributes to the output mix.
@@ -119,7 +123,8 @@ All settings live in `config.yaml`. The defaults are:
 | `streamer.audio.channels` | `1` | 1 = mono, 2 = stereo |
 | `streamer.audio.chunk_size` | `512` | Frames per buffer read |
 | `streamer.buffer.max_seconds` | `60` | Circular buffer length |
-| `player.enabled` | `false` | Enable MIDI-triggered playback (not yet implemented) |
+| `player.enabled` | `false` | Enable the MIDI player |
+| `player.midi_device` | `none` | MIDI input device name (substring match); if unset, auto-select or prompt |
 | `player.audio.device` | `none` | Audio output device name for playback |
 | `detection.snr_threshold_db` | `12.0` | dB above ambient to trigger recording |
 | `detection.hold_time` | `0.5` | Seconds to hold recording open after signal drops |

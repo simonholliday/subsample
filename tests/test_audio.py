@@ -185,6 +185,33 @@ class TestAudioReader:
 		mock_stream.stop_stream.assert_called_once()
 		mock_stream.close.assert_called_once()
 
+	def test_read_returns_none_on_timeout (self) -> None:
+		"""read(timeout=...) should return None when no data arrives before the timeout."""
+		reader, _ = self._make_reader()
+
+		# Queue is empty — read with a very short timeout should return None.
+		result = reader.read(timeout=0.01)
+
+		reader.stop()
+
+		assert result is None
+
+	def test_read_no_timeout_returns_chunk (self) -> None:
+		"""read() with no timeout argument should still return a chunk when data is available."""
+		chunk_size = 16
+		reader, _ = self._make_reader(chunk_size=chunk_size)
+
+		raw = numpy.zeros(chunk_size, dtype=numpy.int16).tobytes()
+		reader._callback(raw, chunk_size, {}, 0)
+
+		# Should not require a timeout argument — backward-compatible call.
+		chunk = reader.read()
+
+		reader.stop()
+
+		assert chunk is not None
+		assert chunk.shape == (chunk_size, 1)
+
 
 class TestFindDeviceByName:
 

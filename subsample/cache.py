@@ -306,7 +306,8 @@ def _load_payload (
 	except FileNotFoundError:
 		return None
 
-	except (json.JSONDecodeError, OSError) as exc:
+	except (json.JSONDecodeError, OSError, ValueError) as exc:
+		# ValueError catches UnicodeDecodeError (subclass) for files with invalid UTF-8.
 		_log.warning("Ignoring malformed %s %s: %s", label, path.name, exc)
 		return None
 

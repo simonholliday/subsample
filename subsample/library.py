@@ -336,13 +336,15 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 def load_instrument_library (
 	directory: pathlib.Path,
 	max_memory_bytes: int,
+	load_audio: bool = True,
 ) -> InstrumentLibrary:
 
 	"""Discover and load instrument samples (WAV + sidecar) from a directory.
 
 	Like load_reference_library(), but also loads the audio data from each WAV
-	file. Unlike reference samples, instrument samples require the WAV to be
-	present — sidecars without a matching WAV are skipped with a WARNING.
+	file (unless load_audio=False). Unlike reference samples, instrument samples
+	require the WAV to be present — sidecars without a matching WAV are skipped
+	with a WARNING.
 
 	Scans the top level of directory only (non-recursive). Samples are added in
 	sorted filename order; the memory limit is respected using FIFO eviction.
@@ -352,6 +354,9 @@ def load_instrument_library (
 	Args:
 		directory:        Path to search for .analysis.json sidecar files.
 		max_memory_bytes: Memory limit passed to the returned InstrumentLibrary.
+		load_audio:       When True (default), load PCM data into each record's
+		                  audio field. When False, audio is left as None to save
+		                  memory — use this when playback is not required.
 
 	Returns:
 		InstrumentLibrary containing all successfully loaded samples.
@@ -388,11 +393,14 @@ def load_instrument_library (
 			)
 			continue
 
-		audio = _load_wav_audio(audio_path)
+		if load_audio:
+			audio: typing.Optional[numpy.ndarray] = _load_wav_audio(audio_path)
 
-		if audio is None:
-			# _load_wav_audio already logged the reason
-			continue
+			if audio is None:
+				# _load_wav_audio already logged the reason
+				continue
+		else:
+			audio = None
 
 		record = SampleRecord(
 			sample_id = allocate_id(),

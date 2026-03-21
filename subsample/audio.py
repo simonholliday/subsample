@@ -217,17 +217,26 @@ class AudioReader:
 			stream_callback=self._callback,
 		)
 
-	def read (self) -> numpy.ndarray:
+	def read (self, timeout: typing.Optional[float] = None) -> typing.Optional[numpy.ndarray]:
 
-		"""Return the next audio chunk, blocking until one is available.
+		"""Return the next audio chunk, or None if timeout elapses.
 
 		Unpacks raw bytes from the callback queue into a numpy integer array.
+		When timeout is None (default) the call blocks indefinitely until a
+		chunk arrives — identical to the original behaviour.
+
+		Args:
+			timeout: Maximum seconds to wait. None = block forever.
 
 		Returns:
-			Array of shape (chunk_size, channels), integer dtype.
+			Array of shape (chunk_size, channels), integer dtype, or None on timeout.
 		"""
 
-		raw_bytes = self._queue.get()
+		try:
+			raw_bytes = self._queue.get(timeout=timeout)
+		except queue.Empty:
+			return None
+
 		return unpack_audio(raw_bytes, self._bit_depth, self._channels)
 
 	@property

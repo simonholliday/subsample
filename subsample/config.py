@@ -47,6 +47,10 @@ class PlayerConfig:
 
 	audio: PlayerAudioConfig = dataclasses.field(default_factory=PlayerAudioConfig)
 	enabled: bool = False
+	midi_device: typing.Optional[str] = None
+	"""Name (or substring) of the MIDI input device for triggering playback.
+	Case-insensitive substring match. If omitted, auto-selects when only one
+	MIDI input device is present, or shows an interactive menu for multiple."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -276,9 +280,17 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"player.audio.device must be a string (got {type(player_device).__name__}: {player_device!r}). "
 			"Check your config.yaml."
 		)
+	player_midi_device = player_raw.get("midi_device")
+	if player_midi_device is not None and not isinstance(player_midi_device, str):
+		raise ValueError(
+			f"player.midi_device must be a string (got {type(player_midi_device).__name__}: {player_midi_device!r}). "
+			"Check your config.yaml."
+		)
+
 	player = PlayerConfig(
 		audio=PlayerAudioConfig(device=player_device),
 		enabled=bool(player_raw.get("enabled", False)),
+		midi_device=player_midi_device,
 	)
 
 	detection = DetectionConfig(

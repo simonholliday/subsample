@@ -77,10 +77,11 @@ class CircularBuffer:
 			chunk = chunk.reshape(-1, 1)
 
 		n_frames = chunk.shape[0]
-		assert n_frames <= self._max_frames, (
-			f"Chunk ({n_frames} frames) exceeds buffer capacity ({self._max_frames} frames). "
-			"Use a smaller chunk_size or a larger buffer."
-		)
+		if n_frames > self._max_frames:
+			raise ValueError(
+				f"Chunk ({n_frames} frames) exceeds buffer capacity ({self._max_frames} frames). "
+				"Use a smaller chunk_size or a larger buffer."
+			)
 		head = self.write_head
 		space_to_end = self._max_frames - head
 

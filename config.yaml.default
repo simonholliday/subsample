@@ -56,13 +56,21 @@ streamer:
     # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_buffer_values
 
 # ---------------------------------------------------------------------------
-# player — MIDI-triggered sample playback (not yet implemented)
+# player — MIDI input listener and sample playback
 # ---------------------------------------------------------------------------
-# Set enabled: true when the player is implemented. When enabled, the audio
-# output device below must be configured.
+# MIDI input listening is implemented: enables a device, listens for MIDI
+# messages, and logs them. Audio output (triggering samples on note events)
+# is planned for a future iteration.
 
 player:
   enabled: false
+
+  # midi_device: "Launchpad"
+  # Name (or substring) of the MIDI input device for triggering sample playback.
+  # Case-insensitive substring match — "Launch" matches "Launchpad MK3 MIDI 1".
+  # If omitted, auto-selects when only one MIDI device is present, or shows an
+  # interactive numbered menu when multiple are found.
+  # Run subsample once with player.enabled: true to see available MIDI device names.
 
   audio:
     device: null
@@ -85,10 +93,11 @@ detection:
   ema_alpha: 0.1
   # Exponential moving average smoothing factor for ambient noise tracking.
   # Ambient = alpha * chunk_rms + (1 - alpha) * ambient_prev.
-  # Range: 0.001–0.1. Default 0.01 ≈ 100-chunk averaging (5s at 44100 Hz, 512 chunk_size).
+  # Range: 0.001–0.1. Default 0.1 ≈ 10-chunk averaging (~0.1s at 44100 Hz, 512 chunk_size).
   #
-  # Lower (0.001–0.01): floor adapts slowly. Stable baseline; captures both gradual swells
-  #   and sudden transients. Good for variable environments (e.g. room with occasional noise).
+  # Lower (0.001–0.01): floor adapts slowly (0.01 ≈ 100-chunk / ~5s averaging). Stable
+  #   baseline; captures both gradual swells and sudden transients. Good for variable
+  #   environments (e.g. room with occasional noise).
   # Higher (0.05–0.1): floor chases gradual level rises, so only sounds with a sudden onset
   #   (fast attack — claps, drums, plucks) exceed the threshold. Slow buildups are ignored.
   #   Use this to be selective about transients and filter out gradual ambient changes.

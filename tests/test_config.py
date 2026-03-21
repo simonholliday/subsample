@@ -49,6 +49,7 @@ class TestLoadDefault:
 
 		assert cfg.player.enabled is False
 		assert cfg.player.audio.device is None
+		assert cfg.player.midi_device is None
 
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -213,6 +214,62 @@ class TestLoadCustomConfig:
 
 		assert cfg.player.enabled is True
 		assert cfg.player.audio.device == "Focusrite Output"
+
+	def test_player_midi_device_custom (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			streamer:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			player:
+			  enabled: true
+			  midi_device: "Launchpad"
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.player.midi_device == "Launchpad"
+
+	def test_player_midi_device_non_string_raises (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			streamer:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			player:
+			  midi_device: 42
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		with pytest.raises(ValueError, match="player.midi_device"):
+			subsample.config.load_config(config_file)
 
 	def test_config_is_frozen (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
