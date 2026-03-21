@@ -42,6 +42,12 @@ Timbre metrics (TimbreResult) — timbral fingerprints, NOT normalised:
   mfcc               — 13 mean MFCC coefficients for timbre fingerprinting / similarity
   mfcc_delta         — 13 mean delta-MFCC coefficients (first-order temporal difference)
   mfcc_onset         — 13 onset-weighted MFCC coefficients (exponential decay from attack)
+
+Level metrics (LevelResult) — amplitude measurements, NOT used for similarity:
+
+  peak               — peak absolute amplitude in [0, 1] (max(|signal|) on float32 mono)
+  rms                — RMS amplitude in [0, 1] (sqrt(mean(signal²)) on float32 mono)
+  Used at playback time to normalise levels across samples recorded at different volumes.
 """
 
 import dataclasses
@@ -77,7 +83,7 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide",
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "3"
+ANALYSIS_VERSION: str = "4"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -369,6 +375,31 @@ class TimbreResult:
 	vector reflects the timbral character of the attack rather than the
 	average. For short percussive sounds, this is usually more discriminative
 	than the plain mean MFCCs."""
+
+
+@dataclasses.dataclass(frozen=True)
+class LevelResult:
+
+	"""Peak and RMS amplitude of the recording, measured on the float32 mono signal.
+
+	Both values are in [0.0, 1.0] because the mono signal is normalised to unity
+	by to_mono_float() before analysis. Used for per-sample gain normalisation
+	during playback — NOT included in similarity scoring.
+
+	At playback time, a normalization gain can be computed as:
+	    gain = target_rms / level.rms
+	then scaled by MIDI velocity and clamped by level.peak to prevent clipping.
+	"""
+
+	peak: float
+	"""Peak absolute amplitude: max(abs(signal)).
+	0.0 = silence, 1.0 = full digital scale. Used to set the anti-clipping
+	ceiling so no combination of normalization gain and velocity can exceed 0 dBFS."""
+
+	rms: float
+	"""Root mean square amplitude: sqrt(mean(signal²)).
+	0.0 = silence. Represents perceived average loudness and is the primary
+	value used to normalise levels across samples with different recording volumes."""
 
 
 def compute_params (sample_rate: int) -> AnalysisParams:
@@ -742,6 +773,59 @@ def format_pitch_result (result: PitchResult) -> str:
 	)
 
 
+def compute_level (mono: numpy.ndarray) -> LevelResult:
+
+	"""Compute peak and RMS amplitude from a normalised float32 mono signal.
+
+	Both metrics are derived from the same float32 signal produced by
+	to_mono_float(), so values are naturally in [0.0, 1.0]. The computation
+	is trivially cheap and always runs alongside the other analyses.
+
+	Args:
+		mono: Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+
+	Returns:
+		LevelResult with peak and rms in [0.0, 1.0].
+		Both are 0.0 for an empty or silent signal.
+	"""
+
+	if mono.size == 0:
+		return LevelResult(peak=0.0, rms=0.0)
+
+	peak = float(numpy.max(numpy.abs(mono)))
+	rms  = float(numpy.sqrt(numpy.mean(mono.astype(numpy.float64) ** 2)))
+
+	return LevelResult(peak=peak, rms=rms)
+
+
+def format_level_result (result: LevelResult) -> str:
+
+	"""Return a single-line human-readable summary of the level analysis.
+
+	Shows peak and RMS both as linear [0, 1] values and as dBFS equivalents,
+	so the log output is useful to both engineers (dBFS) and code (linear).
+
+	Args:
+		result: Computed level metrics.
+
+	Returns:
+		String of the form:
+		"peak=0.9512 (-0.4dBFS)  rms=0.2345 (-12.6dBFS)"
+		or "peak=0.0000 (-infdBFS)  rms=0.0000 (-infdBFS)" for silence.
+	"""
+
+	def _dbfs (v: float) -> str:
+		if v <= 0.0:
+			return "-inf"
+		db = 20.0 * math.log10(v)
+		return f"{db:.1f}"
+
+	return (
+		f"peak={result.peak:.4f} ({_dbfs(result.peak)}dBFS)"
+		f"  rms={result.rms:.4f} ({_dbfs(result.rms)}dBFS)"
+	)
+
+
 def analyze_pitch (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
@@ -923,9 +1007,9 @@ def analyze_all (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
 	rhythm_cfg: subsample.config.AnalysisConfig,
-) -> tuple[AnalysisResult, RhythmResult, PitchResult, TimbreResult]:
+) -> tuple[AnalysisResult, RhythmResult, PitchResult, TimbreResult, LevelResult]:
 
-	"""Run all analyses (spectral, rhythm, pitch, timbre) with shared pyin computation.
+	"""Run all analyses (spectral, rhythm, pitch, timbre, level) with shared pyin computation.
 
 	Preferred entry point for the recorder and any code that needs all results.
 	Runs pyin once and passes the result to both analyze_mono() and
@@ -937,17 +1021,18 @@ def analyze_all (
 		rhythm_cfg: Configurable tempo priors from AnalysisConfig.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre) — four result dataclasses.
+		(spectral, rhythm, pitch, timbre, level) — five result dataclasses.
 	"""
 
 	# Run pyin once; share the result between spectral (voiced_fraction) and pitch.
 	pyin = _run_pyin(mono, params)
 
-	rhythm = analyze_rhythm(mono, params, rhythm_cfg)
+	rhythm   = analyze_rhythm(mono, params, rhythm_cfg)
 	spectral = analyze_mono(mono, params, _pyin_voiced_flag=pyin[1] if pyin is not None else None)
 	pitch, timbre = analyze_pitch(mono, params, _pyin_result=pyin)
+	level    = compute_level(mono)
 
-	return spectral, rhythm, pitch, timbre
+	return spectral, rhythm, pitch, timbre, level
 
 
 # ---------------------------------------------------------------------------

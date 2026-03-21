@@ -75,6 +75,7 @@ class SampleRecord:
 		rhythm:    Tempo, beat grid, pulse curve, onset times.
 		pitch:     Fundamental frequency, chroma profile, pitch class.
 		timbre:    MFCC timbral fingerprints (mfcc, mfcc_delta, mfcc_onset).
+		level:     Peak and RMS amplitude (used for playback level normalisation).
 		params:    FFT parameters used when the analysis was computed.
 		duration:  Recording length in seconds.
 		audio:     Original capture-format PCM as a numpy array, shape
@@ -90,6 +91,7 @@ class SampleRecord:
 	rhythm:    subsample.analysis.RhythmResult
 	pitch:     subsample.analysis.PitchResult
 	timbre:    subsample.analysis.TimbreResult
+	level:     subsample.analysis.LevelResult
 	params:    subsample.analysis.AnalysisParams
 	duration:  float
 	audio:     typing.Optional[numpy.ndarray] = None
@@ -309,7 +311,7 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 			# load_sidecar already logged the reason
 			continue
 
-		spectral, rhythm, pitch, timbre, params, duration = result
+		spectral, rhythm, pitch, timbre, params, duration, level = result
 
 		# Derive name: strip ".analysis.json" → audio filename → strip extension
 		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
@@ -322,6 +324,7 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 			rhythm    = rhythm,
 			pitch     = pitch,
 			timbre    = timbre,
+			level     = level,
 			params    = params,
 			duration  = duration,
 			audio     = None,
@@ -378,7 +381,7 @@ def load_instrument_library (
 			# load_sidecar already logged the reason
 			continue
 
-		spectral, rhythm, pitch, timbre, params, duration = result
+		spectral, rhythm, pitch, timbre, params, duration, level = result
 
 		# Derive the audio filename from the sidecar name
 		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
@@ -409,6 +412,7 @@ def load_instrument_library (
 			rhythm    = rhythm,
 			pitch     = pitch,
 			timbre    = timbre,
+			level     = level,
 			params    = params,
 			duration  = duration,
 			audio     = audio,

@@ -100,6 +100,7 @@ def _make_record (
 		rhythm    = rhythm,
 		pitch     = pitch,
 		timbre    = timbre if timbre is not None else _make_timbre(),
+		level     = subsample.analysis.LevelResult(peak=0.5, rms=0.2),
 		params    = params,
 		duration  = 1.0,
 	)
@@ -614,3 +615,80 @@ class TestSimilarityMatrix:
 		t1.join()
 		t2.join()
 		assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# TestLevelIndependence — level must NOT affect similarity scores
+# ---------------------------------------------------------------------------
+
+class TestLevelIndependence:
+
+	"""Verify that LevelResult data has no influence on similarity scoring.
+
+	Two records identical in every way except level should produce the same
+	cosine similarity against any reference.
+	"""
+
+	def test_different_levels_same_similarity (self) -> None:
+		"""Two records with the same spectral/timbre but different level should score identically."""
+		spectral = _make_spectral()
+		timbre   = _make_timbre()
+
+		record_quiet = subsample.library.SampleRecord(
+			sample_id = subsample.library.allocate_id(),
+			name      = "quiet",
+			spectral  = spectral,
+			rhythm    = subsample.analysis.RhythmResult(
+				tempo_bpm=120.0,
+				beat_times=(),
+				pulse_curve=numpy.array([], dtype=numpy.float32),
+				pulse_peak_times=(),
+				onset_times=(),
+				onset_count=0,
+			),
+			pitch     = subsample.analysis.PitchResult(
+				dominant_pitch_hz=0.0,
+				pitch_confidence=0.0,
+				chroma_profile=tuple(0.0 for _ in range(12)),
+				dominant_pitch_class=-1,
+			),
+			timbre    = timbre,
+			level     = subsample.analysis.LevelResult(peak=0.1, rms=0.03),
+			params    = subsample.analysis.compute_params(44100),
+			duration  = 1.0,
+		)
+
+		record_loud = subsample.library.SampleRecord(
+			sample_id = subsample.library.allocate_id(),
+			name      = "loud",
+			spectral  = spectral,
+			rhythm    = subsample.analysis.RhythmResult(
+				tempo_bpm=120.0,
+				beat_times=(),
+				pulse_curve=numpy.array([], dtype=numpy.float32),
+				pulse_peak_times=(),
+				onset_times=(),
+				onset_count=0,
+			),
+			pitch     = subsample.analysis.PitchResult(
+				dominant_pitch_hz=0.0,
+				pitch_confidence=0.0,
+				chroma_profile=tuple(0.0 for _ in range(12)),
+				dominant_pitch_class=-1,
+			),
+			timbre    = timbre,
+			level     = subsample.analysis.LevelResult(peak=0.95, rms=0.70),
+			params    = subsample.analysis.compute_params(44100),
+			duration  = 1.0,
+		)
+
+		ref = _make_record("REF", _make_spectral())
+		lib = _library_with(ref)
+		cfg = _DEFAULT_CFG
+
+		scores_quiet = subsample.similarity.score_against_library(record_quiet, lib, cfg)
+		scores_loud  = subsample.similarity.score_against_library(record_loud,  lib, cfg)
+
+		assert len(scores_quiet) == 1
+		assert len(scores_loud)  == 1
+		assert scores_quiet[0].score == pytest.approx(scores_loud[0].score, abs=1e-6)

@@ -9,7 +9,7 @@ import pytest
 import subsample.analysis
 import subsample.cache
 
-from .helpers import _make_params, _make_pitch, _make_rhythm, _make_spectral, _make_timbre, _make_wav
+from .helpers import _make_level, _make_params, _make_pitch, _make_rhythm, _make_spectral, _make_timbre, _make_wav
 
 
 # ---------------------------------------------------------------------------
@@ -68,21 +68,23 @@ class TestSaveAndLoadRoundTrip:
 		rhythm   = _make_rhythm()
 		pitch    = _make_pitch()
 		timbre   = _make_timbre()
+		level    = _make_level()
 		params   = _make_params()
 		duration = 1.23
 		md5      = subsample.cache.compute_audio_md5(wav)
 
-		subsample.cache.save_cache(wav, md5, params, spectral, rhythm, pitch, timbre, duration)
+		subsample.cache.save_cache(wav, md5, params, spectral, rhythm, pitch, timbre, duration, level)
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		r_spectral, r_rhythm, r_pitch, r_timbre, r_params, r_duration = result
+		r_spectral, r_rhythm, r_pitch, r_timbre, r_params, r_duration, r_level = result
 
 		assert r_spectral == spectral
 		assert r_pitch    == pitch
 		assert r_timbre   == timbre
 		assert r_params   == params
 		assert abs(r_duration - duration) < 1e-9
+		assert r_level == level
 
 	def test_rhythm_fields_survive_roundtrip (self, tmp_path: pathlib.Path) -> None:
 		wav = tmp_path / "kick.wav"
@@ -92,7 +94,7 @@ class TestSaveAndLoadRoundTrip:
 		params = _make_params()
 		md5    = subsample.cache.compute_audio_md5(wav)
 
-		subsample.cache.save_cache(wav, md5, params, _make_spectral(), rhythm, _make_pitch(), _make_timbre(), 1.0)
+		subsample.cache.save_cache(wav, md5, params, _make_spectral(), rhythm, _make_pitch(), _make_timbre(), 1.0, _make_level())
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
 
@@ -108,7 +110,7 @@ class TestSaveAndLoadRoundTrip:
 		wav = tmp_path / "kick.wav"
 		_make_wav(wav)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0, _make_level())
 		assert subsample.cache.cache_path(wav).exists()
 
 
@@ -133,7 +135,7 @@ class TestCacheInvalidation:
 		# Use a long enough WAV for all librosa analysis functions to work
 		_make_wav(wav, n_frames=22050)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0, _make_level())
 
 		# Simulate the analysis algorithm being updated
 		monkeypatch.setattr(subsample.analysis, "ANALYSIS_VERSION", "999")
@@ -141,7 +143,7 @@ class TestCacheInvalidation:
 
 		# Re-analysis should succeed and return a valid result tuple
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration = result
+		spectral, rhythm, pitch, timbre, params, duration, level = result
 		assert isinstance(spectral, subsample.analysis.AnalysisResult)
 
 	def test_version_mismatch_logs_info (
@@ -154,7 +156,7 @@ class TestCacheInvalidation:
 		wav = tmp_path / "kick.wav"
 		_make_wav(wav, n_frames=22050)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0, _make_level())
 
 		monkeypatch.setattr(subsample.analysis, "ANALYSIS_VERSION", "999")
 
@@ -172,14 +174,14 @@ class TestCacheInvalidation:
 		wav = tmp_path / "kick.wav"
 		_make_wav(wav, n_frames=22050)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0, _make_level())
 
 		# Overwrite the WAV with different content
 		_make_wav(wav, n_frames=22050)
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration = result
+		spectral, rhythm, pitch, timbre, params, duration, level = result
 		assert isinstance(spectral, subsample.analysis.AnalysisResult)
 
 	def test_md5_mismatch_logs_info (
@@ -191,7 +193,7 @@ class TestCacheInvalidation:
 		wav = tmp_path / "kick.wav"
 		_make_wav(wav, n_frames=22050)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0, _make_level())
 
 		_make_wav(wav, n_frames=44100)  # different content → different MD5
 
@@ -233,7 +235,7 @@ class TestAtomicWrite:
 		wav = tmp_path / "kick.wav"
 		_make_wav(wav)
 		md5 = subsample.cache.compute_audio_md5(wav)
-		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0)
+		subsample.cache.save_cache(wav, md5, _make_params(), _make_spectral(), _make_rhythm(), _make_pitch(), _make_timbre(), 1.0, _make_level())
 
 		tmp_files = list(tmp_path.glob("*.tmp*"))
 		assert tmp_files == [], f"Temp files left behind: {tmp_files}"

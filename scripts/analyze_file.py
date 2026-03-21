@@ -45,7 +45,7 @@ def _analyze_file (filepath_path: pathlib.Path) -> None:
 	cached = subsample.cache.load_cache(filepath_path)
 
 	if cached is not None:
-		result, rhythm, pitch, timbre, params, duration = cached
+		result, rhythm, pitch, timbre, params, duration, level = cached
 
 	else:
 		try:
@@ -68,7 +68,7 @@ def _analyze_file (filepath_path: pathlib.Path) -> None:
 
 		# Run all three analyses; analyze_all() shares the pyin computation
 		# between spectral and pitch, avoiding ~200-300 ms of redundant work.
-		result, rhythm, pitch, timbre = subsample.analysis.analyze_all(mono, params, rhythm_cfg)
+		result, rhythm, pitch, timbre, level = subsample.analysis.analyze_all(mono, params, rhythm_cfg)
 
 		duration = len(data) / samplerate
 
@@ -84,6 +84,7 @@ def _analyze_file (filepath_path: pathlib.Path) -> None:
 				pitch      = pitch,
 				timbre     = timbre,
 				duration   = duration,
+				level      = level,
 			)
 		except OSError as exc:
 			_log.warning("Could not save analysis cache for %s: %s", filepath_path.name, exc)
@@ -91,6 +92,7 @@ def _analyze_file (filepath_path: pathlib.Path) -> None:
 	print(f"rhythm:   {subsample.analysis.format_rhythm_result(rhythm)}")
 	print(f"spectral: {subsample.analysis.format_result(result, duration)}")
 	print(f"pitch:    {subsample.analysis.format_pitch_result(pitch)}")
+	print(f"level:    {subsample.analysis.format_level_result(level)}")
 
 
 def main () -> None:

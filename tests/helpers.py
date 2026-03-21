@@ -80,6 +80,13 @@ def _make_timbre () -> subsample.analysis.TimbreResult:
 	)
 
 
+def _make_level () -> subsample.analysis.LevelResult:
+
+	"""Return a representative LevelResult with typical field values."""
+
+	return subsample.analysis.LevelResult(peak=0.85, rms=0.25)
+
+
 def _make_params (sample_rate: int = 44100) -> subsample.analysis.AnalysisParams:
 
 	"""Return AnalysisParams computed for the given sample rate."""

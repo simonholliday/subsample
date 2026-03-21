@@ -245,7 +245,7 @@ class TestWavWriterQueueDepth:
 		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
 		received: list[subsample.analysis.AnalysisResult] = []
 
-		def on_complete (path, spectral, rhythm, pitch, timbre, duration, raw_audio):
+		def on_complete (path, spectral, rhythm, pitch, timbre, level, duration, raw_audio):
 			received.append(spectral)
 
 		with tempfile.TemporaryDirectory() as tmp:

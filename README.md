@@ -29,7 +29,9 @@ environment becomes an instant, organized sample pack.
   centroid, bandwidth, zero-crossing rate, harmonic ratio, spectral contrast, voiced
   fraction, log-attack time, spectral flux); rhythm analysis (BPM, beats, pulses,
   onsets); pitch analysis (fundamental frequency, pitch class, chroma profile, MFCC
-  timbre fingerprint, delta-MFCC timbre trajectory, onset-weighted MFCC).
+  timbre fingerprint, delta-MFCC timbre trajectory, onset-weighted MFCC); per-sample
+  amplitude metadata (peak and RMS), stored in the sidecar for use during playback
+  to normalise levels across samples recorded at different volumes.
 - **File analysis** - `scripts/analyze_file.py` runs the same analysis pipeline on any
   local audio file (WAV, FLAC, AIFF, OGG, etc.).
 - **Reference sample library** - load pre-analyzed reference sounds from disk; lookups
@@ -59,7 +61,20 @@ environment becomes an instant, organized sample pack.
 - **MIDI input skeleton** - `player.enabled: true` opens a MIDI input device and logs
   received messages; device selected by name substring match, auto-select, or interactive
   menu — the same pattern used for audio device selection; runs concurrently with the
-  streamer on its own thread.
+  streamer on its own thread. When the player is enabled, instrument samples are loaded
+  with their PCM audio in memory (`load_audio=True`) so they are ready for playback
+  without any further disk reads.
+- **Playback level metadata** - every sample carries `LevelResult` (peak and RMS
+  amplitude, measured on the normalised float32 signal). This enables per-sample gain
+  normalisation at playback time: `gain = target_rms / sample.level.rms`, scaled by
+  MIDI velocity and clamped by `sample.level.peak` to prevent clipping. Quiet samples
+  recorded in a noisy room and loud transients recorded at close range can both sit at
+  the same perceived level without modifying the stored audio.
+- **Similarity-based note-to-sample routing** - the `SimilarityMatrix` is fully
+  operational. `matrix.get_match(reference_name, rank=0)` returns the `sample_id` of
+  the instrument sample most similar to a given reference (e.g. "KICK", "SNARE"). The
+  player can map MIDI notes to reference names in config, and at trigger time call this
+  to find the best-matching sample in the current library.
 
 ## In Progress
 
@@ -75,11 +90,15 @@ environment becomes an instant, organized sample pack.
 - **Interactive classification** - allow live adjustment of classification thresholds;
   manually reassign samples to categories during recording session.
 - **MIDI note assignment** - allocate MIDI trigger notes based on sample classification;
-  notes can be replaced in real time as better examples arrive; manual override supported.
-- **Audio output device selection** - choose a playback interface by name in config,
-  with the same auto-select / interactive-menu fallback used for audio input.
+  the `SimilarityMatrix.get_match()` routing is already implemented — what remains is
+  a config mapping from MIDI note number to reference name (e.g. note 36 → "KICK"), and
+  the trigger dispatch in `MidiPlayer.run()`.
+- **Audio output device selection** - `player.audio.device` config key is already
+  parsed and available as `cfg.player.audio.device`; the device selection logic from
+  `audio.py` is the model to follow.
 - **MIDI playback** - receive MIDI note triggers and play back the assigned sample
-  for each note; MIDI note velocity mapped to playback volume at the point of output.
+  for each note; MIDI velocity maps to playback volume using the `LevelResult`
+  normalisation gain formula already implemented (see Implemented above).
 - **Polyphonic playback** - multiple samples can play simultaneously; each active voice
   contributes to the output mix.
 - **Mix management** - per-voice gain staging to prevent clipping when multiple samples
@@ -235,6 +254,7 @@ This runs the same analysis pipeline used during live capture and prints three l
 rhythm:   tempo=120.2bpm  beats=4  pulses=12  onsets=4
 spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001  zcr=0.120  harmonic=0.821  contrast=0.310  voiced=0.940  log_attack=0.000  flux=0.312
 pitch:    pitch=440.0Hz  chroma=A  pitch_conf=0.89
+level:    peak=0.8743 (-1.2dBFS)  rms=0.2341 (-12.6dBFS)
 ```
 
 The first line shows rhythm properties (not normalised):
@@ -261,6 +281,10 @@ The third line shows pitch and timbre data (raw values, not normalised):
 - **pitch** - Dominant fundamental frequency in Hz, or "none" for unpitched audio
 - **chroma** - Dominant pitch class (C, C#, D, … B), or "none" for unpitched audio
 - **pitch_conf** - pyin pitch detection confidence [0, 1] (use with `voiced` to judge reliability)
+
+The fourth line shows amplitude metadata:
+- **peak** - peak absolute amplitude [0, 1] on the normalised float32 signal, with dBFS equivalent
+- **rms** - RMS (average loudness) [0, 1], with dBFS equivalent; used at playback time to compute per-sample gain normalisation
 
 Three MFCC timbre fingerprints are computed and stored in each sample's `.analysis.json`
 sidecar (not shown in the analysis script output - used for similarity matching):

@@ -44,6 +44,7 @@ _OnCompleteCallback = typing.Callable[
 		subsample.analysis.RhythmResult,
 		subsample.analysis.PitchResult,
 		subsample.analysis.TimbreResult,
+		subsample.analysis.LevelResult,
 		float,           # duration in seconds
 		numpy.ndarray,   # original capture-format PCM (int16/int32, shape n_frames×channels)
 	],
@@ -216,14 +217,14 @@ class WavWriter:
 				# analysis, avoiding running it twice (~200-300 ms saving per recording).
 				mono = subsample.analysis.to_mono_float(req.audio, effective_bit_depth)
 
-				result, rhythm, pitch, timbre = subsample.analysis.analyze_all(
+				result, rhythm, pitch, timbre, level = subsample.analysis.analyze_all(
 					mono,
 					self._analysis_params,
 					self._cfg.analysis,
 				)
 
 				write_result = self._write_wav(
-					req.audio, req.timestamp, rhythm, result, pitch, timbre,
+					req.audio, req.timestamp, rhythm, result, pitch, timbre, level,
 					filename_base=req.filename_base,
 					sample_rate=req.sample_rate,
 					bit_depth=req.bit_depth,
@@ -231,7 +232,7 @@ class WavWriter:
 
 				if self._on_complete is not None and write_result is not None:
 					filepath, duration = write_result
-					self._on_complete(filepath, result, rhythm, pitch, timbre, duration, req.audio)
+					self._on_complete(filepath, result, rhythm, pitch, timbre, level, duration, req.audio)
 
 			except Exception as exc:
 				_log.error("Failed to analyse/cache recording: %s — WAV may be intact", exc, exc_info=True)
@@ -254,6 +255,7 @@ class WavWriter:
 		result: subsample.analysis.AnalysisResult,
 		pitch: subsample.analysis.PitchResult,
 		timbre: subsample.analysis.TimbreResult,
+		level: subsample.analysis.LevelResult,
 		filename_base: typing.Optional[str] = None,
 		sample_rate: typing.Optional[int] = None,
 		bit_depth: typing.Optional[int] = None,
@@ -274,6 +276,7 @@ class WavWriter:
 			result:        Spectral analysis metrics computed before this call.
 			pitch:         Pitch analysis computed before this call.
 			timbre:        Timbral fingerprint computed before this call.
+			level:         Peak and RMS amplitude of the recording.
 			filename_base: If provided, used as the filename stem instead of the
 			               timestamp format. Collision handling still applies.
 			sample_rate:   Sample rate for the WAV header. Defaults to config value.
@@ -339,6 +342,7 @@ class WavWriter:
 			pitch      = pitch,
 			timbre     = timbre,
 			duration   = duration,
+			level      = level,
 		)
 
 		return filepath, duration

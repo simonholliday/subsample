@@ -10,7 +10,7 @@ import subsample.analysis
 import subsample.cache
 import subsample.library
 
-from .helpers import _make_params, _make_pitch, _make_rhythm, _make_spectral, _make_timbre, _make_wav
+from .helpers import _make_level, _make_params, _make_pitch, _make_rhythm, _make_spectral, _make_timbre, _make_wav
 
 
 def _write_sidecar (
@@ -33,6 +33,7 @@ def _write_sidecar (
 	rhythm   = _make_rhythm()
 	pitch    = _make_pitch()
 	timbre   = _make_timbre()
+	level    = _make_level()
 	params   = _make_params()
 
 	# Build the JSON payload the same way cache.save_cache() would, but write
@@ -75,6 +76,10 @@ def _write_sidecar (
 			"mfcc_delta": list(timbre.mfcc_delta),
 			"mfcc_onset": list(timbre.mfcc_onset),
 		},
+		"level": {
+			"peak": level.peak,
+			"rms":  level.rms,
+		},
 	}
 
 	sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -111,6 +116,7 @@ class TestSampleRecord:
 			rhythm    = _make_rhythm(),
 			pitch     = _make_pitch(),
 			timbre    = _make_timbre(),
+			level     = _make_level(),
 			params    = _make_params(),
 			duration  = 1.23,
 		)
@@ -122,7 +128,7 @@ class TestSampleRecord:
 	def test_audio_and_filepath_default_to_none (self) -> None:
 		record = subsample.library.SampleRecord(
 			sample_id=1, name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
-			pitch=_make_pitch(), timbre=_make_timbre(), params=_make_params(), duration=1.0,
+			pitch=_make_pitch(), timbre=_make_timbre(), level=_make_level(), params=_make_params(), duration=1.0,
 		)
 		assert record.audio is None
 		assert record.filepath is None
@@ -131,7 +137,7 @@ class TestSampleRecord:
 		audio = numpy.zeros((1000, 1), dtype=numpy.int16)
 		record = subsample.library.SampleRecord(
 			sample_id=1, name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
-			pitch=_make_pitch(), timbre=_make_timbre(), params=_make_params(), duration=1.0,
+			pitch=_make_pitch(), timbre=_make_timbre(), level=_make_level(), params=_make_params(), duration=1.0,
 			audio=audio,
 		)
 		assert record.audio is not None
@@ -140,7 +146,7 @@ class TestSampleRecord:
 	def test_is_frozen (self) -> None:
 		record = subsample.library.SampleRecord(
 			sample_id=1, name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
-			pitch=_make_pitch(), timbre=_make_timbre(), params=_make_params(), duration=1.0,
+			pitch=_make_pitch(), timbre=_make_timbre(), level=_make_level(), params=_make_params(), duration=1.0,
 		)
 		with pytest.raises(Exception):
 			record.name = "Y"  # type: ignore[misc]
@@ -148,7 +154,7 @@ class TestSampleRecord:
 	def test_as_vector_delegates_to_spectral (self) -> None:
 		record = subsample.library.SampleRecord(
 			sample_id=1, name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
-			pitch=_make_pitch(), timbre=_make_timbre(), params=_make_params(), duration=1.0,
+			pitch=_make_pitch(), timbre=_make_timbre(), level=_make_level(), params=_make_params(), duration=1.0,
 		)
 		assert numpy.array_equal(record.as_vector(), record.spectral.as_vector())
 
@@ -179,7 +185,7 @@ class TestLoadSidecar:
 		sidecar = _write_sidecar(tmp_path, "kick")
 		result = subsample.cache.load_sidecar(sidecar)
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration = result
+		spectral, rhythm, pitch, timbre, params, duration, level = result
 		assert spectral.attack == pytest.approx(0.2)
 		assert duration == pytest.approx(1.0)
 
@@ -232,7 +238,7 @@ class TestReferenceLibrary:
 		return subsample.library.SampleRecord(
 			sample_id=subsample.library.allocate_id(),
 			name=name, spectral=_make_spectral(), rhythm=_make_rhythm(),
-			pitch=_make_pitch(), timbre=_make_timbre(), params=_make_params(), duration=1.0,
+			pitch=_make_pitch(), timbre=_make_timbre(), level=_make_level(), params=_make_params(), duration=1.0,
 		)
 
 	def _library_with (self, records: list[subsample.library.SampleRecord]) -> subsample.library.ReferenceLibrary:
@@ -385,6 +391,7 @@ def _make_instrument_record (
 		rhythm    = _make_rhythm(),
 		pitch     = _make_pitch(),
 		timbre    = _make_timbre(),
+		level     = _make_level(),
 		params    = _make_params(),
 		duration  = n_frames / 44100.0,
 		audio     = audio,
@@ -469,7 +476,7 @@ class TestInstrumentLibrary:
 		record = subsample.library.SampleRecord(
 			sample_id=subsample.library.allocate_id(),
 			name="X", spectral=_make_spectral(), rhythm=_make_rhythm(),
-			pitch=_make_pitch(), timbre=_make_timbre(), params=_make_params(), duration=1.0,
+			pitch=_make_pitch(), timbre=_make_timbre(), level=_make_level(), params=_make_params(), duration=1.0,
 		)
 		evicted = lib.add(record)
 		assert evicted == []

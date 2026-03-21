@@ -49,6 +49,7 @@ _LoadResult = tuple[
 	subsample.analysis.TimbreResult,
 	subsample.analysis.AnalysisParams,
 	float,
+	subsample.analysis.LevelResult,
 ]
 
 
@@ -98,6 +99,7 @@ def save_cache (
 	pitch: subsample.analysis.PitchResult,
 	timbre: subsample.analysis.TimbreResult,
 	duration: float,
+	level: typing.Optional[subsample.analysis.LevelResult] = None,
 ) -> None:
 
 	"""Write analysis results to a JSON sidecar file.
@@ -114,9 +116,13 @@ def save_cache (
 		pitch:      Pitch analysis result.
 		timbre:     Timbral fingerprint result.
 		duration:   Recording duration in seconds.
+		level:      Peak and RMS amplitude. Defaults to LevelResult(0.0, 0.0)
+		            if None (for backwards-compatible callers — should always
+		            be provided in new code).
 	"""
 
-	payload = _serialize(audio_md5, params, spectral, rhythm, pitch, timbre, duration)
+	effective_level = level if level is not None else subsample.analysis.LevelResult(peak=0.0, rms=0.0)
+	payload = _serialize(audio_md5, params, spectral, rhythm, pitch, timbre, duration, effective_level)
 	json_str = json.dumps(payload, indent=2)
 
 	sidecar = cache_path(audio_path)
@@ -163,7 +169,7 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 		audio_path: Path to the audio file.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration) tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration, level) tuple on success, else None.
 	"""
 
 	sidecar = cache_path(audio_path)
@@ -224,17 +230,17 @@ def _reanalyze_and_save (audio_path: pathlib.Path) -> _LoadResult | None:
 	params = subsample.analysis.compute_params(file_info.sample_rate)
 	duration = len(mono) / file_info.sample_rate
 
-	spectral, rhythm, pitch, timbre = subsample.analysis.analyze_all(
+	spectral, rhythm, pitch, timbre, level = subsample.analysis.analyze_all(
 		mono, params, subsample.config.AnalysisConfig(),
 	)
 
 	try:
 		audio_md5 = compute_audio_md5(audio_path)
-		save_cache(audio_path, audio_md5, params, spectral, rhythm, pitch, timbre, duration)
+		save_cache(audio_path, audio_md5, params, spectral, rhythm, pitch, timbre, duration, level)
 	except OSError as exc:
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
 
-	return (spectral, rhythm, pitch, timbre, params, duration)
+	return (spectral, rhythm, pitch, timbre, params, duration, level)
 
 
 def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
@@ -252,7 +258,7 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 		sidecar_path: Path to the .analysis.json sidecar file directly.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration) tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration, level) tuple on success, else None.
 	"""
 
 	# Unlike load_cache(), a missing sidecar is unexpected here — warn explicitly.
@@ -331,12 +337,17 @@ def _deserialize_payload (
 		timbre   = _deserialize_timbre(payload["timbre"])
 		params   = _deserialize_params(payload["params"])
 		duration = float(payload["duration"])
+		# "level" is optional — older sidecars (pre version "4") won't have it.
+		# The version check in load_cache / load_sidecar triggers re-analysis
+		# for truly stale files; this default handles any edge case where the
+		# key is absent despite a matching version.
+		level    = _deserialize_level(payload.get("level", {}))
 
 	except (KeyError, TypeError, ValueError) as exc:
 		_log.warning("Ignoring corrupt %s: %s", label, exc)
 		return None
 
-	return spectral, rhythm, pitch, timbre, params, duration
+	return spectral, rhythm, pitch, timbre, params, duration, level
 
 
 def _serialize (
@@ -347,6 +358,7 @@ def _serialize (
 	pitch: subsample.analysis.PitchResult,
 	timbre: subsample.analysis.TimbreResult,
 	duration: float,
+	level: subsample.analysis.LevelResult,
 ) -> dict[str, typing.Any]:
 
 	"""Build the JSON-serializable dict from analysis results."""
@@ -381,6 +393,7 @@ def _serialize (
 		"rhythm":           rhythm_dict,
 		"pitch":            pitch_dict,
 		"timbre":           timbre_dict,
+		"level":            dataclasses.asdict(level),
 	}
 
 
@@ -494,4 +507,21 @@ def _deserialize_params (data: dict[str, typing.Any]) -> subsample.analysis.Anal
 		n_fft       = int(data.get("n_fft", 2048)),
 		hop_length  = int(data.get("hop_length", 512)),
 		sample_rate = int(data.get("sample_rate", 44100)),
+	)
+
+
+def _deserialize_level (data: dict[str, typing.Any]) -> subsample.analysis.LevelResult:
+
+	"""Reconstruct a LevelResult from a JSON dict.
+
+	Defaults to 0.0 for both fields. This handles two cases:
+	  - A truly missing "level" key in older sidecars (passed as an empty dict).
+	  - A corrupt or partial dict where one field was not written.
+	In both cases the version check upstream should have triggered re-analysis;
+	these defaults are a last-resort guard.
+	"""
+
+	return subsample.analysis.LevelResult(
+		peak = float(data.get("peak", 0.0)),
+		rms  = float(data.get("rms",  0.0)),
 	)

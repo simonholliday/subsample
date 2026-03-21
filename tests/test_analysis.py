@@ -1150,3 +1150,117 @@ class TestFormatPitchResult:
 		s = subsample.analysis.format_pitch_result(self._pitched_result())
 
 		assert "\n" not in s
+
+
+# ---------------------------------------------------------------------------
+# TestComputeLevel
+# ---------------------------------------------------------------------------
+
+class TestComputeLevel:
+
+	"""Tests for compute_level()."""
+
+	def test_empty_array_returns_zeros (self) -> None:
+		"""An empty signal should return peak=0.0 and rms=0.0."""
+		mono = numpy.array([], dtype=numpy.float32)
+		result = subsample.analysis.compute_level(mono)
+
+		assert result.peak == 0.0
+		assert result.rms == 0.0
+
+	def test_silence_returns_zeros (self) -> None:
+		"""An all-zero signal should return peak=0.0 and rms=0.0."""
+		mono = numpy.zeros(1024, dtype=numpy.float32)
+		result = subsample.analysis.compute_level(mono)
+
+		assert result.peak == 0.0
+		assert result.rms == 0.0
+
+	def test_full_scale_sine_peak (self) -> None:
+		"""A full-scale sine wave should have peak close to 1.0."""
+		n = 44100
+		t = numpy.linspace(0.0, 1.0, n, endpoint=False)
+		mono = numpy.sin(2 * numpy.pi * 440 * t).astype(numpy.float32)
+
+		result = subsample.analysis.compute_level(mono)
+
+		assert abs(result.peak - 1.0) < 0.01
+
+	def test_full_scale_sine_rms (self) -> None:
+		"""A full-scale sine wave has theoretical RMS of 1/sqrt(2) ≈ 0.7071."""
+		n = 44100
+		t = numpy.linspace(0.0, 1.0, n, endpoint=False)
+		mono = numpy.sin(2 * numpy.pi * 440 * t).astype(numpy.float32)
+
+		result = subsample.analysis.compute_level(mono)
+
+		assert abs(result.rms - (1.0 / numpy.sqrt(2))) < 0.005
+
+	def test_half_amplitude_sine (self) -> None:
+		"""Halving the amplitude should halve both peak and RMS."""
+		n = 44100
+		t = numpy.linspace(0.0, 1.0, n, endpoint=False)
+		full = numpy.sin(2 * numpy.pi * 440 * t).astype(numpy.float32)
+		half = (full * 0.5).astype(numpy.float32)
+
+		r_full = subsample.analysis.compute_level(full)
+		r_half = subsample.analysis.compute_level(half)
+
+		assert abs(r_half.peak - r_full.peak * 0.5) < 0.01
+		assert abs(r_half.rms  - r_full.rms  * 0.5) < 0.005
+
+	def test_peak_is_in_unit_range (self) -> None:
+		"""Peak must be in [0.0, 1.0] for a normalised signal."""
+		rng = numpy.random.default_rng(seed=0)
+		mono = rng.uniform(-1.0, 1.0, 4096).astype(numpy.float32)
+
+		result = subsample.analysis.compute_level(mono)
+
+		assert 0.0 <= result.peak <= 1.0
+
+	def test_rms_never_exceeds_peak (self) -> None:
+		"""RMS can never exceed the peak amplitude."""
+		rng = numpy.random.default_rng(seed=1)
+		mono = rng.uniform(-1.0, 1.0, 4096).astype(numpy.float32)
+
+		result = subsample.analysis.compute_level(mono)
+
+		assert result.rms <= result.peak + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# TestFormatLevelResult
+# ---------------------------------------------------------------------------
+
+class TestFormatLevelResult:
+
+	"""Tests for format_level_result()."""
+
+	def test_contains_peak_and_rms_labels (self) -> None:
+		"""Output should contain 'peak=' and 'rms=' labels."""
+		result = subsample.analysis.LevelResult(peak=0.5, rms=0.25)
+		s = subsample.analysis.format_level_result(result)
+
+		assert "peak=" in s
+		assert "rms=" in s
+
+	def test_contains_dbfs (self) -> None:
+		"""Output should contain dBFS values in parentheses."""
+		result = subsample.analysis.LevelResult(peak=0.5, rms=0.25)
+		s = subsample.analysis.format_level_result(result)
+
+		assert "dBFS" in s
+
+	def test_silence_shows_inf (self) -> None:
+		"""A zero-amplitude signal should show '-inf' for dBFS."""
+		result = subsample.analysis.LevelResult(peak=0.0, rms=0.0)
+		s = subsample.analysis.format_level_result(result)
+
+		assert "-inf" in s
+
+	def test_is_single_line (self) -> None:
+		"""Output should be a single line with no newlines."""
+		result = subsample.analysis.LevelResult(peak=0.8, rms=0.3)
+		s = subsample.analysis.format_level_result(result)
+
+		assert "\n" not in s
