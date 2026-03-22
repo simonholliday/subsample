@@ -257,8 +257,7 @@ analysis:
 # for percussive use. Derivatives are held in memory only — they are never
 # written to disk and are regenerated on demand.
 #
-# This section is currently scaffolded (pipeline wired, no transforms active).
-# Settings here will take effect as each transform type is implemented.
+# Phase 2: pitch shifting is active (requires rubberband-cli installed).
 # See README-AGENTS.md "Transform pipeline" for implementation guidance.
 
 # transform:
@@ -267,20 +266,19 @@ analysis:
 #   # Eviction: parent-priority FIFO — all variants of the oldest parent are
 #   # evicted together so remaining sets stay complete and playable.
 #   # At 44100 Hz float32 stereo, 50 MB ≈ 150 seconds of derivative audio.
-#   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_transform_values
+#   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
 #
 #   auto_pitch: true
 #   # When true, pitch variants are automatically produced for each tonal sample
-#   # (those that pass the has_stable_pitch() test) as it arrives.
-#   # Variants are generated for every MIDI note in [pitch_range_low, pitch_range_high].
-#   # Requires Phase 2 pitch transform implementation; no effect in Phase 1.
+#   # (those that pass the has_stable_pitch() test) as they arrive.
+#   # Variants are generated for every MIDI note within pitch_range_semitones of
+#   # the sample's detected pitch. Requires rubberband-cli to be installed.
 #
-#   pitch_range_low: 36
-#   # Lowest MIDI note for auto-generated pitch variants (C2). Range: 0–127.
-#
-#   pitch_range_high: 72
-#   # Highest MIDI note for auto-generated pitch variants (C5). Range: 0–127.
-#   # Must be >= pitch_range_low.
+#   pitch_range_semitones: 12
+#   # Number of semitones above and below the detected pitch to generate variants.
+#   # 12 = one octave each way = 25 variants per tonal sample (including the
+#   # center note, which micro-corrects tuning). Range: 0–48.
+#   # Set to 0 to disable auto-generation (on-demand variants still work).
 #
 #   target_bpm: 0.0
 #   # Target BPM for automatic time-stretch variants. 0.0 = disabled.

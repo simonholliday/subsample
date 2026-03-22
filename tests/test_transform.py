@@ -1,5 +1,6 @@
 """Tests for subsample/transform.py — the sample transform pipeline scaffold."""
 
+import pathlib
 import threading
 import time
 
@@ -65,6 +66,54 @@ def _make_record (
 		spectral  = tests.helpers._make_spectral(),
 		rhythm    = rhythm,
 		pitch     = tests.helpers._make_pitch(),
+		timbre    = tests.helpers._make_timbre(),
+		level     = tests.helpers._make_level(),
+		params    = tests.helpers._make_params(),
+		duration  = float(audio.shape[0]) / 44100.0,
+		audio     = audio,
+	)
+
+
+def _make_record_unpitched (
+	sample_id: int = 1,
+) -> subsample.library.SampleRecord:
+
+	"""Return a SampleRecord that fails has_stable_pitch() (dominant_pitch_hz=0)."""
+
+	pitch = subsample.analysis.PitchResult(
+		dominant_pitch_hz    = 0.0,
+		pitch_confidence     = 0.0,
+		chroma_profile       = tuple(0.0 for _ in range(12)),
+		dominant_pitch_class = -1,
+		pitch_stability      = 0.0,
+		voiced_frame_count   = 0,
+	)
+
+	spectral = subsample.analysis.AnalysisResult(
+		spectral_flatness  = 0.9,
+		attack             = 0.5,
+		release            = 0.5,
+		spectral_centroid  = 0.5,
+		spectral_bandwidth = 0.5,
+		zcr                = 0.8,
+		harmonic_ratio     = 0.1,
+		spectral_contrast  = 0.3,
+		voiced_fraction    = 0.1,
+		log_attack_time    = 0.5,
+		spectral_flux      = 0.5,
+	)
+
+	audio = _make_pcm_audio()
+
+	return subsample.library.SampleRecord(
+		sample_id = sample_id,
+		name      = f"unpitched_{sample_id}",
+		spectral  = spectral,
+		rhythm    = subsample.analysis.RhythmResult(
+			tempo_bpm=0.0, beat_times=(), pulse_curve=numpy.zeros(0, dtype=numpy.float32),
+			pulse_peak_times=(), onset_times=(), onset_count=0,
+		),
+		pitch     = pitch,
 		timbre    = tests.helpers._make_timbre(),
 		level     = tests.helpers._make_level(),
 		params    = tests.helpers._make_params(),
@@ -412,30 +461,41 @@ class TestTransformProcessor:
 	def test_enqueue_skips_when_handler_not_registered (self) -> None:
 		"""enqueue() is a no-op when no handler is registered for a step.
 
-		In Phase 1 _HANDLERS is empty.  Submitting jobs that would always fail
-		on the worker is prevented at enqueue() time so no errors are logged.
+		Temporarily clears _HANDLERS to simulate a transform type with no
+		implementation.  Submitting such jobs is prevented at enqueue() time
+		so no errors are logged.
 		"""
 
 		completed: list[subsample.transform.TransformResult] = []
 
-		processor = subsample.transform.TransformProcessor(
-			sample_rate=44100,
-			bit_depth=16,
-			on_complete=completed.append,
-		)
+		# Temporarily clear all handlers to simulate an unregistered transform.
+		original_handlers = dict(subsample.transform.TransformProcessor._HANDLERS)
 
-		record = _make_record(sample_id=1)
-		spec   = subsample.transform.TransformSpec(
-			steps=(subsample.transform.PitchShift(target_midi_note=60),)
-		)
+		try:
+			subsample.transform.TransformProcessor._HANDLERS.clear()
 
-		assert subsample.transform.TransformProcessor._HANDLERS == {}
+			processor = subsample.transform.TransformProcessor(
+				sample_rate=44100,
+				bit_depth=16,
+				on_complete=completed.append,
+			)
 
-		processor.enqueue(record, spec)
-		processor.shutdown()
+			record = _make_record(sample_id=1)
+			spec   = subsample.transform.TransformSpec(
+				steps=(subsample.transform.PitchShift(target_midi_note=60),)
+			)
 
-		# Nothing should have been submitted or completed.
-		assert completed == []
+			assert subsample.transform.TransformProcessor._HANDLERS == {}
+
+			processor.enqueue(record, spec)
+			processor.shutdown()
+
+			# Nothing should have been submitted or completed.
+			assert completed == []
+
+		finally:
+			subsample.transform.TransformProcessor._HANDLERS.clear()
+			subsample.transform.TransformProcessor._HANDLERS.update(original_handlers)
 
 	def test_enqueue_deduplication (self) -> None:
 		"""Submitting the same (record, spec) twice should not double-run."""
@@ -673,15 +733,49 @@ class TestTransformManager:
 		assert len(variants) == 3
 		manager.shutdown()
 
-	def test_on_sample_added_is_noop_in_phase1 (self) -> None:
-		"""Phase 1 scaffold: on_sample_added does nothing."""
-		manager, cache, _ = self._make_manager()
+	def test_on_sample_added_enqueues_stable_pitch_variants (self) -> None:
+		"""on_sample_added auto-enqueues pitch variants for tonal samples."""
+		manager, cache, lib = self._make_manager()
 		record = _make_record(sample_id=1)
+		lib.add(record)
 
 		manager.on_sample_added(record)
-
-		assert not cache.has_variants(1)
 		manager.shutdown()
+
+		# Default pitch helper: 440 Hz = MIDI 69, range 12 → notes 57–81 = 25 variants
+		assert cache.has_variants(1)
+		assert len(cache.list_variants(1)) == 25
+
+	def test_on_sample_added_skips_unpitched (self) -> None:
+		"""on_sample_added produces no variants for samples that fail has_stable_pitch."""
+		manager, cache, lib = self._make_manager()
+		record = _make_record_unpitched(sample_id=2)
+		lib.add(record)
+
+		manager.on_sample_added(record)
+		manager.shutdown()
+
+		assert not cache.has_variants(2)
+
+	def test_on_sample_added_respects_auto_pitch_false (self) -> None:
+		"""auto_pitch=False suppresses automatic variant production."""
+		lib   = subsample.library.InstrumentLibrary(max_memory_bytes=100 * 1024 * 1024)
+		cache = subsample.transform.TransformCache(max_memory_bytes=50 * 1024 * 1024)
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100, bit_depth=16, on_complete=cache.put,
+		)
+		cfg = subsample.config.TransformConfig(auto_pitch=False)
+		manager = subsample.transform.TransformManager(
+			cache=cache, processor=processor,
+			instrument_library=lib, cfg=cfg,
+		)
+
+		record = _make_record(sample_id=3)
+		lib.add(record)
+		manager.on_sample_added(record)
+		manager.shutdown()
+
+		assert not cache.has_variants(3)
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +813,53 @@ class TestAudioHelpers:
 
 
 # ---------------------------------------------------------------------------
+# TestApplyPitch
+# ---------------------------------------------------------------------------
+
+class TestApplyPitch:
+
+	"""Tests for the _apply_pitch handler and its Rubber Band integration."""
+
+	def test_returns_same_shape_mono (self) -> None:
+		"""Output has the same (n_frames, 1) shape as the mono input."""
+		audio  = numpy.random.default_rng(0).standard_normal((4410, 1)).astype(numpy.float32) * 0.1
+		record = _make_record(sample_id=1)
+		step   = subsample.transform.PitchShift(target_midi_note=72)
+
+		result = subsample.transform._apply_pitch(audio, 44100, record, step)
+
+		assert result.shape == audio.shape
+		assert result.dtype == numpy.float32
+
+	def test_returns_same_shape_stereo (self) -> None:
+		"""Output has the same (n_frames, 2) shape as a stereo input."""
+		audio  = numpy.random.default_rng(1).standard_normal((4410, 2)).astype(numpy.float32) * 0.1
+		record = _make_record(sample_id=1)
+		step   = subsample.transform.PitchShift(target_midi_note=60)
+
+		result = subsample.transform._apply_pitch(audio, 44100, record, step)
+
+		assert result.shape == audio.shape
+		assert result.dtype == numpy.float32
+
+	def test_upward_shift_produces_different_audio (self) -> None:
+		"""Shifting a sine wave up by an octave produces distinct output."""
+		t     = numpy.linspace(0, 0.1, 4410, endpoint=False, dtype=numpy.float32)
+		sine  = numpy.sin(2 * numpy.pi * 440.0 * t)
+		audio = sine[:, numpy.newaxis]  # (4410, 1)
+
+		# Default _make_pitch() has dominant_pitch_hz=440.0 (MIDI 69)
+		record = _make_record(sample_id=1)
+		step   = subsample.transform.PitchShift(target_midi_note=81)  # +12 semitones
+
+		result = subsample.transform._apply_pitch(audio, 44100, record, step)
+
+		assert result.shape == audio.shape
+		# The octave-shifted output should differ from the original
+		assert not numpy.allclose(result, audio, atol=0.01)
+
+
+# ---------------------------------------------------------------------------
 # TestTransformConfig
 # ---------------------------------------------------------------------------
 
@@ -726,18 +867,17 @@ class TestTransformConfig:
 
 	"""Config defaults load correctly and validation fires on bad values."""
 
-	_DEFAULT_CONFIG_PATH = None  # uses package default
+	_DEFAULT_CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config.yaml.default"
 
 	def test_default_transform_values (self) -> None:
-		cfg = subsample.config.load_config()
-		assert cfg.transform.max_memory_mb    == 50.0
-		assert cfg.transform.auto_pitch       is True
-		assert cfg.transform.pitch_range_low  == 36
-		assert cfg.transform.pitch_range_high == 72
-		assert cfg.transform.target_bpm       == 0.0
+		cfg = subsample.config.load_config(self._DEFAULT_CONFIG_PATH)
+		assert cfg.transform.max_memory_mb         == 50.0
+		assert cfg.transform.auto_pitch            is True
+		assert cfg.transform.pitch_range_semitones == 12
+		assert cfg.transform.target_bpm            == 0.0
 
 	def test_invalid_pitch_range_raises (self) -> None:
-		with pytest.raises(ValueError, match="pitch_range_low"):
+		with pytest.raises(ValueError, match="pitch_range_semitones"):
 			subsample.config._build_config({
 				"recorder": {
 					"audio": {"sample_rate": 44100, "bit_depth": 16, "channels": 1, "chunk_size": 512},
@@ -748,5 +888,5 @@ class TestTransformConfig:
 					"warmup_seconds": 1.0, "ema_alpha": 0.1,
 				},
 				"output": {"directory": "./samples", "filename_format": "%Y"},
-				"transform": {"pitch_range_low": 72, "pitch_range_high": 36},
+				"transform": {"pitch_range_semitones": -1},
 			})

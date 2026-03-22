@@ -78,24 +78,26 @@ environment becomes an instant, organized sample pack.
   player can map MIDI notes to reference names in config, and at trigger time call this
   to find the best-matching sample in the current library.
 
+- **Automatic pitch variants** - tonal samples with a stable, confident pitch are
+  automatically pitch-shifted to every MIDI note one octave above and below the detected
+  pitch (configurable via `transform.pitch_range_semitones`, default ±12 semitones = 25
+  variants). Uses Rubber Band via `pyrubberband` in offline mode with the finer engine for
+  highest quality. Variants are produced in the background by the transform worker pool;
+  the player falls back to the original sample until a variant is ready. Pre-loaded startup
+  samples are queued for variant production before recording begins. Requires
+  `rubberband-cli` installed on the system (see Requirements).
+
 ## In Progress
 
 - **Automatic sample classification** - infrastructure in place; next: wire ranked match
   results to a simple classifier (e.g. "if top reference match is KICK, classify as KICK").
-- **Sample transform pipeline** - the architecture for producing derivative versions of
-  samples is scaffolded and fully wired (`subsample/transform.py`): `TransformCache`,
-  `TransformProcessor` (background worker pool with dispatch registry), and
-  `TransformManager` (coordination point for player and recorder). No transforms are
-  active yet — the pipeline runs but the dispatch table is empty. First implementation
-  will be pitch shifting using `pedalboard`. See `transform.max_memory_mb` and related
-  settings in `config.yaml`.
+- **Sample transform pipeline** - the derivative audio architecture (`subsample/transform.py`)
+  is fully wired and active: `TransformCache`, `TransformProcessor` (background worker pool),
+  and `TransformManager` (coordination point for player and recorder). Pitch shifting is live.
+  Time-stretching and envelope shaping are next. See `transform.*` settings in `config.yaml`.
 
 ## Planned
 
-- **Pitch re-mapping** - register `_apply_pitch()` in `TransformProcessor._HANDLERS`
-  (using `pedalboard`); wire `TransformManager.on_sample_added()` to auto-enqueue for
-  samples passing `has_stable_pitch()`; player already checks `get_pitched()` before
-  falling back to the original.
 - **BPM time-stretching** - register `_apply_time_stretch()`; trigger via
   `TransformManager.on_bpm_change()` when target tempo changes.
 - **Envelope shaping** - register `_apply_envelope()` to adjust attack/release for
@@ -173,6 +175,9 @@ All settings live in `config.yaml`. The defaults are:
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1–12); captures steady-state timbral colour |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory (coefficients 1–12); how timbre evolves over time |
 | `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack (coefficients 1–12); most useful for percussive discrimination |
+| `transform.max_memory_mb` | `50.0` | Memory budget (MB) for pitch-shifted variants; separate from instrument library budget |
+| `transform.auto_pitch` | `true` | Auto-produce pitch variants for tonal samples; set to `false` to disable |
+| `transform.pitch_range_semitones` | `12` | Semitones above and below detected pitch for auto-variants (12 = ±1 octave = 25 notes) |
 
 ## Output
 
@@ -334,6 +339,7 @@ same similarity weights as the live application.
 
 - Python 3.12+
 - PortAudio (required by PyAudio - install via your system package manager: `apt install portaudio19-dev` or `brew install portaudio`)
+- Rubber Band (required by pyrubberband for pitch shifting - install via your system package manager: `apt install rubberband-cli` or `brew install rubberband`)
 
 ## Tests
 
@@ -365,6 +371,9 @@ Subsample makes use of these excellent open-source libraries:
 | [librosa ↗](https://librosa.org/) | Audio analysis (spectral, rhythm, pitch) | ISC |
 | [SciPy ↗](https://scipy.org/) | Signal processing (onset detection, filtering) | BSD-3-Clause |
 | [SoundFile ↗](https://python-soundfile.readthedocs.io/) | WAV file reading for library pre-load | BSD-3-Clause |
+| [mido ↗](https://github.com/mido/mido) | MIDI message parsing and I/O | MIT |
+| [python-rtmidi ↗](https://github.com/SpotlightKid/python-rtmidi) | MIDI device access (RtMidi bindings) | MIT |
+| [pyrubberband ↗](https://github.com/bmcfee/pyrubberband) | Pitch shifting (Rubber Band wrapper) | ISC |
 
 ## About the Author
 

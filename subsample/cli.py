@@ -428,8 +428,8 @@ def main () -> None:
 	# --- Transform pipeline ---
 	# Create the cache, processor, and manager now (before threads start) so
 	# that the on_complete callback and the player share the same instance.
-	# Phase 1 (scaffold): the pipeline is wired but the dispatch table is empty,
-	# so on_sample_added() is a no-op and no variants are produced yet.
+	# Phase 2: pitch shifting is active — on_sample_added() auto-enqueues
+	# variants for tonal samples via _apply_pitch() (Rubber Band, offline mode).
 	max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
 
 	_transform_cache = subsample.transform.TransformCache(
@@ -453,6 +453,15 @@ def main () -> None:
 			cfg=cfg.transform,
 		)
 	)
+
+	# Auto-enqueue pitch variants for all pre-loaded instrument samples.
+	# Live-captured samples are handled by the on_complete callback (below).
+	# Pre-loaded startup samples are never processed by that callback, so we
+	# notify the manager here, before threads start.  enqueue() returns
+	# immediately; variants are computed in the background by the worker pool.
+	if transform_manager is not None and len(instrument_library) > 0:
+		for _record in instrument_library.samples():
+			transform_manager.on_sample_added(_record)
 
 	# --- Thread-based orchestration ---
 	# Both the recorder and player have blocking loops, so each runs on its own

@@ -114,7 +114,9 @@ import os
 import threading
 import typing
 
+import librosa
 import numpy
+import pyrubberband
 
 import subsample.analysis
 import subsample.library
@@ -147,10 +149,9 @@ class PitchShift:
 	"""Shift all channels to a target MIDI note.
 
 	target_midi_note: MIDI note number (0–127).  Middle C = 60, A4 = 69.
-	The shift ratio is computed from the parent sample's dominant_pitch_hz
-	and the frequency corresponding to target_midi_note.
-	Unimplemented — handler not yet registered in TransformProcessor._HANDLERS.
-	Register _apply_pitch() there once the pedalboard implementation is ready.
+	The shift in semitones is computed from the parent sample's
+	dominant_pitch_hz (via librosa.hz_to_midi) to the target note frequency.
+	Processed by _apply_pitch() using Rubber Band (pyrubberband, offline mode).
 	"""
 
 	PRIORITY: typing.ClassVar[int] = PITCH_PRIORITY
@@ -541,8 +542,8 @@ class TransformProcessor:
 	"""
 
 	# Dispatch table: step type → apply function.
-	# Empty in Phase 1 (scaffold).  Populate here as transforms are implemented:
-	#   _HANDLERS[PitchShift]     = _apply_pitch       (Phase 2, pedalboard)
+	# PitchShift registered at module load (Phase 2, pyrubberband).
+	# Populate here as further transforms are implemented:
 	#   _HANDLERS[EnvelopeAdjust] = _apply_envelope     (Phase 3)
 	#   _HANDLERS[TimeStretch]    = _apply_time_stretch (Phase 3)
 	_HANDLERS: typing.ClassVar[dict[type, _ApplyFn]] = {}
@@ -787,19 +788,44 @@ class TransformManager:
 
 	def on_sample_added (self, record: "subsample.library.SampleRecord") -> None:
 
-		"""Called when a new SampleRecord enters the instrument library.
+		"""Auto-enqueue pitch variants when a new SampleRecord enters the library.
 
-		Phase 1 (scaffold): no-op — no handlers are registered yet.
+		If auto_pitch is enabled and the sample has a stable, confident pitch
+		(per has_stable_pitch()), enqueues one PitchShift job per MIDI note in
+		[center - pitch_range_semitones, center + pitch_range_semitones], clamped
+		to [0, 127].  center is the nearest integer MIDI note to the detected Hz.
 
-		Phase 2 will add:
-		  - auto_pitch: if cfg.auto_pitch is True and
-		    analysis.has_stable_pitch(record.spectral, record.pitch, record.duration)
-		    passes, enqueue_pitch_range() for cfg.pitch_range_low..pitch_range_high.
-		  - auto_bpm: if cfg.target_bpm > 0 and record.rhythm.tempo_bpm > 0,
-		    enqueue a TimeStretch variant at cfg.target_bpm.
+		The center-note variant micro-corrects tuning when the original recording
+		is slightly off-pitch (e.g. 443 Hz is MIDI 69.12; the A4 variant is tuned
+		to exactly 440 Hz).
+
+		If target_bpm > 0 and the sample has detected rhythmic content, a
+		TimeStretch variant is also enqueued (requires Phase 3 handler).
 		"""
 
-		pass  # Phase 2: add auto-enqueue logic here
+		if self._cfg.auto_pitch and self._cfg.pitch_range_semitones > 0:
+
+			if subsample.analysis.has_stable_pitch(
+				record.spectral, record.pitch, record.duration,
+			):
+				center = int(round(librosa.hz_to_midi(record.pitch.dominant_pitch_hz)))
+				low    = max(0,   center - self._cfg.pitch_range_semitones)
+				high   = min(127, center + self._cfg.pitch_range_semitones)
+				notes  = list(range(low, high + 1))
+
+				self._processor.enqueue_pitch_range(record, notes)
+
+				_log.info(
+					"Auto-pitch: sample %d (%s) %.1f Hz (MIDI %d) → %d variant(s) [%d–%d]",
+					record.sample_id, record.name,
+					record.pitch.dominant_pitch_hz, center, len(notes), low, high,
+				)
+
+		# Auto-BPM time-stretch: enqueue if target set and sample has detected rhythm.
+		# TimeStretch handler not yet registered (Phase 3) — enqueue() silently skips.
+		if self._cfg.target_bpm > 0.0 and record.rhythm.tempo_bpm > 0.0:
+			spec = TransformSpec(steps=(TimeStretch(target_bpm=self._cfg.target_bpm),))
+			self._processor.enqueue(record, spec)
 
 	def on_parent_evicted (self, sample_ids: list[int]) -> None:
 
@@ -908,3 +934,45 @@ def _mix_to_mono (audio: numpy.ndarray) -> numpy.ndarray:
 		return audio[:, 0]
 
 	return numpy.mean(audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]
+
+
+def _apply_pitch (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        PitchShift,
+) -> numpy.ndarray:
+
+	"""Shift all channels to a target MIDI note using Rubber Band (offline, finer engine).
+
+	Computes the semitone shift from the parent sample's detected pitch
+	(record.pitch.dominant_pitch_hz) to the frequency of step.target_midi_note.
+	Uses pyrubberband with --fine for Rubber Band v3's highest quality offline
+	processing.  pyrubberband accepts (n_frames, channels) directly — no
+	shape transposition is needed.
+
+	Args:
+		audio:       float32, shape (n_frames, channels).
+		sample_rate: Hz (e.g. 44100).
+		record:      Parent SampleRecord — provides source pitch.
+		step:        PitchShift with target_midi_note.
+
+	Returns:
+		float32, shape (n_frames, channels) — pitch-shifted audio.
+	"""
+
+	source_midi = float(librosa.hz_to_midi(record.pitch.dominant_pitch_hz))
+	n_steps     = float(step.target_midi_note) - source_midi
+
+	return pyrubberband.pitch_shift(  # type: ignore[no-any-return]
+		audio,
+		sample_rate,
+		n_steps,
+		rbargs={"--fine": ""},
+	)
+
+
+# Register the pitch-shift handler so TransformProcessor can dispatch to it.
+# All enqueue() calls for PitchShift specs are now live; previously they were
+# silently dropped because _HANDLERS was empty (Phase 1 scaffold).
+TransformProcessor._HANDLERS[PitchShift] = _apply_pitch

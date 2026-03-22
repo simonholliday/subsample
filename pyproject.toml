@@ -16,6 +16,7 @@ dependencies = [
 	"soundfile>=0.12",
 	"mido>=1.3",
 	"python-rtmidi>=1.5",
+	"pyrubberband>=0.4",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,10 @@ strict = true
 
 [[tool.mypy.overrides]]
 module = ["mido", "mido.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pyrubberband", "pyrubberband.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
