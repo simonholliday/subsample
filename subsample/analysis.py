@@ -78,12 +78,19 @@ warnings.filterwarnings(
 # arrays produced by librosa). They are expected and not actionable.
 warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
 warnings.filterwarnings("ignore", message="invalid value encountered in divide", category=RuntimeWarning)
+# librosa's chroma_cqt uses multi-rate CQT that internally downsamples the signal
+# by 2× per octave. Each downsampled level is analysed with an internal n_fft=1024,
+# which triggers this UserWarning for short signals (< 1024 samples at that level).
+# The computation is correct — librosa zero-pads internally. Python's __warningregistry__
+# can cache a first-seen warning before any context-manager filter applies, so a
+# module-level filter is the only reliable way to suppress it.
+warnings.filterwarnings("ignore", message="n_fft=", category=UserWarning)
 
 
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "6"
+ANALYSIS_VERSION: str = "7"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -350,7 +357,8 @@ class PitchResult:
 	Measured in semitones (MIDI units) so the value is frequency-independent —
 	1 semitone of variation sounds the same at any pitch.
 
-	0.0  — perfectly stable, or no voiced frames (check voiced_fraction).
+	0.0  — perfectly stable (2+ voiced frames with identical pitch), or ≤1 voiced
+	       frame (check voiced_frame_count before trusting this value).
 	~0.1 — very stable (synthesiser, piano, held wind note).
 	~0.5 — slight natural variation.
 	~1.0 — noticeable movement (gentle vibrato, slight bend).
@@ -359,9 +367,19 @@ class PitchResult:
 	Unvoiced frames (silence, noise, gaps) are excluded — a tone that drops out
 	and returns at the same pitch still registers as stable.
 
-	Practical threshold for keyboard resampling suitability:
-	  pitch_stability < 0.5  AND  voiced_fraction > 0.5  AND  dominant_pitch_hz > 0
-	"""
+	Only meaningful when voiced_frame_count >= 2."""
+
+	voiced_frame_count: int
+	"""Number of pyin frames flagged as voiced (i.e. containing a detected pitch).
+
+	One pyin frame spans hop_length audio samples (default 512 at 44100 Hz ≈ 11.6 ms).
+	A value of 0 means pyin found no pitched content at all.
+
+	Use this alongside pitch_stability — when voiced_frame_count == 1, pitch_stability
+	is 0.0 by definition (std dev of a single value) but that does not mean the pitch
+	is stable; it just means there is not enough data to measure variation.
+
+	Typical range for usable keyboard samples: >= 5 frames (~60 ms of voiced content)."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -792,51 +810,63 @@ def format_pitch_result (result: PitchResult) -> str:
 		f"  chroma={chroma_str}"
 		f"  pitch_conf={result.pitch_confidence:.2f}"
 		f"  stability={result.pitch_stability:.3f}st"
+		f"  voiced_frames={result.voiced_frame_count}"
 	)
 
 
-def is_keyboard_candidate (
+def has_stable_pitch (
 	spectral: AnalysisResult,
 	pitch: PitchResult,
+	duration: float,
 ) -> bool:
 
-	"""Return True if this sample is a good candidate for keyboard resampling.
+	"""Return True if this sample has a single, stable, confident pitch.
 
-	A keyboard candidate has a single, stable pitch that can be shifted across
-	a note range without sounding unnatural. Harmonics of the fundamental are
-	fine — a piano note is full of them and still maps perfectly to one key.
+	Samples that pass this test are suitable for pitch-shifting across a keyboard
+	range — each one maps cleanly to one note without vibrato, bends, or noise.
+	Harmonics of the fundamental are fine; a piano note is full of them and still
+	maps to a single key.
 
-	This is a compound query over existing analysis fields, not stored data.
-	Thresholds can be adjusted here without re-analysing any samples.
+	This is a compound query over existing analysis fields; thresholds live here
+	and can be tightened without re-analysing samples.
 
-	Decision criteria:
+	Decision criteria (all seven must hold):
 
-	  dominant_pitch_hz > 0        — a fundamental was detected at all
+	  dominant_pitch_hz > 0        — pyin found a fundamental at all
 	  voiced_fraction   > 0.5      — pitched content in more than half the frames
-	                                 (allows gaps: a tone that drops out and
-	                                 returns counts fine; see pitch_stability)
+	  voiced_frame_count >= 5      — at least ~60 ms of voiced content; excludes
+	                                 noise bursts where a single pyin frame is
+	                                 flagged as voiced (making pitch_stability
+	                                 trivially 0.0 — not a sign of stability)
+	  pitch_confidence  > 0.5      — pyin was confident about the pitch; rejects
+	                                 samples where the 65 Hz fmin floor is returned
+	                                 as a fallback rather than a real detection
 	  pitch_stability   < 0.5 st   — F0 varies less than half a semitone (std)
 	                                 across voiced frames; excludes vibrato,
 	                                 pitch bends, and multi-pitch signals
 	  harmonic_ratio    > 0.4      — more harmonic than percussive energy
-	                                 (HPSS-based); excludes drum hits, clicks,
-	                                 and noise bursts
+	                                 (HPSS-based); excludes drum hits and noise
+	  duration          >= 0.1 s   — at least 100 ms long; sub-100 ms bursts are
+	                                 not useful keyboard samples regardless of pitch
 
 	Args:
-		spectral: AnalysisResult for the sample (provides voiced_fraction and
-		          harmonic_ratio).
-		pitch:    PitchResult for the sample (provides dominant_pitch_hz,
-		          pitch_stability).
+		spectral: AnalysisResult for the sample (voiced_fraction, harmonic_ratio).
+		pitch:    PitchResult for the sample (dominant_pitch_hz, pitch_confidence,
+		          voiced_frame_count, pitch_stability).
+		duration: Recording length in seconds.
 
 	Returns:
-		True if all four criteria are met, False otherwise.
+		True if all seven criteria are met, False otherwise.
 	"""
 
 	return (
 		pitch.dominant_pitch_hz > 0.0
 		and spectral.voiced_fraction > 0.5
+		and pitch.voiced_frame_count >= 5
+		and pitch.pitch_confidence > 0.5
 		and pitch.pitch_stability < 0.5
 		and spectral.harmonic_ratio > 0.4
+		and duration >= 0.1
 	)
 
 
@@ -950,6 +980,7 @@ def analyze_pitch (
 				chroma_profile=tuple(0.0 for _ in range(12)),
 				dominant_pitch_class=-1,
 				pitch_stability=0.0,
+				voiced_frame_count=0,
 			),
 			_empty_timbre,
 		)
@@ -969,6 +1000,8 @@ def analyze_pitch (
 	# Semitone scale is logarithmic and frequency-independent, so 0.5 semitones
 	# means the same thing at 100 Hz or 1000 Hz.
 	# Only voiced frames are included; unvoiced gaps don't count as instability.
+	voiced_frame_count = int(voiced_f0.size)
+
 	if voiced_f0.size > 1:
 		pitch_stability = float(numpy.std(librosa.hz_to_midi(voiced_f0)))
 	else:
@@ -979,21 +1012,15 @@ def analyze_pitch (
 	# each pitch class over the whole recording.
 	#
 	# chroma_cqt uses multi-rate CQT processing: it internally downsamples the
-	# signal by 2x for each lower octave (so a 5847-sample signal becomes
-	# ~730 → ~365 → ~183 → ~92 → ~46 at the lowest octaves). Each downsampled
-	# level is analysed with an internal n_fft=1024, which triggers librosa's
-	# "n_fft too large" UserWarning for levels shorter than 1024 samples. This
-	# is an expected, harmless implementation detail — librosa zero-pads
-	# internally and produces correct output. Suppress the warning here.
-	with warnings.catch_warnings():
-		# Suppress only the "n_fft too large" warning from librosa's internal CQT
-		# downsampling. Other UserWarnings (e.g. deprecated parameters) remain visible.
-		warnings.filterwarnings("ignore", message="n_fft=", category=UserWarning)
-		chroma_raw = librosa.feature.chroma_cqt(
-			y=mono,
-			sr=params.sample_rate,
-			hop_length=params.hop_length,
-		)
+	# signal by 2x for each lower octave. Each downsampled level is analysed with
+	# an internal n_fft=1024, which triggers an "n_fft too large" UserWarning for
+	# short signals. This is expected and harmless — suppressed by the module-level
+	# warnings.filterwarnings("ignore", message="n_fft=") at the top of this file.
+	chroma_raw = librosa.feature.chroma_cqt(
+		y=mono,
+		sr=params.sample_rate,
+		hop_length=params.hop_length,
+	)
 
 	# Mean over time frames; result is shape (12,)
 	chroma_mean = numpy.mean(chroma_raw, axis=1)
@@ -1038,6 +1065,7 @@ def analyze_pitch (
 				chroma_profile=chroma_profile,
 				dominant_pitch_class=dominant_pitch_class,
 				pitch_stability=pitch_stability,
+				voiced_frame_count=voiced_frame_count,
 			),
 			_empty_timbre,
 		)
@@ -1073,6 +1101,7 @@ def analyze_pitch (
 			chroma_profile=chroma_profile,
 			dominant_pitch_class=dominant_pitch_class,
 			pitch_stability=pitch_stability,
+			voiced_frame_count=voiced_frame_count,
 		),
 		TimbreResult(
 			mfcc=mfcc,

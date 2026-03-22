@@ -1138,6 +1138,7 @@ class TestFormatPitchResult:
 			chroma_profile=tuple(0.0 for _ in range(12)),
 			dominant_pitch_class=9,
 			pitch_stability=0.12,
+			voiced_frame_count=8,
 		)
 
 	def _unpitched_result (self) -> subsample.analysis.PitchResult:
@@ -1147,6 +1148,7 @@ class TestFormatPitchResult:
 			chroma_profile=tuple(0.0 for _ in range(12)),
 			dominant_pitch_class=-1,
 			pitch_stability=0.0,
+			voiced_frame_count=0,
 		)
 
 	def test_contains_all_labels (self) -> None:
@@ -1301,9 +1303,9 @@ class TestFormatLevelResult:
 # TestIsKeyboardCandidate
 # ---------------------------------------------------------------------------
 
-class TestIsKeyboardCandidate:
+class TestHasStablePitch:
 
-	"""Tests for is_keyboard_candidate()."""
+	"""Tests for has_stable_pitch()."""
 
 	def _spectral (self, voiced_fraction: float = 0.8, harmonic_ratio: float = 0.7) -> subsample.analysis.AnalysisResult:
 		return subsample.analysis.AnalysisResult(
@@ -1314,31 +1316,50 @@ class TestIsKeyboardCandidate:
 			log_attack_time=0.5, spectral_flux=0.2,
 		)
 
-	def _pitch (self, hz: float = 440.0, stability: float = 0.1) -> subsample.analysis.PitchResult:
+	def _pitch (
+		self,
+		hz: float = 440.0,
+		stability: float = 0.1,
+		confidence: float = 0.8,
+		voiced_frame_count: int = 10,
+	) -> subsample.analysis.PitchResult:
 		return subsample.analysis.PitchResult(
 			dominant_pitch_hz=hz,
-			pitch_confidence=0.9,
+			pitch_confidence=confidence,
 			chroma_profile=tuple(0.0 for _ in range(12)),
 			dominant_pitch_class=9,
 			pitch_stability=stability,
+			voiced_frame_count=voiced_frame_count,
 		)
 
-	def test_stable_tonal_sample_is_candidate (self) -> None:
-		"""A pitched, stable, tonal sample should be a keyboard candidate."""
-		assert subsample.analysis.is_keyboard_candidate(self._spectral(), self._pitch()) is True
+	def test_stable_tonal_sample_passes (self) -> None:
+		"""A pitched, stable, confident, tonal sample should pass."""
+		assert subsample.analysis.has_stable_pitch(self._spectral(), self._pitch(), 0.5) is True
 
-	def test_no_pitch_detected_is_not_candidate (self) -> None:
+	def test_no_pitch_detected_fails (self) -> None:
 		"""dominant_pitch_hz == 0 means no pitch was found."""
-		assert subsample.analysis.is_keyboard_candidate(self._spectral(), self._pitch(hz=0.0)) is False
+		assert subsample.analysis.has_stable_pitch(self._spectral(), self._pitch(hz=0.0), 0.5) is False
 
-	def test_low_voiced_fraction_is_not_candidate (self) -> None:
+	def test_low_voiced_fraction_fails (self) -> None:
 		"""Less than half the frames pitched — not suitable."""
-		assert subsample.analysis.is_keyboard_candidate(self._spectral(voiced_fraction=0.3), self._pitch()) is False
+		assert subsample.analysis.has_stable_pitch(self._spectral(voiced_fraction=0.3), self._pitch(), 0.5) is False
 
-	def test_unstable_pitch_is_not_candidate (self) -> None:
+	def test_unstable_pitch_fails (self) -> None:
 		"""pitch_stability >= 0.5 semitones (vibrato / bend) should be excluded."""
-		assert subsample.analysis.is_keyboard_candidate(self._spectral(), self._pitch(stability=1.2)) is False
+		assert subsample.analysis.has_stable_pitch(self._spectral(), self._pitch(stability=1.2), 0.5) is False
 
-	def test_percussive_sample_is_not_candidate (self) -> None:
+	def test_percussive_sample_fails (self) -> None:
 		"""Low harmonic_ratio means it's percussive rather than tonal."""
-		assert subsample.analysis.is_keyboard_candidate(self._spectral(harmonic_ratio=0.2), self._pitch()) is False
+		assert subsample.analysis.has_stable_pitch(self._spectral(harmonic_ratio=0.2), self._pitch(), 0.5) is False
+
+	def test_low_pitch_confidence_fails (self) -> None:
+		"""Confidence <= 0.5 means pyin fell back to its fmin floor, not a real pitch."""
+		assert subsample.analysis.has_stable_pitch(self._spectral(), self._pitch(confidence=0.3), 0.5) is False
+
+	def test_too_few_voiced_frames_fails (self) -> None:
+		"""Fewer than 5 voiced frames — not enough data to trust stability."""
+		assert subsample.analysis.has_stable_pitch(self._spectral(), self._pitch(voiced_frame_count=3), 0.5) is False
+
+	def test_short_duration_fails (self) -> None:
+		"""Duration < 0.1 s — too short to be a useful keyboard sample."""
+		assert subsample.analysis.has_stable_pitch(self._spectral(), self._pitch(), 0.05) is False

@@ -91,6 +91,7 @@ def _make_record (
 		chroma_profile=tuple(0.0 for _ in range(12)),
 		dominant_pitch_class=-1,
 		pitch_stability=0.0,
+		voiced_frame_count=0,
 	)
 	params = subsample.analysis.compute_params(44100)
 
@@ -652,7 +653,8 @@ class TestLevelIndependence:
 				pitch_confidence=0.0,
 				chroma_profile=tuple(0.0 for _ in range(12)),
 				dominant_pitch_class=-1,
-		pitch_stability=0.0,
+				pitch_stability=0.0,
+				voiced_frame_count=0,
 			),
 			timbre    = timbre,
 			level     = subsample.analysis.LevelResult(peak=0.1, rms=0.03),
@@ -677,7 +679,8 @@ class TestLevelIndependence:
 				pitch_confidence=0.0,
 				chroma_profile=tuple(0.0 for _ in range(12)),
 				dominant_pitch_class=-1,
-		pitch_stability=0.0,
+				pitch_stability=0.0,
+				voiced_frame_count=0,
 			),
 			timbre    = timbre,
 			level     = subsample.analysis.LevelResult(peak=0.95, rms=0.70),

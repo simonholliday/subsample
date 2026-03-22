@@ -67,6 +67,7 @@ def _make_pitch () -> subsample.analysis.PitchResult:
 		chroma_profile       = tuple(float(i) / 12.0 for i in range(12)),
 		dominant_pitch_class = 9,
 		pitch_stability      = 0.1,
+		voiced_frame_count   = 8,
 	)
 
 
