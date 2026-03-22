@@ -121,7 +121,7 @@ class TestLoadDefault:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
 		assert cfg.detection.trim_pre_samples == 15
-		assert cfg.detection.trim_post_samples == 45
+		assert cfg.detection.trim_post_samples == 85
 
 
 class TestLoadCustomConfig:

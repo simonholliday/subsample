@@ -122,10 +122,10 @@ detection:
   # Smaller = abrupt onset. Larger = longer fade-in and pre-signal context.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
 
-  trim_post_samples: 45
+  trim_post_samples: 85
   # Extra audio samples to keep after the detected signal end when trimming silence.
   # Creates a fade-out envelope (S-curve) over these samples for smooth audio release.
-  # At 44100 Hz, 45 samples ≈ 1.02 ms. Range: 0–100 samples.
+  # At 44100 Hz, 85 samples ≈ 1.93 ms. Range: 0–100 samples.
   # Smaller = abrupt cutoff. Larger = longer fade-out and post-signal tail.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
 

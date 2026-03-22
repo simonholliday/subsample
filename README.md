@@ -148,7 +148,7 @@ All settings live in `config.yaml`. The defaults are:
 | `detection.warmup_seconds` | `1.0` | Calibration period before detection activates |
 | `detection.ema_alpha` | `0.1` | Ambient noise adaptation speed (lower = slower) |
 | `detection.trim_pre_samples` | `15` | Samples to keep before signal onset (S-curve fade applied) |
-| `detection.trim_post_samples` | `45` | Samples to keep after signal end (S-curve fade applied) |
+| `detection.trim_post_samples` | `85` | Samples to keep after signal end (S-curve fade applied) |
 | `output.directory` | `./samples` | Where WAV files are saved |
 | `output.filename_format` | `%Y-%m-%d_%H-%M-%S` | strftime format for filenames |
 | `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |
