@@ -42,6 +42,13 @@ _log = logging.getLogger(__name__)
 # sends on channel 16 (user-facing), which mido reports as channel=15.
 _MIDI_CHANNEL = 9          # channel 10 in user-facing terms (mido: 0-indexed)
 
+# WIP/exploratory: MIDI channel for pitch-variant testing (channel 1, mido 0-indexed).
+# Notes on this channel are mapped directly to cached pitch variants from the transform
+# pipeline — see MidiPlayer._build_variant_note_map() and _handle_message().
+# This bypasses similarity matching: instrument samples are iterated in insertion order;
+# each sample's variants claim their MIDI notes, with later samples overwriting earlier.
+_VARIANT_CHANNEL = 0
+
 # MIDI note range mapped to reference samples (first note = lowest note number).
 _NOTE_FIRST = 36            # MIDI note 36 = first reference sample (alphabetical)
 _NOTE_LAST  = 51            # MIDI note 51 = 16th reference (or last if fewer)
@@ -224,6 +231,42 @@ class MidiPlayer:
 			"\n  ".join(f"note {note} → {name}" for note, name in sorted(self._note_map.items())),
 		)
 
+		# WIP: variant channel active when transform pipeline is wired in.
+		if transform_manager is not None:
+			_log.info(
+				"WIP variant channel: ch %d (mido ch %d) → pitch variants from transform cache "
+				"(rebuilt lazily per trigger from instrument library insertion order)",
+				_VARIANT_CHANNEL + 1, _VARIANT_CHANNEL,
+			)
+
+	def _build_variant_note_map (self) -> dict[int, int]:
+
+		"""Build a midi_note → sample_id map from all cached pitch variants.
+
+		WIP/exploratory: used by _handle_message() for _VARIANT_CHANNEL triggers.
+
+		Iterates instrument samples in insertion order (oldest first). For each sample,
+		all cached PitchShift variants are extracted from the transform pipeline.
+		Each variant's target MIDI note is mapped to the sample's ID. Later samples
+		overwrite earlier ones, so the most recently added sample wins for any
+		given note.
+
+		Returns an empty dict if no transform pipeline is configured.
+		"""
+
+		if self._transform_manager is None:
+			return {}
+
+		note_map: dict[int, int] = {}
+
+		for record in self._instrument_library.samples():
+			for key in self._transform_manager.list_variants(record.sample_id):
+				for step in key.spec.steps:
+					if isinstance(step, subsample.transform.PitchShift):
+						note_map[step.target_midi_note] = record.sample_id
+
+		return note_map
+
 	def run (self) -> None:
 
 		"""Open MIDI input and a stereo callback output stream, then dispatch events.
@@ -326,6 +369,43 @@ class MidiPlayer:
 		# note_off (and note_on with velocity=0, which mido uses for note_off)
 		# are expected and silently discarded — no log noise.
 		if msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
+			return
+
+		# WIP/exploratory: channel 1 (mido ch 0) plays pitch variants directly.
+		# Bypasses similarity matching — maps notes to cached PitchShift variants.
+		# See _build_variant_note_map() for the mapping strategy.
+		if msg.type == "note_on" and msg.channel == _VARIANT_CHANNEL:
+			if self._transform_manager is None:
+				_log.debug("MIDI ch%d note %d: variant channel ignored (no transform pipeline)", _VARIANT_CHANNEL, msg.note)
+				return
+
+			variant_note_map = self._build_variant_note_map()
+			sample_id = variant_note_map.get(msg.note)
+
+			if sample_id is None:
+				_log.debug("MIDI ch%d note %d: no variant mapped (variants still computing?)", _VARIANT_CHANNEL, msg.note)
+				return
+
+			record = self._instrument_library.get(sample_id)
+			if record is None:
+				_log.debug("MIDI ch%d note %d: sample %d not in library", _VARIANT_CHANNEL, msg.note, sample_id)
+				return
+
+			variant = self._transform_manager.get_pitched(sample_id, msg.note)
+
+			if variant is None:
+				_log.debug("MIDI ch%d note %d → sample %d %r: variant cache miss", _VARIANT_CHANNEL, msg.note, sample_id, record.name)
+				return
+
+			rendered = self._render_float(variant.audio, variant.level)
+
+			with self._voices_lock:
+				self._voices.append(_Voice(audio=rendered))
+
+			_log.info(
+				"WIP ch%d note %d → sample %d %r (pitched variant, %.2fs)",
+				_VARIANT_CHANNEL, msg.note, sample_id, record.name, variant.duration,
+			)
 			return
 
 		# Only act on note_on events on the configured channel; log anything else.

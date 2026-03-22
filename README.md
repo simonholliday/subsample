@@ -93,15 +93,27 @@ environment becomes an instant, organized sample pack.
   results to a simple classifier (e.g. "if top reference match is KICK, classify as KICK").
 - **Sample transform pipeline** - the derivative audio architecture (`subsample/transform.py`)
   is fully wired and active: `TransformCache`, `TransformProcessor` (background worker pool),
-  and `TransformManager` (coordination point for player and recorder). Pitch shifting is live.
-  Time-stretching and envelope shaping are next. See `transform.*` settings in `config.yaml`.
+  and `TransformManager` (coordination point for player and recorder). Pitch shifting is live
+  via `_apply_pitch()` (Rubber Band, offline mode). Time-stretching (`TimeStretch` dataclass,
+  `on_bpm_change()`, config field `transform.target_bpm`) and envelope shaping (`EnvelopeAdjust`
+  dataclass) are scaffolded — only the apply-function implementations and handler registrations
+  remain. See `transform.*` settings in `config.yaml`.
+- **Pitch-variant playback testing (WIP)** - MIDI channel 1 (mido ch 0) is wired in
+  `player.py` as an exploratory channel that maps notes directly to cached pitch variants,
+  bypassing the reference-similarity routing used by channel 10. Instrument samples are
+  iterated in insertion order; each sample's variants claim their MIDI notes, with later
+  samples overwriting earlier ones. This gives end-to-end hardware test coverage for the
+  transform pipeline. The mapping channel constant (`_VARIANT_CHANNEL`) will move to config
+  alongside the other hard-coded playback constants in a future iteration.
 
 ## Planned
 
-- **BPM time-stretching** - register `_apply_time_stretch()`; trigger via
-  `TransformManager.on_bpm_change()` when target tempo changes.
-- **Envelope shaping** - register `_apply_envelope()` to adjust attack/release for
-  percussive use.
+- **BPM time-stretching** - `TimeStretch` dataclass, `TransformManager.on_bpm_change()`,
+  and `transform.target_bpm` config field (default 0.0 = disabled) are all in place;
+  only `_apply_time_stretch()` remains to implement and register in
+  `TransformProcessor._HANDLERS`.
+- **Envelope shaping** - `EnvelopeAdjust` dataclass (attack/release in ms) is defined;
+  only `_apply_envelope()` remains to implement and register.
 - **Parallel startup re-analysis** - when the analysis version bumps, stale sidecar files are currently re-analyzed sequentially on the main thread at startup; for large libraries this blocks for several minutes. Re-analysis should be parallelized using the same `SampleProcessor` thread pool used for live capture.
 - **Multi-band energy envelope** - split the spectrum into 3–5 frequency bands (sub-bass,
   low-mid, mid, presence, air) and compute per-band peak energy and decay rate; would
@@ -178,6 +190,7 @@ All settings live in `config.yaml`. The defaults are:
 | `transform.max_memory_mb` | `50.0` | Memory budget (MB) for pitch-shifted variants; separate from instrument library budget |
 | `transform.auto_pitch` | `true` | Auto-produce pitch variants for tonal samples; set to `false` to disable |
 | `transform.pitch_range_semitones` | `12` | Semitones above and below detected pitch for auto-variants (12 = ±1 octave = 25 notes) |
+| `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables (infrastructure in place, handler not yet implemented) |
 
 ## Output
 
