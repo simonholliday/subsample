@@ -39,14 +39,14 @@ _log = logging.getLogger(__name__)
 
 # MIDI channel to listen on. Mido uses 0-indexed channels; the BeatStep Pro
 # sends on channel 16 (user-facing), which mido reports as channel=15.
-_MIDI_CHANNEL = 15          # channel 16 in user-facing terms (mido: 0-indexed)
+_MIDI_CHANNEL = 9          # channel 10 in user-facing terms (mido: 0-indexed)
 
 # MIDI note range mapped to reference samples (first note = lowest note number).
 _NOTE_FIRST = 36            # MIDI note 36 = first reference sample (alphabetical)
 _NOTE_LAST  = 51            # MIDI note 51 = 16th reference (or last if fewer)
 
 # Fixed MIDI velocity used for every trigger. Input velocity is ignored.
-_HARD_CODED_VELOCITY = 100  # TODO: replace with msg.velocity from MIDI input
+_HARD_CODED_VELOCITY = 127  # TODO: replace with msg.velocity from MIDI input
 
 # Target RMS level for playback normalisation (linear, not dBFS).
 # 0.1 ≈ -20 dBFS — leaves headroom for mixing multiple simultaneous voices.
