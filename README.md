@@ -85,6 +85,7 @@ environment becomes an instant, organized sample pack.
 
 ## Planned
 
+- **Parallel startup re-analysis** - when the analysis version bumps, stale sidecar files are currently re-analyzed sequentially on the main thread at startup; for large libraries this blocks for several minutes. Re-analysis should be parallelized using the same `SampleProcessor` thread pool used for live capture.
 - **Multi-band energy envelope** - split the spectrum into 3–5 frequency bands (sub-bass,
   low-mid, mid, presence, air) and compute per-band peak energy and decay rate; would
   directly encode the physical signature of drum types (kick = sub-bass dominant; snare =

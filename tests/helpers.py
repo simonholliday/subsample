@@ -66,6 +66,7 @@ def _make_pitch () -> subsample.analysis.PitchResult:
 		pitch_confidence     = 0.92,
 		chroma_profile       = tuple(float(i) / 12.0 for i in range(12)),
 		dominant_pitch_class = 9,
+		pitch_stability      = 0.1,
 	)
 
 

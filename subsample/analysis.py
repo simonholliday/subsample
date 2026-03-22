@@ -83,7 +83,7 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide",
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "4"
+ANALYSIS_VERSION: str = "6"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -246,7 +246,7 @@ class AnalysisResult:
 
 	def as_vector (self) -> numpy.ndarray:
 
-		"""Return the nine spectral metrics as a float32 1-D array.
+		"""Return nine of the eleven spectral metrics as a float32 1-D array (excludes log_attack_time and spectral_flux).
 
 		This is the **spectral fingerprint** of the sound — a fixed-length
 		vector where every element is normalised to [0.0, 1.0]:
@@ -343,6 +343,25 @@ class PitchResult:
 	"""Index of the strongest pitch class in chroma_profile (argmax), 0–11.
 	-1 if no chroma energy was detected. Maps to _PITCH_CLASSES for display.
 	Example: A = 9, C = 0, F# = 6. Does not encode octave information."""
+
+	pitch_stability: float
+	"""Standard deviation of the pyin F0 track across voiced frames, in semitones.
+
+	Measured in semitones (MIDI units) so the value is frequency-independent —
+	1 semitone of variation sounds the same at any pitch.
+
+	0.0  — perfectly stable, or no voiced frames (check voiced_fraction).
+	~0.1 — very stable (synthesiser, piano, held wind note).
+	~0.5 — slight natural variation.
+	~1.0 — noticeable movement (gentle vibrato, slight bend).
+	>2.0 — significant change (strong vibrato, glide, or multiple pitches).
+
+	Unvoiced frames (silence, noise, gaps) are excluded — a tone that drops out
+	and returns at the same pitch still registers as stable.
+
+	Practical threshold for keyboard resampling suitability:
+	  pitch_stability < 0.5  AND  voiced_fraction > 0.5  AND  dominant_pitch_hz > 0
+	"""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -772,6 +791,52 @@ def format_pitch_result (result: PitchResult) -> str:
 		f"pitch={pitch_str}"
 		f"  chroma={chroma_str}"
 		f"  pitch_conf={result.pitch_confidence:.2f}"
+		f"  stability={result.pitch_stability:.3f}st"
+	)
+
+
+def is_keyboard_candidate (
+	spectral: AnalysisResult,
+	pitch: PitchResult,
+) -> bool:
+
+	"""Return True if this sample is a good candidate for keyboard resampling.
+
+	A keyboard candidate has a single, stable pitch that can be shifted across
+	a note range without sounding unnatural. Harmonics of the fundamental are
+	fine — a piano note is full of them and still maps perfectly to one key.
+
+	This is a compound query over existing analysis fields, not stored data.
+	Thresholds can be adjusted here without re-analysing any samples.
+
+	Decision criteria:
+
+	  dominant_pitch_hz > 0        — a fundamental was detected at all
+	  voiced_fraction   > 0.5      — pitched content in more than half the frames
+	                                 (allows gaps: a tone that drops out and
+	                                 returns counts fine; see pitch_stability)
+	  pitch_stability   < 0.5 st   — F0 varies less than half a semitone (std)
+	                                 across voiced frames; excludes vibrato,
+	                                 pitch bends, and multi-pitch signals
+	  harmonic_ratio    > 0.4      — more harmonic than percussive energy
+	                                 (HPSS-based); excludes drum hits, clicks,
+	                                 and noise bursts
+
+	Args:
+		spectral: AnalysisResult for the sample (provides voiced_fraction and
+		          harmonic_ratio).
+		pitch:    PitchResult for the sample (provides dominant_pitch_hz,
+		          pitch_stability).
+
+	Returns:
+		True if all four criteria are met, False otherwise.
+	"""
+
+	return (
+		pitch.dominant_pitch_hz > 0.0
+		and spectral.voiced_fraction > 0.5
+		and pitch.pitch_stability < 0.5
+		and spectral.harmonic_ratio > 0.4
 	)
 
 
@@ -884,6 +949,7 @@ def analyze_pitch (
 				pitch_confidence=0.0,
 				chroma_profile=tuple(0.0 for _ in range(12)),
 				dominant_pitch_class=-1,
+				pitch_stability=0.0,
 			),
 			_empty_timbre,
 		)
@@ -898,6 +964,15 @@ def analyze_pitch (
 
 	voiced_p = voiced_probs[voiced_flag]
 	pitch_confidence = float(numpy.mean(voiced_p)) if voiced_p.size > 0 else 0.0
+
+	# Pitch stability: std dev of voiced F0 in semitones (MIDI units).
+	# Semitone scale is logarithmic and frequency-independent, so 0.5 semitones
+	# means the same thing at 100 Hz or 1000 Hz.
+	# Only voiced frames are included; unvoiced gaps don't count as instability.
+	if voiced_f0.size > 1:
+		pitch_stability = float(numpy.std(librosa.hz_to_midi(voiced_f0)))
+	else:
+		pitch_stability = 0.0
 
 	# --- chroma_cqt: pitch class energy (constant-Q, more accurate than STFT) ---
 	# Returns shape (12, n_frames). Mean across time gives the average energy in
@@ -962,6 +1037,7 @@ def analyze_pitch (
 				pitch_confidence=pitch_confidence,
 				chroma_profile=chroma_profile,
 				dominant_pitch_class=dominant_pitch_class,
+				pitch_stability=pitch_stability,
 			),
 			_empty_timbre,
 		)
@@ -996,6 +1072,7 @@ def analyze_pitch (
 			pitch_confidence=pitch_confidence,
 			chroma_profile=chroma_profile,
 			dominant_pitch_class=dominant_pitch_class,
+			pitch_stability=pitch_stability,
 		),
 		TimbreResult(
 			mfcc=mfcc,

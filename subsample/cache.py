@@ -465,6 +465,7 @@ def _deserialize_pitch (data: dict[str, typing.Any]) -> subsample.analysis.Pitch
 		pitch_confidence     = float(data.get("pitch_confidence", 0.0)),
 		chroma_profile       = chroma_profile,
 		dominant_pitch_class = int(data.get("dominant_pitch_class", -1)),
+		pitch_stability      = float(data.get("pitch_stability", 0.0)),
 	)
 
 

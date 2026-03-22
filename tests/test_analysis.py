@@ -1039,6 +1039,35 @@ class TestAnalyzePitch:
 
 		assert pitch.pitch_confidence < 0.1
 
+	def test_stable_sine_has_low_pitch_stability (self) -> None:
+		"""A sustained constant-frequency sine wave should have near-zero pitch_stability."""
+		pitch, _ = subsample.analysis.analyze_pitch(self._float_sine(440.0), self._params())
+
+		# A perfectly stable tone; allow small numerical variation from pyin
+		assert pitch.pitch_stability < 0.5
+
+	def test_swept_sine_has_high_pitch_stability (self) -> None:
+		"""A linearly swept sine (440 Hz → 880 Hz) should have high pitch_stability."""
+		sample_rate = 44100
+		duration = 1.0
+		t = numpy.linspace(0, duration, int(sample_rate * duration), dtype=numpy.float32)
+		# Instantaneous frequency sweeps from 440 to 880 Hz over the duration
+		phase = 2.0 * numpy.pi * (440.0 * t + 220.0 * t ** 2 / duration)
+		swept = numpy.sin(phase).astype(numpy.float32)
+
+		pitch, _ = subsample.analysis.analyze_pitch(swept, self._params())
+
+		# A full octave sweep covers 12 semitones; std should be well above 0.5
+		assert pitch.pitch_stability > 0.5
+
+	def test_empty_audio_has_zero_pitch_stability (self) -> None:
+		"""Silence / no voiced frames should yield pitch_stability == 0.0."""
+		pitch, _ = subsample.analysis.analyze_pitch(
+			numpy.zeros(0, dtype=numpy.float32), self._params()
+		)
+
+		assert pitch.pitch_stability == 0.0
+
 
 class TestOnsetDetection:
 
@@ -1108,6 +1137,7 @@ class TestFormatPitchResult:
 			pitch_confidence=0.92,
 			chroma_profile=tuple(0.0 for _ in range(12)),
 			dominant_pitch_class=9,
+			pitch_stability=0.12,
 		)
 
 	def _unpitched_result (self) -> subsample.analysis.PitchResult:
@@ -1116,6 +1146,7 @@ class TestFormatPitchResult:
 			pitch_confidence=0.0,
 			chroma_profile=tuple(0.0 for _ in range(12)),
 			dominant_pitch_class=-1,
+			pitch_stability=0.0,
 		)
 
 	def test_contains_all_labels (self) -> None:
@@ -1264,3 +1295,50 @@ class TestFormatLevelResult:
 		s = subsample.analysis.format_level_result(result)
 
 		assert "\n" not in s
+
+
+# ---------------------------------------------------------------------------
+# TestIsKeyboardCandidate
+# ---------------------------------------------------------------------------
+
+class TestIsKeyboardCandidate:
+
+	"""Tests for is_keyboard_candidate()."""
+
+	def _spectral (self, voiced_fraction: float = 0.8, harmonic_ratio: float = 0.7) -> subsample.analysis.AnalysisResult:
+		return subsample.analysis.AnalysisResult(
+			spectral_flatness=0.0, attack=0.5, release=0.5,
+			spectral_centroid=0.5, spectral_bandwidth=0.3,
+			zcr=0.1, harmonic_ratio=harmonic_ratio,
+			spectral_contrast=0.5, voiced_fraction=voiced_fraction,
+			log_attack_time=0.5, spectral_flux=0.2,
+		)
+
+	def _pitch (self, hz: float = 440.0, stability: float = 0.1) -> subsample.analysis.PitchResult:
+		return subsample.analysis.PitchResult(
+			dominant_pitch_hz=hz,
+			pitch_confidence=0.9,
+			chroma_profile=tuple(0.0 for _ in range(12)),
+			dominant_pitch_class=9,
+			pitch_stability=stability,
+		)
+
+	def test_stable_tonal_sample_is_candidate (self) -> None:
+		"""A pitched, stable, tonal sample should be a keyboard candidate."""
+		assert subsample.analysis.is_keyboard_candidate(self._spectral(), self._pitch()) is True
+
+	def test_no_pitch_detected_is_not_candidate (self) -> None:
+		"""dominant_pitch_hz == 0 means no pitch was found."""
+		assert subsample.analysis.is_keyboard_candidate(self._spectral(), self._pitch(hz=0.0)) is False
+
+	def test_low_voiced_fraction_is_not_candidate (self) -> None:
+		"""Less than half the frames pitched — not suitable."""
+		assert subsample.analysis.is_keyboard_candidate(self._spectral(voiced_fraction=0.3), self._pitch()) is False
+
+	def test_unstable_pitch_is_not_candidate (self) -> None:
+		"""pitch_stability >= 0.5 semitones (vibrato / bend) should be excluded."""
+		assert subsample.analysis.is_keyboard_candidate(self._spectral(), self._pitch(stability=1.2)) is False
+
+	def test_percussive_sample_is_not_candidate (self) -> None:
+		"""Low harmonic_ratio means it's percussive rather than tonal."""
+		assert subsample.analysis.is_keyboard_candidate(self._spectral(harmonic_ratio=0.2), self._pitch()) is False

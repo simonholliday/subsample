@@ -22,9 +22,11 @@ ReferenceLibrary lookup is case-insensitive.
 """
 
 import collections
+import concurrent.futures
 import dataclasses
 import itertools
 import logging
+import os
 import pathlib
 import threading
 import typing
@@ -302,18 +304,35 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 		_log.warning("Reference directory not found: %s — library will be empty", directory)
 		return ReferenceLibrary([])
 
+	sidecar_paths = sorted(directory.glob(f"*{_SIDECAR_SUFFIX}"))
+
+	if not sidecar_paths:
+		return ReferenceLibrary([])
+
+	n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
+
+	# Phase 1 — parallel: load each sidecar concurrently (may trigger
+	# re-analysis if the version is stale). Results are kept in sorted order
+	# via the futures list so Phase 2 builds records in a deterministic sequence.
+	with concurrent.futures.ThreadPoolExecutor(
+		max_workers=n_workers,
+		thread_name_prefix="ref-loader",
+	) as executor:
+		futures = [
+			executor.submit(subsample.cache.load_sidecar, path)
+			for path in sidecar_paths
+		]
+		raw_results = [f.result() for f in futures]
+
+	# Phase 2 — sequential: construct SampleRecords in sorted filename order.
 	records: list[SampleRecord] = []
 
-	for sidecar_path in sorted(directory.glob(f"*{_SIDECAR_SUFFIX}")):
-		result = subsample.cache.load_sidecar(sidecar_path)
-
+	for sidecar_path, result in zip(sidecar_paths, raw_results):
 		if result is None:
-			# load_sidecar already logged the reason
 			continue
 
 		spectral, rhythm, pitch, timbre, params, duration, level = result
 
-		# Derive name: strip ".analysis.json" → audio filename → strip extension
 		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
 		name = pathlib.Path(audio_name).stem
 
@@ -334,6 +353,75 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 	_log.info("Loaded %d reference sample(s) from %s", len(records), directory)
 
 	return ReferenceLibrary(records)
+
+
+@dataclasses.dataclass(frozen=True)
+class _LoadedSample:
+
+	"""Intermediate result from _load_one_sample(); holds all data needed to
+	build a SampleRecord once the parallel phase is complete.
+
+	sample_id and filepath are filled in during the sequential phase so that
+	allocate_id() is called in sorted order, preserving FIFO semantics.
+	"""
+
+	spectral:   subsample.analysis.AnalysisResult
+	rhythm:     subsample.analysis.RhythmResult
+	pitch:      subsample.analysis.PitchResult
+	timbre:     subsample.analysis.TimbreResult
+	level:      subsample.analysis.LevelResult
+	params:     subsample.analysis.AnalysisParams
+	duration:   float
+	name:       str
+	audio_path: pathlib.Path
+	audio:      typing.Optional[numpy.ndarray]
+
+
+def _load_one_sample (
+	sidecar_path: pathlib.Path,
+	load_audio: bool,
+) -> typing.Optional[_LoadedSample]:
+
+	"""Load one instrument sample (sidecar + optional audio) from disk.
+
+	Designed to run on a worker thread. Each file is fully independent, so
+	multiple calls can safely execute concurrently.
+
+	Returns a _LoadedSample on success, or None if any step fails (the
+	reason will have already been logged by the callee).
+	"""
+
+	result = subsample.cache.load_sidecar(sidecar_path)
+
+	if result is None:
+		return None
+
+	spectral, rhythm, pitch, timbre, params, duration, level = result
+
+	audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
+	audio_path = sidecar_path.parent / audio_name
+	name = pathlib.Path(audio_name).stem
+
+	if not audio_path.exists():
+		_log.warning(
+			"Skipping instrument sample %s — audio file not found: %s",
+			name, audio_path,
+		)
+		return None
+
+	if load_audio:
+		audio: typing.Optional[numpy.ndarray] = _load_wav_audio(audio_path)
+
+		if audio is None:
+			return None
+	else:
+		audio = None
+
+	return _LoadedSample(
+		spectral=spectral, rhythm=rhythm, pitch=pitch, timbre=timbre,
+		level=level, params=params, duration=duration,
+		name=name, audio_path=audio_path, audio=audio,
+	)
 
 
 def load_instrument_library (
@@ -372,51 +460,56 @@ def load_instrument_library (
 		_log.warning("Instrument directory not found: %s — library will be empty", directory)
 		return lib
 
+	sidecar_paths = sorted(directory.glob(f"*{_SIDECAR_SUFFIX}"))
+
+	if not sidecar_paths:
+		return lib
+
+	# Worker count: same formula as SampleProcessor — reserve 2 cores for
+	# audio threads, use half the remainder. At least 1 always.
+	n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
+
+	_log.info(
+		"Loading %d instrument sample(s) from %s using %d worker(s)…",
+		len(sidecar_paths), directory, n_workers,
+	)
+
+	# Phase 1 — parallel: load sidecar + audio for each file concurrently.
+	# Each file is fully independent (separate disk reads, separate re-analysis),
+	# so parallelism is safe. Results are associated with their original sorted
+	# position via the futures list so Phase 2 can add records in order.
+	with concurrent.futures.ThreadPoolExecutor(
+		max_workers=n_workers,
+		thread_name_prefix="lib-loader",
+	) as executor:
+		futures = [
+			executor.submit(_load_one_sample, path, load_audio)
+			for path in sidecar_paths
+		]
+		# Block until all workers finish; results arrive in submitted order.
+		raw_results = [f.result() for f in futures]
+
+	# Phase 2 — sequential: construct SampleRecords and add to the library in
+	# sorted filename order. allocate_id() is called here (not in workers) so
+	# IDs are assigned in a deterministic order and FIFO eviction works correctly.
 	loaded = 0
 
-	for sidecar_path in sorted(directory.glob(f"*{_SIDECAR_SUFFIX}")):
-		result = subsample.cache.load_sidecar(sidecar_path)
-
-		if result is None:
-			# load_sidecar already logged the reason
+	for loaded_sample in raw_results:
+		if loaded_sample is None:
 			continue
-
-		spectral, rhythm, pitch, timbre, params, duration, level = result
-
-		# Derive the audio filename from the sidecar name
-		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
-		audio_path = sidecar_path.parent / audio_name
-		name = pathlib.Path(audio_name).stem
-
-		# Instrument samples require audio — skip if WAV is absent
-		if not audio_path.exists():
-			_log.warning(
-				"Skipping instrument sample %s — audio file not found: %s",
-				name, audio_path,
-			)
-			continue
-
-		if load_audio:
-			audio: typing.Optional[numpy.ndarray] = _load_wav_audio(audio_path)
-
-			if audio is None:
-				# _load_wav_audio already logged the reason
-				continue
-		else:
-			audio = None
 
 		record = SampleRecord(
 			sample_id = allocate_id(),
-			name      = name,
-			spectral  = spectral,
-			rhythm    = rhythm,
-			pitch     = pitch,
-			timbre    = timbre,
-			level     = level,
-			params    = params,
-			duration  = duration,
-			audio     = audio,
-			filepath  = audio_path,
+			name      = loaded_sample.name,
+			spectral  = loaded_sample.spectral,
+			rhythm    = loaded_sample.rhythm,
+			pitch     = loaded_sample.pitch,
+			timbre    = loaded_sample.timbre,
+			level     = loaded_sample.level,
+			params    = loaded_sample.params,
+			duration  = loaded_sample.duration,
+			audio     = loaded_sample.audio,
+			filepath  = loaded_sample.audio_path,
 		)
 
 		lib.add(record)
