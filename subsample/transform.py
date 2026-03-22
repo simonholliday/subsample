@@ -759,7 +759,13 @@ class TransformManager:
 
 		if result is None:
 			record = self._instrument_library.get(sample_id)
-			if record is not None:
+
+			# Only enqueue for samples with a stable, confident pitch.
+			# Matches the gate in on_sample_added() — percussive samples have
+			# dominant_pitch_hz == 0, which causes log2(0) in librosa.hz_to_midi.
+			if record is not None and subsample.analysis.has_stable_pitch(
+				record.spectral, record.pitch, record.duration,
+			):
 				spec = TransformSpec(steps=(PitchShift(target_midi_note=midi_note),))
 				self._processor.enqueue(record, spec)
 
@@ -960,6 +966,12 @@ def _apply_pitch (
 	Returns:
 		float32, shape (n_frames, channels) — pitch-shifted audio.
 	"""
+
+	if record.pitch.dominant_pitch_hz <= 0.0:
+		raise ValueError(
+			f"Cannot pitch-shift sample {record.sample_id} ({record.name!r}): "
+			f"dominant_pitch_hz is {record.pitch.dominant_pitch_hz!r} — no stable pitch detected"
+		)
 
 	source_midi = float(librosa.hz_to_midi(record.pitch.dominant_pitch_hz))
 	n_steps     = float(step.target_midi_note) - source_midi

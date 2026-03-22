@@ -374,7 +374,7 @@ def main () -> None:
 		format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 		datefmt="%H:%M:%S",
 	)
-	logging.getLogger("subsample").setLevel(logging.DEBUG)
+	logging.getLogger("subsample").setLevel(logging.INFO)
 
 	args = _parse_args()
 
