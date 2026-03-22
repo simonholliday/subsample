@@ -305,10 +305,7 @@ class SimilarityMatrix:
 					if ranked is None:
 						continue
 
-					for i, m in enumerate(ranked):
-						if m.sample_id == sid:
-							del ranked[i]
-							break
+					ranked[:] = [m for m in ranked if m.sample_id != sid]
 
 	def get_match (
 		self,

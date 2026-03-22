@@ -137,6 +137,38 @@ class InstrumentConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class TransformConfig:
+
+	max_memory_mb: float = 50.0
+	"""Maximum memory (MB) for in-memory derivative audio (transform variants).
+
+	Separate from instrument.max_memory_mb — derivatives are disposable and
+	regenerated on demand, so they have their own independent budget.
+	Eviction strategy: parent-priority FIFO (all variants of the oldest parent
+	are evicted together to keep variant sets intact).
+	At 44100 Hz float32 stereo, 50 MB ≈ 150 seconds of derivative audio."""
+
+	auto_pitch: bool = True
+	"""When True, automatically create pitch variants for samples that pass the
+	has_stable_pitch() test as they arrive.  Variants are produced in the
+	background for every MIDI note in [pitch_range_low, pitch_range_high].
+	Set to False to disable automatic pitch variant production."""
+
+	pitch_range_low: int = 36
+	"""Lowest MIDI note for auto-generated pitch variants (default: C2).
+	Range: 0–127.  Must be <= pitch_range_high."""
+
+	pitch_range_high: int = 72
+	"""Highest MIDI note for auto-generated pitch variants (default: C5).
+	Range: 0–127.  Must be >= pitch_range_low."""
+
+	target_bpm: float = 0.0
+	"""Target BPM for automatic time-stretch variants.  0.0 = disabled.
+	When > 0, a time-stretch variant is produced for every sample that has
+	detected rhythmic content (rhythm.tempo_bpm > 0)."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
 
 	recorder: RecorderConfig
@@ -146,6 +178,7 @@ class Config:
 	instrument: InstrumentConfig = dataclasses.field(default_factory=InstrumentConfig)
 	similarity: SimilarityConfig = dataclasses.field(default_factory=SimilarityConfig)
 	player: PlayerConfig = dataclasses.field(default_factory=PlayerConfig)
+	transform: TransformConfig = dataclasses.field(default_factory=TransformConfig)
 	reference: typing.Optional[ReferenceConfig] = None
 
 
@@ -365,6 +398,21 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	else:
 		reference = None
 
+	transform_raw: dict[str, typing.Any] = raw.get("transform", {})
+	transform = TransformConfig(
+		max_memory_mb    = float(transform_raw.get("max_memory_mb",    50.0)),
+		auto_pitch       = bool(transform_raw.get("auto_pitch",        True)),
+		pitch_range_low  = int(transform_raw.get("pitch_range_low",    36)),
+		pitch_range_high = int(transform_raw.get("pitch_range_high",   72)),
+		target_bpm       = float(transform_raw.get("target_bpm",       0.0)),
+	)
+
+	if transform.pitch_range_low > transform.pitch_range_high:
+		raise ValueError(
+			f"transform.pitch_range_low ({transform.pitch_range_low}) must be "
+			f"<= pitch_range_high ({transform.pitch_range_high})"
+		)
+
 	return Config(
 		recorder=recorder,
 		detection=detection,
@@ -373,5 +421,6 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		instrument=instrument,
 		similarity=similarity,
 		player=player,
+		transform=transform,
 		reference=reference,
 	)

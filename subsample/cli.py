@@ -40,6 +40,7 @@ import subsample.library
 import subsample.player
 import subsample.recorder
 import subsample.similarity
+import subsample.transform
 import subsample.trim
 
 
@@ -223,6 +224,7 @@ def _run_recorder (
 	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
 	shutdown_event: threading.Event,
 	store_audio: bool,
+	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 ) -> None:
 
 	"""Set up an audio input device and run the real-time capture loop.
@@ -240,6 +242,8 @@ def _run_recorder (
 		similarity_matrix:  Similarity index to update as new samples arrive, or None.
 		shutdown_event:     Set this to stop the capture loop cleanly.
 		store_audio:        When True, keep PCM data in SampleRecord for playback.
+		transform_manager:  Optional transform pipeline; notified of new and evicted
+		                    samples so derivative variants are kept in sync.
 	"""
 
 	pa = subsample.audio.create_pyaudio()
@@ -273,7 +277,8 @@ def _run_recorder (
 		cfg,
 		analysis_params,
 		on_complete=_make_on_complete(
-			reference_library, instrument_library, analysis_params, similarity_matrix, store_audio,
+			reference_library, instrument_library, analysis_params,
+			similarity_matrix, store_audio, transform_manager,
 		),
 	)
 
@@ -311,6 +316,7 @@ def _start_player (
 	instrument_library: subsample.library.InstrumentLibrary,
 	similarity_matrix: subsample.similarity.SimilarityMatrix,
 	reference_library: subsample.library.ReferenceLibrary,
+	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 ) -> None:
 
 	"""Select a MIDI input device, create a MidiPlayer, and run it.
@@ -324,6 +330,8 @@ def _start_player (
 		instrument_library: Loaded instrument samples (must have audio in memory).
 		similarity_matrix:  Similarity index for note → sample lookup.
 		reference_library:  Reference library; provides sorted names for note mapping.
+		transform_manager:  Optional transform pipeline; enables pitched variant
+		                    playback when provided.
 	"""
 
 	try:
@@ -347,6 +355,7 @@ def _start_player (
 		sample_rate=cfg.recorder.audio.sample_rate,
 		bit_depth=cfg.recorder.audio.bit_depth,
 		output_device_name=cfg.player.audio.device,
+		transform_manager=transform_manager,
 	)
 	player.run()
 
@@ -416,6 +425,35 @@ def main () -> None:
 			similarity_matrix.bulk_add(instrument_library.samples())
 		print(f"  Similarity   : {similarity_matrix}")
 
+	# --- Transform pipeline ---
+	# Create the cache, processor, and manager now (before threads start) so
+	# that the on_complete callback and the player share the same instance.
+	# Phase 1 (scaffold): the pipeline is wired but the dispatch table is empty,
+	# so on_sample_added() is a no-op and no variants are produced yet.
+	max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
+
+	_transform_cache = subsample.transform.TransformCache(
+		max_memory_bytes=max_transform_bytes,
+	)
+	def _on_transform_complete (
+		result: subsample.transform.TransformResult,
+	) -> None:
+		_transform_cache.put(result)
+
+	_transform_processor = subsample.transform.TransformProcessor(
+		sample_rate=cfg.recorder.audio.sample_rate,
+		bit_depth=cfg.recorder.audio.bit_depth,
+		on_complete=_on_transform_complete,
+	)
+	transform_manager: typing.Optional[subsample.transform.TransformManager] = (
+		subsample.transform.TransformManager(
+			cache=_transform_cache,
+			processor=_transform_processor,
+			instrument_library=instrument_library,
+			cfg=cfg.transform,
+		)
+	)
+
 	# --- Thread-based orchestration ---
 	# Both the recorder and player have blocking loops, so each runs on its own
 	# thread. The main thread waits on shutdown_event and forwards Ctrl+C.
@@ -430,6 +468,7 @@ def main () -> None:
 				cfg, reference_library, instrument_library,
 				analysis_params, similarity_matrix,
 				shutdown_event, cfg.player.enabled,
+				transform_manager,
 			),
 			name="recorder",
 		))
@@ -445,7 +484,10 @@ def main () -> None:
 		else:
 			threads.append(threading.Thread(
 				target=_start_player,
-				args=(cfg, shutdown_event, instrument_library, similarity_matrix, reference_library),
+				args=(
+					cfg, shutdown_event, instrument_library,
+					similarity_matrix, reference_library, transform_manager,
+				),
 				name="player",
 			))
 
@@ -468,6 +510,10 @@ def main () -> None:
 
 	for t in threads:
 		t.join(timeout=10.0)
+
+	# Drain any in-flight transform workers before exiting.
+	if transform_manager is not None:
+		transform_manager.shutdown()
 
 	print("Done.")
 
@@ -500,17 +546,22 @@ def _make_on_complete (
 	analysis_params: subsample.analysis.AnalysisParams,
 	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
 	store_audio: bool,
+	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 ) -> subsample.recorder._OnCompleteCallback:
 
 	"""Return the on_complete callback for the live-capture SampleProcessor.
 
 	The returned callback runs on the writer thread and must not block.
 	It logs the analysis result, adds the recording to the instrument
-	library, and updates the similarity matrix.
+	library, updates the similarity matrix, and notifies the transform
+	pipeline so derivative variants can be produced in the background.
 
 	Args:
-		store_audio: When True, keep PCM data in the SampleRecord. Set to
-		             cfg.player.enabled — audio is only needed for playback.
+		store_audio:       When True, keep PCM data in the SampleRecord. Set to
+		                   cfg.player.enabled — audio is only needed for playback.
+		transform_manager: Optional transform pipeline coordinator. When provided,
+		                   cascade-evicts derivatives for any evicted parents and
+		                   triggers auto-variant production for the new sample.
 	"""
 
 	def on_complete (
@@ -560,5 +611,13 @@ def _make_on_complete (
 					"Similarity: %s",
 					subsample.similarity.format_similarity_scores(scores),
 				)
+
+		# Keep the transform cache in sync with the instrument library.
+		# Cascade-evict derivatives of any evicted parents first, then
+		# notify the manager that a new sample is available for transforms.
+		if transform_manager is not None:
+			if evicted:
+				transform_manager.on_parent_evicted(evicted)
+			transform_manager.on_sample_added(record)
 
 	return on_complete

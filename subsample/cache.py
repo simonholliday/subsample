@@ -215,7 +215,7 @@ def _reanalyze_and_save (audio_path: pathlib.Path) -> _LoadResult | None:
 		audio_path: Path to the audio file to re-analyze.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration) on success, None on error.
+		(spectral, rhythm, pitch, timbre, params, duration, level) on success, None on error.
 	"""
 
 	_log.info("Re-analyzing %s (analysis version updated)…", audio_path.name)

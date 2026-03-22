@@ -1524,6 +1524,12 @@ def _compute_harmonic_ratio (
 
 	energy_harmonic = float(numpy.sum(harmonic ** 2))
 
+	# librosa.istft can return NaN for very short signals (fewer frames than
+	# n_fft) even when D is valid.  Treat NaN energy as zero — the sample is
+	# too short to decompose reliably.
+	if not numpy.isfinite(energy_harmonic):
+		return 0.0
+
 	return min(energy_harmonic / energy_total, 1.0)
 
 

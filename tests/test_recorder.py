@@ -14,7 +14,7 @@ import subsample.audio
 import subsample.config
 import subsample.recorder
 
-from .helpers import _make_params
+import tests.helpers
 
 
 class TestPackInt24:
@@ -111,7 +111,7 @@ class TestSampleProcessorFilenameBase:
 		with tempfile.TemporaryDirectory() as tmp:
 			out_dir = pathlib.Path(tmp)
 			cfg = _make_config(out_dir)
-			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
 
 			writer.enqueue(
 				audio,
@@ -133,7 +133,7 @@ class TestSampleProcessorFilenameBase:
 		with tempfile.TemporaryDirectory() as tmp:
 			out_dir = pathlib.Path(tmp)
 			cfg = _make_config(out_dir)
-			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
 
 			writer.enqueue(audio, datetime.datetime(2026, 3, 20, 12, 0, 0))
 			writer.flush()
@@ -156,7 +156,7 @@ class TestSampleProcessorFilenameBase:
 		with tempfile.TemporaryDirectory() as tmp:
 			out_dir = pathlib.Path(tmp)
 			cfg = _make_config(out_dir)
-			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
 
 			ts = datetime.datetime.now()
 			writer.enqueue(audio1, ts, filename_base="segment_1")
@@ -187,7 +187,7 @@ class TestSampleProcessorFlush:
 		with tempfile.TemporaryDirectory() as tmp:
 			out_dir = pathlib.Path(tmp)
 			cfg = _make_config(out_dir)
-			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
 
 			for i in range(3):
 				writer.enqueue(audio, datetime.datetime.now(), filename_base=f"seg_{i}")
@@ -206,7 +206,7 @@ class TestSampleProcessorFlush:
 
 		with tempfile.TemporaryDirectory() as tmp:
 			cfg = _make_config(pathlib.Path(tmp))
-			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
 			writer.enqueue(audio, datetime.datetime.now())
 			writer.flush()
 			writer.shutdown()  # should not raise
@@ -220,7 +220,7 @@ class TestSampleProcessorQueueDepth:
 		"""queue_depth should be 0 immediately after construction."""
 		with tempfile.TemporaryDirectory() as tmp:
 			cfg = _make_config(pathlib.Path(tmp))
-			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
 
 			assert writer.queue_depth == 0
 
@@ -232,7 +232,7 @@ class TestSampleProcessorQueueDepth:
 
 		with tempfile.TemporaryDirectory() as tmp:
 			cfg = _make_config(pathlib.Path(tmp))
-			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
 
 			writer.enqueue(audio, datetime.datetime.now())
 			writer.flush()
@@ -274,7 +274,7 @@ class TestSampleProcessorQueueDepth:
 
 			# Pin to 1 worker so items 2-4 queue up while item 1 is gated.
 			with unittest.mock.patch("subsample.recorder._compute_worker_count", return_value=1):
-				writer = subsample.recorder.SampleProcessor(cfg, _make_params(), on_complete=on_complete)
+				writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params(), on_complete=on_complete)
 
 			with caplog.at_level(logging.WARNING, logger="subsample.recorder"):
 				with unittest.mock.patch("subsample.analysis.analyze_all", side_effect=gated_analyze):
@@ -318,7 +318,7 @@ class TestSampleProcessorQueueDepth:
 
 			# Pin to 1 worker so the backlog warning fires and the drain log follows.
 			with unittest.mock.patch("subsample.recorder._compute_worker_count", return_value=1):
-				writer = subsample.recorder.SampleProcessor(cfg, _make_params())
+				writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
 
 			with caplog.at_level(logging.INFO, logger="subsample.recorder"):
 				with unittest.mock.patch("subsample.analysis.analyze_all", side_effect=gated_analyze):

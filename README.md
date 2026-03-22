@@ -82,9 +82,24 @@ environment becomes an instant, organized sample pack.
 
 - **Automatic sample classification** - infrastructure in place; next: wire ranked match
   results to a simple classifier (e.g. "if top reference match is KICK, classify as KICK").
+- **Sample transform pipeline** - the architecture for producing derivative versions of
+  samples is scaffolded and fully wired (`subsample/transform.py`): `TransformCache`,
+  `TransformProcessor` (background worker pool with dispatch registry), and
+  `TransformManager` (coordination point for player and recorder). No transforms are
+  active yet — the pipeline runs but the dispatch table is empty. First implementation
+  will be pitch shifting using `pedalboard`. See `transform.max_memory_mb` and related
+  settings in `config.yaml`.
 
 ## Planned
 
+- **Pitch re-mapping** - register `_apply_pitch()` in `TransformProcessor._HANDLERS`
+  (using `pedalboard`); wire `TransformManager.on_sample_added()` to auto-enqueue for
+  samples passing `has_stable_pitch()`; player already checks `get_pitched()` before
+  falling back to the original.
+- **BPM time-stretching** - register `_apply_time_stretch()`; trigger via
+  `TransformManager.on_bpm_change()` when target tempo changes.
+- **Envelope shaping** - register `_apply_envelope()` to adjust attack/release for
+  percussive use.
 - **Parallel startup re-analysis** - when the analysis version bumps, stale sidecar files are currently re-analyzed sequentially on the main thread at startup; for large libraries this blocks for several minutes. Re-analysis should be parallelized using the same `SampleProcessor` thread pool used for live capture.
 - **Multi-band energy envelope** - split the spectrum into 3–5 frequency bands (sub-bass,
   low-mid, mid, presence, air) and compute per-band peak energy and decay rate; would
@@ -99,9 +114,6 @@ environment becomes an instant, organized sample pack.
   hard-coded value of 100; the gain formula (`(velocity/127)²`) is already implemented.
 - **Mix management** - per-voice gain staging to prevent clipping when multiple samples
   overlap; configurable mixing strategy (e.g. normalise to peak, fixed headroom).
-- **Pitch re-mapping** - recognise tonal samples and map them across a keyboard range
-  centered on their recorded pitch, so a single sample can be played at any pitch.
-- **BPM time-stretching** - warp rhythmic samples to a target tempo to fit a song or loop.
 - **Sample library** - load previously collected samples, re-analyze them, and assign
   them to MIDI notes alongside newly recorded material.
 - **Independent modes** - recording, analysis, MIDI assignment, and MIDI playback can

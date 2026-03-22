@@ -28,13 +28,14 @@ import subsample.analysis
 import subsample.audio
 import subsample.library
 import subsample.similarity
+import subsample.transform
 
 
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# HARD-CODED playback constants — temporary while we explore output levels.
-# These will become config fields in a future iteration.
+# Playback constants — known deferred items awaiting config migration.
+# Tracked in README-AGENTS.md "Extending audio playback" and README.md Planned.
 # ---------------------------------------------------------------------------
 
 # MIDI channel to listen on. Mido uses 0-indexed channels; the BeatStep Pro
@@ -185,6 +186,7 @@ class MidiPlayer:
 		sample_rate: int,
 		bit_depth: int,
 		output_device_name: typing.Optional[str] = None,
+		transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	) -> None:
 
 		self._device_name        = device_name
@@ -194,6 +196,12 @@ class MidiPlayer:
 		self._sample_rate        = sample_rate
 		self._bit_depth          = bit_depth
 		self._output_device_name = output_device_name
+
+		# Optional transform pipeline. When provided, _handle_message() checks
+		# for a pre-computed pitched variant before falling back to _render().
+		# Pass a TransformManager instance to enable pitched playback;
+		# None keeps the existing behaviour (originals only).
+		self._transform_manager  = transform_manager
 
 		# Active voices being mixed. The MIDI thread appends; the audio
 		# callback reads and removes finished ones. Protected by _voices_lock.
@@ -340,12 +348,28 @@ class MidiPlayer:
 			_log.debug("Sample %d not found or audio not loaded", sample_id)
 			return
 
-		rendered = self._render(record)
-		if rendered is None:
+		# Check for a pre-computed pitched variant first.
+		# If found, use it directly (already float32, no int→float conversion).
+		# If not found (None), the manager has enqueued it for next time;
+		# fall back to rendering the original at its native pitch.
+		if self._transform_manager is not None:
+			variant = self._transform_manager.get_pitched(sample_id, msg.note)
+			if variant is not None:
+				rendered = self._render_float(variant.audio, variant.level)
+				with self._voices_lock:
+					self._voices.append(_Voice(audio=rendered))
+				_log.info(
+					"note %d → %r → %r (pitched variant)  (%.2fs)",
+					msg.note, ref_name, record.name, variant.duration,
+				)
+				return
+
+		original: typing.Optional[numpy.ndarray] = self._render(record)
+		if original is None:
 			return
 
 		with self._voices_lock:
-			self._voices.append(_Voice(audio=rendered))
+			self._voices.append(_Voice(audio=original))
 
 		_log.info(
 			"note %d → %r → %r  (%.2fs)",
@@ -359,18 +383,42 @@ class MidiPlayer:
 
 		"""Convert a SampleRecord to a gain-adjusted stereo float32 array.
 
-		Returns shape (n_frames, 2), values in [-1.0, 1.0]. The gain
-		normalisation and centre-pan duplication happen here so the audio
-		callback only needs to sum and clip — no per-voice work beyond indexing.
-
+		Converts int PCM → mono float32 → applies gain → returns stereo.
 		Returns None if the record has no audio.
+
+		For transform variants (already float32 multi-channel), use
+		_render_float() directly to skip the int→float conversion.
 		"""
 
 		if record.audio is None:
 			return None
 
-		# Convert raw PCM to normalised float32 mono [-1.0, 1.0].
+		# Convert raw int PCM to normalised float32 mono.
 		mono = subsample.analysis.to_mono_float(record.audio, self._bit_depth)
+
+		# Reshape to (n_frames, 1) so _render_float can handle the panning step.
+		mono_2d: numpy.ndarray = mono[:, numpy.newaxis]
+
+		return self._render_float(mono_2d, record.level)
+
+	def _render_float (
+		self,
+		audio: numpy.ndarray,
+		level: subsample.analysis.LevelResult,
+	) -> numpy.ndarray:
+
+		"""Apply gain normalisation and pan to stereo float32.
+
+		Shared by both the original _render() path (mono from int PCM) and
+		the transform variant path (float32 multi-channel from TransformResult).
+
+		Args:
+			audio: float32, shape (n_frames, channels).  Mono or stereo.
+			level: LevelResult for this audio (peak + rms), used for gain calc.
+
+		Returns:
+			Stereo float32, shape (n_frames, 2), values in [-1.0, 1.0].
+		"""
 
 		# --- Gain calculation ---
 		# Hard-coded velocity; TODO: replace with msg.velocity from MIDI input.
@@ -378,29 +426,37 @@ class MidiPlayer:
 
 		# Normalise to target RMS so samples recorded at different levels sound
 		# balanced. Guard against silence (rms == 0) to avoid division by zero.
-		if record.level.rms > 0.0:
-			norm_gain = _TARGET_RMS / record.level.rms
+		if level.rms > 0.0:
+			norm_gain = _TARGET_RMS / level.rms
 		else:
 			norm_gain = 1.0
 
 		raw_gain = norm_gain * vel_scale
 
 		# Anti-clip ceiling: ensure gain × peak never exceeds full scale.
-		if record.level.peak > 0.0:
-			final_gain = min(raw_gain, 1.0 / record.level.peak)
+		if level.peak > 0.0:
+			final_gain = min(raw_gain, 1.0 / level.peak)
 		else:
 			final_gain = raw_gain
 
 		_log.debug(
 			"gain: norm=%.3f  vel_scale=%.3f  raw=%.3f  final=%.3f  (rms=%.4f peak=%.4f)",
 			norm_gain, vel_scale, raw_gain, final_gain,
-			record.level.rms, record.level.peak,
+			level.rms, level.peak,
 		)
 
-		mono = mono * final_gain
+		gained = audio * final_gain
 
-		# Centre pan: duplicate mono to both L and R channels.
+		# Pan to stereo.  Multi-channel originals are mixed to mono first;
+		# mono originals are duplicated to both channels.
 		# TODO: add per-note pan mapping
-		stereo = numpy.column_stack((mono, mono))
+		if gained.shape[1] == 2:
+			stereo = gained
+		elif gained.shape[1] == 1:
+			stereo = numpy.column_stack((gained[:, 0], gained[:, 0]))
+		else:
+			# More than 2 channels: mix down to mono then centre pan.
+			mono_mix = numpy.mean(gained, axis=1, dtype=numpy.float32)
+			stereo   = numpy.column_stack((mono_mix, mono_mix))
 
 		return stereo
