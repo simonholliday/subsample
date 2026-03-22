@@ -124,6 +124,8 @@ subsample ./recordings/*.wav           # Multiple files (glob expansion)
 
 **File input mode:** Provide one or more WAV file paths as positional arguments. Each file is processed using its native sample rate, bit depth, and channel count; detected segments are saved to the output directory with names like `recording_1.wav`, `recording_2.wav`, etc. File processing happens before live capture starts (if configured).
 
+**How audio flows through the system:** The audio input thread (or file reader) continuously feeds chunks through a level detector. When a sound event is detected, the trimmed segment is handed off to a pool of background worker threads - the number of workers is chosen automatically based on how many CPU cores are available, so Subsample scales from a Raspberry Pi to a workstation without any configuration. Each worker independently runs the full analysis pipeline (librosa spectral, rhythm, and pitch analysis), writes the WAV file, saves the analysis sidecar, and adds the sample to the in-memory instrument library. The input thread is never blocked waiting for analysis to finish, so fast back-to-back sounds are captured reliably even if analysis is slow.
+
 ## Configuration
 
 All settings live in `config.yaml`. The defaults are:
@@ -220,7 +222,7 @@ reference/
   CH.wav.analysis.json       →  "CH"
 ```
 
-At startup, reference samples are loaded before instrument samples. For every instrument sample (pre-loaded at startup or captured live), Subsample computes cosine similarity on a 47-element composite feature vector against every reference and maintains a ranked list per reference — most similar instrument first. When a sample is evicted from the instrument library, it is also removed from the ranked lists.
+At startup, reference samples are loaded before instrument samples. For every instrument sample (pre-loaded at startup or captured live), Subsample computes cosine similarity on a 47-element composite feature vector against every reference and maintains a ranked list per reference - most similar instrument first. When a sample is evicted from the instrument library, it is also removed from the ranked lists.
 
 The feature vector is built from four independently L2-normalised groups, each scaled by a configurable weight (see `similarity.*` in `config.yaml`). This means the same comparison method works for both percussive sounds (attack character dominates) and tonal sounds (sustained timbre dominates) without needing to classify them first.
 

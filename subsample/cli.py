@@ -187,7 +187,7 @@ def _process_input_files (
 
 		analysis_params = subsample.analysis.compute_params(file_info.sample_rate)
 
-		writer = subsample.recorder.WavWriter(cfg, analysis_params, on_complete=None)
+		writer = subsample.recorder.SampleProcessor(cfg, analysis_params, on_complete=None)
 
 		segment_index = 1
 		chunk_size = cfg.recorder.audio.chunk_size
@@ -269,7 +269,7 @@ def _run_recorder (
 		max_recording_frames=max_frames,
 	)
 
-	writer = subsample.recorder.WavWriter(
+	writer = subsample.recorder.SampleProcessor(
 		cfg,
 		analysis_params,
 		on_complete=_make_on_complete(
@@ -502,7 +502,7 @@ def _make_on_complete (
 	store_audio: bool,
 ) -> subsample.recorder._OnCompleteCallback:
 
-	"""Return the on_complete callback for the live-capture WavWriter.
+	"""Return the on_complete callback for the live-capture SampleProcessor.
 
 	The returned callback runs on the writer thread and must not block.
 	It logs the analysis result, adds the recording to the instrument

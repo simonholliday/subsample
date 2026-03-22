@@ -1,22 +1,29 @@
-"""Background WAV file writer for Subsample.
+"""Sample processing pipeline for Subsample.
 
-Decouples audio I/O from disk I/O by running the WAV writer on a dedicated
-daemon thread. The main capture loop hands off completed recordings via a
-queue, so file writes never block audio capture.
+Decouples audio capture from analysis and disk I/O by running per-sample
+work on a thread-pool executor. The recorder thread hands off completed
+recordings via submit(); each worker independently runs the full pipeline:
+  convert → analyze → write WAV → save sidecar → invoke on_complete callback
 
-WavWriter's sole responsibility is: receive audio → run analysis → write WAV
-→ save sidecar cache → invoke on_complete callback. It has no knowledge of
-similarity scoring, analysis formatting, or any other presentation concern.
-Those belong in the on_complete callback supplied by the caller (see cli.py).
+Worker count is auto-scaled from os.cpu_count() at construction time — no
+configuration needed. Two cores are reserved for audio threads (recorder +
+player callback); half the remainder are used for processing. This degrades
+gracefully to a single worker on a Raspberry Pi and scales up automatically
+on multi-core machines.
+
+SampleProcessor has no knowledge of similarity scoring, analysis formatting,
+or any other presentation concern. Those belong in the on_complete callback
+supplied by the caller (see cli.py).
 """
 
+import concurrent.futures
 import dataclasses
 import datetime
 import hashlib
 import io
 import logging
+import os
 import pathlib
-import queue
 import threading
 import typing
 import wave
@@ -30,13 +37,24 @@ import subsample.config
 
 _log = logging.getLogger(__name__)
 
-# Sentinel used to signal the writer thread to shut down cleanly
-_SHUTDOWN: typing.Final[object] = object()
+
+def _compute_worker_count () -> int:
+
+	"""Return the number of processing workers to use.
+
+	Reserves 2 cores for audio threads (recorder input + player callback),
+	then uses half the remainder — at least 1. Scales automatically from
+	a Raspberry Pi (1 worker) up to a workstation (many workers).
+	"""
+
+	cpu_count = os.cpu_count() or 1
+	return max(1, (cpu_count - 2) // 2)
+
 
 # Callback type invoked after each recording is written and analyzed.
-# Receives the output path, all four analysis results, the recording duration,
+# Receives the output path, all analysis results, the recording duration,
 # and the original capture-format PCM audio array for instrument sample storage.
-# Runs on the writer thread — use a queue to hand data back to the main thread safely.
+# Runs on a worker thread — use a queue to hand data back to the main thread safely.
 _OnCompleteCallback = typing.Callable[
 	[
 		pathlib.Path,
@@ -53,12 +71,12 @@ _OnCompleteCallback = typing.Callable[
 
 
 @dataclasses.dataclass(frozen=True)
-class _WriteRequest:
+class _ProcessRequest:
 
-	"""A single audio segment queued for writing to disk.
+	"""A single audio segment submitted for processing.
 
 	filename_base, sample_rate, and bit_depth are optional overrides used when
-	processing audio files rather than live stream chunks. When None, the writer
+	processing audio files rather than live stream chunks. When None, the worker
 	falls back to the values from the application config.
 	"""
 
@@ -69,23 +87,25 @@ class _WriteRequest:
 	bit_depth: typing.Optional[int] = None        # None → use config bit depth
 
 
-# Type alias for items placed on the queue
-_QueueItem = typing.Union[_WriteRequest, object]
+class SampleProcessor:
 
+	"""Processes audio recordings on a thread-pool executor.
 
-class WavWriter:
+	Each submitted recording runs the full pipeline concurrently:
+	  convert → analyze → write WAV → save sidecar → on_complete callback
 
-	"""Writes audio recordings to WAV files on a background daemon thread.
+	Worker count is auto-scaled from os.cpu_count() — see _compute_worker_count().
+	Results may complete out of order; InstrumentLibrary and SimilarityMatrix
+	are both thread-safe and handle concurrent updates correctly.
 
 	Usage:
-		writer = WavWriter(config, analysis_params)
-		writer.enqueue(audio_array, datetime.datetime.now())
+		processor = SampleProcessor(config, analysis_params)
+		processor.enqueue(audio_array, datetime.datetime.now())
 		# … later …
-		writer.shutdown()
+		processor.shutdown()
 
-	IMPORTANT: shutdown() must be called before the process exits. The writer
-	thread is a daemon, so if the main thread exits without calling shutdown(),
-	any recordings still in the queue will be silently lost.
+	IMPORTANT: shutdown() must be called before the process exits to ensure
+	all in-flight recordings complete and their WAV files are written.
 	"""
 
 	def __init__ (
@@ -95,37 +115,45 @@ class WavWriter:
 		on_complete: typing.Optional[_OnCompleteCallback] = None,
 	) -> None:
 
-		"""Start the writer thread and ensure the output directory exists.
+		"""Start the worker pool and ensure the output directory exists.
 
 		Args:
 			cfg:             Full application config.
 			analysis_params: Pre-computed FFT params (from compute_params()).
-			on_complete:     Optional callback invoked on the writer thread after
+			on_complete:     Optional callback invoked on a worker thread after
 			                 each recording is written and analyzed. Receives
-			                 (filepath, spectral, rhythm, pitch, timbre, duration, audio).
-			                 Use a queue to hand results back to the main thread.
+			                 (filepath, spectral, rhythm, pitch, timbre, level,
+			                 duration, audio). Use a queue to pass results back
+			                 to the main thread if needed.
 		"""
 
-		self._cfg = cfg
+		self._cfg             = cfg
 		self._analysis_params = analysis_params
-		self._on_complete = on_complete
-		self._queue: queue.Queue[_QueueItem] = queue.Queue()
-
-		# Set to True when queue depth ≥ 3; cleared when the queue drains to
-		# zero. Used to emit a single INFO log when a backlog clears, rather
-		# than flooding the log on every item.
-		self._was_backed_up: bool = False
+		self._on_complete     = on_complete
 
 		output_dir = pathlib.Path(cfg.output.directory)
 		output_dir.mkdir(parents=True, exist_ok=True)
 		self._output_dir = output_dir
 
-		self._thread = threading.Thread(
-			target=self._writer_loop,
-			name="wav-writer",
-			daemon=True,
+		self._n_workers = _compute_worker_count()
+		_log.info(
+			"SampleProcessor: %d worker(s) (cpu_count=%d)",
+			self._n_workers, os.cpu_count() or 1,
 		)
-		self._thread.start()
+
+		self._executor = concurrent.futures.ThreadPoolExecutor(
+			max_workers=self._n_workers,
+			thread_name_prefix="sample-worker",
+		)
+
+		# Track pending futures for flush() and queue_depth.
+		# Protected by _futures_lock since workers complete on arbitrary threads.
+		self._futures:      list[concurrent.futures.Future[None]] = []
+		self._futures_lock: threading.Lock = threading.Lock()
+
+		# Set to True when a backlog warning fires; cleared on drain.
+		# Ensures the "queue drained" INFO fires once per backlog episode.
+		self._was_backed_up: bool = False
 
 	def enqueue (
 		self,
@@ -136,7 +164,10 @@ class WavWriter:
 		bit_depth: typing.Optional[int] = None,
 	) -> None:
 
-		"""Queue an audio array for writing to disk.
+		"""Submit an audio array for processing.
+
+		Returns immediately. The recording is analyzed and written to disk
+		by the next available worker thread.
 
 		Args:
 			audio:         PCM samples as a NumPy integer array, shape (n_frames, channels).
@@ -151,13 +182,20 @@ class WavWriter:
 			               to config value.
 		"""
 
-		self._queue.put(_WriteRequest(audio, timestamp, filename_base, sample_rate, bit_depth))
+		req = _ProcessRequest(audio, timestamp, filename_base, sample_rate, bit_depth)
 
-		depth = self._queue.qsize()
+		future = self._executor.submit(self._process, req)
+		future.add_done_callback(self._on_future_done)
+
+		with self._futures_lock:
+			# Drop completed futures to keep the list short.
+			self._futures = [f for f in self._futures if not f.done()]
+			self._futures.append(future)
+			depth = sum(1 for f in self._futures if not f.done())
 
 		if depth >= 3:
 			_log.warning(
-				"wav-writer queue depth: %d — analysis may be falling behind captures",
+				"sample-processor backlog: %d in-flight — processing may be falling behind captures",
 				depth,
 			)
 			self._was_backed_up = True
@@ -165,87 +203,91 @@ class WavWriter:
 	@property
 	def queue_depth (self) -> int:
 
-		"""Number of recordings currently waiting to be analysed and written."""
+		"""Number of recordings currently being processed or waiting for a worker."""
 
-		return self._queue.qsize()
+		with self._futures_lock:
+			return sum(1 for f in self._futures if not f.done())
 
 	def flush (self) -> None:
 
-		"""Block until all queued recordings have been written.
+		"""Block until all submitted recordings have finished processing.
 
-		Unlike shutdown(), the writer thread continues running after this returns.
+		Unlike shutdown(), the executor continues running after this returns.
 		Use this to ensure file-input segments are on disk before loading the
 		instrument library.
 		"""
 
-		self._queue.join()
+		with self._futures_lock:
+			pending = list(self._futures)
+
+		if pending:
+			concurrent.futures.wait(pending)
 
 	def shutdown (self) -> None:
 
-		"""Flush remaining recordings and stop the writer thread gracefully.
+		"""Wait for all in-flight recordings to complete and stop the worker pool.
 
-		Safe to call more than once — subsequent calls after the thread has
-		already exited are no-ops.
+		Safe to call more than once — subsequent calls after the executor has
+		already shut down are no-ops.
 		"""
 
-		if not self._thread.is_alive():
-			return
+		self._executor.shutdown(wait=True)
 
-		self._queue.put(_SHUTDOWN)
-		self._thread.join()
+	def _on_future_done (self, future: concurrent.futures.Future[None]) -> None:
 
-	def _writer_loop (self) -> None:
+		"""Done callback — logs INFO when a backlog episode fully drains.
 
-		"""Main loop for the writer thread; runs until the shutdown sentinel arrives."""
+		Called on the completing worker thread. Checks under the lock whether
+		all futures are now done and a backlog warning was previously emitted.
+		"""
 
-		while True:
-			item = self._queue.get()
+		with self._futures_lock:
+			if self._was_backed_up and not any(
+				not f.done() for f in self._futures
+			):
+				_log.info("sample-processor queue drained")
+				self._was_backed_up = False
 
-			if item is _SHUTDOWN:
-				self._queue.task_done()
-				break
+	def _process (self, req: _ProcessRequest) -> None:
 
-			try:
-				req = typing.cast(_WriteRequest, item)
+		"""Full processing pipeline for a single recording. Runs on a worker thread.
 
-				# Use per-request overrides when provided (file-input mode); otherwise
-				# fall back to the config values set for the live capture stream.
-				effective_bit_depth = req.bit_depth if req.bit_depth is not None else self._cfg.recorder.audio.bit_depth
+		Sequence: convert → analyze → write WAV → save sidecar → on_complete callback.
+		Exceptions are caught and logged so one failed recording never kills the worker.
+		"""
 
-				# Convert once; all three analyses operate on the same mono float array.
-				# analyze_all() shares the pyin computation between spectral and pitch
-				# analysis, avoiding running it twice (~200-300 ms saving per recording).
-				mono = subsample.analysis.to_mono_float(req.audio, effective_bit_depth)
+		try:
+			# Use per-request overrides when provided (file-input mode); otherwise
+			# fall back to the config values set for the live capture stream.
+			effective_bit_depth = (
+				req.bit_depth if req.bit_depth is not None
+				else self._cfg.recorder.audio.bit_depth
+			)
 
-				result, rhythm, pitch, timbre, level = subsample.analysis.analyze_all(
-					mono,
-					self._analysis_params,
-					self._cfg.analysis,
-				)
+			# Convert once; all analyses operate on the same mono float array.
+			# analyze_all() shares the pyin computation between spectral and pitch
+			# analysis, avoiding running it twice (~200-300 ms saving per recording).
+			mono = subsample.analysis.to_mono_float(req.audio, effective_bit_depth)
 
-				write_result = self._write_wav(
-					req.audio, req.timestamp, rhythm, result, pitch, timbre, level,
-					filename_base=req.filename_base,
-					sample_rate=req.sample_rate,
-					bit_depth=req.bit_depth,
-				)
+			result, rhythm, pitch, timbre, level = subsample.analysis.analyze_all(
+				mono,
+				self._analysis_params,
+				self._cfg.analysis,
+			)
 
-				if self._on_complete is not None and write_result is not None:
-					filepath, duration = write_result
-					self._on_complete(filepath, result, rhythm, pitch, timbre, level, duration, req.audio)
+			write_result = self._write_wav(
+				req.audio, req.timestamp, rhythm, result, pitch, timbre, level,
+				filename_base=req.filename_base,
+				sample_rate=req.sample_rate,
+				bit_depth=req.bit_depth,
+			)
 
-			except Exception as exc:
-				_log.error("Failed to analyse/cache recording: %s — WAV may be intact", exc, exc_info=True)
+			if self._on_complete is not None and write_result is not None:
+				filepath, duration = write_result
+				self._on_complete(filepath, result, rhythm, pitch, timbre, level, duration, req.audio)
 
-			finally:
-				# After get() the item is already removed from the queue, so
-				# qsize() here reflects remaining items. Emit a one-shot INFO
-				# when a backlog drains to zero.
-				if self._was_backed_up and self._queue.empty():
-					_log.info("wav-writer queue drained")
-					self._was_backed_up = False
-
-				self._queue.task_done()
+		except Exception as exc:
+			_log.error("Failed to process recording: %s — WAV may be intact", exc, exc_info=True)
 
 	def _write_wav (
 		self,
@@ -284,10 +326,19 @@ class WavWriter:
 		"""
 
 		# Resolve effective format values; per-request overrides take precedence.
-		effective_sample_rate = sample_rate if sample_rate is not None else self._cfg.recorder.audio.sample_rate
-		effective_bit_depth   = bit_depth   if bit_depth   is not None else self._cfg.recorder.audio.bit_depth
+		effective_sample_rate = (
+			sample_rate if sample_rate is not None
+			else self._cfg.recorder.audio.sample_rate
+		)
+		effective_bit_depth = (
+			bit_depth if bit_depth is not None
+			else self._cfg.recorder.audio.bit_depth
+		)
 
-		fname_base = filename_base if filename_base is not None else timestamp.strftime(self._cfg.output.filename_format)
+		fname_base = (
+			filename_base if filename_base is not None
+			else timestamp.strftime(self._cfg.output.filename_format)
+		)
 		filepath = self._output_dir / (fname_base + ".wav")
 
 		# Ensure the array is 2-D (n_frames, channels) before writing

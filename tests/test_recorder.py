@@ -100,9 +100,9 @@ def _make_config (output_dir: pathlib.Path) -> subsample.config.Config:
 	)
 
 
-class TestWavWriterFilenameBase:
+class TestSampleProcessorFilenameBase:
 
-	"""Tests for the filename_base parameter in WavWriter.enqueue()."""
+	"""Tests for the filename_base parameter in SampleProcessor.enqueue()."""
 
 	def test_filename_base_used_as_stem (self) -> None:
 		"""When filename_base is provided, the output file should use it as the stem."""
@@ -111,7 +111,7 @@ class TestWavWriterFilenameBase:
 		with tempfile.TemporaryDirectory() as tmp:
 			out_dir = pathlib.Path(tmp)
 			cfg = _make_config(out_dir)
-			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
 
 			writer.enqueue(
 				audio,
@@ -133,7 +133,7 @@ class TestWavWriterFilenameBase:
 		with tempfile.TemporaryDirectory() as tmp:
 			out_dir = pathlib.Path(tmp)
 			cfg = _make_config(out_dir)
-			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
 
 			writer.enqueue(audio, datetime.datetime(2026, 3, 20, 12, 0, 0))
 			writer.flush()
@@ -145,14 +145,18 @@ class TestWavWriterFilenameBase:
 		assert files[0].stem == "2026-03-20_12-00-00"
 
 	def test_collision_overwrites (self) -> None:
-		"""If filename_base.wav already exists, the second file overwrites it."""
+		"""If filename_base.wav already exists, the last writer wins.
+
+		With a thread pool both submissions run concurrently so the outcome
+		is non-deterministic; we only assert that exactly one valid WAV exists.
+		"""
 		audio1 = numpy.full((4410, 1), 100, dtype=numpy.int16)
 		audio2 = numpy.full((4410, 1), 200, dtype=numpy.int16)
 
 		with tempfile.TemporaryDirectory() as tmp:
 			out_dir = pathlib.Path(tmp)
 			cfg = _make_config(out_dir)
-			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
 
 			ts = datetime.datetime.now()
 			writer.enqueue(audio1, ts, filename_base="segment_1")
@@ -164,18 +168,17 @@ class TestWavWriterFilenameBase:
 			assert len(files) == 1
 			assert files[0].stem == "segment_1"
 
-			# Verify the *second* write (audio2, value=200) is the one that persisted,
-			# not the first. Read back the first PCM sample to confirm.
+			# Verify the file is a valid WAV with some non-zero content.
 			with wave.open(str(files[0]), "rb") as wf:
 				raw = wf.readframes(1)
 			first_sample = numpy.frombuffer(raw, dtype=numpy.int16)[0]
 
-		assert first_sample == 200
+		assert first_sample in (100, 200)  # either worker may have written last
 
 
-class TestWavWriterFlush:
+class TestSampleProcessorFlush:
 
-	"""Tests for WavWriter.flush()."""
+	"""Tests for SampleProcessor.flush()."""
 
 	def test_flush_blocks_until_queue_empty (self) -> None:
 		"""flush() should block until all enqueued items are written."""
@@ -184,7 +187,7 @@ class TestWavWriterFlush:
 		with tempfile.TemporaryDirectory() as tmp:
 			out_dir = pathlib.Path(tmp)
 			cfg = _make_config(out_dir)
-			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
 
 			for i in range(3):
 				writer.enqueue(audio, datetime.datetime.now(), filename_base=f"seg_{i}")
@@ -203,13 +206,13 @@ class TestWavWriterFlush:
 
 		with tempfile.TemporaryDirectory() as tmp:
 			cfg = _make_config(pathlib.Path(tmp))
-			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
 			writer.enqueue(audio, datetime.datetime.now())
 			writer.flush()
 			writer.shutdown()  # should not raise
 
 
-class TestWavWriterQueueDepth:
+class TestSampleProcessorQueueDepth:
 
 	"""Tests for the queue_depth property and backlog warning logging."""
 
@@ -217,7 +220,7 @@ class TestWavWriterQueueDepth:
 		"""queue_depth should be 0 immediately after construction."""
 		with tempfile.TemporaryDirectory() as tmp:
 			cfg = _make_config(pathlib.Path(tmp))
-			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
 
 			assert writer.queue_depth == 0
 
@@ -229,7 +232,7 @@ class TestWavWriterQueueDepth:
 
 		with tempfile.TemporaryDirectory() as tmp:
 			cfg = _make_config(pathlib.Path(tmp))
-			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			writer = subsample.recorder.SampleProcessor(cfg, _make_params())
 
 			writer.enqueue(audio, datetime.datetime.now())
 			writer.flush()
@@ -241,7 +244,14 @@ class TestWavWriterQueueDepth:
 	def test_backlog_warning_emitted_at_depth_three (
 		self, caplog: pytest.LogCaptureFixture
 	) -> None:
-		"""A WARNING should be logged when queue depth reaches 3."""
+		"""A WARNING should be logged when queue depth reaches 3.
+
+		Pins the processor to 1 worker so the queue builds up predictably
+		while the first item is held by the gate.
+		"""
+		import threading
+		import unittest.mock
+
 		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
 		received: list[subsample.analysis.AnalysisResult] = []
 
@@ -251,12 +261,8 @@ class TestWavWriterQueueDepth:
 		with tempfile.TemporaryDirectory() as tmp:
 			cfg = _make_config(pathlib.Path(tmp))
 
-			# Pause the writer thread so the queue can build up before processing.
-			# Use an Event to gate the first analysis call.
-			import threading
 			gate = threading.Event()
 			original_analyze = subsample.analysis.analyze_all
-
 			call_count = 0
 
 			def gated_analyze (*args, **kwargs):
@@ -266,37 +272,38 @@ class TestWavWriterQueueDepth:
 					gate.wait()
 				return original_analyze(*args, **kwargs)
 
-			writer = subsample.recorder.WavWriter(cfg, _make_params(), on_complete=on_complete)
+			# Pin to 1 worker so items 2-4 queue up while item 1 is gated.
+			with unittest.mock.patch("subsample.recorder._compute_worker_count", return_value=1):
+				writer = subsample.recorder.SampleProcessor(cfg, _make_params(), on_complete=on_complete)
 
 			with caplog.at_level(logging.WARNING, logger="subsample.recorder"):
-				import unittest.mock
 				with unittest.mock.patch("subsample.analysis.analyze_all", side_effect=gated_analyze):
-					# Enqueue enough items that the queue builds up while the first is held
 					for i in range(4):
 						writer.enqueue(audio, datetime.datetime.now(), filename_base=f"seg_{i}")
-
-					# Allow processing to continue
 					gate.set()
 					writer.flush()
 
 			writer.shutdown()
 
 		warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-		assert any("queue depth" in m for m in warning_messages), (
-			f"Expected a queue-depth WARNING; got: {warning_messages}"
+		assert any("backlog" in m for m in warning_messages), (
+			f"Expected a backlog WARNING; got: {warning_messages}"
 		)
 
 	def test_drain_info_logged_after_backlog (
 		self, caplog: pytest.LogCaptureFixture
 	) -> None:
-		"""An INFO 'queue drained' log should appear once the backlog clears."""
+		"""An INFO 'queue drained' log should appear once the backlog clears.
+
+		Pins the processor to 1 worker so the backlog builds up predictably.
+		"""
+		import threading
+		import unittest.mock
+
 		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
 
 		with tempfile.TemporaryDirectory() as tmp:
 			cfg = _make_config(pathlib.Path(tmp))
-
-			import threading
-			import unittest.mock
 
 			gate = threading.Event()
 			original_analyze = subsample.analysis.analyze_all
@@ -309,7 +316,9 @@ class TestWavWriterQueueDepth:
 					gate.wait()
 				return original_analyze(*args, **kwargs)
 
-			writer = subsample.recorder.WavWriter(cfg, _make_params())
+			# Pin to 1 worker so the backlog warning fires and the drain log follows.
+			with unittest.mock.patch("subsample.recorder._compute_worker_count", return_value=1):
+				writer = subsample.recorder.SampleProcessor(cfg, _make_params())
 
 			with caplog.at_level(logging.INFO, logger="subsample.recorder"):
 				with unittest.mock.patch("subsample.analysis.analyze_all", side_effect=gated_analyze):
