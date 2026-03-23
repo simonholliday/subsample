@@ -57,17 +57,28 @@ def _make_rhythm () -> subsample.analysis.RhythmResult:
 	)
 
 
-def _make_pitch () -> subsample.analysis.PitchResult:
+def _make_pitch (
+	dominant_pitch_hz:    float = 440.0,
+	pitch_confidence:     float = 0.92,
+	pitch_stability:      float = 0.1,
+	voiced_frame_count:   int   = 8,
+) -> subsample.analysis.PitchResult:
 
-	"""Return a representative PitchResult with typical field values."""
+	"""Return a representative PitchResult with typical field values.
+
+	The `pitch_stability` and `voiced_frame_count` fields are exposed as
+	keyword arguments because they are the two fields evaluated by
+	`has_stable_pitch()`.  Tests that need to exercise stability thresholds
+	can override them without constructing PitchResult manually.
+	"""
 
 	return subsample.analysis.PitchResult(
-		dominant_pitch_hz    = 440.0,
-		pitch_confidence     = 0.92,
+		dominant_pitch_hz    = dominant_pitch_hz,
+		pitch_confidence     = pitch_confidence,
 		chroma_profile       = tuple(float(i) / 12.0 for i in range(12)),
 		dominant_pitch_class = 9,
-		pitch_stability      = 0.1,
-		voiced_frame_count   = 8,
+		pitch_stability      = pitch_stability,
+		voiced_frame_count   = voiced_frame_count,
 	)
 
 

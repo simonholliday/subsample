@@ -501,3 +501,47 @@ def get_pyaudio_format (bit_depth: int) -> int:
 		raise ValueError(f"Unsupported bit depth {bit_depth}. Supported: {supported}")
 
 	return formats[bit_depth]
+
+
+def float32_to_pcm_bytes (audio: numpy.ndarray, bit_depth: int) -> bytes:
+
+	"""Convert a float32 audio array to PCM bytes for the given output bit depth.
+
+	Mirrors the bit-depth-aware byte layout expected by PortAudio's paInt16,
+	paInt24, and paInt32 formats:
+
+	  16-bit: 2 bytes per sample, signed int16, little-endian.
+	  24-bit: 3 bytes per sample, signed int24, little-endian.  The 3 least-
+	          significant bytes of an int32 encode the value correctly.
+	  32-bit: 4 bytes per sample, signed int32, little-endian.
+
+	Args:
+		audio:     float32 array, values in [-1.0, 1.0]. Any shape — the array
+		           is flattened in C (row-major) order, which produces the
+		           interleaved L/R layout PortAudio expects.
+		bit_depth: 16, 24, or 32.
+
+	Returns:
+		Raw bytes suitable for returning from a PyAudio output callback.
+
+	Raises:
+		ValueError: If bit_depth is not 16, 24, or 32.
+	"""
+
+	flat = audio.flatten()
+
+	if bit_depth == 16:
+		return (flat * 32767.0).astype(numpy.int16).tobytes()
+
+	if bit_depth == 24:
+		# Scale to signed 24-bit range, store in int32, then extract the 3
+		# least-significant bytes (little-endian order) per sample.
+		# This is the inverse of unpack_audio()'s 24-bit path.
+		scaled = (flat * 8388607.0).astype(numpy.int32)
+		raw = scaled.view(numpy.uint8).reshape(-1, 4)
+		return raw[:, :3].tobytes()
+
+	if bit_depth == 32:
+		return (flat * 2147483647.0).astype(numpy.int32).tobytes()
+
+	raise ValueError(f"Unsupported bit depth {bit_depth}. Supported: 16, 24, 32")

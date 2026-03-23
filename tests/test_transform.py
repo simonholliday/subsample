@@ -742,12 +742,15 @@ class TestTransformManager:
 		manager.on_sample_added(record)
 		manager.shutdown()
 
-		# Default pitch helper: 440 Hz = MIDI 69, range 12 → notes 57–81 = 25 variants
+		# Default pitch helper: 440 Hz = MIDI 69, range 12 → notes 57–81 = 25 pitch
+		# variants, plus 1 base variant (identity spec) = 26 total.
 		assert cache.has_variants(1)
-		assert len(cache.list_variants(1)) == 25
+		assert len(cache.list_variants(1)) == 26
+		# Base variant is present alongside the pitch variants.
+		assert cache.get_base(1) is not None
 
 	def test_on_sample_added_skips_unpitched (self) -> None:
-		"""on_sample_added produces no variants for samples that fail has_stable_pitch."""
+		"""on_sample_added produces a base variant even for samples that fail has_stable_pitch."""
 		manager, cache, lib = self._make_manager()
 		record = _make_record_unpitched(sample_id=2)
 		lib.add(record)
@@ -755,10 +758,13 @@ class TestTransformManager:
 		manager.on_sample_added(record)
 		manager.shutdown()
 
-		assert not cache.has_variants(2)
+		# Base variant is always created; no pitch variants for unpitched samples.
+		assert cache.has_variants(2)
+		assert len(cache.list_variants(2)) == 1
+		assert cache.get_base(2) is not None
 
 	def test_on_sample_added_respects_auto_pitch_false (self) -> None:
-		"""auto_pitch=False suppresses automatic variant production."""
+		"""auto_pitch=False suppresses pitch variants but the base variant is always produced."""
 		lib   = subsample.library.InstrumentLibrary(max_memory_bytes=100 * 1024 * 1024)
 		cache = subsample.transform.TransformCache(max_memory_bytes=50 * 1024 * 1024)
 		processor = subsample.transform.TransformProcessor(
@@ -775,7 +781,85 @@ class TestTransformManager:
 		manager.on_sample_added(record)
 		manager.shutdown()
 
-		assert not cache.has_variants(3)
+		# Base variant only — no pitch variants with auto_pitch=False.
+		assert cache.has_variants(3)
+		assert len(cache.list_variants(3)) == 1
+		assert cache.get_base(3) is not None
+
+
+# ---------------------------------------------------------------------------
+# TestSampleRateConversion
+# ---------------------------------------------------------------------------
+
+class TestSampleRateConversion:
+
+	"""TransformProcessor resamples variants when output_sample_rate differs."""
+
+	def test_base_variant_resampled_to_output_rate (self) -> None:
+		"""Base variant audio length reflects the output sample rate, not the recorder rate."""
+		completed: list[subsample.transform.TransformResult] = []
+
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100,
+			output_sample_rate=48000,
+			bit_depth=16,
+			on_complete=completed.append,
+		)
+
+		record = _make_record(sample_id=1)
+		processor.enqueue(record, subsample.transform._BASE_VARIANT_SPEC)
+		processor.shutdown()
+
+		assert len(completed) == 1
+		result = completed[0]
+
+		# n_frames / output_rate should match n_frames / input_rate
+		# (i.e. duration is preserved, frame count scales with rate).
+		original_frames = record.audio.shape[0]   # type: ignore[union-attr]
+		expected_frames = int(round(original_frames * 48000 / 44100))
+		assert abs(result.audio.shape[0] - expected_frames) <= 2  # allow 1–2 rounding frames
+
+	def test_no_resampling_when_rates_match (self) -> None:
+		"""When capture and output rates match, frame count is unchanged."""
+		completed: list[subsample.transform.TransformResult] = []
+
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100,
+			output_sample_rate=44100,
+			bit_depth=16,
+			on_complete=completed.append,
+		)
+
+		record = _make_record(sample_id=2)
+		processor.enqueue(record, subsample.transform._BASE_VARIANT_SPEC)
+		processor.shutdown()
+
+		assert len(completed) == 1
+		original_frames = record.audio.shape[0]   # type: ignore[union-attr]
+		assert completed[0].audio.shape[0] == original_frames
+
+	def test_duration_uses_output_rate (self) -> None:
+		"""TransformResult.duration is computed at the output sample rate."""
+		completed: list[subsample.transform.TransformResult] = []
+
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100,
+			output_sample_rate=48000,
+			bit_depth=16,
+			on_complete=completed.append,
+		)
+
+		record = _make_record(sample_id=3)
+		processor.enqueue(record, subsample.transform._BASE_VARIANT_SPEC)
+		processor.shutdown()
+
+		assert len(completed) == 1
+		result = completed[0]
+
+		# Duration should equal n_output_frames / output_rate, which equals the
+		# original duration (time-preserved resampling).
+		expected_duration = result.audio.shape[0] / 48000
+		assert abs(result.duration - expected_duration) < 1e-6
 
 
 # ---------------------------------------------------------------------------

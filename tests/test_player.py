@@ -292,6 +292,7 @@ class TestNoteOff:
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
 		player._OUTPUT_CHANNELS = 2
+		player._output_bit_depth = 16
 
 		# Call the real _audio_callback
 		subsample.player.MidiPlayer._audio_callback(
@@ -312,6 +313,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
+		player._output_bit_depth = 16
 
 		subsample.player.MidiPlayer._audio_callback(
 			player, None, 512, {}, 0

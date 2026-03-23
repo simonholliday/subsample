@@ -89,6 +89,15 @@ player:
     # Name (or substring) of the audio output device to use for playback.
     # Leave null to use the system default output device.
 
+    # sample_rate: null
+    # Output sample rate in Hz.  Leave null (default) to use the recorder's
+    # sample rate.  Do not set higher than the recorder rate — upsampling adds
+    # no quality.  Set lower if the output device cannot run at the source rate.
+
+    # bit_depth: null
+    # Output bit depth: 16, 24, or 32.  Leave null (default) to use the
+    # recorder's bit depth.  Use 16 if the device only supports 16-bit output.
+
 # ---------------------------------------------------------------------------
 # detection — level-based trigger for recording segments
 # ---------------------------------------------------------------------------

@@ -85,12 +85,17 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide",
 # can cache a first-seen warning before any context-manager filter applies, so a
 # module-level filter is the only reliable way to suppress it.
 warnings.filterwarnings("ignore", message="n_fft=", category=UserWarning)
+# When n_fft is clamped to a very short signal, the mel filterbank can end up
+# with more bands than available FFT bins, leaving some filters empty.  The
+# MFCC computation still succeeds — affected coefficients are zero — and the
+# impact on similarity matching for these edge-case samples is negligible.
+warnings.filterwarnings("ignore", message="Empty filters detected in mel frequency basis", category=UserWarning)
 
 
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "7"
+ANALYSIS_VERSION: str = "8"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation

@@ -385,15 +385,18 @@ class SampleProcessor:
 		# Persist analysis alongside the WAV so future reads (e.g. reference
 		# file loading on startup) can skip re-analysis when nothing changes.
 		subsample.cache.save_cache(
-			audio_path = filepath,
-			audio_md5  = audio_md5,
-			params     = self._analysis_params,
-			spectral   = result,
-			rhythm     = rhythm,
-			pitch      = pitch,
-			timbre     = timbre,
-			duration   = duration,
-			level      = level,
+			audio_path  = filepath,
+			audio_md5   = audio_md5,
+			params      = self._analysis_params,
+			spectral    = result,
+			rhythm      = rhythm,
+			pitch       = pitch,
+			timbre      = timbre,
+			duration    = duration,
+			level       = level,
+			bit_depth   = effective_bit_depth,
+			channels    = n_channels,
+			captured_at = timestamp.isoformat(),
 		)
 
 		return filepath, duration

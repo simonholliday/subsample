@@ -84,7 +84,7 @@ def trim_silence (
 	fade_in_len = fade_in_silence if fade_in_silence > 0 else min(pre_samples, len(result))
 	if fade_in_len > 1:
 		ramp = (1 - numpy.cos(numpy.linspace(0, numpy.pi, fade_in_len))) / 2
-		result[:fade_in_len] = (result[:fade_in_len] * ramp[:, None]).astype(audio.dtype)
+		result[:fade_in_len] = (result[:fade_in_len] * ramp[:, numpy.newaxis]).astype(audio.dtype)
 
 	# Fade out: S-curve over the last post_samples frames of the output.
 	# Using a fixed window (not end_idx - above[-1]) prevents the fade from
@@ -94,6 +94,6 @@ def trim_silence (
 	fade_out_len = min(post_samples, len(result))
 	if fade_out_len > 1:
 		ramp = (1 + numpy.cos(numpy.linspace(0, numpy.pi, fade_out_len))) / 2
-		result[-fade_out_len:] = (result[-fade_out_len:] * ramp[:, None]).astype(audio.dtype)
+		result[-fade_out_len:] = (result[-fade_out_len:] * ramp[:, numpy.newaxis]).astype(audio.dtype)
 
 	return result

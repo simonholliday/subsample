@@ -226,6 +226,11 @@ class TransformSpec:
 		# documented pattern for setting computed fields in __post_init__.
 		object.__setattr__(self, "steps", sorted_steps)
 
+# The identity spec: no transform steps.  Used for the base variant — a
+# float32, peak-normalised copy of the original at the recorder's sample rate,
+# ready for mixing.  Every sample gets one regardless of pitch stability.
+_BASE_VARIANT_SPEC: TransformSpec = TransformSpec(steps=())
+
 # ---------------------------------------------------------------------------
 # TransformKey
 # ---------------------------------------------------------------------------
@@ -370,6 +375,19 @@ class TransformCache:
 
 		with self._lock:
 			return self._index.get(key)
+
+	def get_base (self, sample_id: int) -> typing.Optional[TransformResult]:
+
+		"""Convenience: look up the base variant (identity spec) for a sample.
+
+		The base variant is a float32, peak-normalised copy at the recorder's
+		sample rate, with no transform steps applied.  Returns None if not yet
+		computed.
+		"""
+
+		key = TransformKey(sample_id=sample_id, spec=_BASE_VARIANT_SPEC)
+
+		return self.get(key)
 
 	def get_pitched (
 		self,
@@ -550,14 +568,19 @@ class TransformProcessor:
 
 	def __init__ (
 		self,
-		sample_rate: int,
-		bit_depth:   int,
-		on_complete: typing.Optional[_OnTransformComplete] = None,
+		sample_rate:        int,
+		bit_depth:          int,
+		output_sample_rate: typing.Optional[int] = None,
+		on_complete:        typing.Optional[_OnTransformComplete] = None,
 	) -> None:
 
-		self._sample_rate = sample_rate
-		self._bit_depth   = bit_depth
-		self._on_complete = on_complete
+		self._sample_rate        = sample_rate
+		self._bit_depth          = bit_depth
+		# Output sample rate for the playback device.  If different from the
+		# capture rate, _execute() resamples after normalisation so all variants
+		# (base and pitch-shifted) arrive at the player pre-converted.
+		self._output_sample_rate = output_sample_rate if output_sample_rate is not None else sample_rate
+		self._on_complete        = on_complete
 
 		n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
 
@@ -661,7 +684,35 @@ class TransformProcessor:
 			# Convert integer PCM to float32 preserving all channels.
 			audio = _pcm_to_float32(record.audio, self._bit_depth)
 
+			# Peak-normalise to 0.9 full-scale before the processing chain.
+			# In float32 this is lossless, and brings quiet samples up to a
+			# consistent level so subsequent DSP stages have good headroom.
+			# We measure the actual peak of the float32 audio here rather than
+			# using record.level.peak (which was computed on the mono downmix).
+			# For stereo sources the true per-channel peak can exceed the mono
+			# peak, so using the live measurement is more accurate.
+			# TransformResult.level is recomputed after all steps, so
+			# _render_float() always applies the correct inverse gain.
+			actual_peak = float(numpy.max(numpy.abs(audio)))
+			if actual_peak > 0.0:
+				audio = audio * (0.9 / actual_peak)
+
+			# Resample to the output device rate if it differs from the capture rate.
+			# Done once here, before any transform steps, so pitch shift and all
+			# subsequent DSP operate at the correct output rate — the same rate the
+			# player's audio stream is opened at.
+			# librosa.resample expects time as the last axis: transpose to
+			# (channels, n_frames), resample, transpose back.
+			if self._output_sample_rate != self._sample_rate:
+				audio = librosa.resample(
+					audio.T,
+					orig_sr=self._sample_rate,
+					target_sr=self._output_sample_rate,
+				).T.astype(numpy.float32)
+
 			# Apply each step in priority order, dispatching via _HANDLERS.
+			# Handlers receive the output sample rate so pitch shift and any future
+			# DSP operate correctly at the resampled rate.
 			for step in spec.steps:
 				handler = self._HANDLERS.get(type(step))
 
@@ -672,12 +723,12 @@ class TransformProcessor:
 						"'How to add a new transform type' guide in transform.py."
 					)
 
-				audio = handler(audio, self._sample_rate, record, step)
+				audio = handler(audio, self._output_sample_rate, record, step)
 
 			# Compute level from the mono mix, consistent with how SampleRecord.level
 			# was originally computed (analysis.compute_level operates on mono float32).
 			level    = subsample.analysis.compute_level(_mix_to_mono(audio))
-			duration = audio.shape[0] / self._sample_rate
+			duration = audio.shape[0] / self._output_sample_rate
 
 			result = TransformResult(key=key, audio=audio, duration=duration, level=level)
 
@@ -792,22 +843,50 @@ class TransformManager:
 
 		return result
 
+	def get_base (self, sample_id: int) -> typing.Optional[TransformResult]:
+
+		"""Return the cached base variant for a sample, or None if not ready.
+
+		The base variant is a float32, peak-normalised copy at the recorder's
+		sample rate, with no DSP applied.  Every sample gets one — regardless
+		of pitch stability — so the playback path never needs to call
+		_pcm_to_float32() at trigger time.
+
+		On a miss, enqueues the base variant for background production and
+		returns None.  The caller should fall back to _render() for this
+		trigger; the variant will be ready on the next.
+		"""
+
+		result = self._cache.get_base(sample_id)
+
+		if result is None:
+			record = self._instrument_library.get(sample_id)
+			if record is not None:
+				self._processor.enqueue(record, _BASE_VARIANT_SPEC)
+
+		return result
+
 	def on_sample_added (self, record: "subsample.library.SampleRecord") -> None:
 
-		"""Auto-enqueue pitch variants when a new SampleRecord enters the library.
+		"""Auto-enqueue variants when a new SampleRecord enters the library.
+
+		Always enqueues a base variant (identity spec — float32, peak-normalised,
+		no DSP) so the playback path has a pre-converted copy ready for every
+		sample without calling _pcm_to_float32() at trigger time.
 
 		If auto_pitch is enabled and the sample has a stable, confident pitch
-		(per has_stable_pitch()), enqueues one PitchShift job per MIDI note in
-		[center - pitch_range_semitones, center + pitch_range_semitones], clamped
-		to [0, 127].  center is the nearest integer MIDI note to the detected Hz.
-
-		The center-note variant micro-corrects tuning when the original recording
-		is slightly off-pitch (e.g. 443 Hz is MIDI 69.12; the A4 variant is tuned
-		to exactly 440 Hz).
+		(per has_stable_pitch()), also enqueues one PitchShift job per MIDI note
+		in [center - pitch_range_semitones, center + pitch_range_semitones],
+		clamped to [0, 127].  The center-note variant micro-corrects tuning when
+		the original recording is slightly off-pitch (e.g. 443 Hz → MIDI 69.12;
+		the A4 variant plays at exactly 440 Hz).
 
 		If target_bpm > 0 and the sample has detected rhythmic content, a
 		TimeStretch variant is also enqueued (requires Phase 3 handler).
 		"""
+
+		# Base variant: always enqueue regardless of pitch content.
+		self._processor.enqueue(record, _BASE_VARIANT_SPEC)
 
 		if self._cfg.auto_pitch and self._cfg.pitch_range_semitones > 0:
 

@@ -129,7 +129,7 @@ class ReferenceLibrary:
 		# Original-cased names are preserved in each record.
 		self._index: dict[str, SampleRecord] = {r.name.upper(): r for r in records}
 
-	def get (self, name: str) -> SampleRecord | None:
+	def get (self, name: str) -> typing.Optional[SampleRecord]:
 
 		"""Return the record for name (case-insensitive), or None if not found."""
 
@@ -519,7 +519,7 @@ def load_instrument_library (
 	return lib
 
 
-def _load_wav_audio (path: pathlib.Path) -> numpy.ndarray | None:
+def _load_wav_audio (path: pathlib.Path) -> typing.Optional[numpy.ndarray]:
 
 	"""Read a WAV file into a numpy array matching the capture pipeline format.
 

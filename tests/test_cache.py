@@ -164,8 +164,12 @@ class TestCacheInvalidation:
 		with caplog.at_level(logging.INFO, logger="subsample.cache"):
 			subsample.cache.load_cache(wav)
 
+		# Log message must show the old → new version transition.
 		assert any(
-			r.levelno == logging.INFO and "Re-analyzing" in r.message
+			r.levelno == logging.INFO
+			and "Re-analyzing" in r.message
+			and "→" in r.message
+			and "999" in r.message
 			for r in caplog.records
 		)
 
@@ -239,3 +243,119 @@ class TestAtomicWrite:
 
 		tmp_files = list(tmp_path.glob("*.tmp*"))
 		assert tmp_files == [], f"Temp files left behind: {tmp_files}"
+
+
+# ---------------------------------------------------------------------------
+# TestAudioMetadata — new fields: bit_depth, channels, captured_at
+# ---------------------------------------------------------------------------
+
+class TestAudioMetadata:
+
+	def _save (
+		self,
+		wav: pathlib.Path,
+		bit_depth: int = 16,
+		channels: int = 1,
+		captured_at: "str | None" = None,
+	) -> None:
+		"""Helper: write a sidecar with the given metadata fields."""
+		md5 = subsample.cache.compute_audio_md5(wav)
+		subsample.cache.save_cache(
+			wav, md5,
+			tests.helpers._make_params(),
+			tests.helpers._make_spectral(),
+			tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(),
+			tests.helpers._make_timbre(),
+			1.0,
+			tests.helpers._make_level(),
+			bit_depth   = bit_depth,
+			channels    = channels,
+			captured_at = captured_at,
+		)
+
+	def test_bit_depth_stored (self, tmp_path: pathlib.Path) -> None:
+		"""bit_depth is written to the sidecar JSON."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+		self._save(wav, bit_depth=24)
+
+		data = json.loads(subsample.cache.cache_path(wav).read_text())
+		assert data["bit_depth"] == 24
+
+	def test_channels_stored (self, tmp_path: pathlib.Path) -> None:
+		"""channels is written to the sidecar JSON."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+		self._save(wav, channels=2)
+
+		data = json.loads(subsample.cache.cache_path(wav).read_text())
+		assert data["channels"] == 2
+
+	def test_captured_at_stored (self, tmp_path: pathlib.Path) -> None:
+		"""captured_at ISO timestamp is written to the sidecar JSON."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+		self._save(wav, captured_at="2026-03-23T14:30:00")
+
+		data = json.loads(subsample.cache.cache_path(wav).read_text())
+		assert data["captured_at"] == "2026-03-23T14:30:00"
+
+	def test_captured_at_null_for_reference_files (self, tmp_path: pathlib.Path) -> None:
+		"""captured_at is null when no timestamp is provided (reference/imported files)."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+		self._save(wav, captured_at=None)
+
+		data = json.loads(subsample.cache.cache_path(wav).read_text())
+		assert data["captured_at"] is None
+
+	def test_default_values (self, tmp_path: pathlib.Path) -> None:
+		"""Omitting the new params uses safe defaults (backwards-compatible callers)."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+		md5 = subsample.cache.compute_audio_md5(wav)
+		subsample.cache.save_cache(
+			wav, md5,
+			tests.helpers._make_params(),
+			tests.helpers._make_spectral(),
+			tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(),
+			tests.helpers._make_timbre(),
+			1.0,
+			tests.helpers._make_level(),
+		)
+
+		data = json.loads(subsample.cache.cache_path(wav).read_text())
+		assert data["bit_depth"]   == 16
+		assert data["channels"]    == 1
+		assert data["captured_at"] is None
+
+	def test_sidecar_missing_new_fields_still_loads (self, tmp_path: pathlib.Path) -> None:
+		"""A version-8 sidecar that pre-dates bit_depth/channels/captured_at still loads."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav, n_frames=44100)
+		md5 = subsample.cache.compute_audio_md5(wav)
+
+		# Write a sidecar that omits the three new metadata fields.
+		subsample.cache.save_cache(
+			wav, md5,
+			tests.helpers._make_params(),
+			tests.helpers._make_spectral(),
+			tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(),
+			tests.helpers._make_timbre(),
+			1.0,
+			tests.helpers._make_level(),
+		)
+
+		# Remove the new fields to simulate a sidecar from before they were added.
+		sidecar = subsample.cache.cache_path(wav)
+		data = json.loads(sidecar.read_text())
+		for key in ("bit_depth", "channels", "captured_at"):
+			data.pop(key, None)
+		sidecar.write_text(json.dumps(data), encoding="utf-8")
+
+		# Should still load successfully — _deserialize_payload uses .get() defaults.
+		result = subsample.cache.load_cache(wav)
+		assert result is not None

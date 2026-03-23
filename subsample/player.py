@@ -74,11 +74,11 @@ _GM_DRUM_NOTE_MAP: dict[int, tuple[str, int, bool]] = {
 	38: ("SD5075", 0, True),    # snare_1 → most similar to SD5075
 	40: ("SD5075", 1, True),    # snare_2 → second-most similar
 	39: ("CP",     0, True),    # hand_clap
-	42: ("CH",     0, False),   # hi_hat_closed — responds to note_off
-	46: ("CL",     0, False),   # hi_hat_open   — muted by note_off from closed pedal
-	49: ("OH25",   0, True),    # crash_1 — rings freely
-	57: ("OH25",   1, True),    # crash_2 → second-most similar to OH25
-	55: ("CY5050", 0, True),    # splash_cymbal — rings freely
+	42: ("CH",     0, True),    # hi_hat_closed
+	46: ("OH25",   0, True),    # hi_hat_open
+	49: ("CY5050", 0, True),    # crash_1 — rings freely
+	57: ("CY5050", 1, True),    # crash_2 → second-most similar to OH25
+	55: ("CY5050", 2, True),    # splash_cymbal — rings freely
 	56: ("CB",     0, True),    # cowbell
 }
 
@@ -151,11 +151,11 @@ def find_midi_device_by_name (name: str) -> str:
 	"""
 
 	name_lower = name.lower()
-	available  = list(mido.get_input_names())
+	available: list[str] = [str(d) for d in mido.get_input_names()]
 
 	for device_name in available:
-		if name_lower in str(device_name).lower():
-			return str(device_name)
+		if name_lower in device_name.lower():
+			return device_name
 
 	available_str = "\n  ".join(available) if available else "(none found)"
 	raise ValueError(
@@ -243,6 +243,8 @@ class MidiPlayer:
 		sample_rate: int,
 		bit_depth: int,
 		output_device_name: typing.Optional[str] = None,
+		output_bit_depth: typing.Optional[int] = None,
+		output_sample_rate: typing.Optional[int] = None,
 		transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 		virtual_midi_port: typing.Optional[str] = None,
 	) -> None:
@@ -254,6 +256,14 @@ class MidiPlayer:
 		self._sample_rate        = sample_rate
 		self._bit_depth          = bit_depth
 		self._output_device_name = output_device_name
+
+		# Output format for the playback stream.  Both default to the capture
+		# format when not overridden.  output_bit_depth drives the final
+		# float32→PCM packing in _audio_callback; output_sample_rate informs
+		# the transform pipeline so base variants are produced at the correct
+		# rate (relevant when input and output sample rates differ).
+		self._output_bit_depth   = output_bit_depth   if output_bit_depth   is not None else bit_depth
+		self._output_sample_rate = output_sample_rate if output_sample_rate is not None else sample_rate
 
 		# Optional transform pipeline. When provided, _handle_message() checks
 		# for a pre-computed pitched variant before falling back to _render().
@@ -351,9 +361,9 @@ class MidiPlayer:
 		# Callback mode: PortAudio pulls audio from _audio_callback on its own
 		# high-priority thread. The MIDI loop runs independently and adds voices.
 		stream = pa.open(
-			format=subsample.audio.get_pyaudio_format(self._bit_depth),
+			format=subsample.audio.get_pyaudio_format(self._output_bit_depth),
 			channels=_OUTPUT_CHANNELS,
-			rate=self._sample_rate,
+			rate=self._output_sample_rate,
 			output=True,
 			output_device_index=output_device_index,
 			stream_callback=self._audio_callback,
@@ -441,9 +451,11 @@ class MidiPlayer:
 			self._voices = active
 
 		mixed = numpy.clip(output, -1.0, 1.0)
-		samples = (mixed * 32767.0).astype(numpy.int16)
 
-		return (samples.tobytes(), pyaudio.paContinue)
+		# Convert to PCM bytes at the stream's declared bit depth.
+		# Previously hard-coded to int16 regardless of the stream format,
+		# which caused data/format mismatch for 24-bit and 32-bit streams.
+		return (subsample.audio.float32_to_pcm_bytes(mixed, self._output_bit_depth), pyaudio.paContinue)
 
 	def _handle_message (self, msg: mido.Message) -> None:
 
@@ -532,12 +544,10 @@ class MidiPlayer:
 			_log.debug("Sample %d not found or audio not loaded", sample_id)
 			return
 
-		# Check for a pre-computed pitched variant first.
-		# If found, use it directly (already float32, no int→float conversion).
-		# If not found (None), the manager has enqueued it for next time;
-		# fall back to rendering the original at its native pitch.
 		if self._transform_manager is not None:
+			# 1. Check for a pitch variant (tonal samples only).
 			variant = self._transform_manager.get_pitched(sample_id, msg.note)
+
 			if variant is not None:
 				rendered = self._render_float(variant.audio, variant.level, msg.velocity)
 				with self._voices_lock:
@@ -548,6 +558,23 @@ class MidiPlayer:
 				)
 				return
 
+			# 2. Fall back to the base variant (float32, peak-normalised, no DSP).
+			# Available for every sample once the background worker has run.
+			base = self._transform_manager.get_base(sample_id)
+
+			if base is not None:
+				rendered = self._render_float(base.audio, base.level, msg.velocity)
+				with self._voices_lock:
+					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
+				_log.info(
+					"note %d (vel %d) → %r → %r (base variant)  (%.2fs)",
+					msg.note, msg.velocity, ref_name, record.name, base.duration,
+				)
+				return
+
+		# 3. Last resort: convert from int PCM on this trigger.
+		# Used only on the first trigger before the base variant is ready,
+		# or when no transform manager is configured.
 		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity)
 		if original is None:
 			return

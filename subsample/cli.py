@@ -363,6 +363,8 @@ def _start_player (
 			sample_rate=cfg.recorder.audio.sample_rate,
 			bit_depth=cfg.recorder.audio.bit_depth,
 			output_device_name=cfg.player.audio.device,
+			output_bit_depth=cfg.player.audio.bit_depth,
+			output_sample_rate=cfg.player.audio.sample_rate,
 			transform_manager=transform_manager,
 			virtual_midi_port=cfg.player.virtual_midi_port,
 		)
@@ -391,6 +393,8 @@ def _start_player (
 		sample_rate=cfg.recorder.audio.sample_rate,
 		bit_depth=cfg.recorder.audio.bit_depth,
 		output_device_name=cfg.player.audio.device,
+		output_bit_depth=cfg.player.audio.bit_depth,
+		output_sample_rate=cfg.player.audio.sample_rate,
 		transform_manager=transform_manager,
 	)
 	player.run()
@@ -476,8 +480,18 @@ def main () -> None:
 	) -> None:
 		_transform_cache.put(result)
 
+	# Resolve the effective output sample rate for the player.  Variants are
+	# resampled to this rate in the transform worker so they arrive at the
+	# player pre-converted — zero conversion overhead at trigger time.
+	output_sample_rate = (
+		cfg.player.audio.sample_rate
+		if cfg.player.audio.sample_rate is not None
+		else cfg.recorder.audio.sample_rate
+	)
+
 	_transform_processor = subsample.transform.TransformProcessor(
 		sample_rate=cfg.recorder.audio.sample_rate,
+		output_sample_rate=output_sample_rate,
 		bit_depth=cfg.recorder.audio.bit_depth,
 		on_complete=_on_transform_complete,
 	)

@@ -100,6 +100,9 @@ def save_cache (
 	timbre: subsample.analysis.TimbreResult,
 	duration: float,
 	level: typing.Optional[subsample.analysis.LevelResult] = None,
+	bit_depth: int = 16,
+	channels: int = 1,
+	captured_at: typing.Optional[str] = None,
 ) -> None:
 
 	"""Write analysis results to a JSON sidecar file.
@@ -108,21 +111,29 @@ def save_cache (
 	left in a partially-written state if the process is interrupted.
 
 	Args:
-		audio_path: Path to the audio file being cached.
-		audio_md5:  MD5 hex digest of the audio file (precomputed by caller).
-		params:     FFT parameters used during analysis.
-		spectral:   Spectral analysis result.
-		rhythm:     Rhythm analysis result.
-		pitch:      Pitch analysis result.
-		timbre:     Timbral fingerprint result.
-		duration:   Recording duration in seconds.
-		level:      Peak and RMS amplitude. Defaults to LevelResult(0.0, 0.0)
-		            if None (for backwards-compatible callers — should always
-		            be provided in new code).
+		audio_path:  Path to the audio file being cached.
+		audio_md5:   MD5 hex digest of the audio file (precomputed by caller).
+		params:      FFT parameters used during analysis.
+		spectral:    Spectral analysis result.
+		rhythm:      Rhythm analysis result.
+		pitch:       Pitch analysis result.
+		timbre:      Timbral fingerprint result.
+		duration:    Recording duration in seconds.
+		level:       Peak and RMS amplitude. Defaults to LevelResult(0.0, 0.0)
+		             if None (for backwards-compatible callers — should always
+		             be provided in new code).
+		bit_depth:   Bit depth of the original audio (16, 24, or 32).
+		channels:    Number of audio channels (1=mono, 2=stereo).
+		captured_at: ISO 8601 capture timestamp for live recordings; None for
+		             reference samples and file imports whose capture time is
+		             unknown.
 	"""
 
 	effective_level = level if level is not None else subsample.analysis.LevelResult(peak=0.0, rms=0.0)
-	payload = _serialize(audio_md5, params, spectral, rhythm, pitch, timbre, duration, effective_level)
+	payload = _serialize(
+		audio_md5, params, spectral, rhythm, pitch, timbre, duration, effective_level,
+		bit_depth=bit_depth, channels=channels, captured_at=captured_at,
+	)
 	json_str = json.dumps(payload, indent=2)
 
 	sidecar = cache_path(audio_path)
@@ -182,7 +193,7 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 	# When stale, re-analyze and overwrite the sidecar immediately.
 	cached_version = payload.get("analysis_version")
 	if cached_version != subsample.analysis.ANALYSIS_VERSION:
-		return _reanalyze_and_save(audio_path)
+		return _reanalyze_and_save(audio_path, cached_version=cached_version)
 
 	# MD5 check — reads the audio file; done after version check to skip
 	# disk I/O when the version alone invalidates the cache.
@@ -201,7 +212,10 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 	return _deserialize_payload(payload, sidecar.name)
 
 
-def _reanalyze_and_save (audio_path: pathlib.Path) -> _LoadResult | None:
+def _reanalyze_and_save (
+	audio_path: pathlib.Path,
+	cached_version: typing.Optional[str] = None,
+) -> _LoadResult | None:
 
 	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
 
@@ -212,13 +226,22 @@ def _reanalyze_and_save (audio_path: pathlib.Path) -> _LoadResult | None:
 	Logs at INFO level so the user understands the per-file analysis delay.
 
 	Args:
-		audio_path: Path to the audio file to re-analyze.
+		audio_path:     Path to the audio file to re-analyze.
+		cached_version: The analysis_version string found in the stale sidecar,
+		                if available. When provided, the log message includes the
+		                old → new version transition so the cause is clear.
 
 	Returns:
 		(spectral, rhythm, pitch, timbre, params, duration, level) on success, None on error.
 	"""
 
-	_log.info("Re-analyzing %s (analysis version updated)…", audio_path.name)
+	if cached_version is not None:
+		_log.info(
+			"Re-analyzing %s (analysis version %s → %s)…",
+			audio_path.name, cached_version, subsample.analysis.ANALYSIS_VERSION,
+		)
+	else:
+		_log.info("Re-analyzing %s (audio changed or sidecar stale)…", audio_path.name)
 
 	try:
 		file_info = subsample.audio.read_audio_file(audio_path)
@@ -278,7 +301,7 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 		audio_path = sidecar_path.parent / audio_name
 
 		if audio_path.exists():
-			return _reanalyze_and_save(audio_path)
+			return _reanalyze_and_save(audio_path, cached_version=cached_version)
 
 		_log.warning(
 			"Skipping %s (analysis version mismatch: %s → %s; audio file not found)",
@@ -337,10 +360,12 @@ def _deserialize_payload (
 		timbre   = _deserialize_timbre(payload["timbre"])
 		params   = _deserialize_params(payload["params"])
 		duration = float(payload["duration"])
-		# "level" is optional — older sidecars (pre version "4") won't have it.
-		# The version check in load_cache / load_sidecar triggers re-analysis
-		# for truly stale files; this default handles any edge case where the
-		# key is absent despite a matching version.
+		# "level" uses .get() with an empty-dict default so that sidecars
+		# written before the field existed (any version before it was added) can
+		# still be deserialised.  The ANALYSIS_VERSION check invalidates truly
+		# stale files before reaching this point; this default is a belt-and-
+		# braces guard against any edge case where the key is absent despite a
+		# matching version (e.g. manual editing, partial writes).
 		level    = _deserialize_level(payload.get("level", {}))
 
 	except (KeyError, TypeError, ValueError) as exc:
@@ -359,6 +384,9 @@ def _serialize (
 	timbre: subsample.analysis.TimbreResult,
 	duration: float,
 	level: subsample.analysis.LevelResult,
+	bit_depth: int = 16,
+	channels: int = 1,
+	captured_at: typing.Optional[str] = None,
 ) -> dict[str, typing.Any]:
 
 	"""Build the JSON-serializable dict from analysis results."""
@@ -387,7 +415,10 @@ def _serialize (
 		"analysis_version": subsample.analysis.ANALYSIS_VERSION,
 		"audio_md5":        audio_md5,
 		"sample_rate":      params.sample_rate,
+		"bit_depth":        bit_depth,
+		"channels":         channels,
 		"duration":         duration,
+		"captured_at":      captured_at,
 		"params":           params_dict,
 		"spectral":         spectral_dict,
 		"rhythm":           rhythm_dict,

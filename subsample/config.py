@@ -53,6 +53,17 @@ class RecorderConfig:
 class PlayerAudioConfig:
 
 	device: typing.Optional[str] = None
+	bit_depth: typing.Optional[int] = None
+	"""Output bit depth for the audio device (16, 24, or 32).
+	None (the default) means use the recorder's bit depth, which matches
+	the capture quality.  Override here if the output device requires a
+	different format."""
+	sample_rate: typing.Optional[int] = None
+	"""Output sample rate in Hz.
+	None (the default) means use the recorder's sample rate.  Never set
+	this higher than the recording sample rate — upsampling adds no
+	quality and wastes CPU.  Useful when the output device runs at a lower
+	rate than the recorder (e.g. recorder at 96 kHz, output at 48 kHz)."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -351,8 +362,31 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			"Check your config.yaml."
 		)
 
+	player_bit_depth_raw = player_audio_raw.get("bit_depth")
+	player_bit_depth: typing.Optional[int] = (
+		int(player_bit_depth_raw) if player_bit_depth_raw is not None else None
+	)
+	if player_bit_depth is not None and player_bit_depth not in {16, 24, 32}:
+		raise ValueError(
+			f"Unsupported player.audio.bit_depth {player_bit_depth}. "
+			"Supported values: 16, 24, 32"
+		)
+
+	player_sample_rate_raw = player_audio_raw.get("sample_rate")
+	player_sample_rate: typing.Optional[int] = (
+		int(player_sample_rate_raw) if player_sample_rate_raw is not None else None
+	)
+	if player_sample_rate is not None and player_sample_rate <= 0:
+		raise ValueError(
+			f"player.audio.sample_rate must be > 0 (got {player_sample_rate})"
+		)
+
 	player = PlayerConfig(
-		audio=PlayerAudioConfig(device=player_device),
+		audio=PlayerAudioConfig(
+			device=player_device,
+			bit_depth=player_bit_depth,
+			sample_rate=player_sample_rate,
+		),
 		enabled=bool(player_raw.get("enabled", False)),
 		midi_device=player_midi_device,
 		virtual_midi_port=player_virtual_midi_port,
@@ -438,9 +472,10 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		target_bpm            = float(transform_raw.get("target_bpm",            0.0)),
 	)
 
-	if transform.pitch_range_semitones < 0:
+	if transform.pitch_range_semitones < 0 or transform.pitch_range_semitones > 48:
 		raise ValueError(
-			f"transform.pitch_range_semitones ({transform.pitch_range_semitones}) must be >= 0"
+			f"transform.pitch_range_semitones ({transform.pitch_range_semitones}) must be in [0, 48]. "
+			"Values above 48 semitones (±4 octaves) produce too many variants and stress the cache."
 		)
 
 	return Config(
