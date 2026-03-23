@@ -56,18 +56,30 @@ _VARIANT_CHANNEL = 0
 # kick_1 and kick_2 route to "BD0025" so either triggers the best kick sample).
 # Hard-coded for the current reference library; will move to config in a future
 # iteration alongside the other hard-coded playback constants.
-_GM_DRUM_NOTE_MAP: dict[int, str] = {
-	35: "BD0025",   # kick_2
-	36: "BD0025",   # kick_1
-	38: "SD5075",   # snare_1
-	39: "CP",       # hand_clap
-	40: "SD5075",   # snare_2
-	42: "CH",       # hi_hat_closed
-	46: "CL",       # hi_hat_open
-	49: "OH25",     # crash_1
-	55: "CY5050",   # splash_cymbal
-	56: "CB",       # cowbell
-	57: "OH25",     # crash_2
+# Each entry is (reference_name, rank, one_shot) where:
+#   rank      — selects among instrument samples ordered by similarity to the
+#               reference. rank=0 is the closest match, rank=1 the second-closest.
+#               Falls back to rank=0 automatically if rank N doesn't exist.
+#   one_shot  — when True, note_off events are ignored and the sample plays to
+#               completion (natural decay).  When False, note_off triggers a
+#               cosine fade-out via the releasing flag.
+#
+# Percussion behaviour: kicks, snares, and cymbals are one-shot — they should
+# ring out naturally regardless of how long the key is held.  Hi-hats are NOT
+# one-shot because the closed hi-hat pedal (note 42) conventionally sends
+# note_off for the open hi-hat (note 46) to silence it — standard GM behaviour.
+_GM_DRUM_NOTE_MAP: dict[int, tuple[str, int, bool]] = {
+	36: ("BD0025", 0, True),    # kick_1  → most similar to BD0025
+	35: ("BD0025", 1, True),    # kick_2  → second-most similar (falls back to 0 if absent)
+	38: ("SD5075", 0, True),    # snare_1 → most similar to SD5075
+	40: ("SD5075", 1, True),    # snare_2 → second-most similar
+	39: ("CP",     0, True),    # hand_clap
+	42: ("CH",     0, False),   # hi_hat_closed — responds to note_off
+	46: ("CL",     0, False),   # hi_hat_open   — muted by note_off from closed pedal
+	49: ("OH25",   0, True),    # crash_1 — rings freely
+	57: ("OH25",   1, True),    # crash_2 → second-most similar to OH25
+	55: ("CY5050", 0, True),    # splash_cymbal — rings freely
+	56: ("CB",     0, True),    # cowbell
 }
 
 # Target RMS level for playback normalisation (linear, not dBFS).
@@ -97,9 +109,12 @@ class _Voice:
 	channel:   MIDI channel (mido 0-indexed) that triggered this voice.
 	position:  Current read cursor in frames. Advances each callback call.
 	           Voice is removed when position >= len(audio).
-	releasing: Set to True when a note_off arrives for this note+channel.
-	           The callback applies a short cosine fade-out over
-	           _RELEASE_FADE_FRAMES frames, then retires the voice.
+	releasing: Set to True when a note_off arrives for this note+channel
+	           (only for non-one-shot voices).  The callback applies a short
+	           cosine fade-out over _RELEASE_FADE_FRAMES frames, then retires.
+	one_shot:  When True, note_off events are ignored — the sample plays to
+	           natural completion.  Kicks, snares, and cymbals are one-shot;
+	           hi-hats are not (open hi-hat is silenced by the closed pedal).
 	"""
 
 	audio:     numpy.ndarray
@@ -107,6 +122,7 @@ class _Voice:
 	channel:   int
 	position:  int  = 0
 	releasing: bool = False
+	one_shot:  bool = False
 
 
 def list_midi_input_devices () -> list[str]:
@@ -254,20 +270,23 @@ class MidiPlayer:
 		self._voices:      list[_Voice]  = []
 		self._voices_lock: threading.Lock = threading.Lock()
 
-		# Build note → reference name map from the GM drum mapping.
+		# Build note → (reference_name, rank, one_shot) map from the GM drum mapping.
 		# Reference names not present in the library are silently omitted so
 		# that a sparse reference directory doesn't raise at trigger time.
 		reference_set = set(name.upper() for name in reference_names)
-		self._note_map: dict[int, str] = {
-			note: ref
-			for note, ref in _GM_DRUM_NOTE_MAP.items()
+		self._note_map: dict[int, tuple[str, int, bool]] = {
+			note: (ref, rank, one_shot)
+			for note, (ref, rank, one_shot) in _GM_DRUM_NOTE_MAP.items()
 			if ref.upper() in reference_set
 		}
 
 		_log.info(
 			"MIDI note map (ch %d / mido ch %d):\n  %s",
 			_MIDI_CHANNEL + 1, _MIDI_CHANNEL,
-			"\n  ".join(f"note {note} → {name}" for note, name in sorted(self._note_map.items())),
+			"\n  ".join(
+				f"note {note} → {ref} (rank {rank}{'  one-shot' if one_shot else ''})"
+				for note, (ref, rank, one_shot) in sorted(self._note_map.items())
+			),
 		)
 
 		# WIP: variant channel active when transform pipeline is wired in.
@@ -430,8 +449,10 @@ class MidiPlayer:
 
 		"""Dispatch a single MIDI message.
 
-		Only note_on on the configured channel triggers playback. note_off is
-		silently discarded (expected). Everything else is logged at DEBUG.
+		note_off (and note_on with velocity=0) marks matching active voices as
+		releasing so the audio callback fades them out over _RELEASE_FADE_FRAMES.
+		note_on on the configured channel triggers playback.
+		Everything else is logged at DEBUG and ignored.
 		"""
 
 		# note_off (and note_on with velocity=0, which mido normalises to note_off)
@@ -440,7 +461,8 @@ class MidiPlayer:
 			with self._voices_lock:
 				for voice in self._voices:
 					if voice.note == msg.note and voice.channel == msg.channel:
-						voice.releasing = True
+						if not voice.one_shot:
+							voice.releasing = True
 			return
 
 		# WIP/exploratory: channel 1 (mido ch 0) plays pitch variants directly.
@@ -471,8 +493,11 @@ class MidiPlayer:
 
 			rendered = self._render_float(variant.audio, variant.level, msg.velocity)
 
+			# Inherit one_shot from the GM drum map if this note is mapped there.
+			variant_one_shot = _GM_DRUM_NOTE_MAP.get(msg.note, ("", 0, False))[2]
+
 			with self._voices_lock:
-				self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel))
+				self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=variant_one_shot))
 
 			_log.info(
 				"WIP ch%d note %d (vel %d) → sample %d %r (pitched variant, %.2fs)",
@@ -485,12 +510,19 @@ class MidiPlayer:
 			_log.debug("MIDI (ignored): %s", msg)
 			return
 
-		ref_name = self._note_map.get(msg.note)
-		if ref_name is None:
+		mapping = self._note_map.get(msg.note)
+		if mapping is None:
 			_log.debug("MIDI note %d on mido ch%d: no reference mapped", msg.note, _MIDI_CHANNEL)
 			return
 
-		sample_id = self._similarity_matrix.get_match(ref_name, rank=0)
+		ref_name, rank, one_shot = mapping
+
+		# Look up the Nth-closest instrument sample for this reference.
+		# If rank N doesn't exist yet (e.g. only one hit recorded), fall back
+		# to rank 0 so the note always triggers something.
+		sample_id = self._similarity_matrix.get_match(ref_name, rank=rank)
+		if sample_id is None and rank > 0:
+			sample_id = self._similarity_matrix.get_match(ref_name, rank=0)
 		if sample_id is None:
 			_log.debug("No instrument match for reference %r — library empty?", ref_name)
 			return
@@ -509,7 +541,7 @@ class MidiPlayer:
 			if variant is not None:
 				rendered = self._render_float(variant.audio, variant.level, msg.velocity)
 				with self._voices_lock:
-					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel))
+					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 				_log.info(
 					"note %d (vel %d) → %r → %r (pitched variant)  (%.2fs)",
 					msg.note, msg.velocity, ref_name, record.name, variant.duration,
@@ -521,7 +553,7 @@ class MidiPlayer:
 			return
 
 		with self._voices_lock:
-			self._voices.append(_Voice(audio=original, note=msg.note, channel=msg.channel))
+			self._voices.append(_Voice(audio=original, note=msg.note, channel=msg.channel, one_shot=one_shot))
 
 		_log.info(
 			"note %d (vel %d) → %r → %r  (%.2fs)",

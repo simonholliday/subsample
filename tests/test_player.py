@@ -319,3 +319,62 @@ class TestNoteOff:
 
 		assert len(player._voices) == 1
 		assert player._voices[0].position == 512
+
+
+# ---------------------------------------------------------------------------
+# One-shot mode
+# ---------------------------------------------------------------------------
+
+class TestOneShot:
+
+	def _make_voice (self, note: int = 36, channel: int = 9, one_shot: bool = False) -> subsample.player._Voice:
+		import numpy
+		audio = numpy.zeros((4410, 2), dtype=numpy.float32)
+		return subsample.player._Voice(audio=audio, note=note, channel=channel, one_shot=one_shot)
+
+	def test_one_shot_voice_ignores_note_off (self) -> None:
+		"""note_off must NOT set releasing=True on a one-shot voice."""
+		import mido
+
+		voice = self._make_voice(note=36, channel=9, one_shot=True)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices = [voice]
+		player._voices_lock = threading.Lock()
+
+		msg = mido.Message("note_off", channel=9, note=36)
+		subsample.player.MidiPlayer._handle_message(player, msg)
+
+		assert voice.releasing is False
+
+	def test_non_one_shot_voice_responds_to_note_off (self) -> None:
+		"""A voice with one_shot=False must still set releasing=True on note_off."""
+		import mido
+
+		voice = self._make_voice(note=42, channel=9, one_shot=False)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices = [voice]
+		player._voices_lock = threading.Lock()
+
+		msg = mido.Message("note_off", channel=9, note=42)
+		subsample.player.MidiPlayer._handle_message(player, msg)
+
+		assert voice.releasing is True
+
+	def test_one_shot_does_not_affect_other_voices (self) -> None:
+		"""note_off should still release a co-existing non-one-shot voice on the same note."""
+		import mido
+
+		one_shot_voice = self._make_voice(note=36, channel=9, one_shot=True)
+		normal_voice   = self._make_voice(note=36, channel=9, one_shot=False)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices = [one_shot_voice, normal_voice]
+		player._voices_lock = threading.Lock()
+
+		msg = mido.Message("note_off", channel=9, note=36)
+		subsample.player.MidiPlayer._handle_message(player, msg)
+
+		assert one_shot_voice.releasing is False
+		assert normal_voice.releasing is True
