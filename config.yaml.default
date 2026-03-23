@@ -71,6 +71,15 @@ player:
   # If omitted, auto-selects when only one MIDI device is present, or shows an
   # interactive numbered menu when multiple are found.
   # Run subsample once with player.enabled: true to see available MIDI device names.
+  # Ignored when virtual_midi_port is set.
+
+  # virtual_midi_port: "Subsample Virtual MIDI"
+  # Name for a virtual MIDI input port created by Subsample at startup.
+  # When set, Subsample creates this port instead of connecting to a hardware
+  # MIDI device — midi_device is ignored and no device selection menu is shown.
+  # External applications (DAWs, aconnect, MIDI routing tools) can send MIDI
+  # to this port by its exact name.
+  # Mutually exclusive with midi_device: virtual_midi_port takes precedence.
 
   audio:
     device: null

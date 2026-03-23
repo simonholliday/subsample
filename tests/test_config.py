@@ -50,6 +50,7 @@ class TestLoadDefault:
 		assert cfg.player.enabled is False
 		assert cfg.player.audio.device is None
 		assert cfg.player.midi_device is None
+		assert cfg.player.virtual_midi_port is None
 
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -269,6 +270,63 @@ class TestLoadCustomConfig:
 		config_file.write_text(yaml_content)
 
 		with pytest.raises(ValueError, match="player.midi_device"):
+			subsample.config.load_config(config_file)
+
+	def test_player_virtual_midi_port_custom (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			recorder:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			player:
+			  enabled: true
+			  virtual_midi_port: "Subsample Virtual MIDI"
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.player.virtual_midi_port == "Subsample Virtual MIDI"
+		assert cfg.player.midi_device is None
+
+	def test_player_virtual_midi_port_non_string_raises (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			recorder:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			player:
+			  virtual_midi_port: 99
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		with pytest.raises(ValueError, match="player.virtual_midi_port"):
 			subsample.config.load_config(config_file)
 
 	def test_config_is_frozen (self) -> None:

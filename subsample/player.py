@@ -49,12 +49,28 @@ _MIDI_CHANNEL = 9          # channel 10 in user-facing terms (mido: 0-indexed)
 # each sample's variants claim their MIDI notes, with later samples overwriting earlier.
 _VARIANT_CHANNEL = 0
 
-# MIDI note range mapped to reference samples (first note = lowest note number).
-_NOTE_FIRST = 36            # MIDI note 36 = first reference sample (alphabetical)
-_NOTE_LAST  = 51            # MIDI note 51 = 16th reference (or last if fewer)
+# General MIDI drum note → reference sample mapping.
+# When a GM note triggers on the configured MIDI channel, Subsample looks up the
+# reference name here and plays the best-matching instrument sample via the
+# similarity matrix. Multiple GM notes can map to the same reference (e.g. both
+# kick_1 and kick_2 route to "BD0025" so either triggers the best kick sample).
+# Hard-coded for the current reference library; will move to config in a future
+# iteration alongside the other hard-coded playback constants.
+_GM_DRUM_NOTE_MAP: dict[int, str] = {
+	35: "BD0025",   # kick_2
+	36: "BD0025",   # kick_1
+	38: "SD5075",   # snare_1
+	39: "CP",       # hand_clap
+	40: "SD5075",   # snare_2
+	42: "CH",       # hi_hat_closed
+	46: "CL",       # hi_hat_open
+	49: "OH25",     # crash_1
+	55: "CY5050",   # splash_cymbal
+	56: "CB",       # cowbell
+	57: "OH25",     # crash_2
+}
 
-# Fixed MIDI velocity used for every trigger. Input velocity is ignored.
-_HARD_CODED_VELOCITY = 127  # TODO: replace with msg.velocity from MIDI input
+# No hard-coded velocity — MIDI velocity is passed through from each note_on message.
 
 # Target RMS level for playback normalisation (linear, not dBFS).
 # 0.1 ≈ -20 dBFS — leaves headroom for mixing multiple simultaneous voices.
@@ -194,6 +210,7 @@ class MidiPlayer:
 		bit_depth: int,
 		output_device_name: typing.Optional[str] = None,
 		transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
+		virtual_midi_port: typing.Optional[str] = None,
 	) -> None:
 
 		self._device_name        = device_name
@@ -210,24 +227,28 @@ class MidiPlayer:
 		# None keeps the existing behaviour (originals only).
 		self._transform_manager  = transform_manager
 
+		# When set, run() creates a virtual MIDI input port by this name instead
+		# of connecting to a hardware device. Overrides device_name for input.
+		self._virtual_midi_port  = virtual_midi_port
+
 		# Active voices being mixed. The MIDI thread appends; the audio
 		# callback reads and removes finished ones. Protected by _voices_lock.
 		self._voices:      list[_Voice]  = []
 		self._voices_lock: threading.Lock = threading.Lock()
 
-		# Build note → reference name map: note 36 → first name (alphabetical),
-		# note 37 → second, etc., up to _NOTE_LAST (16 slots).
-		self._note_map: dict[int, str] = {}
-		for i, name in enumerate(reference_names):
-			note = _NOTE_FIRST + i
-			if note > _NOTE_LAST:
-				break
-			self._note_map[note] = name
+		# Build note → reference name map from the GM drum mapping.
+		# Reference names not present in the library are silently omitted so
+		# that a sparse reference directory doesn't raise at trigger time.
+		reference_set = set(name.upper() for name in reference_names)
+		self._note_map: dict[int, str] = {
+			note: ref
+			for note, ref in _GM_DRUM_NOTE_MAP.items()
+			if ref.upper() in reference_set
+		}
 
 		_log.info(
-			"MIDI note map (ch %d / mido ch %d, velocity hard-coded to %d):\n  %s",
+			"MIDI note map (ch %d / mido ch %d):\n  %s",
 			_MIDI_CHANNEL + 1, _MIDI_CHANNEL,
-			_HARD_CODED_VELOCITY,
 			"\n  ".join(f"note {note} → {name}" for note, name in sorted(self._note_map.items())),
 		)
 
@@ -273,9 +294,11 @@ class MidiPlayer:
 
 		Blocks until shutdown_event is set. Both the MIDI port and the PyAudio
 		stream are closed in the finally block.
-		"""
 
-		_log.info("MIDI player opening port: %s", self._device_name)
+		Input port selection:
+		  - virtual_midi_port set → create a named virtual port (other apps connect to it)
+		  - otherwise → open the hardware device by device_name
+		"""
 
 		pa = subsample.audio.create_pyaudio()
 
@@ -299,23 +322,35 @@ class MidiPlayer:
 			stream_callback=self._audio_callback,
 		)
 
-		try:
-			with mido.open_input(self._device_name) as port:
-				while not self._shutdown_event.is_set():
-					msg = port.receive(block=False)
+		# Open the MIDI input port — virtual or hardware.
+		# Virtual ports are server destinations that external apps connect to;
+		# they require virtual=True and do not appear in get_input_names().
+		if self._virtual_midi_port is not None:
+			port_label = self._virtual_midi_port
+			port = mido.open_input(self._virtual_midi_port, virtual=True)
+			_log.info("MIDI player opened virtual port: %s", port_label)
+		else:
+			port_label = self._device_name
+			port = mido.open_input(self._device_name)
+			_log.info("MIDI player opened hardware port: %s", port_label)
 
-					if msg is not None:
-						self._handle_message(msg)
-					else:
-						# No message — yield briefly before polling again.
-						# 10 ms gives ~100 Hz polling rate: responsive yet not busy.
-						self._shutdown_event.wait(timeout=0.01)
+		try:
+			while not self._shutdown_event.is_set():
+				msg = port.receive(block=False)
+
+				if msg is not None:
+					self._handle_message(msg)
+				else:
+					# No message — yield briefly before polling again.
+					# 10 ms gives ~100 Hz polling rate: responsive yet not busy.
+					self._shutdown_event.wait(timeout=0.01)
 
 		finally:
+			port.close()
 			stream.stop_stream()
 			stream.close()
 			pa.terminate()
-			_log.info("MIDI player closed port: %s", self._device_name)
+			_log.info("MIDI player closed port: %s", port_label)
 
 	def _audio_callback (
 		self,
@@ -397,14 +432,14 @@ class MidiPlayer:
 				_log.debug("MIDI ch%d note %d → sample %d %r: variant cache miss", _VARIANT_CHANNEL, msg.note, sample_id, record.name)
 				return
 
-			rendered = self._render_float(variant.audio, variant.level)
+			rendered = self._render_float(variant.audio, variant.level, msg.velocity)
 
 			with self._voices_lock:
 				self._voices.append(_Voice(audio=rendered))
 
 			_log.info(
-				"WIP ch%d note %d → sample %d %r (pitched variant, %.2fs)",
-				_VARIANT_CHANNEL, msg.note, sample_id, record.name, variant.duration,
+				"WIP ch%d note %d (vel %d) → sample %d %r (pitched variant, %.2fs)",
+				_VARIANT_CHANNEL, msg.note, msg.velocity, sample_id, record.name, variant.duration,
 			)
 			return
 
@@ -435,16 +470,16 @@ class MidiPlayer:
 		if self._transform_manager is not None:
 			variant = self._transform_manager.get_pitched(sample_id, msg.note)
 			if variant is not None:
-				rendered = self._render_float(variant.audio, variant.level)
+				rendered = self._render_float(variant.audio, variant.level, msg.velocity)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered))
 				_log.info(
-					"note %d → %r → %r (pitched variant)  (%.2fs)",
-					msg.note, ref_name, record.name, variant.duration,
+					"note %d (vel %d) → %r → %r (pitched variant)  (%.2fs)",
+					msg.note, msg.velocity, ref_name, record.name, variant.duration,
 				)
 				return
 
-		original: typing.Optional[numpy.ndarray] = self._render(record)
+		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity)
 		if original is None:
 			return
 
@@ -452,13 +487,14 @@ class MidiPlayer:
 			self._voices.append(_Voice(audio=original))
 
 		_log.info(
-			"note %d → %r → %r  (%.2fs)",
-			msg.note, ref_name, record.name, record.duration,
+			"note %d (vel %d) → %r → %r  (%.2fs)",
+			msg.note, msg.velocity, ref_name, record.name, record.duration,
 		)
 
 	def _render (
 		self,
 		record: subsample.library.SampleRecord,
+		velocity: int,
 	) -> typing.Optional[numpy.ndarray]:
 
 		"""Convert a SampleRecord to a gain-adjusted stereo float32 array.
@@ -479,12 +515,13 @@ class MidiPlayer:
 		# Reshape to (n_frames, 1) so _render_float can handle the panning step.
 		mono_2d: numpy.ndarray = mono[:, numpy.newaxis]
 
-		return self._render_float(mono_2d, record.level)
+		return self._render_float(mono_2d, record.level, velocity)
 
 	def _render_float (
 		self,
 		audio: numpy.ndarray,
 		level: subsample.analysis.LevelResult,
+		velocity: int,
 	) -> numpy.ndarray:
 
 		"""Apply gain normalisation and pan to stereo float32.
@@ -493,16 +530,16 @@ class MidiPlayer:
 		the transform variant path (float32 multi-channel from TransformResult).
 
 		Args:
-			audio: float32, shape (n_frames, channels).  Mono or stereo.
-			level: LevelResult for this audio (peak + rms), used for gain calc.
+			audio:    float32, shape (n_frames, channels).  Mono or stereo.
+			level:    LevelResult for this audio (peak + rms), used for gain calc.
+			velocity: MIDI velocity (0–127) from the triggering note_on message.
 
 		Returns:
 			Stereo float32, shape (n_frames, 2), values in [-1.0, 1.0].
 		"""
 
 		# --- Gain calculation ---
-		# Hard-coded velocity; TODO: replace with msg.velocity from MIDI input.
-		vel_scale = (_HARD_CODED_VELOCITY / 127.0) ** 2  # quadratic — more musical than linear
+		vel_scale = (velocity / 127.0) ** 2  # quadratic — more musical than linear
 
 		# Normalise to target RMS so samples recorded at different levels sound
 		# balanced. Guard against silence (rms == 0) to avoid division by zero.

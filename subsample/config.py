@@ -50,7 +50,15 @@ class PlayerConfig:
 	midi_device: typing.Optional[str] = None
 	"""Name (or substring) of the MIDI input device for triggering playback.
 	Case-insensitive substring match. If omitted, auto-selects when only one
-	MIDI input device is present, or shows an interactive menu for multiple."""
+	MIDI input device is present, or shows an interactive menu for multiple.
+	Ignored when virtual_midi_port is set."""
+
+	virtual_midi_port: typing.Optional[str] = None
+	"""Name for a virtual MIDI input port created by Subsample at startup.
+	When set, this port is used instead of any hardware MIDI device — midi_device
+	is ignored and no device selection menu is shown. External applications (DAWs,
+	aconnect, MIDI routing tools) can send MIDI to this port by name.
+	Example: "Subsample Virtual MIDI"."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -319,10 +327,18 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			"Check your config.yaml."
 		)
 
+	player_virtual_midi_port = player_raw.get("virtual_midi_port")
+	if player_virtual_midi_port is not None and not isinstance(player_virtual_midi_port, str):
+		raise ValueError(
+			f"player.virtual_midi_port must be a string (got {type(player_virtual_midi_port).__name__}: {player_virtual_midi_port!r}). "
+			"Check your config.yaml."
+		)
+
 	player = PlayerConfig(
 		audio=PlayerAudioConfig(device=player_device),
 		enabled=bool(player_raw.get("enabled", False)),
 		midi_device=player_midi_device,
+		virtual_midi_port=player_virtual_midi_port,
 	)
 
 	detection = DetectionConfig(

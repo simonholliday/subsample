@@ -319,13 +319,15 @@ def _start_player (
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 ) -> None:
 
-	"""Select a MIDI input device, create a MidiPlayer, and run it.
+	"""Select a MIDI input device (or create a virtual port), then run the player.
 
-	Resolves the MIDI device from config (substring match) or prompts the
-	user to select one interactively. Runs until shutdown_event is set.
+	When cfg.player.virtual_midi_port is set, Subsample creates a named virtual
+	MIDI input port and skips hardware device selection entirely. Otherwise, it
+	resolves a hardware device from config (substring match) or prompts the user
+	interactively. Runs until shutdown_event is set.
 
 	Args:
-		cfg:                Full application config (reads cfg.player.midi_device).
+		cfg:                Full application config.
 		shutdown_event:     Set this to stop the player cleanly.
 		instrument_library: Loaded instrument samples (must have audio in memory).
 		similarity_matrix:  Similarity index for note → sample lookup.
@@ -334,6 +336,26 @@ def _start_player (
 		                    playback when provided.
 	"""
 
+	# Virtual port mode: bypass hardware device selection entirely.
+	# MidiPlayer.run() will open the named virtual port with virtual=True.
+	if cfg.player.virtual_midi_port is not None:
+		print(f"  MIDI input   : virtual port \"{cfg.player.virtual_midi_port}\"")
+		player = subsample.player.MidiPlayer(
+			"",
+			shutdown_event,
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			reference_names=reference_library.names(),
+			sample_rate=cfg.recorder.audio.sample_rate,
+			bit_depth=cfg.recorder.audio.bit_depth,
+			output_device_name=cfg.player.audio.device,
+			transform_manager=transform_manager,
+			virtual_midi_port=cfg.player.virtual_midi_port,
+		)
+		player.run()
+		return
+
+	# Hardware port mode: resolve device name from config or interactive menu.
 	try:
 		devices = subsample.player.list_midi_input_devices()
 

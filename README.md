@@ -66,6 +66,24 @@ environment becomes an instant, organized sample pack.
   player is enabled, instrument samples are loaded with their PCM audio in memory
   (`load_audio=True`). Note mapping, MIDI channel, and target RMS are currently
   hard-coded and will move to config in a future iteration.
+- **Virtual MIDI input port** - set `player.virtual_midi_port: "Subsample Virtual MIDI"`
+  to create a named virtual MIDI input port at startup instead of connecting to a hardware
+  device. This is the primary way to drive Subsample from another application running on
+  the same machine — for example, a Python sequencer such as
+  [Subsequence](https://github.com/simonholliday/subsequence) can send a drum pattern
+  directly to Subsample's virtual port without any physical MIDI hardware. From the
+  sequencer's side, Subsample's port appears as an output destination (via
+  `mido.get_output_names()`) while Subsample is running. Overrides `player.midi_device`
+  — no hardware device selection occurs when a virtual port is configured.
+
+  > **Performance note:** running a MIDI sequencer and Subsample simultaneously on the
+  > same machine means two real-time workloads compete for CPU and I/O — the sequencer's
+  > clock thread and Subsample's audio input stream both have timing-sensitive
+  > requirements. This works well on a modern multi-core machine but may cause xruns or
+  > timing drift on lower-powered hardware (e.g. a Raspberry Pi). If you experience
+  > dropouts, reduce `recorder.audio.chunk_size`, lower the sequencer's buffer size, or
+  > disable the recorder (`recorder.enabled: false`) to run Subsample in playback-only
+  > mode.
 - **Playback level metadata** - every sample carries `LevelResult` (peak and RMS
   amplitude, measured on the normalised float32 signal). This enables per-sample gain
   normalisation at playback time: `gain = target_rms / sample.level.rms`, scaled by
@@ -169,6 +187,7 @@ All settings live in `config.yaml`. The defaults are:
 | `player.enabled` | `false` | Enable the MIDI player |
 | `player.midi_device` | `none` | MIDI input device name (substring match); if unset, auto-select or prompt |
 | `player.audio.device` | `none` | Audio output device name for playback |
+| `player.virtual_midi_port` | `none` | Name for a virtual MIDI input port; when set, overrides `player.midi_device` and skips hardware device selection |
 | `detection.snr_threshold_db` | `12.0` | dB above ambient to trigger recording |
 | `detection.hold_time` | `0.5` | Seconds to hold recording open after signal drops |
 | `detection.warmup_seconds` | `1.0` | Calibration period before detection activates |

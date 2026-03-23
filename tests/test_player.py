@@ -196,7 +196,7 @@ class TestMidiPlayer:
 				player = self._make_player(shutdown_event)
 				player.run()
 
-		port.__exit__.assert_called_once()
+		port.close.assert_called_once()
 
 	def test_run_on_thread_exits_cleanly (self) -> None:
 		shutdown_event = threading.Event()
