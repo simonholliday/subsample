@@ -32,11 +32,10 @@ import threading
 import typing
 import wave
 
-import subsample.audio
-
 import numpy
 
 import subsample.analysis
+import subsample.audio
 import subsample.cache
 
 

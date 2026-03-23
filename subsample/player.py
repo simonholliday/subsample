@@ -10,9 +10,9 @@ audio + playback cursor) to a shared list. The callback sums all active
 voices into one output buffer, clips, converts to int16, and returns it.
 The MIDI polling loop adds voices under a lock; the callback reads them.
 
-Current implementation: exploratory / hard-coded. Velocities, MIDI channel,
-note range, and target RMS are hard-coded constants at the top of this module
-and will be moved to config in a future iteration.
+Current implementation: exploratory / hard-coded. MIDI channel, note mapping,
+and target RMS are hard-coded constants at the top of this module and will be
+moved to config in a future iteration.
 """
 
 import dataclasses
@@ -70,8 +70,6 @@ _GM_DRUM_NOTE_MAP: dict[int, str] = {
 	57: "OH25",     # crash_2
 }
 
-# No hard-coded velocity — MIDI velocity is passed through from each note_on message.
-
 # Target RMS level for playback normalisation (linear, not dBFS).
 # 0.1 ≈ -20 dBFS — leaves headroom for mixing multiple simultaneous voices.
 _TARGET_RMS = 0.1           # TODO: move to cfg.player.target_rms
@@ -123,12 +121,12 @@ def find_midi_device_by_name (name: str) -> str:
 	"""
 
 	name_lower = name.lower()
+	available  = list(mido.get_input_names())
 
-	for device_name in mido.get_input_names():
+	for device_name in available:
 		if name_lower in str(device_name).lower():
 			return str(device_name)
 
-	available = mido.get_input_names()
 	available_str = "\n  ".join(available) if available else "(none found)"
 	raise ValueError(
 		f"No MIDI input device matching {name!r}.\n"
@@ -192,6 +190,12 @@ class MidiPlayer:
 
 	Note → reference mapping is built from the reference library names in
 	alphabetical order, starting at MIDI note _NOTE_FIRST.
+
+	Note → reference mapping is driven by _GM_DRUM_NOTE_MAP: standard General
+	MIDI drum note numbers are mapped to reference sample names. Multiple GM
+	notes can map to the same reference (e.g. kick_1 and kick_2 both route to
+	"BD0025"). Reference names absent from the loaded library are silently
+	filtered out at construction time.
 
 	Mixing: triggered notes are added as _Voice objects to a shared list.
 	A PyAudio callback stream reads from all active voices simultaneously,
