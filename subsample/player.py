@@ -76,9 +76,9 @@ _GM_DRUM_NOTE_MAP: dict[int, tuple[str, int, bool]] = {
 	39: ("CP",     0, True),    # hand_clap
 	42: ("CH",     0, True),    # hi_hat_closed
 	46: ("OH25",   0, True),    # hi_hat_open
-	49: ("CY5050", 0, True),    # crash_1 — rings freely
-	57: ("CY5050", 1, True),    # crash_2 → second-most similar to OH25
-	55: ("CY5050", 2, True),    # splash_cymbal — rings freely
+	49: ("CY5050", 0, True),    # crash_1
+	57: ("CY5050", 1, True),    # crash_2 - second-most similar to CY5050
+	55: ("CY5050", 2, True),    # splash_cymbal
 	56: ("CB",     0, True),    # cowbell
 }
 
