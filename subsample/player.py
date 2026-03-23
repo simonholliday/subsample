@@ -78,21 +78,35 @@ _TARGET_RMS = 0.1           # TODO: move to cfg.player.target_rms
 # TODO: add per-note pan mapping
 _OUTPUT_CHANNELS = 2        # stereo; mono signal duplicated to both channels
 
+# Cosine fade-out duration applied when a note_off is received.
+# Long enough to prevent a click on hard cutoff; short enough to be imperceptible.
+# At 44100 Hz, 441 frames = 10 ms.
+_RELEASE_FADE_FRAMES = 441
+
 
 @dataclasses.dataclass
 class _Voice:
 
 	"""A single triggered sample being played back by the mix callback.
 
-	audio:    Pre-rendered stereo float32 array, shape (n_frames, 2), in
-	          [-1.0, 1.0]. Gain has already been applied. The callback reads
-	          from this array; it is never modified after creation.
-	position: Current read cursor in frames. Advances each callback call.
-	          Voice is removed when position >= len(audio).
+	audio:     Pre-rendered stereo float32 array, shape (n_frames, 2), in
+	           [-1.0, 1.0]. Gain has already been applied. The callback reads
+	           from this array; it is never modified after creation.
+	note:      MIDI note number that triggered this voice — used to match
+	           note_off events in _handle_message().
+	channel:   MIDI channel (mido 0-indexed) that triggered this voice.
+	position:  Current read cursor in frames. Advances each callback call.
+	           Voice is removed when position >= len(audio).
+	releasing: Set to True when a note_off arrives for this note+channel.
+	           The callback applies a short cosine fade-out over
+	           _RELEASE_FADE_FRAMES frames, then retires the voice.
 	"""
 
-	audio:    numpy.ndarray
-	position: int = 0
+	audio:     numpy.ndarray
+	note:      int
+	channel:   int
+	position:  int  = 0
+	releasing: bool = False
 
 
 def list_midi_input_devices () -> list[str]:
@@ -372,6 +386,10 @@ class MidiPlayer:
 		Sums all active _Voice arrays into a float32 mix, clips to [-1, 1],
 		converts to int16, and returns the bytes. Finished voices (cursor past
 		end of audio) are removed from the list.
+
+		Releasing voices (note_off received): a cosine fade-out is applied over
+		min(remaining, _RELEASE_FADE_FRAMES) frames, then the voice is retired.
+		This prevents an audible click on hard cutoff for tonal samples.
 		"""
 
 		output = numpy.zeros((frame_count, _OUTPUT_CHANNELS), dtype=numpy.float32)
@@ -381,14 +399,25 @@ class MidiPlayer:
 
 			for voice in self._voices:
 				remaining = len(voice.audio) - voice.position
-				n = min(frame_count, remaining)
 
-				output[:n] += voice.audio[voice.position : voice.position + n]
-				voice.position += n
+				if voice.releasing:
+					# Fade out over at most _RELEASE_FADE_FRAMES frames, then retire.
+					# Also clamped to frame_count — the output buffer is never larger.
+					fade_n = min(remaining, _RELEASE_FADE_FRAMES, frame_count)
+					if fade_n > 0:
+						chunk = voice.audio[voice.position : voice.position + fade_n].copy()
+						ramp = ((1.0 + numpy.cos(numpy.linspace(0.0, numpy.pi, fade_n))) / 2.0).astype(numpy.float32)
+						output[:fade_n] += chunk * ramp[:, numpy.newaxis]
+					# Voice is done — not added to active.
 
-				if voice.position < len(voice.audio):
-					active.append(voice)
-				# Voice whose position has reached the end is simply not kept.
+				else:
+					n = min(frame_count, remaining)
+					output[:n] += voice.audio[voice.position : voice.position + n]
+					voice.position += n
+
+					if voice.position < len(voice.audio):
+						active.append(voice)
+					# Voice whose position has reached the end is simply not kept.
 
 			self._voices = active
 
@@ -405,9 +434,13 @@ class MidiPlayer:
 		silently discarded (expected). Everything else is logged at DEBUG.
 		"""
 
-		# note_off (and note_on with velocity=0, which mido uses for note_off)
-		# are expected and silently discarded — no log noise.
+		# note_off (and note_on with velocity=0, which mido normalises to note_off)
+		# marks matching active voices as releasing so the callback fades them out.
 		if msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
+			with self._voices_lock:
+				for voice in self._voices:
+					if voice.note == msg.note and voice.channel == msg.channel:
+						voice.releasing = True
 			return
 
 		# WIP/exploratory: channel 1 (mido ch 0) plays pitch variants directly.
@@ -439,7 +472,7 @@ class MidiPlayer:
 			rendered = self._render_float(variant.audio, variant.level, msg.velocity)
 
 			with self._voices_lock:
-				self._voices.append(_Voice(audio=rendered))
+				self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel))
 
 			_log.info(
 				"WIP ch%d note %d (vel %d) → sample %d %r (pitched variant, %.2fs)",
@@ -476,7 +509,7 @@ class MidiPlayer:
 			if variant is not None:
 				rendered = self._render_float(variant.audio, variant.level, msg.velocity)
 				with self._voices_lock:
-					self._voices.append(_Voice(audio=rendered))
+					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel))
 				_log.info(
 					"note %d (vel %d) → %r → %r (pitched variant)  (%.2fs)",
 					msg.note, msg.velocity, ref_name, record.name, variant.duration,
@@ -488,7 +521,7 @@ class MidiPlayer:
 			return
 
 		with self._voices_lock:
-			self._voices.append(_Voice(audio=original))
+			self._voices.append(_Voice(audio=original, note=msg.note, channel=msg.channel))
 
 		_log.info(
 			"note %d (vel %d) → %r → %r  (%.2fs)",

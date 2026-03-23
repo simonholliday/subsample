@@ -214,3 +214,108 @@ class TestMidiPlayer:
 				t.join(timeout=2.0)
 
 		assert not t.is_alive()
+
+
+# ---------------------------------------------------------------------------
+# note_off / releasing behaviour
+# ---------------------------------------------------------------------------
+
+class TestNoteOff:
+
+	def _make_voice (self, note: int = 36, channel: int = 9, n_frames: int = 4410) -> subsample.player._Voice:
+		"""Return a _Voice with silent audio of the given length."""
+		import numpy
+		audio = numpy.zeros((n_frames, 2), dtype=numpy.float32)
+		return subsample.player._Voice(audio=audio, note=note, channel=channel)
+
+	def test_note_off_marks_voice_releasing (self) -> None:
+		"""A note_off matching an active voice sets voice.releasing = True."""
+		import unittest.mock
+		import mido
+
+		voice = self._make_voice(note=36, channel=9)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices = [voice]
+		player._voices_lock = threading.Lock()
+
+		# Call the real _handle_message on the mock's behalf
+		msg = mido.Message("note_off", channel=9, note=36)
+		subsample.player.MidiPlayer._handle_message(player, msg)
+
+		assert voice.releasing is True
+
+	def test_note_off_only_matches_correct_note (self) -> None:
+		"""A note_off does not affect voices on a different note."""
+		import unittest.mock
+		import mido
+
+		voice_36 = self._make_voice(note=36, channel=9)
+		voice_38 = self._make_voice(note=38, channel=9)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices = [voice_36, voice_38]
+		player._voices_lock = threading.Lock()
+
+		msg = mido.Message("note_off", channel=9, note=36)
+		subsample.player.MidiPlayer._handle_message(player, msg)
+
+		assert voice_36.releasing is True
+		assert voice_38.releasing is False
+
+	def test_note_on_velocity_zero_marks_releasing (self) -> None:
+		"""note_on with velocity=0 (mido's note_off encoding) also marks releasing."""
+		import unittest.mock
+		import mido
+
+		voice = self._make_voice(note=42, channel=9)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices = [voice]
+		player._voices_lock = threading.Lock()
+
+		msg = mido.Message("note_on", channel=9, note=42, velocity=0)
+		subsample.player.MidiPlayer._handle_message(player, msg)
+
+		assert voice.releasing is True
+
+	def test_releasing_voice_retired_by_callback (self) -> None:
+		"""A releasing voice is not kept in the active list after the callback runs."""
+		import numpy
+		import pyaudio
+
+		n_frames = 4410
+		audio = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.5
+		voice = subsample.player._Voice(audio=audio, note=36, channel=9, releasing=True)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices = [voice]
+		player._voices_lock = threading.Lock()
+		player._OUTPUT_CHANNELS = 2
+
+		# Call the real _audio_callback
+		subsample.player.MidiPlayer._audio_callback(
+			player, None, 512, {}, 0
+		)
+
+		# Voice should have been retired (not kept in _voices)
+		assert len(player._voices) == 0
+
+	def test_non_releasing_voice_kept_by_callback (self) -> None:
+		"""A normal (non-releasing) voice is kept until its audio is exhausted."""
+		import numpy
+
+		n_frames = 4410
+		audio = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.5
+		voice = subsample.player._Voice(audio=audio, note=36, channel=9)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices = [voice]
+		player._voices_lock = threading.Lock()
+
+		subsample.player.MidiPlayer._audio_callback(
+			player, None, 512, {}, 0
+		)
+
+		assert len(player._voices) == 1
+		assert player._voices[0].position == 512
