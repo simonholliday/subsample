@@ -61,9 +61,10 @@ recorder:
 # ---------------------------------------------------------------------------
 # player — MIDI input listener and sample playback
 # ---------------------------------------------------------------------------
-# MIDI input listening is implemented: enables a device, listens for MIDI
-# messages, and logs them. Audio output (triggering samples on note events)
-# is planned for a future iteration.
+# Polyphonic MIDI-triggered sample playback.  When enabled, Subsample opens a
+# MIDI input device (hardware or virtual port) and an audio output device, maps
+# incoming notes to the best-matching instrument samples via the similarity
+# engine, and mixes them in real time through a callback-based float32 pipeline.
 
 player:
   enabled: false
