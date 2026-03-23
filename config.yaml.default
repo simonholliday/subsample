@@ -37,6 +37,9 @@ recorder:
     channels: 1
     # Number of input channels: 1 = mono, 2 = stereo.
     # Mono: simpler processing, half the file size. Stereo: spatial information preserved.
+    # Set to null (or omit the key entirely) to auto-detect from the selected device.
+    # When auto-detected, the device's maxInputChannels is used — e.g. a stereo USB
+    # microphone will record in stereo without any manual setting.
     # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
     chunk_size: 512

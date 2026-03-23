@@ -406,6 +406,59 @@ class TestLoadCustomConfig:
 		with pytest.raises(ValueError, match="weight_spectral"):
 			subsample.config.load_config(config_file)
 
+	def _minimal_yaml (self, channels_line: str = "    channels: 1") -> str:
+		"""Return a minimal valid config YAML, with a custom channels line."""
+		return textwrap.dedent(f"""\
+			recorder:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			{channels_line}
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			detection:
+			  snr_threshold_db: 6.0
+			  hold_time: 0.5
+			  warmup_seconds: 3.0
+			  ema_alpha: 0.01
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+
+	def test_channels_explicit (self, tmp_path: pathlib.Path) -> None:
+		"""An explicit channels value is preserved exactly."""
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._minimal_yaml("    channels: 2"))
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.recorder.audio.channels == 2
+
+	def test_channels_null_yields_none (self, tmp_path: pathlib.Path) -> None:
+		"""channels: null in YAML resolves to None (auto-detect at startup)."""
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._minimal_yaml("    channels: null"))
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.recorder.audio.channels is None
+
+	def test_channels_omitted_yields_none (self, tmp_path: pathlib.Path) -> None:
+		"""Omitting channels entirely also resolves to None (auto-detect)."""
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._minimal_yaml(""))
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.recorder.audio.channels is None
+
+	def test_channels_zero_raises (self, tmp_path: pathlib.Path) -> None:
+		"""channels: 0 should raise ValueError at config-load time."""
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._minimal_yaml("    channels: 0"))
+
+		with pytest.raises(ValueError, match="channels must be > 0"):
+			subsample.config.load_config(config_file)
+
 	def test_invalid_bit_depth_raises (self, tmp_path: pathlib.Path) -> None:
 		"""Loading a config with unsupported bit_depth should raise ValueError."""
 		yaml_content = textwrap.dedent("""\

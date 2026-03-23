@@ -536,8 +536,9 @@ class MidiPlayer:
 
 		"""Convert a SampleRecord to a gain-adjusted stereo float32 array.
 
-		Converts int PCM → mono float32 → applies gain → returns stereo.
-		Returns None if the record has no audio.
+		Converts int PCM → float32 preserving channel count → applies gain →
+		returns stereo.  Stereo recordings play back in stereo; mono recordings
+		are centre-panned.  Returns None if the record has no audio.
 
 		For transform variants (already float32 multi-channel), use
 		_render_float() directly to skip the int→float conversion.
@@ -546,13 +547,11 @@ class MidiPlayer:
 		if record.audio is None:
 			return None
 
-		# Convert raw int PCM to normalised float32 mono.
-		mono = subsample.analysis.to_mono_float(record.audio, self._bit_depth)
+		# Convert int PCM → float32, preserving all channels so that stereo
+		# recordings play back in stereo rather than being mixed to mono.
+		float_audio = subsample.transform._pcm_to_float32(record.audio, self._bit_depth)
 
-		# Reshape to (n_frames, 1) so _render_float can handle the panning step.
-		mono_2d: numpy.ndarray = mono[:, numpy.newaxis]
-
-		return self._render_float(mono_2d, record.level, velocity)
+		return self._render_float(float_audio, record.level, velocity)
 
 	def _render_float (
 		self,

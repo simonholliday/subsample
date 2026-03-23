@@ -344,3 +344,42 @@ class TestReadAudioFile:
 
 			with pytest.raises(wave.Error):
 				subsample.audio.read_audio_file(path)
+
+
+# ---------------------------------------------------------------------------
+# get_device_channels
+# ---------------------------------------------------------------------------
+
+class TestGetDeviceChannels:
+
+	def _make_pa (self, max_input_channels: int) -> unittest.mock.MagicMock:
+		"""Return a mock PyAudio instance reporting the given channel count."""
+		pa = unittest.mock.MagicMock()
+		pa.get_device_info_by_index.return_value = {
+			"name": "Mock Device",
+			"maxInputChannels": max_input_channels,
+		}
+		return pa
+
+	def test_returns_channel_count (self) -> None:
+		"""Returns the device's maxInputChannels value as an int."""
+		pa = self._make_pa(2)
+
+		result = subsample.audio.get_device_channels(pa, 0)
+
+		assert result == 2
+
+	def test_mono_device (self) -> None:
+		"""Returns 1 for a mono device."""
+		pa = self._make_pa(1)
+
+		result = subsample.audio.get_device_channels(pa, 0)
+
+		assert result == 1
+
+	def test_zero_channels_raises (self) -> None:
+		"""Raises ValueError when the device reports no input channels (output-only)."""
+		pa = self._make_pa(0)
+
+		with pytest.raises(ValueError, match="no input channels"):
+			subsample.audio.get_device_channels(pa, 0)

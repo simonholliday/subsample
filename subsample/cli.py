@@ -22,6 +22,7 @@ Press Ctrl+C to stop cleanly.
 """
 
 import argparse
+import dataclasses
 import datetime
 import logging
 import pathlib
@@ -255,21 +256,34 @@ def _run_recorder (
 			devices = subsample.audio.list_input_devices(pa)
 			device_index = subsample.audio.select_device(devices)
 
-		reader = subsample.audio.AudioReader(pa, device_index, cfg.recorder.audio)
+		# Resolve channel count: if not set in config, detect from the device.
+		# A stereo mic (e.g. Shure MV88+) reports maxInputChannels=2 and will
+		# automatically record and play back in stereo without any config change.
+		audio_cfg = cfg.recorder.audio
+		if audio_cfg.channels is None:
+			detected_channels = subsample.audio.get_device_channels(pa, device_index)
+			audio_cfg = dataclasses.replace(audio_cfg, channels=detected_channels)
+			_log.info("Auto-detected %d input channel(s) from device", detected_channels)
+
+		reader = subsample.audio.AudioReader(pa, device_index, audio_cfg)
 
 	except (ValueError, OSError) as exc:
 		print(f"Error opening audio device: {exc}", file=sys.stderr)
 		pa.terminate()
 		return
 
-	audio_dtype = _AUDIO_DTYPE[cfg.recorder.audio.bit_depth]
-	max_frames = cfg.recorder.audio.sample_rate * cfg.recorder.buffer.max_seconds
-	buf = subsample.buffer.CircularBuffer(max_frames, cfg.recorder.audio.channels, dtype=audio_dtype)
+	# By this point channels is always resolved (either explicit from config, or
+	# auto-detected above).  The assert narrows the type for mypy.
+	assert audio_cfg.channels is not None
+
+	audio_dtype = _AUDIO_DTYPE[audio_cfg.bit_depth]
+	max_frames = audio_cfg.sample_rate * cfg.recorder.buffer.max_seconds
+	buf = subsample.buffer.CircularBuffer(max_frames, audio_cfg.channels, dtype=audio_dtype)
 
 	detector = subsample.detector.LevelDetector(
 		cfg.detection,
-		cfg.recorder.audio.sample_rate,
-		cfg.recorder.audio.chunk_size,
+		audio_cfg.sample_rate,
+		audio_cfg.chunk_size,
 		max_recording_frames=max_frames,
 	)
 
@@ -560,11 +574,18 @@ def _print_banner (cfg: subsample.config.Config) -> None:
 		modes.append("player")
 	mode_str = " + ".join(modes) if modes else "file-only"
 
+	# channels may be None when auto-detect is configured; show "auto" until resolved.
+	ch_str = (
+		f"{cfg.recorder.audio.channels}ch"
+		if cfg.recorder.audio.channels is not None
+		else "auto"
+	)
+
 	print(
 		f"Subsample  |  {mode_str}  |  "
 		f"{cfg.recorder.audio.sample_rate} Hz  "
 		f"{cfg.recorder.audio.bit_depth}-bit  "
-		f"{cfg.recorder.audio.channels}ch  |  "
+		f"{ch_str}  |  "
 		f"buffer {cfg.recorder.buffer.max_seconds}s  |  "
 		f"SNR ≥ {cfg.detection.snr_threshold_db} dB  |  "
 		f"→ {cfg.output.directory}"

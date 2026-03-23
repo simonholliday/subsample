@@ -15,10 +15,23 @@ import yaml
 @dataclasses.dataclass(frozen=True)
 class AudioConfig:
 
+	"""Audio capture settings for the recorder.
+
+	`channels` may be None (the default), in which case the correct value is
+	resolved at startup from the selected input device's reported
+	`maxInputChannels`.  Once resolved, a new AudioConfig is constructed via
+	`dataclasses.replace` so that the rest of the pipeline always sees a
+	concrete integer.
+
+	When set explicitly, `channels` is validated to be > 0 at config-load
+	time.  The auto-detect path validates after the device is opened.
+	"""
+
 	sample_rate: int
 	bit_depth: int
-	channels: int
 	chunk_size: int
+	channels: typing.Optional[int] = None
+	"""Number of input channels to capture.  None = auto-detect from device."""
 	device: typing.Optional[str] = None
 
 
@@ -279,11 +292,15 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			"Check your config.yaml."
 		)
 
+	# channels is optional: None means auto-detect from the selected device at startup.
+	channels_raw = audio_raw.get("channels")
+	channels: typing.Optional[int] = int(channels_raw) if channels_raw is not None else None
+
 	audio = AudioConfig(
 		sample_rate=int(_require(audio_raw, "sample_rate", "recorder.audio")),
 		bit_depth=int(_require(audio_raw, "bit_depth", "recorder.audio")),
-		channels=int(_require(audio_raw, "channels", "recorder.audio")),
 		chunk_size=int(_require(audio_raw, "chunk_size", "recorder.audio")),
+		channels=channels,
 		device=device_raw,
 	)
 
@@ -294,7 +311,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		)
 	if audio.sample_rate <= 0:
 		raise ValueError(f"recorder.audio.sample_rate must be > 0 (got {audio.sample_rate})")
-	if audio.channels <= 0:
+	if audio.channels is not None and audio.channels <= 0:
 		raise ValueError(f"recorder.audio.channels must be > 0 (got {audio.channels})")
 	if audio.chunk_size <= 0:
 		raise ValueError(f"recorder.audio.chunk_size must be > 0 (got {audio.chunk_size})")

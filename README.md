@@ -181,7 +181,7 @@ All settings live in `config.yaml`. The defaults are:
 | `recorder.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
 | `recorder.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
-| `recorder.audio.channels` | `1` | 1 = mono, 2 = stereo |
+| `recorder.audio.channels` | auto | 1 = mono, 2 = stereo. Omit (or set to `null`) to auto-detect from the selected device |
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |

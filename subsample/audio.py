@@ -209,6 +209,14 @@ class AudioReader:
 			audio_cfg:   Audio configuration (sample rate, bit depth, etc.).
 		"""
 
+		# channels must be resolved to a concrete int before AudioReader is
+		# constructed.  Callers are responsible for auto-detecting via
+		# get_device_channels() when AudioConfig.channels is None.
+		assert audio_cfg.channels is not None, (
+			"AudioConfig.channels must be resolved before opening an AudioReader. "
+			"Call get_device_channels() to auto-detect from the selected device."
+		)
+
 		self._bit_depth = audio_cfg.bit_depth
 		self._channels = audio_cfg.channels
 		self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self._QUEUE_MAX)
@@ -289,6 +297,31 @@ class AudioReader:
 				pass
 
 		return (None, pyaudio.paContinue)
+
+
+def get_device_channels (pa: pyaudio.PyAudio, device_index: int) -> int:
+
+	"""Return the maximum number of input channels reported by the device.
+
+	Used to auto-detect the channel count when `recorder.audio.channels` is
+	omitted from config.  The value comes from PortAudio's `maxInputChannels`
+	field, which reflects the hardware capability — e.g. 2 for a stereo USB
+	microphone, 1 for a mono headset.
+
+	Raises:
+		ValueError: If the device reports zero input channels (output-only device).
+	"""
+
+	info = pa.get_device_info_by_index(device_index)
+	ch = int(info["maxInputChannels"])
+
+	if ch <= 0:
+		raise ValueError(
+			f"Device {info['name']!r} reports no input channels — "
+			"it may be an output-only device."
+		)
+
+	return ch
 
 
 def list_input_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:
