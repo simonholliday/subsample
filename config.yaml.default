@@ -69,6 +69,15 @@ recorder:
 player:
   enabled: false
 
+  max_polyphony: 8
+  # Maximum number of simultaneous voices before clipping becomes likely.
+  # Per-voice gain target = 1.0 / max_polyphony.  With max_polyphony=8, each
+  # voice targets 0.125 RMS (~-18 dBFS), leaving headroom for 8 simultaneous
+  # notes.  If you hear clipping during dense passages, raise this value
+  # (more voices, each quieter).  Lower it for louder individual notes when
+  # fewer overlap.  Range: 1–64.  The player logs a warning when clipping
+  # is detected, with a reminder to adjust this value.
+
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
   # Case-insensitive substring match — "Launch" matches "Launchpad MK3 MIDI 1".

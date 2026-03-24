@@ -51,6 +51,7 @@ class TestLoadDefault:
 		assert cfg.player.audio.device is None
 		assert cfg.player.midi_device is None
 		assert cfg.player.virtual_midi_port is None
+		assert cfg.player.max_polyphony == 8
 
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -483,4 +484,49 @@ class TestLoadCustomConfig:
 		config_file.write_text(yaml_content)
 
 		with pytest.raises(ValueError, match="Unsupported bit_depth"):
+			subsample.config.load_config(config_file)
+
+	def _player_yaml (self, player_section: str) -> str:
+		"""Return a minimal valid config with a custom player section."""
+		return textwrap.dedent(f"""\
+			recorder:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			player:
+			{player_section}
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+
+	def test_player_max_polyphony_custom (self, tmp_path: pathlib.Path) -> None:
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._player_yaml("  max_polyphony: 16"))
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.player.max_polyphony == 16
+
+	def test_player_max_polyphony_zero_raises (self, tmp_path: pathlib.Path) -> None:
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._player_yaml("  max_polyphony: 0"))
+
+		with pytest.raises(ValueError, match="max_polyphony"):
+			subsample.config.load_config(config_file)
+
+	def test_player_max_polyphony_too_high_raises (self, tmp_path: pathlib.Path) -> None:
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._player_yaml("  max_polyphony: 65"))
+
+		with pytest.raises(ValueError, match="max_polyphony"):
 			subsample.config.load_config(config_file)

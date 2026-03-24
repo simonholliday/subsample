@@ -381,3 +381,124 @@ class TestOneShot:
 
 		assert one_shot_voice.releasing is False
 		assert normal_voice.releasing is True
+
+
+# ---------------------------------------------------------------------------
+# max_polyphony and target_rms
+# ---------------------------------------------------------------------------
+
+class TestMaxPolyphony:
+
+	def _make_player (
+		self,
+		max_polyphony: int = 8,
+	) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			reference_names=[],
+			sample_rate=44100,
+			bit_depth=16,
+			max_polyphony=max_polyphony,
+		)
+
+	def test_target_rms_default (self) -> None:
+		player = self._make_player(max_polyphony=8)
+
+		assert player._target_rms == pytest.approx(0.125)
+
+	def test_target_rms_matches_legacy_value (self) -> None:
+		# max_polyphony=10 reproduces the previous hard-coded _TARGET_RMS=0.1
+		player = self._make_player(max_polyphony=10)
+
+		assert player._target_rms == pytest.approx(0.1)
+
+	def test_target_rms_monophonic (self) -> None:
+		# max_polyphony=1 allocates full headroom to a single voice
+		player = self._make_player(max_polyphony=1)
+
+		assert player._target_rms == pytest.approx(1.0)
+
+	def test_clipping_warning_logged (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		import numpy
+
+		n_frames = 512
+		# Two voices each at 0.8 → sum = 1.6 → clips
+		audio_loud = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.8
+		voice_a = subsample.player._Voice(audio=audio_loud.copy(), note=36, channel=9)
+		voice_b = subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices            = [voice_a, voice_b]
+		player._voices_lock       = threading.Lock()
+		player._output_bit_depth  = 16
+		player._release_fade_frames = 441
+		player._last_clip_warn    = 0.0
+		player._max_polyphony     = 8
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+
+		assert any("clipping" in r.message.lower() for r in caplog.records)
+
+	def test_clipping_warning_throttled (self) -> None:
+		import numpy
+
+		n_frames = 512
+		audio_loud = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.8
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices_lock       = threading.Lock()
+		player._output_bit_depth  = 16
+		player._release_fade_frames = 441
+		player._max_polyphony     = 8
+
+		# First call fires the warning; record the timestamp it sets
+		player._last_clip_warn = 0.0
+		voice_a = subsample.player._Voice(audio=audio_loud.copy(), note=36, channel=9)
+		voice_b = subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9)
+		player._voices = [voice_a, voice_b]
+		subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+		first_warn_time: float = player._last_clip_warn
+
+		# Second call immediately after — _last_clip_warn is recent → no new warning
+		voice_c = subsample.player._Voice(audio=audio_loud.copy(), note=36, channel=9)
+		voice_d = subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9)
+		player._voices = [voice_c, voice_d]
+		with unittest.mock.patch.object(subsample.player._log, "warning") as mock_warn:
+			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+
+		mock_warn.assert_not_called()
+		# Timestamp should not have advanced (no new warning was issued)
+		assert player._last_clip_warn == first_warn_time
+
+	def test_no_clipping_no_warning (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		import numpy
+
+		n_frames = 512
+		audio_quiet = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.1
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices            = [subsample.player._Voice(audio=audio_quiet.copy(), note=36, channel=9)]
+		player._voices_lock       = threading.Lock()
+		player._output_bit_depth  = 16
+		player._release_fade_frames = 441
+		player._last_clip_warn    = 0.0
+		player._max_polyphony     = 8
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+
+		assert not any("clipping" in r.message.lower() for r in caplog.records)

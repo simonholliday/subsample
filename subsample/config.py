@@ -84,6 +84,14 @@ class PlayerConfig:
 	aconnect, MIDI routing tools) can send MIDI to this port by name.
 	Example: "Subsample Virtual MIDI"."""
 
+	max_polyphony: int = 8
+	"""Maximum number of simultaneous voices the mix should accommodate.
+	Drives per-voice gain: target_rms = 1.0 / max_polyphony.  With the default
+	of 8, each voice targets 0.125 RMS (~-18 dBFS), leaving headroom for 8
+	simultaneous notes. Raise this if you hear clipping during dense passages
+	(more voices, each quieter). Lower it for louder individual notes when
+	fewer overlap. Range: 1–64."""
+
 
 @dataclasses.dataclass(frozen=True)
 class DetectionConfig:
@@ -390,6 +398,14 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"player.audio.sample_rate must be > 0 (got {player_sample_rate})"
 		)
 
+	player_max_polyphony = int(player_raw.get("max_polyphony", 8))
+	if player_max_polyphony < 1 or player_max_polyphony > 64:
+		raise ValueError(
+			f"player.max_polyphony ({player_max_polyphony}) must be in [1, 64]. "
+			"Raise it to allow more simultaneous voices; lower it for louder "
+			"individual notes."
+		)
+
 	player = PlayerConfig(
 		audio=PlayerAudioConfig(
 			device=player_device,
@@ -399,6 +415,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		enabled=bool(player_raw.get("enabled", False)),
 		midi_device=player_midi_device,
 		virtual_midi_port=player_virtual_midi_port,
+		max_polyphony=player_max_polyphony,
 	)
 
 	detection = DetectionConfig(

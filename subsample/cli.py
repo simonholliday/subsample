@@ -367,6 +367,7 @@ def _start_player (
 			output_sample_rate=cfg.player.audio.sample_rate,
 			transform_manager=transform_manager,
 			virtual_midi_port=cfg.player.virtual_midi_port,
+			max_polyphony=cfg.player.max_polyphony,
 		)
 		try:
 			player.run()
@@ -400,6 +401,7 @@ def _start_player (
 		output_bit_depth=cfg.player.audio.bit_depth,
 		output_sample_rate=cfg.player.audio.sample_rate,
 		transform_manager=transform_manager,
+		max_polyphony=cfg.player.max_polyphony,
 	)
 	try:
 		player.run()

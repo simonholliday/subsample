@@ -7,17 +7,24 @@ and triggers polyphonic audio playback.
 Mixing architecture: a PyAudio callback stream requests N frames at regular
 intervals. Each triggered note adds a _Voice (pre-rendered stereo float32
 audio + playback cursor) to a shared list. The callback sums all active
-voices into one output buffer, clips, converts to int16, and returns it.
-The MIDI polling loop adds voices under a lock; the callback reads them.
+voices into one output buffer, clips, converts to PCM bytes at the output
+bit depth, and returns them. The MIDI polling loop adds voices under a lock;
+the callback reads them.
 
-Current implementation: exploratory / hard-coded. MIDI channel, note mapping,
-and target RMS are hard-coded constants at the top of this module and will be
-moved to config in a future iteration.
+Per-voice gain is controlled by cfg.player.max_polyphony: each voice's RMS
+target is 1.0 / max_polyphony, so N voices at max velocity sum to
+approximately full scale. Clipping is detected in the callback and logged at
+WARNING (throttled) with guidance to raise max_polyphony.
+
+Current implementation: MIDI channel, note mapping, and output channel count
+are hard-coded constants at the top of this module and will move to config in
+a future iteration.
 """
 
 import dataclasses
 import logging
 import threading
+import time
 import typing
 
 import mido
@@ -81,10 +88,6 @@ _GM_DRUM_NOTE_MAP: dict[int, tuple[str, int, bool]] = {
 	55: ("CY5050", 2, True),    # splash_cymbal
 	56: ("CB",     0, True),    # cowbell
 }
-
-# Target RMS level for playback normalisation (linear, not dBFS).
-# 0.1 ≈ -20 dBFS — leaves headroom for mixing multiple simultaneous voices.
-_TARGET_RMS = 0.1           # TODO: move to cfg.player.target_rms
 
 # Output always stereo with centre pan (equal L and R).
 # TODO: add per-note pan mapping
@@ -248,6 +251,7 @@ class MidiPlayer:
 		output_sample_rate: typing.Optional[int] = None,
 		transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 		virtual_midi_port: typing.Optional[str] = None,
+		max_polyphony: int = 8,
 	) -> None:
 
 		self._device_name        = device_name
@@ -266,6 +270,17 @@ class MidiPlayer:
 		self._output_bit_depth    = output_bit_depth   if output_bit_depth   is not None else bit_depth
 		self._output_sample_rate  = output_sample_rate if output_sample_rate is not None else sample_rate
 		self._release_fade_frames = round(_RELEASE_FADE_SECONDS * self._output_sample_rate)
+
+		# Per-voice RMS target derived from max_polyphony.
+		# 1.0 / max_polyphony gives each voice an equal share of headroom:
+		# 8 voices → 0.125 RMS per voice ≈ -18 dBFS.  The anti-clip ceiling
+		# in _render_float() (1.0 / level.peak) is a separate per-voice guard.
+		self._target_rms       = 1.0 / max_polyphony
+		self._max_polyphony    = max_polyphony
+
+		# Clipping detection: timestamp of the last warning so we can throttle
+		# to at most one log message every 5 seconds during dense passages.
+		self._last_clip_warn: float = 0.0
 
 		# Optional transform pipeline. When provided, _handle_message() checks
 		# for a pre-computed pitched variant before falling back to _render().
@@ -451,6 +466,23 @@ class MidiPlayer:
 					# Voice whose position has reached the end is simply not kept.
 
 			self._voices = active
+
+		# Clipping detection: warn when the summed mix exceeds [-1, 1] before
+		# the hard clip.  Throttled to at most one warning every 5 seconds so
+		# a dense passage doesn't spam the log.  time.monotonic() is cheap and
+		# safe to call from the PortAudio callback thread.
+		peak_abs = float(numpy.max(numpy.abs(output)))
+		if peak_abs > 1.0:
+			now = time.monotonic()
+			if now - self._last_clip_warn >= 5.0:
+				self._last_clip_warn = now
+				_log.warning(
+					"Audio clipping: peak=%.3f (%.1f dB over full scale) — "
+					"raise player.max_polyphony above %d to reduce per-voice level",
+					peak_abs,
+					20.0 * numpy.log10(peak_abs),
+					self._max_polyphony,
+				)
 
 		mixed = numpy.clip(output, -1.0, 1.0)
 
@@ -641,7 +673,7 @@ class MidiPlayer:
 		# Normalise to target RMS so samples recorded at different levels sound
 		# balanced. Guard against silence (rms == 0) to avoid division by zero.
 		if level.rms > 0.0:
-			norm_gain = _TARGET_RMS / level.rms
+			norm_gain = self._target_rms / level.rms
 		else:
 			norm_gain = 1.0
 
