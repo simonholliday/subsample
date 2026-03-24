@@ -595,6 +595,93 @@ class TestLoadInstrumentLibrary:
 		record = lib.samples()[0]
 		assert record.filepath == wav_path
 
+	def test_orphan_disabled_logs_warning_and_hint (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		# Sidecar without WAV — default behaviour (clean_orphaned_sidecars=False)
+		sidecar = _write_sidecar(tmp_path, "KICK")
+		with caplog.at_level(logging.DEBUG, logger="subsample.library"):
+			lib = subsample.library.load_instrument_library(
+				tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=False,
+			)
+
+		assert len(lib) == 0
+		assert sidecar.exists(), "Sidecar must NOT be deleted when feature is disabled"
+		messages = [r.message for r in caplog.records]
+		assert any("not found" in m.lower() for m in messages), "Expected WARNING about missing audio"
+		assert any("clean_orphaned_sidecars" in m for m in messages), "Expected one-time hint"
+
+	def test_orphan_disabled_hint_appears_only_once (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		# Multiple orphans — hint should appear only once
+		_write_sidecar(tmp_path, "KICK")
+		_write_sidecar(tmp_path, "SNARE")
+		_write_sidecar(tmp_path, "HAT")
+		with caplog.at_level(logging.DEBUG, logger="subsample.library"):
+			subsample.library.load_instrument_library(
+				tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=False,
+			)
+
+		hint_count = sum(1 for r in caplog.records if "clean_orphaned_sidecars" in r.message)
+		assert hint_count == 1, f"Hint should appear exactly once, got {hint_count}"
+
+	def test_orphan_enabled_deletes_sidecar (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		sidecar = _write_sidecar(tmp_path, "KICK")
+		with caplog.at_level(logging.DEBUG, logger="subsample.library"):
+			lib = subsample.library.load_instrument_library(
+				tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=True,
+			)
+
+		assert len(lib) == 0
+		assert not sidecar.exists(), "Sidecar should have been deleted"
+		messages = [r.message for r in caplog.records]
+		assert any("orphaned" in m.lower() for m in messages), "Expected INFO about deletion"
+		assert not any("clean_orphaned_sidecars" in m for m in messages), "No hint when feature is enabled"
+
+	def test_orphan_enabled_keeps_good_samples (self, tmp_path: pathlib.Path) -> None:
+		# One orphan + one valid pair — valid sample loads; orphan is cleaned up
+		sidecar_orphan = _write_sidecar(tmp_path, "ORPHAN")
+		_write_wav_and_sidecar(tmp_path, "KICK")
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=True,
+		)
+		assert len(lib) == 1
+		assert lib.samples()[0].name == "KICK"
+		assert not sidecar_orphan.exists()
+
+	def test_orphan_enabled_logs_error_on_permission_failure (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		import unittest.mock
+		sidecar = _write_sidecar(tmp_path, "KICK")
+
+		with unittest.mock.patch.object(
+			type(sidecar), "unlink",
+			side_effect=OSError("Permission denied"),
+		):
+			with caplog.at_level(logging.DEBUG, logger="subsample.library"):
+				subsample.library.load_instrument_library(
+					tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=True,
+				)
+
+		assert sidecar.exists(), "Sidecar must survive when deletion fails"
+		assert any(r.levelname == "ERROR" for r in caplog.records), "Expected ERROR log"
+
 
 # ---------------------------------------------------------------------------
 # TestLoadWavAudio

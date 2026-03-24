@@ -452,6 +452,7 @@ def main () -> None:
 			pathlib.Path(cfg.instrument.directory),
 			max_instrument_bytes,
 			load_audio=cfg.player.enabled,
+			clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
 		)
 		print(
 			f"  Instruments  : {len(instrument_library)} sample(s) loaded"

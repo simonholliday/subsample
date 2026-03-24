@@ -255,6 +255,13 @@ analysis:
 #   # Each sample requires both a WAV file and an .analysis.json sidecar.
 #   # If omitted, the instrument library starts empty and is populated as
 #   # recordings are captured.
+#
+#   clean_orphaned_sidecars: false
+#   # When true, .analysis.json sidecar files whose corresponding audio file
+#   # has been deleted are automatically removed at startup. When false
+#   # (default), orphaned sidecars are skipped with a warning.
+#   # Note: this only applies to instrument samples. Reference sidecars are
+#   # intentionally allowed to exist without their audio file.
 #   #
 #   # Persistent library pattern — set this to the same path as output.directory:
 #   #

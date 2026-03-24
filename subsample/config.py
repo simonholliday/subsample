@@ -167,6 +167,15 @@ class InstrumentConfig:
 	at startup. Each sample requires both a WAV file and an .analysis.json
 	sidecar. If omitted, the instrument library starts empty."""
 
+	clean_orphaned_sidecars: bool = False
+	"""When True, automatically delete .analysis.json sidecar files whose
+	corresponding audio file has been deleted. When False (default), orphaned
+	sidecars are skipped with a warning and a one-time hint explaining how to
+	enable this feature.
+
+	Note: this only applies to instrument samples. Reference samples are
+	intentionally allowed to exist as sidecar-only (no audio required)."""
+
 
 @dataclasses.dataclass(frozen=True)
 class TransformConfig:
@@ -434,6 +443,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	instrument = InstrumentConfig(
 		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
 		directory=instrument_raw.get("directory"),
+		clean_orphaned_sidecars=bool(instrument_raw.get("clean_orphaned_sidecars", False)),
 	)
 
 	similarity_raw: dict[str, typing.Any] = raw.get("similarity", {})

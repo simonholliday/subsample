@@ -379,6 +379,7 @@ All settings live in `config.yaml`. The defaults are:
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory samples; oldest evicted (FIFO) when exceeded |
 | `instrument.directory` | `none` | Optional directory to pre-load instrument samples from at startup |
+| `instrument.clean_orphaned_sidecars` | `false` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
 | `reference.directory` | `none` | Optional directory of reference sounds for similarity classification |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (11 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1–12) |

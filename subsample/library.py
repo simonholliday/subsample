@@ -379,12 +379,23 @@ class _LoadedSample:
 def _load_one_sample (
 	sidecar_path: pathlib.Path,
 	load_audio: bool,
+	clean_orphaned_sidecars: bool,
+	orphan_hint_shown: threading.Event,
 ) -> typing.Optional[_LoadedSample]:
 
 	"""Load one instrument sample (sidecar + optional audio) from disk.
 
 	Designed to run on a worker thread. Each file is fully independent, so
 	multiple calls can safely execute concurrently.
+
+	Args:
+		sidecar_path:            Path to the .analysis.json sidecar file.
+		load_audio:              When True, load PCM data from the WAV file.
+		clean_orphaned_sidecars: When True, delete sidecars whose WAV is missing
+		                         instead of just warning. When False, log a
+		                         warning and a one-time hint about the option.
+		orphan_hint_shown:       Shared event; set after the hint is logged so
+		                         it appears at most once across all workers.
 
 	Returns a _LoadedSample on success, or None if any step fails (the
 	reason will have already been logged by the callee).
@@ -402,10 +413,33 @@ def _load_one_sample (
 	name = pathlib.Path(audio_name).stem
 
 	if not audio_path.exists():
-		_log.warning(
-			"Skipping instrument sample %s — audio file not found: %s",
-			name, audio_path,
-		)
+
+		if clean_orphaned_sidecars:
+			try:
+				sidecar_path.unlink()
+				_log.info(
+					"Deleted orphaned sidecar for %s — audio file not found: %s",
+					name, audio_path,
+				)
+			except OSError as exc:
+				_log.error(
+					"Failed to delete orphaned sidecar %s: %s",
+					sidecar_path, exc,
+				)
+
+		else:
+			_log.warning(
+				"Skipping instrument sample %s — audio file not found: %s",
+				name, audio_path,
+			)
+
+			if not orphan_hint_shown.is_set():
+				orphan_hint_shown.set()
+				_log.info(
+					"To automatically remove orphaned sidecars, set "
+					"instrument.clean_orphaned_sidecars: true in config.yaml"
+				)
+
 		return None
 
 	if load_audio:
@@ -427,14 +461,16 @@ def load_instrument_library (
 	directory: pathlib.Path,
 	max_memory_bytes: int,
 	load_audio: bool = True,
+	clean_orphaned_sidecars: bool = False,
 ) -> InstrumentLibrary:
 
 	"""Discover and load instrument samples (WAV + sidecar) from a directory.
 
 	Like load_reference_library(), but also loads the audio data from each WAV
 	file (unless load_audio=False). Unlike reference samples, instrument samples
-	require the WAV to be present — sidecars without a matching WAV are skipped
-	with a WARNING.
+	require the WAV to be present — sidecars without a matching WAV are either
+	skipped with a WARNING (default) or deleted (if clean_orphaned_sidecars is
+	True).
 
 	Scans the top level of directory only (non-recursive). Samples are added in
 	sorted filename order; the memory limit is respected using FIFO eviction.
@@ -442,11 +478,13 @@ def load_instrument_library (
 	Each loaded record is assigned a session-unique ID.
 
 	Args:
-		directory:        Path to search for .analysis.json sidecar files.
-		max_memory_bytes: Memory limit passed to the returned InstrumentLibrary.
-		load_audio:       When True (default), load PCM data into each record's
-		                  audio field. When False, audio is left as None to save
-		                  memory — use this when playback is not required.
+		directory:                Path to search for .analysis.json sidecar files.
+		max_memory_bytes:         Memory limit passed to the returned InstrumentLibrary.
+		load_audio:               When True (default), load PCM data into each record's
+		                          audio field. When False, audio is left as None to save
+		                          memory — use this when playback is not required.
+		clean_orphaned_sidecars:  When True, delete sidecars whose WAV is missing.
+		                          When False (default), log a warning and skip.
 
 	Returns:
 		InstrumentLibrary containing all successfully loaded samples.
@@ -477,12 +515,20 @@ def load_instrument_library (
 	# Each file is fully independent (separate disk reads, separate re-analysis),
 	# so parallelism is safe. Results are associated with their original sorted
 	# position via the futures list so Phase 2 can add records in order.
+	#
+	# orphan_hint_shown is shared across workers so the one-time config hint
+	# is emitted at most once regardless of how many orphans are found.
+	orphan_hint_shown = threading.Event()
+
 	with concurrent.futures.ThreadPoolExecutor(
 		max_workers=n_workers,
 		thread_name_prefix="lib-loader",
 	) as executor:
 		futures = [
-			executor.submit(_load_one_sample, path, load_audio)
+			executor.submit(
+				_load_one_sample, path, load_audio,
+				clean_orphaned_sidecars, orphan_hint_shown,
+			)
 			for path in sidecar_paths
 		]
 		# Block until all workers finish; results arrive in submitted order.
