@@ -145,10 +145,11 @@ isochronous transfers with no retransmit and are sensitive to any timing jitter.
   newest samples in RAM using FIFO eviction. An optional startup directory pre-populates
   the library from previously recorded files.
 
-### Playback (WIP)
+### Playback
 
-The player is functional but under active development. MIDI channel and note mapping are
-currently hard-coded constants (GM drum layout, channel 10) that will move to config.
+MIDI routing is config-driven via `midi-map.yaml`. See the [MIDI Map](#midi-map) section
+for the format. The remaining hard-coded items (output channel count, note→reference
+mapping for pitched channels) will move to config in future phases.
 
 - **MIDI-triggered polyphonic sample playback** - `player.enabled: true` opens a MIDI
   input device and plays the best-matching instrument sample for each note trigger via a
@@ -243,12 +244,6 @@ currently hard-coded constants (GM drum layout, channel 10) that will move to co
 - **Time-stretch and envelope transforms** - `TimeStretch` and `EnvelopeAdjust` dataclasses
   are scaffolded; only the apply-function implementations and handler registrations remain.
   See `transform.target_bpm` in `config.yaml`.
-- **Pitch-variant playback test channel** - MIDI channel 1 (mido ch 0) is wired as an
-  exploratory channel that maps notes directly to cached pitch variants, bypassing the
-  reference-similarity routing used by channel 10. This gives end-to-end hardware test
-  coverage for the transform pipeline. The mapping strategy and channel constant will
-  move to config in a future iteration.
-
 ## Planned
 
 - **BPM time-stretching** - `TransformManager.on_bpm_change()` and `transform.target_bpm`
@@ -396,6 +391,7 @@ optional and rarely needs changing.
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
+| `player.midi_map` | `none` | Path to MIDI routing map YAML; if unset, uses built-in GM drum defaults |
 | `player.max_polyphony` | `8` | Max simultaneous voices; per-voice gain = 1/max\_polyphony. Raise if clipping; lower for louder individual voices |
 | `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched |
 | `player.limiter_ceiling_db` | `-0.1` | Maximum output level (dBFS) the limiter allows; must exceed threshold |
@@ -510,6 +506,70 @@ sample_id = similarity_matrix.get_match("BD0025", rank=1)
 ```
 
 Lookup is case-insensitive.
+
+## MIDI Map
+
+MIDI routing is defined in a YAML file — by default `midi-map.yaml` in the project
+directory, referenced from `config.yaml`:
+
+```yaml
+player:
+  midi_map: "./midi-map.yaml"
+```
+
+Copy `midi-map.yaml.default` as your starting point. The file lists **assignments** — each
+mapping one or more MIDI notes on a given channel to sample targets.
+
+### Assignment fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Label shown in logs |
+| `channel` | yes | MIDI channel 1-16 (standard numbering) |
+| `notes` | yes | Single note, or list (see Note syntax below) |
+| `target` | yes | Which sample(s) to play (see Target types below) |
+| `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
+| `pan` | no | Stereo position as percentage weights e.g. `[50, 50]` = centre (default) |
+
+### Note syntax
+
+```yaml
+notes: 36          # single MIDI note number
+notes: [36, 35]    # list — each gets the next similarity rank (first = best match)
+```
+
+Note names (`C4`, `D#3`, etc.) and ranges (`C2..C6`) are planned for a future phase.
+
+### Target types
+
+**`reference(NAME)`** — plays the recorded instrument sample most similar to the named
+reference. When multiple notes share a reference, they receive ranked matches: first note
+in the list gets rank 0 (best match), second gets rank 1, and so on. Falls back to rank 0
+if fewer samples than notes have been recorded.
+
+```yaml
+- name: Kicks
+  channel: 10
+  notes: [36, 35]          # note 36 → most kick-like; note 35 → second-most
+  target: reference(BD0025)
+  one_shot: true
+```
+
+The reference name must match a file in your `reference.directory` (case-insensitive).
+
+### Pan
+
+Pan weights are normalised to constant-power gains so perceived loudness is equal at any
+pan position:
+
+```yaml
+pan: [50, 50]    # centre (default)
+pan: [100, 0]    # hard left
+pan: [75, 25]    # left of centre
+```
+
+Channel order follows SMPTE: `[L, R]` for stereo; `[L, R, C, LFE, Ls, Rs]` for 5.1.
+Multichannel output is planned — stereo is the current output format.
 
 ## Scripts
 

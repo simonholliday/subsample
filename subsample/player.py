@@ -325,19 +325,17 @@ class MidiPlayer:
 	it blocks until shutdown_event is set, then closes the MIDI port and
 	PyAudio stream and returns cleanly.
 
-	Note → reference mapping is built from the reference library names in
-	alphabetical order, starting at MIDI note _NOTE_FIRST.
-
-	Note → reference mapping is driven by _GM_DRUM_NOTE_MAP: standard General
-	MIDI drum note numbers are mapped to reference sample names. Multiple GM
-	notes can map to the same reference (e.g. kick_1 and kick_2 both route to
-	"BD0025"). Reference names absent from the loaded library are silently
-	filtered out at construction time.
+	Note → reference mapping is loaded from a YAML file by the caller via
+	load_midi_map() and passed as the `midi_map` parameter.  The map keys
+	notes by (mido_channel, midi_note) and stores (ref_name, rank, one_shot,
+	pan_gains) per note.  At trigger time, the most similar instrument sample
+	to the reference is looked up from the SimilarityMatrix and played back.
 
 	Mixing: triggered notes are added as _Voice objects to a shared list.
 	A PyAudio callback stream reads from all active voices simultaneously,
-	sums them into one output buffer, and returns the mixed audio. This
-	runs independently of the MIDI polling loop so notes overlap naturally.
+	sums them into one output buffer, applies the safety limiter, and returns
+	the mixed audio.  This runs independently of the MIDI polling loop so
+	notes overlap naturally.
 	"""
 
 	def __init__ (
