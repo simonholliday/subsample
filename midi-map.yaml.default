@@ -33,8 +33,8 @@
 #
 # TARGET TYPES (summary)
 #   reference(name)   similarity-ranked lookup against reference library  [IMPLEMENTED]
+#   sample(filename)  specific sample by filename (without .wav extension) [IMPLEMENTED]
 #   pitched(selector) pitched/tonal sample by position (newest/oldest/N)  [FUTURE]
-#   sample(filename)  specific sample by filename (without .wav extension) [FUTURE]
 #   newest()          most recently added sample (any type)                [FUTURE]
 #   oldest()          oldest sample in the library (any type)              [FUTURE]
 #
@@ -258,7 +258,7 @@ assignments:
 
 
   # =================================================================
-  # SAMPLE BY NAME  (FUTURE PHASE - not yet implemented)
+  # SAMPLE BY NAME
   # =================================================================
   #
   # TARGET TYPE: sample(filename)
@@ -273,10 +273,6 @@ assignments:
   #
   #   Eviction: static — if the named sample is evicted from the
   #   library, the note plays silence until it is reloaded.
-  #
-  #   [DEV] Code path (to implement):
-  #     name = target_raw[len("sample("):].split(")")[0].strip()
-  #     sample_id = instrument_library.find_by_name(name)   # to be added
   #
   # - name: Fixed kick
   #   channel: 10

@@ -50,9 +50,12 @@ _log = logging.getLogger(__name__)
 _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 
 # Type alias for the compiled note map:
-# (mido_channel, midi_note) -> (ref_name, rank, one_shot, pan_gains)
-# pan_gains: float32 array of constant-power channel gains, shape (output_channels,).
-_NoteMap = dict[tuple[int, int], tuple[str, int, bool, numpy.ndarray]]
+# (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pan_gains)
+#   target_type: "reference" or "sample"
+#   target_arg:  reference name (for "reference") or filename stem (for "sample")
+#   rank:        similarity rank for "reference"; unused (0) for "sample"
+#   pan_gains:   float32 array of constant-power channel gains, shape (output_channels,)
+_NoteMap = dict[tuple[int, int], tuple[str, str, int, bool, numpy.ndarray]]
 
 
 def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_name: str) -> numpy.ndarray:
@@ -114,19 +117,22 @@ def load_midi_map (
 
 	"""Load a MIDI routing map from a YAML file.
 
-	Parses the assignments list from the file and returns a lookup dict keyed
-	by (mido_channel, midi_note) -> (reference_name, rank, one_shot, pan_gains).
+	Parses the assignments list and returns a lookup dict keyed by
+	(mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pan_gains).
 
-	For reference() targets with a note list, ranks are distributed by position:
-	the first note in the list receives rank 0 (best match), the second rank 1, etc.
+	Supported target types:
+	  reference(NAME) — resolved at trigger time via SimilarityMatrix.get_match().
+	                    Ranks are distributed by note-list position: first note = rank 0.
+	  sample(STEM)    — resolved at trigger time via InstrumentLibrary.find_by_name().
+	                    STEM is the WAV filename without extension.
 
 	Pan weights are normalised to constant-power gains: gain[i] = sqrt(w[i]/sum(w)).
-	This maintains equal perceived loudness regardless of pan position.
 	Channel order follows SMPTE: 2.0 = L R; 5.1 = L R C LFE Ls Rs; 7.1 adds Lrs Rrs.
 
-	Assignments whose reference name is not in reference_names are skipped with
-	a WARNING — this prevents silent failures when using a map built for a
-	different reference library.
+	reference() assignments whose name is not in reference_names are skipped with a
+	WARNING — this prevents silent failures when using a map built for a different
+	reference library.  sample() assignments are not validated at load time; a missing
+	sample plays silence at trigger time.
 
 	Args:
 		path:             Path to the MIDI map YAML file.
@@ -134,7 +140,7 @@ def load_midi_map (
 		output_channels:  Number of output channels (default 2 = stereo).
 
 	Returns:
-		Dict mapping (mido_channel, midi_note) -> (ref_name, rank, one_shot, pan_gains).
+		Dict mapping (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pan_gains).
 		Empty dict if the file is empty or has no valid assignments.
 
 	Raises:
@@ -170,29 +176,38 @@ def load_midi_map (
 			raise ValueError(f"MIDI map assignment {name!r}: missing 'notes'")
 		notes: list[int] = [notes_raw] if isinstance(notes_raw, int) else list(notes_raw)
 
-		# Target: currently only reference(NAME) is supported
+		# Target: parse target type and argument.
 		target_raw = assignment.get("target", "")
-		if not isinstance(target_raw, str) or not target_raw.startswith("reference("):
-			_log.debug("MIDI map assignment %r: skipping unsupported target %r (not yet implemented)", name, target_raw)
+		if not isinstance(target_raw, str):
+			_log.debug("MIDI map assignment %r: skipping unsupported target %r", name, target_raw)
 			continue
 
-		# Extract reference name from reference(NAME) or reference(NAME, ...)
-		ref_name = target_raw[len("reference("):].split(")")[0].split(",")[0].strip()
+		if target_raw.startswith("reference("):
+			target_type = "reference"
+			target_arg = target_raw[len("reference("):].split(")")[0].split(",")[0].strip()
 
-		if ref_name.upper() not in reference_set:
-			_log.warning(
-				"MIDI map assignment %r: reference %r not in reference library — skipping",
-				name, ref_name,
-			)
+			if target_arg.upper() not in reference_set:
+				_log.warning(
+					"MIDI map assignment %r: reference %r not in reference library — skipping",
+					name, target_arg,
+				)
+				continue
+
+		elif target_raw.startswith("sample("):
+			target_type = "sample"
+			target_arg = target_raw[len("sample("):].split(")")[0].strip()
+
+		else:
+			_log.debug("MIDI map assignment %r: skipping unsupported target %r (not yet implemented)", name, target_raw)
 			continue
 
 		one_shot: bool = bool(assignment.get("one_shot", True))
 
 		pan_gains = _parse_pan_gains(assignment.get("pan"), output_channels, name)
 
-		# Distribute ranks by note-list position: first note = rank 0, second = rank 1, …
+		# Distribute ranks by note-list position (reference only; unused for sample).
 		for rank, note in enumerate(notes):
-			note_map[(mido_channel, int(note))] = (ref_name, rank, one_shot, pan_gains)
+			note_map[(mido_channel, int(note))] = (target_type, target_arg, rank, one_shot, pan_gains)
 
 	_log.info(
 		"MIDI map loaded from %s: %d note(s) across %d assignment(s)",
@@ -414,7 +429,7 @@ class MidiPlayer:
 		# (stereo) for this phase; multichannel support raises this in future.
 		self._output_channels: int = 2
 
-		# Note routing map: (mido_channel, midi_note) -> (ref_name, rank, one_shot, pan_gains).
+		# Note routing map: (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pan_gains).
 		# Loaded from the MIDI map YAML file by the caller (cli.py) via load_midi_map().
 		self._note_map: _NoteMap = midi_map
 
@@ -422,9 +437,11 @@ class MidiPlayer:
 			"MIDI note map: %d note(s) loaded\n  %s",
 			len(self._note_map),
 			"\n  ".join(
-				f"ch{ch+1} note {note} → {ref} (rank {rank}{'  one-shot' if one_shot else ''})"
-				f"  pan=[{', '.join(f'{g:.2f}' for g in pan_gains)}]"
-				for (ch, note), (ref, rank, one_shot, pan_gains) in sorted(self._note_map.items())
+				f"ch{ch+1} note {note} → {ttype}({targ})"
+				+ (f" rank {rank}" if ttype == "reference" else "")
+				+ ("  one-shot" if one_shot else "")
+				+ f"  pan=[{', '.join(f'{g:.2f}' for g in pan_gains)}]"
+				for (ch, note), (ttype, targ, rank, one_shot, pan_gains) in sorted(self._note_map.items())
 			),
 		)
 
@@ -613,16 +630,30 @@ class MidiPlayer:
 			_log.debug("MIDI ch%d note %d: no mapping", msg.channel + 1, msg.note)
 			return
 
-		ref_name, rank, one_shot, pan_gains = mapping
+		target_type, target_arg, rank, one_shot, pan_gains = mapping
 
-		# Look up the Nth-closest instrument sample for this reference.
-		# If rank N doesn't exist yet (e.g. only one hit recorded), fall back
-		# to rank 0 so the note always triggers something.
-		sample_id = self._similarity_matrix.get_match(ref_name, rank=rank)
-		if sample_id is None and rank > 0:
-			sample_id = self._similarity_matrix.get_match(ref_name, rank=0)
-		if sample_id is None:
-			_log.debug("No instrument match for reference %r — library empty?", ref_name)
+		if target_type == "reference":
+			# Look up the Nth-closest instrument sample for this reference.
+			# If rank N doesn't exist yet (e.g. only one hit recorded), fall back
+			# to rank 0 so the note always triggers something.
+			sample_id = self._similarity_matrix.get_match(target_arg, rank=rank)
+			if sample_id is None and rank > 0:
+				sample_id = self._similarity_matrix.get_match(target_arg, rank=0)
+			if sample_id is None:
+				_log.debug("No instrument match for reference %r — library empty?", target_arg)
+				return
+
+		elif target_type == "sample":
+			# Direct lookup by filename stem — O(1) via InstrumentLibrary._name_index.
+			# Returns None if the sample is not currently loaded (evicted or not yet
+			# recorded); in that case the note plays silence, no error.
+			sample_id = self._instrument_library.find_by_name(target_arg)
+			if sample_id is None:
+				_log.debug("sample(%r) not in library — not yet loaded or evicted", target_arg)
+				return
+
+		else:
+			_log.debug("Unknown target type %r — skipping", target_type)
 			return
 
 		record = self._instrument_library.get(sample_id)
@@ -640,7 +671,7 @@ class MidiPlayer:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 				_log.info(
 					"note %d (vel %d) → %r → %r (pitched variant)  (%.2fs)",
-					msg.note, msg.velocity, ref_name, record.name, variant.duration,
+					msg.note, msg.velocity, target_arg, record.name, variant.duration,
 				)
 				return
 
@@ -654,7 +685,7 @@ class MidiPlayer:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 				_log.info(
 					"note %d (vel %d) → %r → %r (base variant)  (%.2fs)",
-					msg.note, msg.velocity, ref_name, record.name, base.duration,
+					msg.note, msg.velocity, target_arg, record.name, base.duration,
 				)
 				return
 
@@ -670,7 +701,7 @@ class MidiPlayer:
 
 		_log.info(
 			"note %d (vel %d) → %r → %r  (%.2fs)",
-			msg.note, msg.velocity, ref_name, record.name, record.duration,
+			msg.note, msg.velocity, target_arg, record.name, record.duration,
 		)
 
 	def _render (

@@ -515,6 +515,31 @@ class TestInstrumentLibrary:
 		assert lib.get(record.sample_id) is record
 		assert evicted == []
 
+	def test_find_by_name_returns_id (self) -> None:
+		"""find_by_name returns the sample_id for a loaded sample."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		r = _make_instrument_record("my-kick")
+		lib.add(r)
+
+		assert lib.find_by_name("my-kick") == r.sample_id
+
+	def test_find_by_name_missing_returns_none (self) -> None:
+		"""find_by_name returns None for a name not in the library."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+
+		assert lib.find_by_name("no-such-sample") is None
+
+	def test_find_by_name_evicted_returns_none (self) -> None:
+		"""find_by_name returns None after a sample has been evicted."""
+		r1 = _make_instrument_record("old-kick", n_frames=500)
+		r2 = _make_instrument_record("new-kick", n_frames=500)
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=r1.audio.nbytes + 10)
+		lib.add(r1)
+		lib.add(r2)   # evicts r1
+
+		assert lib.find_by_name("old-kick") is None
+		assert lib.find_by_name("new-kick") == r2.sample_id
+
 	def test_single_add_evicts_multiple_old_samples (self) -> None:
 		# Three small records: 500 int16 frames × 1 channel = 1000 bytes each (3000 total).
 		# One large record: 2000 int16 frames = 4000 bytes.

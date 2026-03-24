@@ -682,7 +682,8 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
 		assert (9, 36) in note_map
-		ref, rank, one_shot, pan_gains = note_map[(9, 36)]
+		ttype, ref, rank, one_shot, pan_gains = note_map[(9, 36)]
+		assert ttype == "reference"
 		assert ref == "BD0025"
 		assert rank == 0
 		assert one_shot is True
@@ -699,8 +700,8 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
-		assert note_map[(9, 36)][1] == 0   # rank 0
-		assert note_map[(9, 35)][1] == 1   # rank 1
+		assert note_map[(9, 36)][2] == 0   # rank 0
+		assert note_map[(9, 35)][2] == 1   # rank 1
 
 	def test_channel_conversion (self, tmp_path: pathlib.Path) -> None:
 		"""User-facing channel 10 converts to mido channel 9."""
@@ -727,7 +728,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
-		_, _, one_shot, _ = note_map[(9, 36)]
+		_, _, _, one_shot, _ = note_map[(9, 36)]
 		assert one_shot is True
 
 	def test_unknown_reference_skipped (
@@ -789,8 +790,40 @@ assignments:
 
 		assert (9, 36) in note_map
 		assert (9, 38) in note_map
-		assert note_map[(9, 36)][0] == "BD0025"
-		assert note_map[(9, 38)][0] == "SD5075"
+		assert note_map[(9, 36)][1] == "BD0025"
+		assert note_map[(9, 38)][1] == "SD5075"
+
+	def test_sample_target_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""sample(filename) target is parsed into the note map with target_type 'sample'."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Fixed kick
+    channel: 10
+    notes: 36
+    target: sample(2026-03-24_14-37-14)
+    one_shot: true
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		assert (9, 36) in note_map
+		ttype, fname, rank, one_shot, pan_gains = note_map[(9, 36)]
+		assert ttype == "sample"
+		assert fname == "2026-03-24_14-37-14"
+		assert one_shot is True
+
+	def test_sample_target_no_reference_validation (self, tmp_path: pathlib.Path) -> None:
+		"""sample() targets are not validated against the reference library at load time."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Fixed kick
+    channel: 10
+    notes: 36
+    target: sample(some-recording)
+""")
+		# Empty reference_names — sample() should still be accepted
+		note_map = subsample.player.load_midi_map(path, [])
+
+		assert (9, 36) in note_map
 
 	def test_default_map_parses (self) -> None:
 		"""The shipped midi-map.yaml.default parses without error."""
@@ -801,7 +834,7 @@ assignments:
 		assert len(note_map) > 0
 		# Kick on note 36 (mido ch 9)
 		assert (9, 36) in note_map
-		assert note_map[(9, 36)][0] == "BD0025"
+		assert note_map[(9, 36)][1] == "BD0025"
 
 	def test_default_pan_is_centre (self, tmp_path: pathlib.Path) -> None:
 		"""Omitted pan defaults to equal power across all output channels."""
@@ -815,7 +848,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
 
-		_, _, _, pan_gains = note_map[(9, 36)]
+		_, _, _, _, pan_gains = note_map[(9, 36)]
 		# Centre: both channels equal power → gain = 1/sqrt(2) ≈ 0.707
 		assert pan_gains.shape == (2,)
 		numpy.testing.assert_allclose(pan_gains, [1.0 / 2**0.5, 1.0 / 2**0.5], atol=1e-5)
@@ -833,7 +866,7 @@ assignments:
     pan: {weights}
 """)
 			note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
-			_, _, _, pan_gains = note_map[(9, 36)]
+			_, _, _, _, pan_gains = note_map[(9, 36)]
 			total_power = float(numpy.sum(pan_gains ** 2))
 			numpy.testing.assert_allclose(total_power, 1.0, atol=1e-5,
 				err_msg=f"pan {weights} total power should be 1.0")
@@ -850,7 +883,7 @@ assignments:
     pan: [100, 0]
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
-		_, _, _, pan_gains = note_map[(9, 36)]
+		_, _, _, _, pan_gains = note_map[(9, 36)]
 		numpy.testing.assert_allclose(pan_gains, [1.0, 0.0], atol=1e-5)
 
 	def test_pan_wrong_channel_count_raises (self, tmp_path: pathlib.Path) -> None:

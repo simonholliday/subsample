@@ -186,6 +186,9 @@ class InstrumentLibrary:
 		self._index: dict[int, SampleRecord] = {}
 		# Deque maintains insertion order for O(1) popleft during FIFO eviction.
 		self._order: collections.deque[int] = collections.deque()
+		# Secondary index for O(1) lookup by name (filename stem without extension).
+		# Kept in sync with _index by add() and eviction.
+		self._name_index: dict[str, int] = {}
 		self._total_bytes: int = 0
 		self._max_bytes: int = max_memory_bytes
 		# Protects multi-step add/evict operations: the recorder's writer thread
@@ -228,9 +231,11 @@ class InstrumentLibrary:
 				if old_record is not None:
 					old_bytes = old_record.audio.nbytes if old_record.audio is not None else 0
 					self._total_bytes -= old_bytes
+					self._name_index.pop(old_record.name, None)
 					evicted.append(oldest_id)
 
 			self._index[record.sample_id] = record
+			self._name_index[record.name] = record.sample_id
 			self._order.append(record.sample_id)
 			self._total_bytes += sample_bytes
 
@@ -242,6 +247,19 @@ class InstrumentLibrary:
 
 		with self._lock:
 			return self._index.get(sample_id)
+
+	def find_by_name (self, name: str) -> int | None:
+
+		"""Return the sample_id for the sample with the given name, or None if not present.
+
+		Name is the filename stem without extension (e.g. "2026-03-23_10-04-07").
+		Lookup is O(1) via a secondary index kept in sync with the main index.
+		Returns None if the sample is not currently in the library (not yet loaded
+		or evicted).
+		"""
+
+		with self._lock:
+			return self._name_index.get(name)
 
 	def samples (self) -> list[SampleRecord]:
 
