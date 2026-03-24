@@ -368,7 +368,11 @@ def _start_player (
 			transform_manager=transform_manager,
 			virtual_midi_port=cfg.player.virtual_midi_port,
 		)
-		player.run()
+		try:
+			player.run()
+		except ValueError as exc:
+			print(f"\nError starting player: {exc}", file=sys.stderr)
+
 		return
 
 	# Hardware port mode: resolve device name from config or interactive menu.
@@ -397,7 +401,10 @@ def _start_player (
 		output_sample_rate=cfg.player.audio.sample_rate,
 		transform_manager=transform_manager,
 	)
-	player.run()
+	try:
+		player.run()
+	except ValueError as exc:
+		print(f"\nError starting player: {exc}", file=sys.stderr)
 
 
 def main () -> None:

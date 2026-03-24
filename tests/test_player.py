@@ -293,6 +293,7 @@ class TestNoteOff:
 		player._voices_lock = threading.Lock()
 		player._OUTPUT_CHANNELS = 2
 		player._output_bit_depth = 16
+		player._release_fade_frames = 441  # 10 ms at 44100 Hz
 
 		# Call the real _audio_callback
 		subsample.player.MidiPlayer._audio_callback(

@@ -92,8 +92,9 @@ _OUTPUT_CHANNELS = 2        # stereo; mono signal duplicated to both channels
 
 # Cosine fade-out duration applied when a note_off is received.
 # Long enough to prevent a click on hard cutoff; short enough to be imperceptible.
-# At 44100 Hz, 441 frames = 10 ms.
-_RELEASE_FADE_FRAMES = 441
+# Stored as seconds; converted to frames in MidiPlayer.__init__() using the
+# actual output sample rate so the duration is correct regardless of device.
+_RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 
 
 @dataclasses.dataclass
@@ -111,7 +112,7 @@ class _Voice:
 	           Voice is removed when position >= len(audio).
 	releasing: Set to True when a note_off arrives for this note+channel
 	           (only for non-one-shot voices).  The callback applies a short
-	           cosine fade-out over _RELEASE_FADE_FRAMES frames, then retires.
+	           cosine fade-out over self._release_fade_frames frames, then retires.
 	one_shot:  When True, note_off events are ignored — the sample plays to
 	           natural completion.  Kicks, snares, and cymbals are one-shot;
 	           hi-hats are not (open hi-hat is silenced by the closed pedal).
@@ -262,8 +263,9 @@ class MidiPlayer:
 		# float32→PCM packing in _audio_callback; output_sample_rate informs
 		# the transform pipeline so base variants are produced at the correct
 		# rate (relevant when input and output sample rates differ).
-		self._output_bit_depth   = output_bit_depth   if output_bit_depth   is not None else bit_depth
-		self._output_sample_rate = output_sample_rate if output_sample_rate is not None else sample_rate
+		self._output_bit_depth    = output_bit_depth   if output_bit_depth   is not None else bit_depth
+		self._output_sample_rate  = output_sample_rate if output_sample_rate is not None else sample_rate
+		self._release_fade_frames = round(_RELEASE_FADE_SECONDS * self._output_sample_rate)
 
 		# Optional transform pipeline. When provided, _handle_message() checks
 		# for a pre-computed pitched variant before falling back to _render().
@@ -417,7 +419,7 @@ class MidiPlayer:
 		end of audio) are removed from the list.
 
 		Releasing voices (note_off received): a cosine fade-out is applied over
-		min(remaining, _RELEASE_FADE_FRAMES) frames, then the voice is retired.
+		min(remaining, self._release_fade_frames) frames, then the voice is retired.
 		This prevents an audible click on hard cutoff for tonal samples.
 		"""
 
@@ -430,9 +432,9 @@ class MidiPlayer:
 				remaining = len(voice.audio) - voice.position
 
 				if voice.releasing:
-					# Fade out over at most _RELEASE_FADE_FRAMES frames, then retire.
+					# Fade out over at most self._release_fade_frames frames, then retire.
 					# Also clamped to frame_count — the output buffer is never larger.
-					fade_n = min(remaining, _RELEASE_FADE_FRAMES, frame_count)
+					fade_n = min(remaining, self._release_fade_frames, frame_count)
 					if fade_n > 0:
 						chunk = voice.audio[voice.position : voice.position + fade_n].copy()
 						ramp = ((1.0 + numpy.cos(numpy.linspace(0.0, numpy.pi, fade_n))) / 2.0).astype(numpy.float32)
@@ -462,7 +464,7 @@ class MidiPlayer:
 		"""Dispatch a single MIDI message.
 
 		note_off (and note_on with velocity=0) marks matching active voices as
-		releasing so the audio callback fades them out over _RELEASE_FADE_FRAMES.
+		releasing so the audio callback fades them out over self._release_fade_frames.
 		note_on on the configured channel triggers playback.
 		Everything else is logged at DEBUG and ignored.
 		"""
