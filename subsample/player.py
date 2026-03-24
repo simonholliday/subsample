@@ -252,6 +252,8 @@ class MidiPlayer:
 		transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 		virtual_midi_port: typing.Optional[str] = None,
 		max_polyphony: int = 8,
+		limiter_threshold_db: float = -1.5,
+		limiter_ceiling_db: float = -0.1,
 	) -> None:
 
 		self._device_name        = device_name
@@ -277,6 +279,14 @@ class MidiPlayer:
 		# in _render_float() (1.0 / level.peak) is a separate per-voice guard.
 		self._target_rms       = 1.0 / max_polyphony
 		self._max_polyphony    = max_polyphony
+
+		# Safety limiter: tanh soft-clipper applied to the mixed output buffer.
+		# Pre-computed linear values so the callback does no dB conversions.
+		# The knee is the range between threshold and ceiling; the tanh curve
+		# maps [0, ∞) to [0, knee) asymptotically, so output never exceeds ceiling.
+		self._limiter_threshold = 10.0 ** (limiter_threshold_db / 20.0)
+		self._limiter_ceiling   = 10.0 ** (limiter_ceiling_db / 20.0)
+		self._limiter_knee      = self._limiter_ceiling - self._limiter_threshold
 
 		# Clipping detection: timestamp of the last warning so we can throttle
 		# to at most one log message every 5 seconds during dense passages.
@@ -368,7 +378,7 @@ class MidiPlayer:
 
 		# Resolve output device — mirrors the input device selection pattern.
 		if self._output_device_name is not None:
-			output_device_index: typing.Optional[int] = subsample.audio.find_output_device_by_name(
+			output_device_index: int = subsample.audio.find_output_device_by_name(
 				pa, self._output_device_name,
 			)
 		else:
@@ -483,6 +493,21 @@ class MidiPlayer:
 					20.0 * numpy.log10(peak_abs),
 					self._max_polyphony,
 				)
+
+		# Safety limiter: tanh soft-clip above threshold.
+		# Operates in-place on samples where abs(output) > threshold.
+		# Below threshold: zero cost (mask is False, no computation).
+		# Above threshold: smoothly compressed toward ceiling.
+		# The hard clip below remains as a final safety net.
+		abs_output = numpy.abs(output)
+		mask = abs_output > self._limiter_threshold
+		if numpy.any(mask):
+			sign   = numpy.sign(output[mask])
+			excess = abs_output[mask] - self._limiter_threshold
+			output[mask] = sign * (
+				self._limiter_threshold
+				+ self._limiter_knee * numpy.tanh(excess / self._limiter_knee)
+			)
 
 		mixed = numpy.clip(output, -1.0, 1.0)
 

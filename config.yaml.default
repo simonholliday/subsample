@@ -78,6 +78,19 @@ player:
   # fewer overlap.  Range: 1–64.  The player logs a warning when clipping
   # is detected, with a reminder to adjust this value.
 
+  # limiter_threshold_db: -1.5
+  # Safety limiter threshold (dBFS). Signals above this are soft-clipped via
+  # a tanh curve.  -1.5 means the limiter only engages 1.5 dB below full scale
+  # — transparent during normal playback, only catching genuine near-clip
+  # transients.  Lower values (e.g. -6.0) give more compression.  0.0 disables
+  # the limiter (equivalent to the hard clip at full scale).  Range: -12.0–0.0.
+
+  # limiter_ceiling_db: -0.1
+  # Maximum output level (dBFS) the limiter allows.  The signal is smoothly
+  # compressed between threshold and ceiling, asymptotically approaching this
+  # value — never exceeds it.  Must be greater than limiter_threshold_db.
+  # Range: limiter_threshold_db–0.0.
+
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
   # Case-insensitive substring match — "Launch" matches "Launchpad MK3 MIDI 1".

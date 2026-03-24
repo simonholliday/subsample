@@ -368,6 +368,8 @@ def _start_player (
 			transform_manager=transform_manager,
 			virtual_midi_port=cfg.player.virtual_midi_port,
 			max_polyphony=cfg.player.max_polyphony,
+			limiter_threshold_db=cfg.player.limiter_threshold_db,
+			limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 		)
 		try:
 			player.run()

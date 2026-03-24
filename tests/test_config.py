@@ -52,6 +52,8 @@ class TestLoadDefault:
 		assert cfg.player.midi_device is None
 		assert cfg.player.virtual_midi_port is None
 		assert cfg.player.max_polyphony == 8
+		assert cfg.player.limiter_threshold_db == -1.5
+		assert cfg.player.limiter_ceiling_db == -0.1
 
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -529,4 +531,46 @@ class TestLoadCustomConfig:
 		config_file.write_text(self._player_yaml("  max_polyphony: 65"))
 
 		with pytest.raises(ValueError, match="max_polyphony"):
+			subsample.config.load_config(config_file)
+
+	def test_player_limiter_ceiling_not_above_zero_raises (self, tmp_path: pathlib.Path) -> None:
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._player_yaml("  limiter_ceiling_db: 0.5"))
+
+		with pytest.raises(ValueError, match="limiter_ceiling_db"):
+			subsample.config.load_config(config_file)
+
+	def test_player_limiter_ceiling_not_above_threshold_raises (self, tmp_path: pathlib.Path) -> None:
+		yaml_content = textwrap.dedent("""\
+			recorder:
+			  audio:
+			    sample_rate: 44100
+			    bit_depth: 16
+			    channels: 1
+			    chunk_size: 512
+			  buffer:
+			    max_seconds: 60
+			player:
+			  limiter_threshold_db: -1.5
+			  limiter_ceiling_db: -3.0
+			detection:
+			  snr_threshold_db: 12.0
+			  hold_time: 0.5
+			  warmup_seconds: 1.0
+			  ema_alpha: 0.1
+			output:
+			  directory: ./samples
+			  filename_format: "%Y-%m-%d_%H-%M-%S"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		with pytest.raises(ValueError, match="limiter_ceiling_db"):
+			subsample.config.load_config(config_file)
+
+	def test_player_limiter_threshold_out_of_range_raises (self, tmp_path: pathlib.Path) -> None:
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(self._player_yaml("  limiter_threshold_db: -20.0"))
+
+		with pytest.raises(ValueError, match="limiter_threshold_db"):
 			subsample.config.load_config(config_file)

@@ -289,11 +289,16 @@ class TestNoteOff:
 		voice = subsample.player._Voice(audio=audio, note=36, channel=9, releasing=True)
 
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
-		player._voices = [voice]
-		player._voices_lock = threading.Lock()
-		player._OUTPUT_CHANNELS = 2
-		player._output_bit_depth = 16
+		player._voices              = [voice]
+		player._voices_lock         = threading.Lock()
+		player._OUTPUT_CHANNELS     = 2
+		player._output_bit_depth    = 16
 		player._release_fade_frames = 441  # 10 ms at 44100 Hz
+		player._last_clip_warn      = 0.0
+		player._max_polyphony       = 8
+		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
+		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
+		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
 
 		# Call the real _audio_callback
 		subsample.player.MidiPlayer._audio_callback(
@@ -312,9 +317,14 @@ class TestNoteOff:
 		voice = subsample.player._Voice(audio=audio, note=36, channel=9)
 
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
-		player._voices = [voice]
-		player._voices_lock = threading.Lock()
-		player._output_bit_depth = 16
+		player._voices              = [voice]
+		player._voices_lock         = threading.Lock()
+		player._output_bit_depth    = 16
+		player._last_clip_warn      = 0.0
+		player._max_polyphony       = 8
+		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
+		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
+		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
 
 		subsample.player.MidiPlayer._audio_callback(
 			player, None, 512, {}, 0
@@ -437,12 +447,15 @@ class TestMaxPolyphony:
 		voice_b = subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9)
 
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
-		player._voices            = [voice_a, voice_b]
-		player._voices_lock       = threading.Lock()
-		player._output_bit_depth  = 16
+		player._voices              = [voice_a, voice_b]
+		player._voices_lock         = threading.Lock()
+		player._output_bit_depth    = 16
 		player._release_fade_frames = 441
-		player._last_clip_warn    = 0.0
-		player._max_polyphony     = 8
+		player._last_clip_warn      = 0.0
+		player._max_polyphony       = 8
+		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
+		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
+		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
 			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
@@ -456,10 +469,13 @@ class TestMaxPolyphony:
 		audio_loud = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.8
 
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
-		player._voices_lock       = threading.Lock()
-		player._output_bit_depth  = 16
+		player._voices_lock         = threading.Lock()
+		player._output_bit_depth    = 16
 		player._release_fade_frames = 441
-		player._max_polyphony     = 8
+		player._max_polyphony       = 8
+		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
+		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
+		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
 
 		# First call fires the warning; record the timestamp it sets
 		player._last_clip_warn = 0.0
@@ -491,14 +507,125 @@ class TestMaxPolyphony:
 		audio_quiet = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.1
 
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
-		player._voices            = [subsample.player._Voice(audio=audio_quiet.copy(), note=36, channel=9)]
-		player._voices_lock       = threading.Lock()
-		player._output_bit_depth  = 16
+		player._voices              = [subsample.player._Voice(audio=audio_quiet.copy(), note=36, channel=9)]
+		player._voices_lock         = threading.Lock()
+		player._output_bit_depth    = 16
 		player._release_fade_frames = 441
-		player._last_clip_warn    = 0.0
-		player._max_polyphony     = 8
+		player._last_clip_warn      = 0.0
+		player._max_polyphony       = 8
+		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
+		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
+		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
 			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
 
 		assert not any("clipping" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Safety limiter
+# ---------------------------------------------------------------------------
+
+class TestLimiter:
+
+	def _make_player (
+		self,
+		limiter_threshold_db: float = -1.5,
+		limiter_ceiling_db: float = -0.1,
+	) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			reference_names=[],
+			sample_rate=44100,
+			bit_depth=16,
+			limiter_threshold_db=limiter_threshold_db,
+			limiter_ceiling_db=limiter_ceiling_db,
+		)
+
+	def _run_callback_with_audio (
+		self,
+		player: subsample.player.MidiPlayer,
+		audio: "numpy.ndarray",
+	) -> "numpy.ndarray":
+		"""Run _audio_callback with a single voice and return the mixed output."""
+		import numpy
+		import pyaudio
+		n_frames = len(audio)
+		voice = subsample.player._Voice(audio=audio.copy(), note=36, channel=9)
+		player._voices = [voice]
+		raw, _ = subsample.player.MidiPlayer._audio_callback(
+			player, None, n_frames, {}, 0
+		)
+		# Unpack the int16 bytes back to float for assertion
+		pcm = numpy.frombuffer(raw, dtype=numpy.int16).astype(numpy.float32) / 32767.0
+		return pcm.reshape(n_frames, 2)
+
+	def test_below_threshold_passes_unchanged (self) -> None:
+		"""Signals below threshold must be unchanged to within float32 precision."""
+		import numpy
+		player = self._make_player(limiter_threshold_db=-1.5)
+		threshold = player._limiter_threshold
+
+		# Signal at 70% of threshold — well below, untouched
+		level = threshold * 0.7
+		audio = numpy.ones((512, 2), dtype=numpy.float32) * level
+		result = self._run_callback_with_audio(player, audio)
+
+		numpy.testing.assert_allclose(result, level, atol=1e-3)
+
+	def test_above_threshold_is_compressed (self) -> None:
+		"""A signal that would clip is reduced below 0 dBFS by the limiter."""
+		import numpy
+		player = self._make_player(limiter_threshold_db=-1.5, limiter_ceiling_db=-0.1)
+
+		# Signal at exactly 0 dBFS (1.0) — would hard-clip without limiter
+		audio = numpy.ones((512, 2), dtype=numpy.float32) * 1.0
+		result = self._run_callback_with_audio(player, audio)
+
+		# After limiter, output should be below 1.0 but above threshold
+		assert numpy.max(numpy.abs(result)) < 1.0
+		assert numpy.max(numpy.abs(result)) > player._limiter_threshold
+
+	def test_output_never_exceeds_ceiling (self) -> None:
+		"""Regardless of input level, output never exceeds the limiter ceiling."""
+		import numpy
+		player = self._make_player(limiter_threshold_db=-1.5, limiter_ceiling_db=-0.1)
+		ceiling = player._limiter_ceiling
+
+		# Very hot signal: +6 dBFS (2.0)
+		audio = numpy.ones((512, 2), dtype=numpy.float32) * 2.0
+		result = self._run_callback_with_audio(player, audio)
+
+		assert numpy.max(numpy.abs(result)) <= ceiling + 1e-4
+
+	def test_extreme_input_stays_below_ceiling (self) -> None:
+		"""Asymptotic behaviour: even +20 dBFS input stays below ceiling."""
+		import numpy
+		player = self._make_player(limiter_threshold_db=-1.5, limiter_ceiling_db=-0.1)
+		ceiling = player._limiter_ceiling
+
+		# +20 dBFS — massively over full scale
+		audio = numpy.ones((512, 2), dtype=numpy.float32) * 10.0
+		result = self._run_callback_with_audio(player, audio)
+
+		assert numpy.max(numpy.abs(result)) <= ceiling + 1e-4
+
+	def test_symmetry (self) -> None:
+		"""Negative and positive signals are compressed identically in magnitude."""
+		import numpy
+		player = self._make_player()
+
+		level = 1.5  # +3.5 dBFS — above threshold
+		pos_audio = numpy.ones((512, 2), dtype=numpy.float32) * level
+		neg_audio = numpy.ones((512, 2), dtype=numpy.float32) * -level
+
+		pos_result = self._run_callback_with_audio(player, pos_audio)
+		neg_result = self._run_callback_with_audio(player, neg_audio)
+
+		numpy.testing.assert_allclose(numpy.abs(pos_result), numpy.abs(neg_result), atol=1e-4)

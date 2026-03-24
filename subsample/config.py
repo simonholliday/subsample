@@ -92,6 +92,19 @@ class PlayerConfig:
 	(more voices, each quieter). Lower it for louder individual notes when
 	fewer overlap. Range: 1–64."""
 
+	limiter_threshold_db: float = -1.5
+	"""Threshold (dBFS) above which the safety limiter begins soft-clipping.
+	Signals below this pass completely untouched. At -1.5 dBFS the limiter
+	only engages for genuine near-clip transients and is transparent during
+	normal playback. Lower values (e.g. -6.0) give more compression;
+	0.0 disables the limiter. Range: -12.0 to 0.0."""
+
+	limiter_ceiling_db: float = -0.1
+	"""Maximum output level (dBFS) the limiter allows. The signal is
+	smoothly compressed between threshold and ceiling via a tanh curve,
+	asymptotically approaching this value. Must be greater than
+	limiter_threshold_db. Range: limiter_threshold_db to 0.0."""
+
 
 @dataclasses.dataclass(frozen=True)
 class DetectionConfig:
@@ -406,6 +419,23 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			"individual notes."
 		)
 
+	player_limiter_threshold_db = float(player_raw.get("limiter_threshold_db", -1.5))
+	if player_limiter_threshold_db > 0.0 or player_limiter_threshold_db < -12.0:
+		raise ValueError(
+			f"player.limiter_threshold_db ({player_limiter_threshold_db}) must be in [-12.0, 0.0]."
+		)
+
+	player_limiter_ceiling_db = float(player_raw.get("limiter_ceiling_db", -0.1))
+	if player_limiter_ceiling_db > 0.0:
+		raise ValueError(
+			f"player.limiter_ceiling_db ({player_limiter_ceiling_db}) must be ≤ 0.0."
+		)
+	if player_limiter_ceiling_db <= player_limiter_threshold_db:
+		raise ValueError(
+			f"player.limiter_ceiling_db ({player_limiter_ceiling_db}) must be greater than "
+			f"player.limiter_threshold_db ({player_limiter_threshold_db})."
+		)
+
 	player = PlayerConfig(
 		audio=PlayerAudioConfig(
 			device=player_device,
@@ -416,6 +446,8 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		midi_device=player_midi_device,
 		virtual_midi_port=player_virtual_midi_port,
 		max_polyphony=player_max_polyphony,
+		limiter_threshold_db=player_limiter_threshold_db,
+		limiter_ceiling_db=player_limiter_ceiling_db,
 	)
 
 	detection = DetectionConfig(
@@ -477,9 +509,9 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		("similarity.weight_timbre_delta",  similarity.weight_timbre_delta),
 		("similarity.weight_timbre_onset",  similarity.weight_timbre_onset),
 	]:
-		if value < 0.0:
+		if value < 0.0 or value > 2.0:
 			raise ValueError(
-				f"{name} must be >= 0.0 (got {value}). "
+				f"{name} must be in [0.0, 2.0] (got {value}). "
 				"Set to 0.0 to disable a feature group entirely."
 			)
 

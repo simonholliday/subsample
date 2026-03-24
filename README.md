@@ -34,7 +34,7 @@ effectively lossless for 24-bit. Peak-normalising a quiet sample or pitch-shifti
 across two octaves introduces no measurable rounding error. This is the same internal
 format used by professional DAWs, and unusual for a Python audio tool.
 
-### Zero-conversion playback (player is WIP)
+### Zero-conversion playback
 
 When a sample enters the library, a background worker immediately produces a *base
 variant*: a float32, peak-normalised copy resampled to the output device's sample rate
@@ -147,8 +147,8 @@ isochronous transfers with no retransmit and are sensitive to any timing jitter.
 
 ### Playback (WIP)
 
-The player is functional but under active development. MIDI channel, note mapping, and
-target RMS are currently hard-coded constants that will move to config.
+The player is functional but under active development. MIDI channel and note mapping are
+currently hard-coded constants (GM drum layout, channel 10) that will move to config.
 
 - **MIDI-triggered polyphonic sample playback** — `player.enabled: true` opens a MIDI
   input device and plays the best-matching instrument sample for each note trigger via a
@@ -156,9 +156,37 @@ target RMS are currently hard-coded constants that will move to config.
   name substring match, auto-select, or interactive menu.
 - **Per-sample gain normalisation** — every sample carries `LevelResult` (peak and RMS
   on the normalised signal). At playback: `gain = target_rms / sample.rms × velocity²`,
-  clamped by `1.0 / sample.peak` to prevent clipping. Quiet samples recorded in a noisy
-  room and loud transients recorded close-up sit at the same perceived level without
-  modifying the stored audio.
+  clamped by `1.0 / sample.peak` to prevent single-voice clipping. RMS normalisation
+  ensures a quiet recording and a loud one play at comparable levels at the same velocity;
+  MIDI velocity still controls loudness in the usual way (softer hit = quieter note).
+- **Two-stage mix protection** — the output level is controlled at two layers that work
+  together. Set both in `config.yaml` to avoid clipping and distortion on the output:
+
+  **Stage 1 — `max_polyphony` (primary gain staging):** sets the per-voice RMS target to
+  `1.0 / max_polyphony`. With the default of 8, each voice is normalised to 0.125 RMS
+  (~-18 dBFS), leaving enough headroom that 8 simultaneous drum hits sum to approximately
+  full scale. Raise this value if you expect many simultaneous notes; lower it if you want
+  louder individual voices and rarely trigger more than 2–3 at once.
+
+  **Stage 2 — safety limiter (`limiter_threshold_db` / `limiter_ceiling_db`):** a
+  [tanh](https://en.wikipedia.org/wiki/Hyperbolic_functions) soft-clipper applied to the
+  mixed output buffer. Signals below the threshold (-1.5 dBFS by default) pass completely
+  untouched. Above the threshold, the signal is smoothly compressed toward the ceiling
+  (-0.1 dBFS by default), asymptotically approaching it — the output never exceeds the
+  ceiling, no matter how many voices overlap. This eliminates the harsh digital distortion
+  of a hard clip while preserving the character of the sound. The defaults are recommended
+  for all setups:
+
+  ```yaml
+  player:
+    max_polyphony: 8
+    limiter_threshold_db: -1.5   # transparent below -1.5 dBFS; only catches near-clip peaks
+    limiter_ceiling_db: -0.1     # output never exceeds this level
+  ```
+
+  If the player logs a clipping warning, raise `max_polyphony` first (reduces all voices
+  equally). Adjust `limiter_threshold_db` only if you need more or less aggressive
+  compression on peaks.
 - **One-shot / note-off handling** — each drum note carries a `one_shot` flag
   and a 10 ms cosine fade-out prevents clicks when `note_off` cuts a playing voice.
   Currently all drum notes are set to one-shot; the intended GM behaviour (hi-hats
@@ -237,8 +265,6 @@ target RMS are currently hard-coded constants that will move to config.
 - **Config-driven note mapping** — move MIDI channel, note range, and note→reference
   mapping from hard-coded constants to `config.yaml`; allows different pad layouts and
   instruments without code changes.
-- **Mix management** — per-voice gain staging to prevent clipping when many samples
-  overlap; configurable mixing strategy.
 - **Interactive classification** — live adjustment of classification thresholds; manual
   sample reassignment during a session.
 - **Independent modes** — recording, analysis, MIDI assignment, and playback can each
@@ -349,7 +375,16 @@ channel count. Detected segments are saved to the output directory.
 
 ## Configuration
 
-All settings live in `config.yaml`. The defaults are:
+All settings live in `config.yaml`. The defaults are a good starting point — most users
+only need to touch a handful:
+
+- **First run:** set `recorder.audio.device` (your microphone) and `output.directory`
+- **For MIDI playback:** set `player.enabled: true`, `player.midi_device` or `player.virtual_midi_port`, and `player.audio.device`
+- **If you hear clipping:** raise `player.max_polyphony`; the `limiter_threshold_db` and `limiter_ceiling_db` defaults protect against distortion automatically
+- **If recordings miss quiet sounds or trigger on noise:** tune `detection.snr_threshold_db`
+
+Everything else — chunk sizes, buffer lengths, transform settings, similarity weights — is
+optional and rarely needs changing.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -362,6 +397,8 @@ All settings live in `config.yaml`. The defaults are:
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
 | `player.max_polyphony` | `8` | Max simultaneous voices; per-voice gain = 1/max\_polyphony. Raise if clipping; lower for louder individual voices |
+| `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched |
+| `player.limiter_ceiling_db` | `-0.1` | Maximum output level (dBFS) the limiter allows; must exceed threshold |
 | `player.midi_device` | `none` | MIDI input device name (substring match); if unset, auto-select or prompt |
 | `player.audio.device` | `none` | Audio output device name for playback |
 | `player.audio.sample_rate` | auto | Output sample rate; defaults to recorder rate. Do not set higher than source. |
