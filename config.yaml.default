@@ -91,6 +91,11 @@ player:
   # value — never exceeds it.  Must be greater than limiter_threshold_db.
   # Range: limiter_threshold_db–0.0.
 
+  # midi_map: "./midi-map.yaml"
+  # Path to a MIDI routing map file.  Defines which MIDI notes trigger which
+  # samples.  See midi-map.yaml.default for the full format specification.
+  # If omitted, the built-in GM drum mapping is used.
+
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
   # Case-insensitive substring match — "Launch" matches "Launchpad MK3 MIDI 1".

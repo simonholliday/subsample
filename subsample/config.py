@@ -105,6 +105,11 @@ class PlayerConfig:
 	asymptotically approaching this value. Must be greater than
 	limiter_threshold_db. Range: limiter_threshold_db to 0.0."""
 
+	midi_map: typing.Optional[str] = None
+	"""Path to a MIDI routing map file (YAML). Defines which MIDI notes
+	trigger which samples. If omitted, the built-in GM drum mapping is
+	used. See midi-map.yaml.default for the format specification."""
+
 
 @dataclasses.dataclass(frozen=True)
 class DetectionConfig:
@@ -448,6 +453,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		max_polyphony=player_max_polyphony,
 		limiter_threshold_db=player_limiter_threshold_db,
 		limiter_ceiling_db=player_limiter_ceiling_db,
+		midi_map=player_raw.get("midi_map"),
 	)
 
 	detection = DetectionConfig(
