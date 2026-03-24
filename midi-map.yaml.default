@@ -1,0 +1,235 @@
+# ===================================================================
+# midi-map.yaml - Subsample MIDI routing map
+# ===================================================================
+#
+# This file maps MIDI input (channel + note) to sample playback.
+# Copy and customise it for your controller, reference library,
+# or performance setup.
+#
+# CONVENTIONS
+#   Channels:   1-16 (standard MIDI numbering; internally converted
+#               to mido's 0-indexed channels: channel 1 = mido 0,
+#               channel 10 = mido 9)
+#   Note names: C4 = MIDI 60 (Ableton / Logic / FL Studio standard)
+#               C-1 = 0, G9 = 127
+#               Sharps: C#4, D#4    Flats: Db4, Eb4
+#   Note specs: single (36 or C3), list ([36, 38]), range (C2..C4)
+#
+# PAN
+#   pan: [L, R]  (stereo; SMPTE channel order)
+#   Weights are normalised to constant-power gains: gain[i] = sqrt(w[i]/sum(w))
+#   So [50,50] = centre, [100,0] = hard left, [75,25] = left of centre.
+#   Omit pan entirely to default to centre ([50,50] for stereo).
+#
+#   Channel order by layout (SMPTE standard):
+#     2.0 Stereo:   L, R
+#     4.0 Quad:     L, R, Ls, Rs
+#     5.1 Surround: L, R, C, LFE, Ls, Rs
+#     7.1 Surround: L, R, C, LFE, Ls, Rs, Lrs, Rrs
+#
+#   MULTICHANNEL NOTE (TODO):
+#   Currently the output channel count is fixed at 2 (stereo) and the pan
+#   list must have exactly 2 values.  To support multichannel properly,
+#   the output device channel count needs to be determined BEFORE load_midi_map()
+#   is called in cli.py, so pan gain arrays can be sized correctly.  This
+#   requires either (a) opening PyAudio early to query maxOutputChannels, or
+#   (b) storing raw weights in the map and computing gains in MidiPlayer.run()
+#   once the device is known.  See player.py MidiPlayer.run() and cli.py
+#   _start_player() for the relevant code paths.
+#
+# ===================================================================
+
+
+assignments:
+
+
+  # =================================================================
+  # GM DRUMS - Channel 10
+  # =================================================================
+  #
+  # These assignments replicate the built-in _GM_DRUM_NOTE_MAP from
+  # player.py.  Each maps one or more GM drum notes to a reference
+  # sound class via the similarity engine.
+  #
+  # TARGET TYPE: reference(name)
+  #
+  #   Resolution:
+  #     At trigger time, calls:
+  #       similarity_matrix.get_match(name, rank=N)
+  #     where N is this note's position in the notes list (0-indexed).
+  #     Returns a sample_id (int) or None.
+  #
+  #   Rank distribution (multi-note assignments):
+  #     When notes is a list, each note gets the next similarity rank:
+  #       notes: [36, 35]  ->  note 36 = rank 0 (best match)
+  #                             note 35 = rank 1 (second-best)
+  #     If rank N doesn't exist (fewer recorded samples than notes),
+  #     fall back to rank 0.  All notes in the group play SOMETHING
+  #     as long as at least one matching sample exists.
+  #
+  #   Current code path (player.py _handle_message, ~line 585):
+  #     ref_name, rank, one_shot = self._note_map[msg.note]
+  #     sample_id = self._similarity_matrix.get_match(ref_name, rank)
+  #     if sample_id is None and rank > 0:
+  #         sample_id = self._similarity_matrix.get_match(ref_name, 0)
+  #
+  # RE-EVALUATION TRIGGERS:
+  #
+  #   On new sample arrives:
+  #     - SimilarityMatrix.add() is called by cli.py _make_on_complete()
+  #     - The matrix scores the new sample against all references and
+  #       inserts it into the ranked lists at the correct position
+  #     - NO action needed by the map: the next get_match() call at
+  #       trigger time automatically sees the updated ranking
+  #     - The new sample may become rank 0 for a reference, displacing
+  #       the previous best match to rank 1
+  #
+  #   On sample evicted:
+  #     - SimilarityMatrix.remove(sample_id) is called by cli.py
+  #       eviction callback
+  #     - The sample_id is removed from all ranked lists
+  #     - NO action needed by the map: the next get_match() call
+  #       returns the new best match at each rank
+  #     - If the evicted sample was the only match, get_match returns
+  #       None and the note plays silence
+  #
+  #   On reference library loaded:
+  #     - Happens once at startup before any instruments load
+  #     - Assignments whose reference name doesn't exist in the
+  #       library should be validated at map-load time: log a WARNING
+  #       ("assignment 'Kicks' references 'BD0025' which is not in
+  #       the reference library") and skip the assignment
+  #     - reference_set = {name.upper() for name in reference_names}
+  #       used to filter, same as current __init__ logic
+  #
+  # IMPLEMENTATION NOTES:
+  #   - reference() is LAZY: resolved at trigger time, not at load
+  #   - The map itself stores (channel, note, ref_name, rank, one_shot)
+  #     per note - identical to the current _note_map dict
+  #   - Build a dict: (channel, note) -> AssignmentResult containing
+  #     the resolved target function, one_shot flag, etc.
+  # =================================================================
+
+
+  # --- Kicks ---
+  # GM notes 36 (Bass Drum 1) and 35 (Bass Drum 2).
+  # Two notes, one reference: note 36 gets the most kick-like sample
+  # in the library (rank 0), note 35 gets the second-most (rank 1).
+  # Both are one-shot: note_off is ignored, the sample plays out.
+
+  - name: Kicks
+    channel: 10
+    notes: [36, 35]
+    target: reference(BD0025)
+    one_shot: true
+
+
+  # --- Snares ---
+  # GM notes 38 (Acoustic Snare) and 40 (Electric Snare).
+  # Same pattern as kicks: two ranked variations of one reference.
+
+  - name: Snares
+    channel: 10
+    notes: [38, 40]
+    target: reference(SD5075)
+    one_shot: true
+
+
+  # --- Clap ---
+  # GM note 39 (Hand Clap).  Single note, single reference (rank 0).
+
+  - name: Clap
+    channel: 10
+    notes: 39
+    target: reference(CP)
+    one_shot: true
+
+
+  # --- Closed hi-hat ---
+  # GM note 42 (Closed Hi-Hat).  Single note, single reference.
+  # one_shot: true for now.  In a future phase, hi-hats should
+  # interact via mute_group (closed hat silences open hat).
+
+  - name: Closed hi-hat
+    channel: 10
+    notes: 42
+    target: reference(CH)
+    one_shot: true
+
+
+  # --- Open hi-hat ---
+  # GM note 46 (Open Hi-Hat).  Single note, single reference.
+  # one_shot: true for now.  See mute_group note above.
+
+  - name: Open hi-hat
+    channel: 10
+    notes: 46
+    target: reference(OH25)
+    one_shot: true
+
+
+  # --- Crashes and splash ---
+  # GM notes 49 (Crash 1), 57 (Crash 2), 55 (Splash).
+  # Three notes, one reference: ranked 0, 1, 2.  If only one
+  # cymbal-like sample exists, all three play the same one.
+
+  - name: Crashes
+    channel: 10
+    notes: [49, 57, 55]
+    target: reference(CY5050)
+    one_shot: true
+
+
+  # --- Cowbell ---
+  # GM note 56 (Cowbell).  Single note, single reference.
+
+  - name: Cowbell
+    channel: 10
+    notes: 56
+    target: reference(CB)
+    one_shot: true
+
+
+  # =================================================================
+  # PITCHED KEYBOARD - Channel 1  (FUTURE PHASE - not yet implemented)
+  # =================================================================
+  #
+  # Uncomment when pitched sample playback is implemented.
+  #
+  # TARGET TYPE: pitched(selector)
+  #
+  #   Resolution:
+  #     At trigger time, filters InstrumentLibrary for samples where
+  #     has_stable_pitch(record.spectral, record.pitch, record.duration)
+  #     returns True.  Then selects by position:
+  #       pitched(newest) -> last in insertion order
+  #       pitched(oldest) -> first in insertion order
+  #       pitched(N)      -> Nth (1-indexed)
+  #
+  #   Pitch-shifting (implicit):
+  #     Because notes is a range and target resolves to a single sample,
+  #     pitch-shifting is automatic.  Each note in C2..C6 triggers the
+  #     same sample at the corresponding MIDI pitch.  The transform
+  #     pipeline (TransformManager.get_pitched) handles this:
+  #       1. Check TransformCache for a pre-computed PitchShift variant
+  #       2. If miss: enqueue for background computation, return None
+  #       3. Player falls back to base variant or original until ready
+  #
+  #   RE-EVALUATION TRIGGERS:
+  #     On new sample arrives:
+  #       - If new sample passes has_stable_pitch(), it becomes a
+  #         candidate.  pitched(newest) immediately points to it.
+  #       - Pitch variants are auto-enqueued by TransformManager.
+  #         on_sample_added() (if transform.auto_pitch is true).
+  #     On sample evicted:
+  #       - If the evicted sample was the one this target resolved to,
+  #         the next trigger re-evaluates and picks the new newest/
+  #         oldest/Nth pitched sample.
+  #       - TransformManager.on_parent_evicted() cascades variant
+  #         eviction automatically.
+  #
+  # - name: Keyboard
+  #   channel: 1
+  #   notes: C2..C6
+  #   target: pitched(newest)
+  #   one_shot: false

@@ -16,16 +16,19 @@ target is 1.0 / max_polyphony, so N voices at max velocity sum to
 approximately full scale. Clipping is detected in the callback and logged at
 WARNING (throttled) with guidance to raise max_polyphony.
 
-Current implementation: MIDI channel, note mapping, and output channel count
-are hard-coded constants at the top of this module and will move to config in
-a future iteration.
+MIDI routing is loaded from a yaml file at startup via load_midi_map().
+The map defines which MIDI notes (on which channels) trigger which samples.
+See midi-map.yaml.default for the format specification.
 """
 
 import dataclasses
 import logging
+import pathlib
 import threading
 import time
 import typing
+
+import yaml
 
 import mido
 import numpy
@@ -40,64 +43,164 @@ import subsample.transform
 
 _log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Playback constants — known deferred items awaiting config migration.
-# Tracked in README-AGENTS.md "Extending audio playback" and README.md Planned.
-# ---------------------------------------------------------------------------
-
-# MIDI channel to listen on. Mido uses 0-indexed channels; the BeatStep Pro
-# sends on channel 16 (user-facing), which mido reports as channel=15.
-_MIDI_CHANNEL = 9          # channel 10 in user-facing terms (mido: 0-indexed)
-
-# WIP/exploratory: MIDI channel for pitch-variant testing (channel 1, mido 0-indexed).
-# Notes on this channel are mapped directly to cached pitch variants from the transform
-# pipeline — see MidiPlayer._build_variant_note_map() and _handle_message().
-# This bypasses similarity matching: instrument samples are iterated in insertion order;
-# each sample's variants claim their MIDI notes, with later samples overwriting earlier.
-_VARIANT_CHANNEL = 0
-
-# General MIDI drum note → reference sample mapping.
-# When a GM note triggers on the configured MIDI channel, Subsample looks up the
-# reference name here and plays the best-matching instrument sample via the
-# similarity matrix. Multiple GM notes can map to the same reference (e.g. both
-# kick_1 and kick_2 route to "BD0025" so either triggers the best kick sample).
-# Hard-coded for the current reference library; will move to config in a future
-# iteration alongside the other hard-coded playback constants.
-# Each entry is (reference_name, rank, one_shot) where:
-#   rank      — selects among instrument samples ordered by similarity to the
-#               reference. rank=0 is the closest match, rank=1 the second-closest.
-#               Falls back to rank=0 automatically if rank N doesn't exist.
-#   one_shot  — when True, note_off events are ignored and the sample plays to
-#               completion (natural decay).  When False, note_off triggers a
-#               cosine fade-out via the releasing flag.
-#
-# Percussion behaviour: kicks, snares, and cymbals are one-shot — they should
-# ring out naturally regardless of how long the key is held.  Hi-hats are NOT
-# one-shot because the closed hi-hat pedal (note 42) conventionally sends
-# note_off for the open hi-hat (note 46) to silence it — standard GM behaviour.
-_GM_DRUM_NOTE_MAP: dict[int, tuple[str, int, bool]] = {
-	36: ("BD0025", 0, True),    # kick_1  → most similar to BD0025
-	35: ("BD0025", 1, True),    # kick_2  → second-most similar (falls back to 0 if absent)
-	38: ("SD5075", 0, True),    # snare_1 → most similar to SD5075
-	40: ("SD5075", 1, True),    # snare_2 → second-most similar
-	39: ("CP",     0, True),    # hand_clap
-	42: ("CH",     0, True),    # hi_hat_closed
-	46: ("OH25",   0, True),    # hi_hat_open
-	49: ("CY5050", 0, True),    # crash_1
-	57: ("CY5050", 1, True),    # crash_2 - second-most similar to CY5050
-	55: ("CY5050", 2, True),    # splash_cymbal
-	56: ("CB",     0, True),    # cowbell
-}
-
-# Output always stereo with centre pan (equal L and R).
-# TODO: add per-note pan mapping
-_OUTPUT_CHANNELS = 2        # stereo; mono signal duplicated to both channels
-
 # Cosine fade-out duration applied when a note_off is received.
 # Long enough to prevent a click on hard cutoff; short enough to be imperceptible.
 # Stored as seconds; converted to frames in MidiPlayer.__init__() using the
 # actual output sample rate so the duration is correct regardless of device.
 _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
+
+# Type alias for the compiled note map:
+# (mido_channel, midi_note) -> (ref_name, rank, one_shot, pan_gains)
+# pan_gains: float32 array of constant-power channel gains, shape (output_channels,).
+_NoteMap = dict[tuple[int, int], tuple[str, int, bool, numpy.ndarray]]
+
+
+def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_name: str) -> numpy.ndarray:
+
+	"""Parse pan weights from config and normalise to constant-power channel gains.
+
+	Pan weights are expressed as a list of non-negative values, one per output channel.
+	They are normalised so the summed power across all channels is 1.0:
+
+	    gain[i] = sqrt(weight[i] / sum(weights))
+
+	This gives constant-power panning: a centre pan [50, 50] produces the same
+	perceived loudness as a hard-left [100, 0], just distributed differently.
+
+	Args:
+		weights_raw:      Raw YAML value (list of numbers, or None for default).
+		output_channels:  Number of output channels (pan list length must match).
+		assignment_name:  Name for error messages.
+
+	Returns:
+		float32 numpy array of shape (output_channels,) with constant-power gains.
+
+	Raises:
+		ValueError: If the weights list has the wrong length or any negative value.
+	"""
+
+	if weights_raw is None:
+		# Default: equal weights across all channels.
+		weight_arr = numpy.ones(output_channels, dtype=numpy.float32)
+	else:
+		weights = list(weights_raw)
+		if len(weights) != output_channels:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan has {len(weights)} value(s) "
+				f"but output has {output_channels} channel(s). "
+				f"Stereo example: [50, 50]  (L, R weights)"
+			)
+		weight_arr = numpy.array(weights, dtype=numpy.float32)
+		if numpy.any(weight_arr < 0):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan weights must be >= 0"
+			)
+
+	total = float(numpy.sum(weight_arr))
+	if total == 0.0:
+		# All-zero pan is unusual but not an error — produces silence.
+		return numpy.zeros(output_channels, dtype=numpy.float32)
+
+	# Constant-power normalisation: gain[i] = sqrt(weight[i] / total)
+	return numpy.sqrt(weight_arr / total).astype(numpy.float32)
+
+
+def load_midi_map (
+	path: pathlib.Path,
+	reference_names: list[str],
+	output_channels: int = 2,
+) -> _NoteMap:
+
+	"""Load a MIDI routing map from a YAML file.
+
+	Parses the assignments list from the file and returns a lookup dict keyed
+	by (mido_channel, midi_note) -> (reference_name, rank, one_shot, pan_gains).
+
+	For reference() targets with a note list, ranks are distributed by position:
+	the first note in the list receives rank 0 (best match), the second rank 1, etc.
+
+	Pan weights are normalised to constant-power gains: gain[i] = sqrt(w[i]/sum(w)).
+	This maintains equal perceived loudness regardless of pan position.
+	Channel order follows SMPTE: 2.0 = L R; 5.1 = L R C LFE Ls Rs; 7.1 adds Lrs Rrs.
+
+	Assignments whose reference name is not in reference_names are skipped with
+	a WARNING — this prevents silent failures when using a map built for a
+	different reference library.
+
+	Args:
+		path:             Path to the MIDI map YAML file.
+		reference_names:  Names from the loaded reference library (case-insensitive).
+		output_channels:  Number of output channels (default 2 = stereo).
+
+	Returns:
+		Dict mapping (mido_channel, midi_note) -> (ref_name, rank, one_shot, pan_gains).
+		Empty dict if the file is empty or has no valid assignments.
+
+	Raises:
+		FileNotFoundError: If the file does not exist.
+		ValueError:        If the YAML is malformed or a required field is missing.
+	"""
+
+	if not path.exists():
+		raise FileNotFoundError(f"MIDI map not found: {path}")
+
+	with path.open(encoding="utf-8") as fh:
+		raw = yaml.safe_load(fh)
+
+	if raw is None or "assignments" not in raw:
+		_log.warning("MIDI map %s has no assignments — no notes will be mapped", path)
+		return {}
+
+	reference_set = {name.upper() for name in reference_names}
+	note_map: _NoteMap = {}
+
+	for assignment in raw["assignments"]:
+		name = assignment.get("name", "<unnamed>")
+
+		# Channel: user-facing 1-16 → mido 0-indexed
+		channel_raw = assignment.get("channel")
+		if channel_raw is None:
+			raise ValueError(f"MIDI map assignment {name!r}: missing 'channel'")
+		mido_channel = int(channel_raw) - 1
+
+		# Notes: single int or list of ints (range syntax is a future phase)
+		notes_raw = assignment.get("notes")
+		if notes_raw is None:
+			raise ValueError(f"MIDI map assignment {name!r}: missing 'notes'")
+		notes: list[int] = [notes_raw] if isinstance(notes_raw, int) else list(notes_raw)
+
+		# Target: currently only reference(NAME) is supported
+		target_raw = assignment.get("target", "")
+		if not isinstance(target_raw, str) or not target_raw.startswith("reference("):
+			_log.debug("MIDI map assignment %r: skipping unsupported target %r (not yet implemented)", name, target_raw)
+			continue
+
+		# Extract reference name from reference(NAME) or reference(NAME, ...)
+		ref_name = target_raw[len("reference("):].split(")")[0].split(",")[0].strip()
+
+		if ref_name.upper() not in reference_set:
+			_log.warning(
+				"MIDI map assignment %r: reference %r not in reference library — skipping",
+				name, ref_name,
+			)
+			continue
+
+		one_shot: bool = bool(assignment.get("one_shot", True))
+
+		pan_gains = _parse_pan_gains(assignment.get("pan"), output_channels, name)
+
+		# Distribute ranks by note-list position: first note = rank 0, second = rank 1, …
+		for rank, note in enumerate(notes):
+			note_map[(mido_channel, int(note))] = (ref_name, rank, one_shot, pan_gains)
+
+	_log.info(
+		"MIDI map loaded from %s: %d note(s) across %d assignment(s)",
+		path,
+		len(note_map),
+		len(raw.get("assignments", [])),
+	)
+
+	return note_map
 
 
 @dataclasses.dataclass
@@ -243,7 +346,7 @@ class MidiPlayer:
 		shutdown_event: threading.Event,
 		instrument_library: subsample.library.InstrumentLibrary,
 		similarity_matrix: subsample.similarity.SimilarityMatrix,
-		reference_names: list[str],
+		midi_map: _NoteMap,
 		sample_rate: int,
 		bit_depth: int,
 		output_device_name: typing.Optional[str] = None,
@@ -307,60 +410,24 @@ class MidiPlayer:
 		self._voices:      list[_Voice]  = []
 		self._voices_lock: threading.Lock = threading.Lock()
 
-		# Build note → (reference_name, rank, one_shot) map from the GM drum mapping.
-		# Reference names not present in the library are silently omitted so
-		# that a sparse reference directory doesn't raise at trigger time.
-		reference_set = set(name.upper() for name in reference_names)
-		self._note_map: dict[int, tuple[str, int, bool]] = {
-			note: (ref, rank, one_shot)
-			for note, (ref, rank, one_shot) in _GM_DRUM_NOTE_MAP.items()
-			if ref.upper() in reference_set
-		}
+		# Number of output channels.  Determines the shape of the mix buffer and
+		# must match the pa.open(channels=...) call in run().  Fixed at 2
+		# (stereo) for this phase; multichannel support raises this in future.
+		self._output_channels: int = 2
+
+		# Note routing map: (mido_channel, midi_note) -> (ref_name, rank, one_shot, pan_gains).
+		# Loaded from the MIDI map YAML file by the caller (cli.py) via load_midi_map().
+		self._note_map: _NoteMap = midi_map
 
 		_log.info(
-			"MIDI note map (ch %d / mido ch %d):\n  %s",
-			_MIDI_CHANNEL + 1, _MIDI_CHANNEL,
+			"MIDI note map: %d note(s) loaded\n  %s",
+			len(self._note_map),
 			"\n  ".join(
-				f"note {note} → {ref} (rank {rank}{'  one-shot' if one_shot else ''})"
-				for note, (ref, rank, one_shot) in sorted(self._note_map.items())
+				f"ch{ch+1} note {note} → {ref} (rank {rank}{'  one-shot' if one_shot else ''})"
+				f"  pan=[{', '.join(f'{g:.2f}' for g in pan_gains)}]"
+				for (ch, note), (ref, rank, one_shot, pan_gains) in sorted(self._note_map.items())
 			),
 		)
-
-		# WIP: variant channel active when transform pipeline is wired in.
-		if transform_manager is not None:
-			_log.info(
-				"WIP variant channel: ch %d (mido ch %d) → pitch variants from transform cache "
-				"(rebuilt lazily per trigger from instrument library insertion order)",
-				_VARIANT_CHANNEL + 1, _VARIANT_CHANNEL,
-			)
-
-	def _build_variant_note_map (self) -> dict[int, int]:
-
-		"""Build a midi_note → sample_id map from all cached pitch variants.
-
-		WIP/exploratory: used by _handle_message() for _VARIANT_CHANNEL triggers.
-
-		Iterates instrument samples in insertion order (oldest first). For each sample,
-		all cached PitchShift variants are extracted from the transform pipeline.
-		Each variant's target MIDI note is mapped to the sample's ID. Later samples
-		overwrite earlier ones, so the most recently added sample wins for any
-		given note.
-
-		Returns an empty dict if no transform pipeline is configured.
-		"""
-
-		if self._transform_manager is None:
-			return {}
-
-		note_map: dict[int, int] = {}
-
-		for record in self._instrument_library.samples():
-			for key in self._transform_manager.list_variants(record.sample_id):
-				for step in key.spec.steps:
-					if isinstance(step, subsample.transform.PitchShift):
-						note_map[step.target_midi_note] = record.sample_id
-
-		return note_map
 
 	def run (self) -> None:
 
@@ -389,7 +456,7 @@ class MidiPlayer:
 		# high-priority thread. The MIDI loop runs independently and adds voices.
 		stream = pa.open(
 			format=subsample.audio.get_pyaudio_format(self._output_bit_depth),
-			channels=_OUTPUT_CHANNELS,
+			channels=self._output_channels,
 			rate=self._output_sample_rate,
 			output=True,
 			output_device_index=output_device_index,
@@ -448,7 +515,7 @@ class MidiPlayer:
 		This prevents an audible click on hard cutoff for tonal samples.
 		"""
 
-		output = numpy.zeros((frame_count, _OUTPUT_CHANNELS), dtype=numpy.float32)
+		output = numpy.zeros((frame_count, self._output_channels), dtype=numpy.float32)
 
 		with self._voices_lock:
 			active: list[_Voice] = []
@@ -537,57 +604,17 @@ class MidiPlayer:
 							voice.releasing = True
 			return
 
-		# WIP/exploratory: channel 1 (mido ch 0) plays pitch variants directly.
-		# Bypasses similarity matching — maps notes to cached PitchShift variants.
-		# See _build_variant_note_map() for the mapping strategy.
-		if msg.type == "note_on" and msg.channel == _VARIANT_CHANNEL:
-			if self._transform_manager is None:
-				_log.debug("MIDI ch%d note %d: variant channel ignored (no transform pipeline)", _VARIANT_CHANNEL, msg.note)
-				return
-
-			variant_note_map = self._build_variant_note_map()
-			sample_id = variant_note_map.get(msg.note)
-
-			if sample_id is None:
-				_log.debug("MIDI ch%d note %d: no variant mapped (variants still computing?)", _VARIANT_CHANNEL, msg.note)
-				return
-
-			record = self._instrument_library.get(sample_id)
-			if record is None:
-				_log.debug("MIDI ch%d note %d: sample %d not in library", _VARIANT_CHANNEL, msg.note, sample_id)
-				return
-
-			variant = self._transform_manager.get_pitched(sample_id, msg.note)
-
-			if variant is None:
-				_log.debug("MIDI ch%d note %d → sample %d %r: variant cache miss", _VARIANT_CHANNEL, msg.note, sample_id, record.name)
-				return
-
-			rendered = self._render_float(variant.audio, variant.level, msg.velocity)
-
-			# Inherit one_shot from the GM drum map if this note is mapped there.
-			variant_one_shot = _GM_DRUM_NOTE_MAP.get(msg.note, ("", 0, False))[2]
-
-			with self._voices_lock:
-				self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=variant_one_shot))
-
-			_log.info(
-				"WIP ch%d note %d (vel %d) → sample %d %r (pitched variant, %.2fs)",
-				_VARIANT_CHANNEL, msg.note, msg.velocity, sample_id, record.name, variant.duration,
-			)
-			return
-
-		# Only act on note_on events on the configured channel; log anything else.
-		if msg.type != "note_on" or msg.channel != _MIDI_CHANNEL:
+		# Only act on note_on events; anything else is logged at DEBUG and ignored.
+		if msg.type != "note_on":
 			_log.debug("MIDI (ignored): %s", msg)
 			return
 
-		mapping = self._note_map.get(msg.note)
+		mapping = self._note_map.get((msg.channel, msg.note))
 		if mapping is None:
-			_log.debug("MIDI note %d on mido ch%d: no reference mapped", msg.note, _MIDI_CHANNEL)
+			_log.debug("MIDI ch%d note %d: no mapping", msg.channel + 1, msg.note)
 			return
 
-		ref_name, rank, one_shot = mapping
+		ref_name, rank, one_shot, pan_gains = mapping
 
 		# Look up the Nth-closest instrument sample for this reference.
 		# If rank N doesn't exist yet (e.g. only one hit recorded), fall back
@@ -609,7 +636,7 @@ class MidiPlayer:
 			variant = self._transform_manager.get_pitched(sample_id, msg.note)
 
 			if variant is not None:
-				rendered = self._render_float(variant.audio, variant.level, msg.velocity)
+				rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 				_log.info(
@@ -623,7 +650,7 @@ class MidiPlayer:
 			base = self._transform_manager.get_base(sample_id)
 
 			if base is not None:
-				rendered = self._render_float(base.audio, base.level, msg.velocity)
+				rendered = self._render_float(base.audio, base.level, msg.velocity, pan_gains)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 				_log.info(
@@ -635,7 +662,7 @@ class MidiPlayer:
 		# 3. Last resort: convert from int PCM on this trigger.
 		# Used only on the first trigger before the base variant is ready,
 		# or when no transform manager is configured.
-		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity)
+		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity, pan_gains)
 		if original is None:
 			return
 
@@ -651,13 +678,14 @@ class MidiPlayer:
 		self,
 		record: subsample.library.SampleRecord,
 		velocity: int,
+		pan_gains: numpy.ndarray,
 	) -> typing.Optional[numpy.ndarray]:
 
-		"""Convert a SampleRecord to a gain-adjusted stereo float32 array.
+		"""Convert a SampleRecord to a gain-adjusted, panned output array.
 
-		Converts int PCM → float32 preserving channel count → applies gain →
-		returns stereo.  Stereo recordings play back in stereo; mono recordings
-		are centre-panned.  Returns None if the record has no audio.
+		Converts int PCM → float32 preserving channel count → applies gain and
+		pan → returns output-channel-count float32 array.  Returns None if the
+		record has no audio.
 
 		For transform variants (already float32 multi-channel), use
 		_render_float() directly to skip the int→float conversion.
@@ -670,27 +698,35 @@ class MidiPlayer:
 		# recordings play back in stereo rather than being mixed to mono.
 		float_audio = subsample.transform._pcm_to_float32(record.audio, self._bit_depth)
 
-		return self._render_float(float_audio, record.level, velocity)
+		return self._render_float(float_audio, record.level, velocity, pan_gains)
 
 	def _render_float (
 		self,
 		audio: numpy.ndarray,
 		level: subsample.analysis.LevelResult,
 		velocity: int,
+		pan_gains: numpy.ndarray,
 	) -> numpy.ndarray:
 
-		"""Apply gain normalisation and pan to stereo float32.
+		"""Apply gain normalisation and pan to an output-channel-count float32 array.
 
 		Shared by both the original _render() path (mono from int PCM) and
 		the transform variant path (float32 multi-channel from TransformResult).
 
+		The input audio is first mixed to mono (all source channel counts are
+		supported), then expanded to the output channel count using the
+		constant-power pan_gains vector.
+
 		Args:
-			audio:    float32, shape (n_frames, channels).  Mono or stereo.
-			level:    LevelResult for this audio (peak + rms), used for gain calc.
-			velocity: MIDI velocity (0–127) from the triggering note_on message.
+			audio:     float32, shape (n_frames, in_channels).  Any channel count.
+			level:     LevelResult for this audio (peak + rms), used for gain calc.
+			velocity:  MIDI velocity (0–127) from the triggering note_on message.
+			pan_gains: float32 array, shape (output_channels,).  Pre-computed
+			           constant-power gains, one per output channel.  See
+			           _parse_pan_gains() in load_midi_map().
 
 		Returns:
-			Stereo float32, shape (n_frames, 2), values in [-1.0, 1.0].
+			float32 array, shape (n_frames, output_channels), values in [-1.0, 1.0].
 		"""
 
 		# --- Gain calculation ---
@@ -719,16 +755,16 @@ class MidiPlayer:
 
 		gained = audio * final_gain
 
-		# Pan to stereo.  Multi-channel originals are mixed to mono first;
-		# mono originals are duplicated to both channels.
-		# TODO: add per-note pan mapping
-		if gained.shape[1] == 2:
-			stereo = gained
-		elif gained.shape[1] == 1:
-			stereo = numpy.column_stack((gained[:, 0], gained[:, 0]))
+		# Mix input to mono.  All source formats (mono, stereo, multichannel)
+		# are reduced to a single channel before panning.  This is the correct
+		# approach: we pan the *sound*, not individual source channels.
+		if gained.shape[1] == 1:
+			mono = gained[:, 0]
 		else:
-			# More than 2 channels: mix down to mono then centre pan.
-			mono_mix = numpy.mean(gained, axis=1, dtype=numpy.float32)
-			stereo   = numpy.column_stack((mono_mix, mono_mix))
+			mono = numpy.mean(gained, axis=1, dtype=numpy.float32)
 
-		return stereo
+		# Expand mono to the output channel layout using constant-power pan gains.
+		# pan_gains shape: (output_channels,)
+		# mono shape:      (n_frames,)
+		# result shape:    (n_frames, output_channels)
+		return (mono[:, numpy.newaxis] * pan_gains[numpy.newaxis, :]).astype(numpy.float32)

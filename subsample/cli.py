@@ -350,6 +350,17 @@ def _start_player (
 		                    playback when provided.
 	"""
 
+	# Load the MIDI routing map from config or fall back to the shipped default.
+	_midi_map_path = (
+		pathlib.Path(cfg.player.midi_map) if cfg.player.midi_map is not None
+		else pathlib.Path(__file__).parent.parent / "midi-map.yaml.default"
+	)
+	try:
+		midi_map = subsample.player.load_midi_map(_midi_map_path, reference_library.names())
+	except (FileNotFoundError, ValueError) as exc:
+		print(f"Error loading MIDI map: {exc}", file=sys.stderr)
+		return
+
 	# Virtual port mode: bypass hardware device selection entirely.
 	# MidiPlayer.run() will open the named virtual port with virtual=True.
 	if cfg.player.virtual_midi_port is not None:
@@ -359,7 +370,7 @@ def _start_player (
 			shutdown_event,
 			instrument_library=instrument_library,
 			similarity_matrix=similarity_matrix,
-			reference_names=reference_library.names(),
+			midi_map=midi_map,
 			sample_rate=cfg.recorder.audio.sample_rate,
 			bit_depth=cfg.recorder.audio.bit_depth,
 			output_device_name=cfg.player.audio.device,
@@ -396,7 +407,7 @@ def _start_player (
 		shutdown_event,
 		instrument_library=instrument_library,
 		similarity_matrix=similarity_matrix,
-		reference_names=reference_library.names(),
+		midi_map=midi_map,
 		sample_rate=cfg.recorder.audio.sample_rate,
 		bit_depth=cfg.recorder.audio.bit_depth,
 		output_device_name=cfg.player.audio.device,
@@ -404,6 +415,8 @@ def _start_player (
 		output_sample_rate=cfg.player.audio.sample_rate,
 		transform_manager=transform_manager,
 		max_polyphony=cfg.player.max_polyphony,
+		limiter_threshold_db=cfg.player.limiter_threshold_db,
+		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 	)
 	try:
 		player.run()

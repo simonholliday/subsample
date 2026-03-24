@@ -1,5 +1,6 @@
 """Tests for subsample.player — MIDI device selection and MidiPlayer lifecycle."""
 
+import pathlib
 import threading
 import unittest.mock
 
@@ -120,7 +121,7 @@ class TestMidiPlayer:
 			shutdown_event,
 			instrument_library=instrument_library,
 			similarity_matrix=similarity_matrix,
-			reference_names=["KICK", "SNARE"],
+			midi_map={},
 			sample_rate=44100,
 			bit_depth=16,
 		)
@@ -291,7 +292,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices              = [voice]
 		player._voices_lock         = threading.Lock()
-		player._OUTPUT_CHANNELS     = 2
+		player._output_channels     = 2
 		player._output_bit_depth    = 16
 		player._release_fade_frames = 441  # 10 ms at 44100 Hz
 		player._last_clip_warn      = 0.0
@@ -319,6 +320,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices              = [voice]
 		player._voices_lock         = threading.Lock()
+		player._output_channels     = 2
 		player._output_bit_depth    = 16
 		player._last_clip_warn      = 0.0
 		player._max_polyphony       = 8
@@ -410,7 +412,7 @@ class TestMaxPolyphony:
 			threading.Event(),
 			instrument_library=instrument_library,
 			similarity_matrix=similarity_matrix,
-			reference_names=[],
+			midi_map={},
 			sample_rate=44100,
 			bit_depth=16,
 			max_polyphony=max_polyphony,
@@ -441,6 +443,7 @@ class TestMaxPolyphony:
 		"""Return a minimal MagicMock wired for _audio_callback testing."""
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices_lock         = threading.Lock()
+		player._output_channels     = 2
 		player._output_bit_depth    = 16
 		player._release_fade_frames = 441
 		player._last_clip_warn      = 0.0
@@ -565,7 +568,7 @@ class TestLimiter:
 			threading.Event(),
 			instrument_library=instrument_library,
 			similarity_matrix=similarity_matrix,
-			reference_names=[],
+			midi_map={},
 			sample_rate=44100,
 			bit_depth=16,
 			limiter_threshold_db=limiter_threshold_db,
@@ -653,3 +656,212 @@ class TestLimiter:
 		neg_result = self._run_callback_with_audio(player, neg_audio)
 
 		numpy.testing.assert_allclose(numpy.abs(pos_result), numpy.abs(neg_result), atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# load_midi_map
+# ---------------------------------------------------------------------------
+
+class TestLoadMidiMap:
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_single_note_reference (self, tmp_path: pathlib.Path) -> None:
+		"""Single-note assignment: one note, rank 0."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+    one_shot: true
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		assert (9, 36) in note_map
+		ref, rank, one_shot, pan_gains = note_map[(9, 36)]
+		assert ref == "BD0025"
+		assert rank == 0
+		assert one_shot is True
+
+	def test_multi_note_rank_distribution (self, tmp_path: pathlib.Path) -> None:
+		"""Note list distributes ranks: first note = rank 0, second = rank 1."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kicks
+    channel: 10
+    notes: [36, 35]
+    target: reference(BD0025)
+    one_shot: true
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		assert note_map[(9, 36)][1] == 0   # rank 0
+		assert note_map[(9, 35)][1] == 1   # rank 1
+
+	def test_channel_conversion (self, tmp_path: pathlib.Path) -> None:
+		"""User-facing channel 10 converts to mido channel 9."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		assert (9, 36) in note_map
+		assert (10, 36) not in note_map
+
+	def test_one_shot_defaults_true (self, tmp_path: pathlib.Path) -> None:
+		"""one_shot defaults to True when omitted."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		_, _, one_shot, _ = note_map[(9, 36)]
+		assert one_shot is True
+
+	def test_unknown_reference_skipped (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""Assignment whose reference is not in library is skipped with WARNING."""
+		import logging
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, [])
+
+		assert len(note_map) == 0
+		assert any("BD0025" in r.message for r in caplog.records)
+
+	def test_case_insensitive_reference (self, tmp_path: pathlib.Path) -> None:
+		"""Reference lookup is case-insensitive."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(bd0025)
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		assert (9, 36) in note_map
+
+	def test_missing_file_raises (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(FileNotFoundError):
+			subsample.player.load_midi_map(tmp_path / "no-such-file.yaml", [])
+
+	def test_empty_file_returns_empty_map (self, tmp_path: pathlib.Path) -> None:
+		path = self._write_map(tmp_path, "")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		assert note_map == {}
+
+	def test_multiple_assignments_different_channels (self, tmp_path: pathlib.Path) -> None:
+		"""Assignments on different channels coexist in the map."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick ch10
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+  - name: Snare ch10
+    channel: 10
+    notes: 38
+    target: reference(SD5075)
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025", "SD5075"])
+
+		assert (9, 36) in note_map
+		assert (9, 38) in note_map
+		assert note_map[(9, 36)][0] == "BD0025"
+		assert note_map[(9, 38)][0] == "SD5075"
+
+	def test_default_map_parses (self) -> None:
+		"""The shipped midi-map.yaml.default parses without error."""
+		default_path = pathlib.Path(__file__).parent.parent / "midi-map.yaml.default"
+		refs = ["BD0025", "SD5075", "CP", "CH", "OH25", "CY5050", "CB"]
+		note_map = subsample.player.load_midi_map(default_path, refs)
+
+		assert len(note_map) > 0
+		# Kick on note 36 (mido ch 9)
+		assert (9, 36) in note_map
+		assert note_map[(9, 36)][0] == "BD0025"
+
+	def test_default_pan_is_centre (self, tmp_path: pathlib.Path) -> None:
+		"""Omitted pan defaults to equal power across all output channels."""
+		import numpy
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
+
+		_, _, _, pan_gains = note_map[(9, 36)]
+		# Centre: both channels equal power → gain = 1/sqrt(2) ≈ 0.707
+		assert pan_gains.shape == (2,)
+		numpy.testing.assert_allclose(pan_gains, [1.0 / 2**0.5, 1.0 / 2**0.5], atol=1e-5)
+
+	def test_explicit_pan_constant_power (self, tmp_path: pathlib.Path) -> None:
+		"""Constant-power law: sum(gains**2) == 1.0 for any pan position."""
+		import numpy
+		for weights in [[100, 0], [0, 100], [50, 50], [75, 25], [30, 70]]:
+			path = self._write_map(tmp_path, f"""
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+    pan: {weights}
+""")
+			note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
+			_, _, _, pan_gains = note_map[(9, 36)]
+			total_power = float(numpy.sum(pan_gains ** 2))
+			numpy.testing.assert_allclose(total_power, 1.0, atol=1e-5,
+				err_msg=f"pan {weights} total power should be 1.0")
+
+	def test_pan_hard_left (self, tmp_path: pathlib.Path) -> None:
+		"""pan: [100, 0] produces gain 1.0 on left, 0.0 on right."""
+		import numpy
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+    pan: [100, 0]
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
+		_, _, _, pan_gains = note_map[(9, 36)]
+		numpy.testing.assert_allclose(pan_gains, [1.0, 0.0], atol=1e-5)
+
+	def test_pan_wrong_channel_count_raises (self, tmp_path: pathlib.Path) -> None:
+		"""pan list length must match output_channels."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    target: reference(BD0025)
+    pan: [50, 50, 50]
+""")
+		with pytest.raises(ValueError, match="pan"):
+			subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)

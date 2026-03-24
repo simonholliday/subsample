@@ -6,8 +6,9 @@ __pycache__/
 dist/
 build/
 
-# Config
+# Config (user-specific files; midi-map.yaml.default is tracked)
 config.yaml
+midi-map.yaml
 
 # Audio
 samples/
