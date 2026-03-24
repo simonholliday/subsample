@@ -433,29 +433,71 @@ class TestMaxPolyphony:
 
 		assert player._target_rms == pytest.approx(1.0)
 
-	def test_clipping_warning_logged (
+	def _make_callback_player (
 		self,
-		caplog: pytest.LogCaptureFixture,
-	) -> None:
-		import logging
-		import numpy
-
-		n_frames = 512
-		# Two voices each at 0.8 → sum = 1.6 → clips
-		audio_loud = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.8
-		voice_a = subsample.player._Voice(audio=audio_loud.copy(), note=36, channel=9)
-		voice_b = subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9)
-
+		limiter_threshold_db: float = -1.5,
+		limiter_ceiling_db: float = -0.1,
+	) -> unittest.mock.MagicMock:
+		"""Return a minimal MagicMock wired for _audio_callback testing."""
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
-		player._voices              = [voice_a, voice_b]
 		player._voices_lock         = threading.Lock()
 		player._output_bit_depth    = 16
 		player._release_fade_frames = 441
 		player._last_clip_warn      = 0.0
 		player._max_polyphony       = 8
-		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
-		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
+		player._limiter_threshold   = 10.0 ** (limiter_threshold_db / 20.0)
+		player._limiter_ceiling     = 10.0 ** (limiter_ceiling_db / 20.0)
 		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
+		return player
+
+	def test_limiter_prevents_clipping_warning (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""With the default limiter, even a loud mix must not trigger the warning."""
+		import logging
+		import numpy
+
+		n_frames = 512
+		# Two voices at 0.8 each → sum = 1.6 (well above 0 dBFS).
+		# The limiter compresses this to below the ceiling, so no warning fires.
+		audio_loud = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.8
+		player = self._make_callback_player()
+		player._voices = [
+			subsample.player._Voice(audio=audio_loud.copy(), note=36, channel=9),
+			subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9),
+		]
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+
+		assert not any("clipping" in r.message.lower() for r in caplog.records)
+
+	def test_clipping_warning_fires_if_post_limiter_ceiling_exceeded (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""Warning fires when post-limiter output exceeds the ceiling.
+
+		Simulates a bypassed limiter by setting _limiter_threshold > 1.0 so the
+		mask is always empty and no sample is soft-clipped.  The raw sum then
+		reaches numpy.clip's hard ceiling of 1.0, which exceeds the configured
+		limiter_ceiling (~0.989), triggering the diagnostic warning.
+		"""
+		import logging
+		import numpy
+
+		n_frames = 512
+		player = self._make_callback_player()
+		# Override threshold to 2.0 — no sample in [-1, 1] will trigger the mask,
+		# so the limiter effectively does nothing and the hard clip produces 1.0.
+		player._limiter_threshold = 2.0
+		player._limiter_knee = player._limiter_ceiling - player._limiter_threshold  # negative, unused
+
+		# Single voice at 1.0 → passes through limiter mask untouched → numpy.clip → 1.0.
+		# 1.0 > ceiling (~0.989) → warning fires.
+		audio = numpy.ones((n_frames, 2), dtype=numpy.float32) * 1.0
+		player._voices = [subsample.player._Voice(audio=audio.copy(), note=36, channel=9)]
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
 			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
@@ -463,59 +505,41 @@ class TestMaxPolyphony:
 		assert any("clipping" in r.message.lower() for r in caplog.records)
 
 	def test_clipping_warning_throttled (self) -> None:
+		"""Warning must not repeat within 5 seconds of the previous one."""
 		import numpy
 
 		n_frames = 512
-		audio_loud = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.8
+		# Bypass limiter (threshold > 1.0) so the warning fires on first call.
+		player = self._make_callback_player()
+		player._limiter_threshold = 2.0
+		player._limiter_knee = player._limiter_ceiling - player._limiter_threshold
+		audio = numpy.ones((n_frames, 2), dtype=numpy.float32) * 1.0
 
-		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
-		player._voices_lock         = threading.Lock()
-		player._output_bit_depth    = 16
-		player._release_fade_frames = 441
-		player._max_polyphony       = 8
-		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
-		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
-		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
-
-		# First call fires the warning; record the timestamp it sets
-		player._last_clip_warn = 0.0
-		voice_a = subsample.player._Voice(audio=audio_loud.copy(), note=36, channel=9)
-		voice_b = subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9)
-		player._voices = [voice_a, voice_b]
+		# First call — fires the warning and records the timestamp.
+		player._voices = [subsample.player._Voice(audio=audio.copy(), note=36, channel=9)]
 		subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
 		first_warn_time: float = player._last_clip_warn
 
-		# Second call immediately after — _last_clip_warn is recent → no new warning
-		voice_c = subsample.player._Voice(audio=audio_loud.copy(), note=36, channel=9)
-		voice_d = subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9)
-		player._voices = [voice_c, voice_d]
+		# Second call immediately after — should be throttled.
+		player._voices = [subsample.player._Voice(audio=audio.copy(), note=36, channel=9)]
 		with unittest.mock.patch.object(subsample.player._log, "warning") as mock_warn:
 			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
 
 		mock_warn.assert_not_called()
-		# Timestamp should not have advanced (no new warning was issued)
 		assert player._last_clip_warn == first_warn_time
 
 	def test_no_clipping_no_warning (
 		self,
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
+		"""Quiet signal with default limiter: no warning."""
 		import logging
 		import numpy
 
 		n_frames = 512
 		audio_quiet = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.1
-
-		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
-		player._voices              = [subsample.player._Voice(audio=audio_quiet.copy(), note=36, channel=9)]
-		player._voices_lock         = threading.Lock()
-		player._output_bit_depth    = 16
-		player._release_fade_frames = 441
-		player._last_clip_warn      = 0.0
-		player._max_polyphony       = 8
-		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
-		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
-		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
+		player = self._make_callback_player()
+		player._voices = [subsample.player._Voice(audio=audio_quiet.copy(), note=36, channel=9)]
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
 			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)

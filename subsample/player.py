@@ -477,23 +477,6 @@ class MidiPlayer:
 
 			self._voices = active
 
-		# Clipping detection: warn when the summed mix exceeds [-1, 1] before
-		# the hard clip.  Throttled to at most one warning every 5 seconds so
-		# a dense passage doesn't spam the log.  time.monotonic() is cheap and
-		# safe to call from the PortAudio callback thread.
-		peak_abs = float(numpy.max(numpy.abs(output)))
-		if peak_abs > 1.0:
-			now = time.monotonic()
-			if now - self._last_clip_warn >= 5.0:
-				self._last_clip_warn = now
-				_log.warning(
-					"Audio clipping: peak=%.3f (%.1f dB over full scale) — "
-					"raise player.max_polyphony above %d to reduce per-voice level",
-					peak_abs,
-					20.0 * numpy.log10(peak_abs),
-					self._max_polyphony,
-				)
-
 		# Safety limiter: tanh soft-clip above threshold.
 		# Operates in-place on samples where abs(output) > threshold.
 		# Below threshold: zero cost (mask is False, no computation).
@@ -510,6 +493,24 @@ class MidiPlayer:
 			)
 
 		mixed = numpy.clip(output, -1.0, 1.0)
+
+		# Clipping detection: warn only if the post-limiter output still exceeds
+		# the ceiling (shouldn't happen — the tanh asymptote guarantees this —
+		# but serves as a diagnostic if the limiter is misconfigured or bypassed).
+		# Throttled to at most one warning every 5 seconds.
+		peak_abs = float(numpy.max(numpy.abs(mixed)))
+		if peak_abs > self._limiter_ceiling:
+			now = time.monotonic()
+			if now - self._last_clip_warn >= 5.0:
+				self._last_clip_warn = now
+				_log.warning(
+					"Audio clipping: post-limiter peak=%.3f (%.1f dBFS) exceeds ceiling %.3f — "
+					"raise player.max_polyphony above %d to reduce per-voice level",
+					peak_abs,
+					20.0 * numpy.log10(peak_abs),
+					self._limiter_ceiling,
+					self._max_polyphony,
+				)
 
 		# Convert to PCM bytes at the stream's declared bit depth.
 		# Previously hard-coded to int16 regardless of the stream format,
