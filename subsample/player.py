@@ -102,7 +102,8 @@ def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_
 		return numpy.zeros(output_channels, dtype=numpy.float32)
 
 	# Constant-power normalisation: gain[i] = sqrt(weight[i] / total)
-	return numpy.sqrt(weight_arr / total).astype(numpy.float32)
+	result: numpy.ndarray = numpy.sqrt(weight_arr / total).astype(numpy.float32)
+	return result
 
 
 def load_midi_map (
@@ -756,13 +757,15 @@ class MidiPlayer:
 		# Mix input to mono.  All source formats (mono, stereo, multichannel)
 		# are reduced to a single channel before panning.  This is the correct
 		# approach: we pan the *sound*, not individual source channels.
+		mono: numpy.ndarray
 		if gained.shape[1] == 1:
 			mono = gained[:, 0]
 		else:
-			mono = numpy.mean(gained, axis=1, dtype=numpy.float32)
+			mono = typing.cast(numpy.ndarray, numpy.mean(gained, axis=1, dtype=numpy.float32))
 
 		# Expand mono to the output channel layout using constant-power pan gains.
 		# pan_gains shape: (output_channels,)
 		# mono shape:      (n_frames,)
 		# result shape:    (n_frames, output_channels)
-		return (mono[:, numpy.newaxis] * pan_gains[numpy.newaxis, :]).astype(numpy.float32)
+		result: numpy.ndarray = (mono[:, numpy.newaxis] * pan_gains[numpy.newaxis, :]).astype(numpy.float32)
+		return result
