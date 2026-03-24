@@ -6,4 +6,3 @@ rhythm, and pitch analysis. Optionally listens for MIDI input to trigger
 playback of collected samples.
 """
 
-__version__: str = "0.1.0"

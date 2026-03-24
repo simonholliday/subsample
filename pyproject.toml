@@ -1,12 +1,19 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "subsample"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Ambient audio sample recorder"
+readme = "README.md"
+authors = [{ name = "Simon Holliday", email = "simon.holliday@protonmail.com" }]
+license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.12"
+classifiers = [
+	"Programming Language :: Python :: 3",
+	"License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+]
 dependencies = [
 	"PyAudio>=0.2.14",
 	"PyYAML>=6.0",
@@ -28,8 +35,18 @@ dev = [
 	"types-PyYAML>=6.0.12",
 ]
 
+[tool.setuptools_scm]
+# Derives version from git tags (e.g. v0.1.0 → 0.1.0).
+
 [tool.setuptools.packages.find]
 include = ["subsample*"]
+
+[tool.setuptools.package-data]
+subsample = ["py.typed"]
+
+[project.urls]
+Repository = "https://github.com/simonholliday/subsample"
+Issues = "https://github.com/simonholliday/subsample/issues"
 
 [project.scripts]
 subsample = "subsample.cli:main"
