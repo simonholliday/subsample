@@ -736,8 +736,13 @@ class TestTransformManager:
 		assert len(variants) == 3
 		manager.shutdown()
 
-	def test_on_sample_added_enqueues_stable_pitch_variants (self) -> None:
-		"""on_sample_added auto-enqueues pitch variants for tonal samples."""
+	def test_on_sample_added_enqueues_base_variant_only (self) -> None:
+		"""on_sample_added enqueues only the base variant, even for tonal samples.
+
+		Pitch variants are driven by MidiPlayer.update_pitched_assignments() which
+		reads the MIDI map to determine the exact note range needed — on_sample_added()
+		does not apply any semitone cap.
+		"""
 		manager, cache, lib = self._make_manager()
 		record = _make_record(sample_id=1)
 		lib.add(record)
@@ -745,11 +750,9 @@ class TestTransformManager:
 		manager.on_sample_added(record)
 		manager.shutdown()
 
-		# Default pitch helper: 440 Hz = MIDI 69, range 12 → notes 57–81 = 25 pitch
-		# variants, plus 1 base variant (identity spec) = 26 total.
+		# Only the base variant (identity spec) — no pitch variants from on_sample_added.
 		assert cache.has_variants(1)
-		assert len(cache.list_variants(1)) == 26
-		# Base variant is present alongside the pitch variants.
+		assert len(cache.list_variants(1)) == 1
 		assert cache.get_base(1) is not None
 
 	def test_on_sample_added_skips_unpitched (self) -> None:
@@ -766,8 +769,8 @@ class TestTransformManager:
 		assert len(cache.list_variants(2)) == 1
 		assert cache.get_base(2) is not None
 
-	def test_on_sample_added_respects_auto_pitch_false (self) -> None:
-		"""auto_pitch=False suppresses pitch variants but the base variant is always produced."""
+	def test_enqueue_pitch_range_respects_auto_pitch_false (self) -> None:
+		"""auto_pitch=False causes enqueue_pitch_range() to be a no-op."""
 		lib   = subsample.library.InstrumentLibrary(max_memory_bytes=100 * 1024 * 1024)
 		cache = subsample.transform.TransformCache(max_memory_bytes=50 * 1024 * 1024)
 		processor = subsample.transform.TransformProcessor(
@@ -782,9 +785,13 @@ class TestTransformManager:
 		record = _make_record(sample_id=3)
 		lib.add(record)
 		manager.on_sample_added(record)
+
+		# Even when enqueue_pitch_range is called explicitly, auto_pitch=False blocks it.
+		manager.enqueue_pitch_range(record, list(range(60, 73)))
+
 		manager.shutdown()
 
-		# Base variant only — no pitch variants with auto_pitch=False.
+		# Base variant only — enqueue_pitch_range was a no-op.
 		assert cache.has_variants(3)
 		assert len(cache.list_variants(3)) == 1
 		assert cache.get_base(3) is not None
@@ -958,22 +965,6 @@ class TestTransformConfig:
 
 	def test_default_transform_values (self) -> None:
 		cfg = subsample.config.load_config(self._DEFAULT_CONFIG_PATH)
-		assert cfg.transform.max_memory_mb         == 50.0
-		assert cfg.transform.auto_pitch            is True
-		assert cfg.transform.pitch_range_semitones == 12
-		assert cfg.transform.target_bpm            == 0.0
-
-	def test_invalid_pitch_range_raises (self) -> None:
-		with pytest.raises(ValueError, match="pitch_range_semitones"):
-			subsample.config._build_config({
-				"recorder": {
-					"audio": {"sample_rate": 44100, "bit_depth": 16, "channels": 1, "chunk_size": 512},
-					"buffer": {"max_seconds": 60},
-				},
-				"detection": {
-					"snr_threshold_db": 12.0, "hold_time": 0.5,
-					"warmup_seconds": 1.0, "ema_alpha": 0.1,
-				},
-				"output": {"directory": "./samples", "filename_format": "%Y"},
-				"transform": {"pitch_range_semitones": -1},
-			})
+		assert cfg.transform.max_memory_mb == 50.0
+		assert cfg.transform.auto_pitch    is True
+		assert cfg.transform.target_bpm    == 0.0

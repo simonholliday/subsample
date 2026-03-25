@@ -340,16 +340,11 @@ analysis:
 #   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
 #
 #   auto_pitch: true
-#   # When true, pitch variants are automatically produced for each tonal sample
-#   # (those that pass the has_stable_pitch() test) as they arrive.
-#   # Variants are generated for every MIDI note within pitch_range_semitones of
-#   # the sample's detected pitch. Requires rubberband-cli to be installed.
-#
-#   pitch_range_semitones: 12
-#   # Number of semitones above and below the detected pitch to generate variants.
-#   # 12 = one octave each way = 25 variants per tonal sample (including the
-#   # center note, which micro-corrects tuning). Range: 0–48.
-#   # Set to 0 to disable auto-generation (on-demand variants still work).
+#   # When true, pitch-shifted variants are pre-computed for every MIDI note in the
+#   # assigned range (e.g. all 128 notes for C-1..G9). Requires rubberband-cli.
+#   # Pitch playback still works with this disabled — notes fall back to on-the-fly
+#   # rendering (slower, higher CPU at trigger time). Set to false if rubberband-cli
+#   # is not installed or you prefer lazy rendering over background pre-computation.
 #
 #   target_bpm: 0.0
 #   # Target BPM for automatic time-stretch variants. 0.0 = disabled.

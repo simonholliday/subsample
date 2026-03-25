@@ -318,8 +318,8 @@ incrementally as new recordings arrive or old ones are evicted. See
 ## Transforms
 
 Tonal samples with a stable, confident pitch are automatically pitch-shifted to
-every MIDI note within a configurable range (default ±12 semitones = 25 variants
-per sample). Variants are produced in the background by a worker pool and cached
+every MIDI note in the assigned note range (e.g. all 128 notes for a full-keyboard
+assignment). Variants are produced in the background by a worker pool and cached
 in a memory-bounded store with parent-priority FIFO eviction - when a variant
 family would exceed the memory budget, the entire oldest family is evicted
 together, keeping remaining families intact and playable.
@@ -404,8 +404,7 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
 | `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack character |
 | `transform.max_memory_mb` | `50.0` | Memory budget (MB) for pitch-shifted variants |
-| `transform.auto_pitch` | `true` | Auto-produce pitch variants for tonal samples |
-| `transform.pitch_range_semitones` | `12` | Semitones above/below detected pitch for auto-variants (12 = ±1 octave = 25 notes) |
+| `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
 | `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables |
 
 ## Output

@@ -902,10 +902,16 @@ class TransformManager:
 		keyboard assignment's best match changes and the new set of variants
 		must be pre-computed before the next trigger.
 
+		No-ops when auto_pitch is disabled — consistent with the player's
+		overall pitch-variant production policy.
+
 		Args:
 			record:     SampleRecord to produce pitch-shifted variants from.
 			midi_notes: MIDI note numbers to pre-compute.
 		"""
+
+		if not self._cfg.auto_pitch:
+			return
 
 		self._processor.enqueue_pitch_range(record, midi_notes)
 
@@ -917,12 +923,11 @@ class TransformManager:
 		no DSP) so the playback path has a pre-converted copy ready for every
 		sample without calling _pcm_to_float32() at trigger time.
 
-		If auto_pitch is enabled and the sample has a stable, confident pitch
-		(per has_stable_pitch()), also enqueues one PitchShift job per MIDI note
-		in [center - pitch_range_semitones, center + pitch_range_semitones],
-		clamped to [0, 127].  The center-note variant micro-corrects tuning when
-		the original recording is slightly off-pitch (e.g. 443 Hz → MIDI 69.12;
-		the A4 variant plays at exactly 440 Hz).
+		Pitch variants are NOT enqueued here — they are driven by
+		MidiPlayer.update_pitched_assignments(), which reads the MIDI map to know
+		exactly which notes are needed and submits the precise set via
+		enqueue_pitch_range().  This avoids a fixed-range cap and ensures the
+		full assigned note range is covered.
 
 		If target_bpm > 0 and the sample has detected rhythmic content, a
 		TimeStretch variant is also enqueued (requires Phase 3 handler).
@@ -930,24 +935,6 @@ class TransformManager:
 
 		# Base variant: always enqueue regardless of pitch content.
 		self._processor.enqueue(record, _BASE_VARIANT_SPEC)
-
-		if self._cfg.auto_pitch and self._cfg.pitch_range_semitones > 0:
-
-			if subsample.analysis.has_stable_pitch(
-				record.spectral, record.pitch, record.duration,
-			):
-				center = int(round(librosa.hz_to_midi(record.pitch.dominant_pitch_hz)))
-				low    = max(0,   center - self._cfg.pitch_range_semitones)
-				high   = min(127, center + self._cfg.pitch_range_semitones)
-				notes  = list(range(low, high + 1))
-
-				self._processor.enqueue_pitch_range(record, notes)
-
-				_log.info(
-					"Auto-pitch: sample %d (%s) %.1f Hz (MIDI %d) → %d variant(s) [%d–%d]",
-					record.sample_id, record.name,
-					record.pitch.dominant_pitch_hz, center, len(notes), low, high,
-				)
 
 		# Auto-BPM time-stretch: enqueue if target set and sample has detected rhythm.
 		# TimeStretch handler not yet registered (Phase 3) — enqueue() silently skips.

@@ -229,17 +229,10 @@ class TransformConfig:
 	At 44100 Hz float32 stereo, 50 MB ≈ 150 seconds of derivative audio."""
 
 	auto_pitch: bool = True
-	"""When True, automatically create pitch variants for samples that pass the
-	has_stable_pitch() test as they arrive.  Variants are produced in the
-	background for every MIDI note within pitch_range_semitones of the detected
-	pitch.  Set to False to disable automatic pitch variant production."""
-
-	pitch_range_semitones: int = 12
-	"""Number of semitones above and below the detected pitch to generate variants.
-	12 = one octave each way = 25 variants per sample (center note included).
-	The center variant micro-corrects tuning when the original is slightly off-pitch.
-	Range: 0–48.  Set to 0 to disable auto-generation (on-demand variants via
-	the player still work)."""
+	"""When True, pitch-shifted variants are produced for each tonal sample
+	(those that pass the has_stable_pitch() test) across the full note range
+	defined by the MIDI map assignment (e.g. all notes in C-1..G9).
+	Set to False to disable all pitch variant production."""
 
 	target_bpm: float = 0.0
 	"""Target BPM for automatic time-stretch variants.  0.0 = disabled.
@@ -602,17 +595,10 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	transform_raw: dict[str, typing.Any] = raw.get("transform", {})
 	transform = TransformConfig(
-		max_memory_mb         = float(transform_raw.get("max_memory_mb",         50.0)),
-		auto_pitch            = bool(transform_raw.get("auto_pitch",             True)),
-		pitch_range_semitones = int(transform_raw.get("pitch_range_semitones",   12)),
-		target_bpm            = float(transform_raw.get("target_bpm",            0.0)),
+		max_memory_mb = float(transform_raw.get("max_memory_mb", 50.0)),
+		auto_pitch    = bool(transform_raw.get("auto_pitch",     True)),
+		target_bpm    = float(transform_raw.get("target_bpm",    0.0)),
 	)
-
-	if transform.pitch_range_semitones < 0 or transform.pitch_range_semitones > 48:
-		raise ValueError(
-			f"transform.pitch_range_semitones ({transform.pitch_range_semitones}) must be in [0, 48]. "
-			"Values above 48 semitones (±4 octaves) produce too many variants and stress the cache."
-		)
 
 	return Config(
 		recorder=recorder,
