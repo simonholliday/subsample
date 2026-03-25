@@ -477,6 +477,19 @@ class TransformCache:
 		"""Maximum memory allowed for cached derivatives, in bytes."""
 		return self._max_bytes
 
+	def format_memory (self) -> str:
+
+		"""Return a human-readable memory usage string for logging.
+
+		Example: '23.4 / 50.0 MB, 53% free'
+		"""
+
+		used     = self.memory_used   # acquires lock once
+		used_mb  = used              / (1024 * 1024)
+		limit_mb = self._max_bytes   / (1024 * 1024)
+		pct_free = int(100 * (1.0 - used / self._max_bytes)) if self._max_bytes > 0 else 100
+		return f"{used_mb:.1f} / {limit_mb:.1f} MB, {pct_free}% free"
+
 	# --- Internal helpers (callers must hold _lock) ---
 
 	def _evict_parent_locked (self, sample_id: int) -> list[TransformKey]:
@@ -572,6 +585,7 @@ class TransformProcessor:
 		bit_depth:          int,
 		output_sample_rate: typing.Optional[int] = None,
 		on_complete:        typing.Optional[_OnTransformComplete] = None,
+		on_idle:            typing.Optional[typing.Callable[[int], None]] = None,
 	) -> None:
 
 		self._sample_rate        = sample_rate
@@ -581,6 +595,9 @@ class TransformProcessor:
 		# (base and pitch-shifted) arrive at the player pre-converted.
 		self._output_sample_rate = output_sample_rate if output_sample_rate is not None else sample_rate
 		self._on_complete        = on_complete
+		# Called with completed-count when the in-flight set empties.  Used by
+		# TransformManager to log cache memory status at queue-idle boundaries.
+		self._on_idle            = on_idle
 
 		n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
 		_log.info("TransformProcessor: %d worker(s) (cpu_count=%d)", n_workers, os.cpu_count() or 1)
@@ -764,7 +781,10 @@ class TransformProcessor:
 				completed = self._batch_completed
 
 			if now_idle:
-				_log.info("Transform queue idle — %d variant(s) processed", completed)
+				if self._on_idle is not None:
+					self._on_idle(completed)
+				else:
+					_log.info("Transform queue idle — %d variant(s) processed", completed)
 
 # ---------------------------------------------------------------------------
 # TransformManager

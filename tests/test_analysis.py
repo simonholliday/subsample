@@ -1470,3 +1470,40 @@ class TestAnalyzeBandEnergy:
 		s = subsample.analysis.format_band_energy_result(result)
 		assert "\n" not in s
 		assert len(s) > 0
+
+
+class TestToMonoFloat:
+
+	def test_mono_16bit (self) -> None:
+
+		"""16-bit mono input: shape becomes (n,) and values are normalised to [-1,1]."""
+
+		# One frame at full scale positive, one at zero.
+		audio = numpy.array([[32767], [0]], dtype=numpy.int32)
+		result = subsample.analysis.to_mono_float(audio, bit_depth=16)
+
+		assert result.shape == (2,)
+		assert result.dtype == numpy.float32
+		assert abs(float(result[0]) - 1.0) < 1e-4
+		assert float(result[1]) == 0.0
+
+	def test_stereo_16bit_downmix (self) -> None:
+
+		"""Stereo 16-bit input is mixed to mono by averaging channels."""
+
+		# Left = +32767, Right = -32767  →  average ≈ 0.
+		audio = numpy.array([[32767, -32767]], dtype=numpy.int32)
+		result = subsample.analysis.to_mono_float(audio, bit_depth=16)
+
+		assert result.shape == (1,)
+		assert abs(float(result[0])) < 1e-4
+
+	def test_32bit_mono (self) -> None:
+
+		"""32-bit mono: full-scale value should map to approximately 1.0."""
+
+		audio = numpy.array([[2147483647]], dtype=numpy.int32)
+		result = subsample.analysis.to_mono_float(audio, bit_depth=32)
+
+		assert result.shape == (1,)
+		assert abs(float(result[0]) - 1.0) < 1e-6

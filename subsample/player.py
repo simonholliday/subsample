@@ -117,6 +117,28 @@ def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_
 	return result
 
 
+# Note class names indexed by semitone offset — used by _midi_to_note_name().
+_NOTE_CLASSES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def _midi_to_note_name (midi_note: int) -> str:
+
+	"""Convert a MIDI note number to a human-readable note name.
+
+	Inverse of _parse_note_name().  Uses sharps only (C#, not Db) and
+	the C4 = 60 convention (octave range -1 to 9).
+
+	>>> _midi_to_note_name(0)
+	'C-1'
+	>>> _midi_to_note_name(60)
+	'C4'
+	>>> _midi_to_note_name(127)
+	'G9'
+	"""
+
+	return f"{_NOTE_CLASSES[midi_note % 12]}{(midi_note // 12) - 1}"
+
+
 # Semitone offsets within an octave — used by _parse_note_name().
 # Flats and enharmonic sharps share entries (Db=C#=1, Eb=D#=3, etc.).
 _SEMITONE_MAP: dict[str, int] = {
@@ -721,17 +743,46 @@ class MidiPlayer:
 		# Loaded from the MIDI map YAML file by the caller (cli.py) via load_midi_map().
 		self._note_map: _NoteMap = midi_map
 
+		# Group consecutive notes that share the same properties into ranges
+		# so that a 128-note pitched assignment becomes a single log line.
+		groups: list[tuple[int, int, int, str, str | _ChainTargets, int, bool, bool, numpy.ndarray]] = []
+		for (ch, note), (ttype, targ, rank, one_shot, pitch, pan_gains) in sorted(self._note_map.items()):
+			if (
+				groups
+				and groups[-1][0] == ch
+				and groups[-1][2] == note - 1
+				and groups[-1][3] == ttype
+				and groups[-1][4] == targ
+				and groups[-1][5] == rank
+				and groups[-1][6] == one_shot
+				and groups[-1][7] == pitch
+				and numpy.array_equal(groups[-1][8], pan_gains)
+			):
+				groups[-1] = (ch, groups[-1][1], note, ttype, targ, rank, one_shot, pitch, pan_gains)
+			else:
+				groups.append((ch, note, note, ttype, targ, rank, one_shot, pitch, pan_gains))
+
+		lines: list[str] = []
+		for ch, lo, hi, ttype, targ, rank, one_shot, pitch, pan_gains in groups:
+			count = hi - lo + 1
+			if count == 1:
+				note_str = f"note {_midi_to_note_name(lo)}"
+			else:
+				note_str = f"notes {_midi_to_note_name(lo)}..{_midi_to_note_name(hi)} ({count})"
+			line = f"ch{ch+1} {note_str} → {ttype}({targ})"
+			if ttype == "reference" and not pitch:
+				line += f" rank {rank}"
+			if pitch:
+				line += " pitched"
+			if one_shot:
+				line += "  one-shot"
+			line += f"  pan=[{', '.join(f'{g:.2f}' for g in pan_gains)}]"
+			lines.append(line)
+
 		_log.info(
 			"MIDI note map: %d note(s) loaded\n  %s",
 			len(self._note_map),
-			"\n  ".join(
-				f"ch{ch+1} note {note} → {ttype}({targ})"
-				+ (f" rank {rank}" if ttype == "reference" and not pitch else "")
-				+ (" pitched" if pitch else "")
-				+ ("  one-shot" if one_shot else "")
-				+ f"  pan=[{', '.join(f'{g:.2f}' for g in pan_gains)}]"
-				for (ch, note), (ttype, targ, rank, one_shot, pitch, pan_gains) in sorted(self._note_map.items())
-			),
+			"\n  ".join(lines),
 		)
 
 	def run (self) -> None:

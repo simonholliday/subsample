@@ -304,6 +304,14 @@ analysis:
 #   # (default), orphaned sidecars are skipped with a warning.
 #   # Note: this only applies to instrument samples. Reference sidecars are
 #   # intentionally allowed to exist without their audio file.
+#
+#   watch: false
+#   # When true, monitor instrument.directory at runtime for new samples
+#   # (WAV + .analysis.json sidecar pairs) arriving from another subsample
+#   # instance and hot-load them without restarting. Designed for multi-
+#   # instance setups: a recorder on one machine writes to a shared/synced
+#   # directory (network drive, Dropbox) and a player elsewhere picks them
+#   # up automatically. Requires instrument.directory and player.enabled.
 #   #
 #   # Persistent library pattern — set this to the same path as output.directory:
 #   #

@@ -398,11 +398,13 @@ weights - is optional and rarely needs changing.
 | `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory samples; oldest evicted (FIFO) when exceeded |
 | `instrument.directory` | `none` | Optional directory to pre-load instrument samples from at startup |
 | `instrument.clean_orphaned_sidecars` | `false` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
+| `instrument.watch` | `false` | Monitor `instrument.directory` at runtime for new samples arriving from a remote recorder instance (see Multi-machine setup) |
 | `reference.directory` | `none` | Optional directory of reference sounds for similarity classification |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (11 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
 | `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack character |
+| `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
 | `transform.max_memory_mb` | `50.0` | Memory budget (MB) for pitch-shifted variants |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
 | `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables |
@@ -453,6 +455,57 @@ On startup, Subsample pre-loads all existing WAV files from `./samples`. As new
 recordings arrive they are written to disk and added to memory in one step. The
 memory cap keeps only the most recent window of captures in RAM; the full archive
 on disk is unaffected.
+
+### Multi-machine setup (remote recorder + player)
+
+Subsample can be split across two machines: one captures and analyses audio, the
+other plays it back via MIDI. The two machines share a directory (network drive,
+Dropbox, or any folder sync tool). The recorder writes samples there; the player
+watches the same directory and loads new samples as they arrive — no restart
+required.
+
+This separation is useful when the recording and playback environments are
+different: a field recorder capturing environmental sound in one location, a
+performance machine somewhere else; a backstage capture machine feeding a front-
+of-house playback rig; or simply keeping CPU-intensive audio analysis on a
+dedicated host.
+
+**Recorder machine** (`config.yaml`):
+```yaml
+recorder:
+  enabled: true
+
+player:
+  enabled: false
+
+output:
+  directory: "/mnt/shared/samples"
+```
+
+**Player machine** (`config.yaml`):
+```yaml
+recorder:
+  enabled: false
+
+player:
+  enabled: true
+
+instrument:
+  directory: "/mnt/shared/samples"
+  watch: true
+```
+
+The recorder writes each detected sample as a WAV file plus an `.analysis.json`
+sidecar containing the pre-computed feature data. The player monitors the shared
+directory for new sidecar files; when one arrives, it loads the sample pair
+directly without re-analysing. The sidecar's arrival is used as the ready signal
+because the recorder always writes the WAV first — a sidecar appearing means both
+files are present and complete.
+
+New samples become available for MIDI playback within a second or two of the
+sidecar landing on disk (a short debounce window to accommodate network sync
+tools). If the WAV has not yet arrived, the player retries a few times before
+logging a warning; that sample will be picked up on the next restart.
 
 ## Reference sample library
 

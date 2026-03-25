@@ -215,6 +215,20 @@ class InstrumentConfig:
 	Note: this only applies to instrument samples. Reference samples are
 	intentionally allowed to exist as sidecar-only (no audio required)."""
 
+	watch: bool = False
+	"""When True, monitor instrument.directory at runtime for new samples
+	arriving as WAV + .analysis.json sidecar pairs and hot-load them into
+	the live instrument library without restarting.
+
+	Designed for multi-instance setups: a recorder on one machine writes
+	samples to a shared directory (network drive, Dropbox, etc.) and a
+	player on another machine picks them up automatically as they arrive.
+
+	Requires instrument.directory to be set and player.enabled to be True.
+	Only reacts to complete samples — the sidecar's arrival signals that
+	both the WAV and analysis are ready (the recorder writes WAV first,
+	sidecar second)."""
+
 
 @dataclasses.dataclass(frozen=True)
 class TransformConfig:
@@ -341,12 +355,11 @@ def _deep_merge (
 	result = dict(base)
 
 	for key, override_value in override.items():
-		if (
-			key in result
-			and isinstance(result[key], dict)
-			and isinstance(override_value, dict)
-		):
-			result[key] = _deep_merge(result[key], override_value)
+		base_value = result.get(key)
+		if isinstance(base_value, dict) and isinstance(override_value, dict):
+			result[key] = _deep_merge(base_value, override_value)
+		elif isinstance(base_value, dict) and override_value is None:
+			pass  # empty YAML section (all children commented out) — preserve base defaults
 		else:
 			result[key] = override_value
 
@@ -561,6 +574,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
 		directory=instrument_raw.get("directory"),
 		clean_orphaned_sidecars=bool(instrument_raw.get("clean_orphaned_sidecars", False)),
+		watch=bool(instrument_raw.get("watch", False)),
 	)
 
 	similarity_raw: dict[str, typing.Any] = raw.get("similarity", {})

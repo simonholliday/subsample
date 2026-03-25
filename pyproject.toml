@@ -24,6 +24,7 @@ dependencies = [
 	"mido>=1.3",
 	"python-rtmidi>=1.5",
 	"pyrubberband>=0.4",
+	"watchdog>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -60,6 +61,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["pyrubberband", "pyrubberband.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["watchdog", "watchdog.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

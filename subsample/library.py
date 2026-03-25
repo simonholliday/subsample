@@ -284,6 +284,18 @@ class InstrumentLibrary:
 
 		return self._max_bytes
 
+	def format_memory (self) -> str:
+
+		"""Return a human-readable memory usage string for logging.
+
+		Example: '45.3 / 100.0 MB, 55% free'
+		"""
+
+		used_mb  = self._total_bytes / (1024 * 1024)
+		limit_mb = self._max_bytes   / (1024 * 1024)
+		pct_free = int(100 * (1.0 - self._total_bytes / self._max_bytes)) if self._max_bytes > 0 else 100
+		return f"{used_mb:.1f} / {limit_mb:.1f} MB, {pct_free}% free"
+
 	def __len__ (self) -> int:
 
 		return len(self._index)

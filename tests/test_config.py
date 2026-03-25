@@ -610,11 +610,23 @@ class TestDeepMerge:
 		assert override == {"b": 2}
 
 	def test_override_null_wins (self) -> None:
-		"""Explicit None in override replaces a non-None base value."""
+		"""Explicit None in override replaces a non-None scalar base value."""
 		base: dict[str, object] = {"channels": 1}
 		override: dict[str, object] = {"channels": None}
 		result = subsample.config._deep_merge(base, override)
 		assert result["channels"] is None
+
+	def test_null_override_of_dict_preserves_base (self) -> None:
+		"""A None override for a base dict (empty YAML section) preserves base defaults.
+
+		When all children of a YAML section are commented out, the parser yields
+		None for that key.  The merge must treat this as 'no override' rather than
+		clobbering the base dict, so that config.yaml.default values still apply.
+		"""
+		base: dict[str, object] = {"buffer": {"max_seconds": 60}}
+		override: dict[str, object] = {"buffer": None}
+		result = subsample.config._deep_merge(base, override)
+		assert result == {"buffer": {"max_seconds": 60}}
 
 	def test_deeply_nested_merge (self) -> None:
 		"""Merge works correctly across multiple levels of nesting."""

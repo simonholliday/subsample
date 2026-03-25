@@ -276,6 +276,13 @@ class SampleProcessor:
 				self._cfg.analysis,
 			)
 
+			# Warn on clipped live recordings so the user knows to reduce gain.
+			# Skipped for file imports (filename_base set) — clipping already occurred.
+			if req.filename_base is None and level.peak >= 1.0:
+				_log.warning(
+					"input clipped (peak 0.0 dBFS) — reduce input gain to avoid distortion"
+				)
+
 			write_result = self._write_wav(
 				req.audio, req.timestamp, rhythm, result, pitch, timbre, level, band_energy,
 				filename_base=req.filename_base,

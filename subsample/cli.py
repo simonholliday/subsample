@@ -43,6 +43,7 @@ import subsample.recorder
 import subsample.similarity
 import subsample.transform
 import subsample.trim
+import subsample.watcher
 
 
 _log = logging.getLogger(__name__)
@@ -488,6 +489,10 @@ def main () -> None:
 			f"  Instruments  : {len(instrument_library)} sample(s) loaded"
 			f" from {cfg.instrument.directory}"
 		)
+		_log.info(
+			"Instrument library: %d sample(s)  [%s]",
+			len(instrument_library), instrument_library.format_memory(),
+		)
 	else:
 		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
 
@@ -527,6 +532,12 @@ def main () -> None:
 		) -> None:
 			_transform_cache.put(result)
 
+		def _on_transform_idle (completed: int) -> None:
+			_log.info(
+				"Transform queue idle — %d variant(s) processed  [cache: %s]",
+				completed, _transform_cache.format_memory(),
+			)
+
 		# Resolve the effective output sample rate for the player.  Variants are
 		# resampled to this rate in the transform worker so they arrive at the
 		# player pre-converted — zero conversion overhead at trigger time.
@@ -541,6 +552,7 @@ def main () -> None:
 			output_sample_rate=output_sample_rate,
 			bit_depth=cfg.recorder.audio.bit_depth,
 			on_complete=_on_transform_complete,
+			on_idle=_on_transform_idle,
 		)
 		transform_manager = subsample.transform.TransformManager(
 			cache=_transform_cache,
@@ -604,6 +616,38 @@ def main () -> None:
 		print("Neither recorder nor player is enabled. Nothing to do.")
 		return
 
+	# --- Directory watcher ---
+	# Start after the instrument library and player are configured so the
+	# on_watched_sample callback can reference all live subsystems.
+	# Only active when player is enabled — the watcher's purpose is to feed
+	# new samples into the playback pipeline.
+	instrument_watcher: typing.Optional[subsample.watcher.InstrumentWatcher] = None
+
+	if cfg.instrument.watch and cfg.instrument.directory is not None and cfg.player.enabled:
+		watch_dir = pathlib.Path(cfg.instrument.directory)
+
+		# Collect sidecars already loaded at startup so the watcher ignores them.
+		# Resolve to absolute paths — the watcher resolves incoming paths via
+		# Path.resolve(), so the comparison must use the same form.
+		known_sidecars: set[pathlib.Path] = {
+			(fp.parent / (fp.name + ".analysis.json")).resolve()
+			for r in instrument_library.samples()
+			if (fp := r.filepath) is not None
+		}
+
+		def _on_watched_sample (record: subsample.library.SampleRecord) -> None:
+			_log.info("Watcher: new sample arrived — %s (%.2fs)", record.name, record.duration)
+			_integrate_sample(record, instrument_library, similarity_matrix,
+			                  transform_manager, _player_cell)
+
+		instrument_watcher = subsample.watcher.InstrumentWatcher(
+			directory=watch_dir,
+			known_sidecars=known_sidecars,
+			on_sample_loaded=_on_watched_sample,
+		)
+		instrument_watcher.start()
+		print(f"  Watcher      : monitoring {cfg.instrument.directory} for new samples")
+
 	for t in threads:
 		t.start()
 
@@ -619,6 +663,9 @@ def main () -> None:
 
 	for t in threads:
 		t.join(timeout=10.0)
+
+	if instrument_watcher is not None:
+		instrument_watcher.stop()
 
 	# Drain any in-flight transform workers before exiting.
 	if transform_manager is not None:
@@ -654,6 +701,56 @@ def _print_banner (cfg: subsample.config.Config) -> None:
 		f"SNR ≥ {cfg.detection.snr_threshold_db} dB  |  "
 		f"→ {cfg.output.directory}"
 	)
+
+
+def _integrate_sample (
+	record: subsample.library.SampleRecord,
+	instrument_library: subsample.library.InstrumentLibrary,
+	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
+	transform_manager: typing.Optional[subsample.transform.TransformManager],
+	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]],
+) -> None:
+
+	"""Add a new sample to all live subsystems.
+
+	Called from both the live-capture on_complete callback and the directory
+	watcher whenever a new sample is ready. Adds the record to the instrument
+	library (evicting the oldest if over the memory limit), updates the
+	similarity matrix, notifies the transform pipeline to produce variants,
+	and triggers a pitched-assignment update on the active player.
+
+	Thread-safe: each subsystem uses an internal lock. The multi-step
+	sequence (library → similarity → transforms → player) is not atomic
+	across subsystems — a concurrent query between steps may see transiently
+	inconsistent state (e.g. an evicted sample still present in the
+	similarity matrix). This is acceptable for the current use case.
+	"""
+
+	evicted = instrument_library.add(record)
+	_log.info(
+		"Instrument library: %d sample(s)  [%s]",
+		len(instrument_library), instrument_library.format_memory(),
+	)
+
+	if similarity_matrix is not None:
+		if evicted:
+			similarity_matrix.remove(evicted)
+		similarity_matrix.add(record)
+
+		scores = similarity_matrix.get_scores(record.sample_id)
+		if scores:
+			_log.debug(
+				"Similarity: %s",
+				subsample.similarity.format_similarity_scores(scores),
+			)
+
+	if transform_manager is not None:
+		if evicted:
+			transform_manager.on_parent_evicted(evicted)
+		transform_manager.on_sample_added(record)
+
+	if player_cell is not None and player_cell[0] is not None:
+		player_cell[0].update_pitched_assignments()
 
 
 def _make_on_complete (
@@ -722,32 +819,7 @@ def _make_on_complete (
 			filepath    = filepath,
 		)
 
-		evicted = instrument_library.add(record)
-
-		if similarity_matrix is not None:
-			if evicted:
-				similarity_matrix.remove(evicted)
-			similarity_matrix.add(record)
-
-			scores = similarity_matrix.get_scores(record.sample_id)
-			if scores:
-				_log.debug(
-					"Similarity: %s",
-					subsample.similarity.format_similarity_scores(scores),
-				)
-
-		# Keep the transform cache in sync with the instrument library.
-		# Cascade-evict derivatives of any evicted parents first, then
-		# notify the manager that a new sample is available for transforms.
-		if transform_manager is not None:
-			if evicted:
-				transform_manager.on_parent_evicted(evicted)
-			transform_manager.on_sample_added(record)
-
-		# Re-compute pitched variants whenever the best match changes.
-		# update_pitched_assignments() enqueues new variants via the transform
-		# pipeline; the processor deduplicates so this is cheap when nothing changed.
-		if player_cell is not None and player_cell[0] is not None:
-			player_cell[0].update_pitched_assignments()
+		_integrate_sample(record, instrument_library, similarity_matrix,
+		                  transform_manager, player_cell)
 
 	return on_complete
