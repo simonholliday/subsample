@@ -496,60 +496,67 @@ def main () -> None:
 	# Build the similarity matrix now that both libraries are populated.
 	# bulk_add() is vectorised (single matrix multiply for N × M scores),
 	# so loading hundreds of pre-existing instrument samples is fast.
+	# Only needed when the player is enabled — similarity scores drive
+	# note-to-sample routing and are not consumed by the recorder alone.
 	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix] = None
-	if reference_library is not None:
+	if reference_library is not None and cfg.player.enabled:
 		similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
 		if len(instrument_library) > 0:
 			similarity_matrix.bulk_add(instrument_library.samples())
 		print(f"  Similarity   : {similarity_matrix}")
 
 	# --- Transform pipeline ---
-	# Create the cache, processor, and manager now (before threads start) so
-	# that the on_complete callback and the player share the same instance.
-	# Phase 2: pitch shifting is active — on_sample_added() auto-enqueues
-	# variants for tonal samples via _apply_pitch() (Rubber Band, offline mode).
-	max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
+	# Only needed when the player is enabled — variants (base, pitch-shifted,
+	# time-stretched) exist solely to serve MIDI-triggered playback.  Skip the
+	# entire pipeline when running recorder-only to avoid unnecessary CPU/memory
+	# usage and spurious "Auto-pitch" log messages.
+	transform_manager: typing.Optional[subsample.transform.TransformManager] = None
 
-	_transform_cache = subsample.transform.TransformCache(
-		max_memory_bytes=max_transform_bytes,
-	)
-	def _on_transform_complete (
-		result: subsample.transform.TransformResult,
-	) -> None:
-		_transform_cache.put(result)
+	if cfg.player.enabled:
+		# Create the cache, processor, and manager now (before threads start) so
+		# that the on_complete callback and the player share the same instance.
+		# Phase 2: pitch shifting is active — on_sample_added() auto-enqueues
+		# variants for tonal samples via _apply_pitch() (Rubber Band, offline mode).
+		max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
 
-	# Resolve the effective output sample rate for the player.  Variants are
-	# resampled to this rate in the transform worker so they arrive at the
-	# player pre-converted — zero conversion overhead at trigger time.
-	output_sample_rate = (
-		cfg.player.audio.sample_rate
-		if cfg.player.audio.sample_rate is not None
-		else cfg.recorder.audio.sample_rate
-	)
+		_transform_cache = subsample.transform.TransformCache(
+			max_memory_bytes=max_transform_bytes,
+		)
+		def _on_transform_complete (
+			result: subsample.transform.TransformResult,
+		) -> None:
+			_transform_cache.put(result)
 
-	_transform_processor = subsample.transform.TransformProcessor(
-		sample_rate=cfg.recorder.audio.sample_rate,
-		output_sample_rate=output_sample_rate,
-		bit_depth=cfg.recorder.audio.bit_depth,
-		on_complete=_on_transform_complete,
-	)
-	transform_manager: typing.Optional[subsample.transform.TransformManager] = (
-		subsample.transform.TransformManager(
+		# Resolve the effective output sample rate for the player.  Variants are
+		# resampled to this rate in the transform worker so they arrive at the
+		# player pre-converted — zero conversion overhead at trigger time.
+		output_sample_rate = (
+			cfg.player.audio.sample_rate
+			if cfg.player.audio.sample_rate is not None
+			else cfg.recorder.audio.sample_rate
+		)
+
+		_transform_processor = subsample.transform.TransformProcessor(
+			sample_rate=cfg.recorder.audio.sample_rate,
+			output_sample_rate=output_sample_rate,
+			bit_depth=cfg.recorder.audio.bit_depth,
+			on_complete=_on_transform_complete,
+		)
+		transform_manager = subsample.transform.TransformManager(
 			cache=_transform_cache,
 			processor=_transform_processor,
 			instrument_library=instrument_library,
 			cfg=cfg.transform,
 		)
-	)
 
-	# Auto-enqueue pitch variants for all pre-loaded instrument samples.
-	# Live-captured samples are handled by the on_complete callback (below).
-	# Pre-loaded startup samples are never processed by that callback, so we
-	# notify the manager here, before threads start.  enqueue() returns
-	# immediately; variants are computed in the background by the worker pool.
-	if transform_manager is not None and len(instrument_library) > 0:
-		for _record in instrument_library.samples():
-			transform_manager.on_sample_added(_record)
+		# Auto-enqueue pitch variants for all pre-loaded instrument samples.
+		# Live-captured samples are handled by the on_complete callback (below).
+		# Pre-loaded startup samples are never processed by that callback, so we
+		# notify the manager here, before threads start.  enqueue() returns
+		# immediately; variants are computed in the background by the worker pool.
+		if len(instrument_library) > 0:
+			for _record in instrument_library.samples():
+				transform_manager.on_sample_added(_record)
 
 	# --- Thread-based orchestration ---
 	# Both the recorder and player have blocking loops, so each runs on its own
