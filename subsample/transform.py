@@ -593,6 +593,10 @@ class TransformProcessor:
 		self._in_flight:      set[TransformKey]  = set()
 		self._in_flight_lock: threading.Lock     = threading.Lock()
 
+		# Counters for idle/active boundary logging.
+		self._batch_enqueued:  int = 0   # jobs submitted since last idle
+		self._batch_completed: int = 0   # jobs finished since last idle
+
 	def enqueue (
 		self,
 		record: "subsample.library.SampleRecord",
@@ -623,7 +627,15 @@ class TransformProcessor:
 		with self._in_flight_lock:
 			if key in self._in_flight:
 				return
+			was_idle = len(self._in_flight) == 0
 			self._in_flight.add(key)
+			if was_idle:
+				self._batch_enqueued  = 0
+				self._batch_completed = 0
+			self._batch_enqueued += 1
+
+		if was_idle:
+			_log.info("Transform queue active")
 
 		self._executor.submit(self._execute, record, spec, key)
 
@@ -679,7 +691,9 @@ class TransformProcessor:
 		"""
 
 		try:
-			assert record.audio is not None
+			# enqueue() guards against None audio, but the type system can't see that.
+			if record.audio is None:
+				return
 
 			# Convert integer PCM to float32 preserving all channels.
 			audio = _pcm_to_float32(record.audio, self._bit_depth)
@@ -744,6 +758,12 @@ class TransformProcessor:
 		finally:
 			with self._in_flight_lock:
 				self._in_flight.discard(key)
+				self._batch_completed += 1
+				now_idle  = len(self._in_flight) == 0
+				completed = self._batch_completed
+
+			if now_idle:
+				_log.info("Transform queue idle — %d variant(s) processed", completed)
 
 # ---------------------------------------------------------------------------
 # TransformManager

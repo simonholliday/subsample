@@ -3,6 +3,7 @@
 import pathlib
 import threading
 import time
+import typing
 
 import numpy
 import pytest
@@ -42,7 +43,7 @@ def _make_pcm_audio (
 
 def _make_record (
 	sample_id: int = 1,
-	audio: numpy.ndarray = None,  # type: ignore[assignment]
+	audio: typing.Optional[numpy.ndarray] = None,
 	tempo_bpm: float = 0.0,
 ) -> subsample.library.SampleRecord:
 
@@ -124,7 +125,7 @@ def _make_record_unpitched (
 
 def _make_result (
 	sample_id: int = 1,
-	spec: subsample.transform.TransformSpec = None,  # type: ignore[assignment]
+	spec: typing.Optional[subsample.transform.TransformSpec] = None,
 	n_frames: int = 4410,
 	channels: int = 1,
 ) -> subsample.transform.TransformResult:

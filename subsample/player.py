@@ -51,9 +51,10 @@ _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 
 # Type alias for the compiled note map:
 # (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pitch, pan_gains)
-#   target_type: "reference" or "sample"
-#   target_arg:  reference name (for "reference") or filename stem (for "sample")
-#   rank:        similarity rank for "reference"; unused (0) for "sample"
+#   target_type: "reference", "sample", or "pitched"
+#   target_arg:  reference name (for "reference") | filename stem (for "sample")
+#                | selector string (for "pitched": "oldest", "newest", or "N")
+#   rank:        similarity rank for "reference"; unused (0) for "sample" and "pitched"
 #   pitch:       True = pitched keyboard assignment (all notes share rank 0; pre-computed variants)
 #   pan_gains:   float32 array of constant-power channel gains, shape (output_channels,)
 _NoteMap = dict[tuple[int, int], tuple[str, str, int, bool, bool, numpy.ndarray]]
@@ -102,7 +103,8 @@ def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_
 
 	total = float(numpy.sum(weight_arr))
 	if total == 0.0:
-		# All-zero pan is unusual but not an error — produces silence.
+		# All-zero pan produces silence. Warn so the user can diagnose a mis-configured map.
+		_log.warning("Assignment %r: all pan weights are zero — note will be silent", assignment_name)
 		return numpy.zeros(output_channels, dtype=numpy.float32)
 
 	# Constant-power normalisation: gain[i] = sqrt(weight[i] / total)
@@ -338,6 +340,24 @@ def load_midi_map (
 			target_type = "sample"
 			target_arg = target_raw[len("sample("):].split(")")[0].strip()
 
+		elif target_raw.startswith("pitched("):
+			target_type = "pitched"
+			target_arg = target_raw[len("pitched("):].split(")")[0].strip()
+
+			# Validate selector: must be "oldest", "newest", or a non-negative integer.
+			if target_arg not in ("oldest", "newest"):
+				try:
+					_idx = int(target_arg)
+					if _idx < 0:
+						raise ValueError("negative index")
+				except ValueError:
+					_log.warning(
+						"MIDI map assignment %r: pitched(%r) is not a valid selector "
+						"(expected oldest, newest, or non-negative integer) — skipping",
+						name, target_arg,
+					)
+					continue
+
 		else:
 			_log.debug("MIDI map assignment %r: skipping unsupported target %r (not yet implemented)", name, target_raw)
 			continue
@@ -354,7 +374,12 @@ def load_midi_map (
 		#
 		# When pitch: false (default), notes distribute ranks so each note triggers a
 		# progressively-less-similar sample variant (existing behaviour).
-		if target_type == "reference" and pitch_enabled:
+		if target_type == "pitched":
+			# pitched() is inherently a pitch-shifted keyboard — always pitch=True, rank=0.
+			# The pitch: YAML key is ignored for this target type.
+			for note in notes:
+				note_map[(mido_channel, int(note))] = (target_type, target_arg, 0, one_shot, True, pan_gains)
+		elif target_type == "reference" and pitch_enabled:
 			for note in notes:
 				note_map[(mido_channel, int(note))] = (target_type, target_arg, 0, one_shot, True, pan_gains)
 		else:
@@ -805,6 +830,16 @@ class MidiPlayer:
 				_log.debug("sample(%r) not in library — not yet loaded or evicted", target_arg)
 				return
 
+		elif target_type == "pitched":
+			# Dynamic selector: scan the instrument library for pitch-stable samples
+			# and select by position.  Variants are pre-computed by
+			# update_pitched_assignments(), so get_pitched() below usually finds a
+			# cached variant immediately.
+			sample_id = self._resolve_pitched_selector(target_arg)
+			if sample_id is None:
+				_log.debug("pitched(%s): no matching pitched sample in library", target_arg)
+				return
+
 		else:
 			_log.debug("Unknown target type %r — skipping", target_type)
 			return
@@ -822,7 +857,7 @@ class MidiPlayer:
 				rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
-				_log.info(
+				_log.debug(
 					"note %d (vel %d) → %r → %r (pitched variant)  (%.2fs)",
 					msg.note, msg.velocity, target_arg, record.name, variant.duration,
 				)
@@ -836,7 +871,7 @@ class MidiPlayer:
 				rendered = self._render_float(base.audio, base.level, msg.velocity, pan_gains)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
-				_log.info(
+				_log.debug(
 					"note %d (vel %d) → %r → %r (base variant)  (%.2fs)",
 					msg.note, msg.velocity, target_arg, record.name, base.duration,
 				)
@@ -852,7 +887,7 @@ class MidiPlayer:
 		with self._voices_lock:
 			self._voices.append(_Voice(audio=original, note=msg.note, channel=msg.channel, one_shot=one_shot))
 
-		_log.info(
+		_log.debug(
 			"note %d (vel %d) → %r → %r  (%.2fs)",
 			msg.note, msg.velocity, target_arg, record.name, record.duration,
 		)
@@ -887,15 +922,16 @@ class MidiPlayer:
 
 		"""Pre-compute pitch variants for all pitched keyboard assignments.
 
-		Groups notes by their reference name where pitch=True, resolves each
-		reference to its current best-matching sample, and enqueues pitch-shift
-		variants for all notes in the group.  The TransformProcessor deduplicates
+		Groups notes by target where pitch=True, resolves each to its current
+		sample (via similarity matrix for reference() targets, via instrument
+		library scan for pitched() targets), and enqueues pitch-shift variants
+		for all notes in the group.  The TransformProcessor deduplicates
 		in-flight and cached keys, so repeated calls are safe and cheap.
 
 		Call this:
 		  - At startup, after the similarity matrix is populated.
-		  - In the on_complete callback after similarity_matrix.add() changes the
-		    best match — the new match's variants are queued before the next trigger.
+		  - In the on_complete callback after a new sample arrives — ensures
+		    variants are ready before the next trigger.
 
 		No-ops if no transform manager is configured or no pitched assignments exist.
 		"""
@@ -903,17 +939,28 @@ class MidiPlayer:
 		if self._transform_manager is None:
 			return
 
-		# Collect notes per reference name from all pitched keyboard assignments.
-		pitched_groups: dict[str, list[int]] = {}
+		# Collect notes per (target_type, target_arg) from all pitched keyboard assignments.
+		# Keying on (ttype, targ) avoids a collision if a reference name accidentally
+		# matches a selector string ("oldest", "newest"), and clearly separates the
+		# two resolution paths below.
+		pitched_groups: dict[tuple[str, str], list[int]] = {}
 		for (_ch, note), (ttype, targ, _rank, _one_shot, pitch, _pan) in self._note_map.items():
 			if pitch:
-				pitched_groups.setdefault(targ, []).append(note)
+				pitched_groups.setdefault((ttype, targ), []).append(note)
 
 		if not pitched_groups:
 			return
 
-		for ref_name, notes in pitched_groups.items():
-			sample_id = self._similarity_matrix.get_match(ref_name, rank=0)
+		for (ttype, targ), notes in pitched_groups.items():
+
+			# Resolve to sample_id using the appropriate strategy for each target type.
+			if ttype == "reference":
+				sample_id = self._similarity_matrix.get_match(targ, rank=0)
+			elif ttype == "pitched":
+				sample_id = self._resolve_pitched_selector(targ)
+			else:
+				continue
+
 			if sample_id is None:
 				continue
 
@@ -923,16 +970,54 @@ class MidiPlayer:
 
 			if not subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
 				_log.warning(
-					"Pitched reference %r: best match %r has no stable pitch — skipping pre-computation",
-					ref_name, record.name,
+					"Pitched %s(%s): best match %r has no stable pitch — skipping pre-computation",
+					ttype, targ, record.name,
 				)
 				continue
 
 			self._transform_manager.enqueue_pitch_range(record, notes)
 			_log.info(
-				"Pitched reference %r: queued %d variant(s) for %r",
-				ref_name, len(notes), record.name,
+				"Pitched %s(%s): queued %d variant(s) for %r",
+				ttype, targ, len(notes), record.name,
 			)
+
+	def _resolve_pitched_selector (self, selector: str) -> typing.Optional[int]:
+
+		"""Resolve a pitched() selector string to a sample_id.
+
+		Scans all samples in the instrument library, filters to those passing
+		has_stable_pitch(), and selects by position:
+		  "oldest" → lowest sample_id (first in insertion order)
+		  "newest" → highest sample_id (last in insertion order)
+		  "N"      → Nth sample, 0-indexed
+
+		InstrumentLibrary.samples() returns records in insertion order, which
+		equals sample_id order (IDs are monotonically increasing).
+
+		Returns None if no pitch-stable samples exist or the index is out of range.
+		"""
+
+		pitched: list[subsample.library.SampleRecord] = [
+			r for r in self._instrument_library.samples()
+			if subsample.analysis.has_stable_pitch(r.spectral, r.pitch, r.duration)
+		]
+
+		if not pitched:
+			return None
+
+		if selector == "oldest":
+			return pitched[0].sample_id
+
+		if selector == "newest":
+			return pitched[-1].sample_id
+
+		# Numeric index — validated at load time to be a non-negative integer.
+		idx = int(selector)
+		if idx >= len(pitched):
+			_log.debug("pitched(%d): only %d pitched sample(s) in library", idx, len(pitched))
+			return None
+
+		return pitched[idx].sample_id
 
 	def _render_float (
 		self,

@@ -36,7 +36,7 @@
 #                       + pitch: true maps a note range to one sample,
 #                         pitch-shifted per note                           [IMPLEMENTED]
 #   sample(filename)  specific sample by filename (without .wav extension) [IMPLEMENTED]
-#   pitched(selector) pitched/tonal sample by position (newest/oldest/N)  [FUTURE]
+#   pitched(selector) pitched/tonal sample by position (newest/oldest/N)  [IMPLEMENTED]
 #   newest()          most recently added sample (any type)                [FUTURE]
 #   oldest()          oldest sample in the library (any type)              [FUTURE]
 #
@@ -233,15 +233,63 @@ assignments:
   #     which re-resolves each reference to its new best match and enqueues
   #     new pitch variants.  The player seamlessly switches to the new sample.
   #
-  #   pitched(newest) / pitched(oldest) / pitched(N) selectors: [FUTURE]
-  #     These will select from samples that pass has_stable_pitch() directly,
-  #     without requiring a reference library entry.
+  #   pitched(newest) / pitched(oldest) / pitched(N) selectors:
+  #     These select from samples that pass has_stable_pitch() directly,
+  #     without requiring a reference library entry.  See the PITCHED
+  #     SELECTOR section below for full documentation.
 
   # - name: Bass keyboard
   #   channel: 1
   #   notes: C2..C4
   #   target: reference(BASS_TONE)
   #   pitch: true
+  #   one_shot: false
+
+
+  # =================================================================
+  # PITCHED SELECTOR
+  # =================================================================
+  #
+  # TARGET TYPE: pitched(selector)
+  #
+  #   Selects a sample directly by its position among all pitch-stable
+  #   samples in the instrument library, without requiring a reference
+  #   library entry.  A sample is pitch-stable when it passes
+  #   has_stable_pitch() — a 7-criterion gate ensuring a confident,
+  #   stable fundamental pitch suitable for keyboard playback.
+  #
+  #   Selectors:
+  #     pitched(oldest)  lowest sample_id that passes has_stable_pitch()
+  #     pitched(newest)  highest sample_id that passes has_stable_pitch()
+  #     pitched(N)       Nth sample (0-indexed) by sample_id
+  #
+  #   Resolution: dynamic — re-evaluated when update_pitched_assignments()
+  #   is called (at startup and after each new sample arrives).  When
+  #   the resolved sample changes, variants are pre-computed before the
+  #   next trigger — no delay on first press.
+  #
+  #   If no pitch-stable samples exist, or N is out of range, the note
+  #   plays silence (no error, no crash).
+  #
+  #   No reference library required — works even when reference.directory
+  #   is not configured.
+
+  # - name: Latest tonal capture
+  #   channel: 2
+  #   notes: C2..C6
+  #   target: pitched(newest)
+  #   one_shot: false
+
+  # - name: First tonal capture
+  #   channel: 3
+  #   notes: C2..C6
+  #   target: pitched(oldest)
+  #   one_shot: false
+
+  # - name: Second tonal capture
+  #   channel: 4
+  #   notes: C2..C6
+  #   target: pitched(1)
   #   one_shot: false
 
 

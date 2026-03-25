@@ -1,5 +1,6 @@
 """Tests for subsample/library.py — reference and instrument sample libraries."""
 
+import dataclasses
 import json
 import pathlib
 
@@ -148,7 +149,7 @@ class TestSampleRecord:
 			sample_id=1, name="X", spectral=tests.helpers._make_spectral(), rhythm=tests.helpers._make_rhythm(),
 			pitch=tests.helpers._make_pitch(), timbre=tests.helpers._make_timbre(), level=tests.helpers._make_level(), params=tests.helpers._make_params(), duration=1.0,
 		)
-		with pytest.raises(Exception):
+		with pytest.raises(dataclasses.FrozenInstanceError):
 			record.name = "Y"  # type: ignore[misc]
 
 	def test_as_vector_delegates_to_spectral (self) -> None:

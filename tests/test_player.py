@@ -1161,3 +1161,322 @@ class TestUpdatePitchedAssignments:
 
 		transform_manager.enqueue_pitch_range.assert_not_called()
 		assert any("stable pitch" in r.message for r in caplog.records)
+
+	def test_enqueues_for_pitched_selector (self) -> None:
+		"""enqueue_pitch_range is called for a pitched() selector assignment."""
+		import numpy
+
+		notes = [48, 50, 52]
+		note_map: subsample.player._NoteMap = {
+			(0, note): ("pitched", "newest", 0, False, True, numpy.array([0.707, 0.707], dtype=numpy.float32))
+			for note in notes
+		}
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		mock_record = unittest.mock.MagicMock()
+		mock_record.name = "tonal-sample"
+
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+		player._instrument_library.get.return_value = mock_record
+
+		with unittest.mock.patch.object(player, "_resolve_pitched_selector", return_value=42):
+			with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=True):
+				player.update_pitched_assignments()
+
+		transform_manager.enqueue_pitch_range.assert_called_once()
+		call_args = transform_manager.enqueue_pitch_range.call_args
+		assert call_args[0][0] is mock_record
+		assert sorted(call_args[0][1]) == sorted(notes)
+
+	def test_pitched_selector_no_match_skips (self) -> None:
+		"""No enqueue when pitched() selector resolves to None."""
+		import numpy
+
+		note_map: subsample.player._NoteMap = {
+			(0, 60): ("pitched", "newest", 0, False, True, numpy.array([0.707, 0.707], dtype=numpy.float32)),
+		}
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+
+		with unittest.mock.patch.object(player, "_resolve_pitched_selector", return_value=None):
+			player.update_pitched_assignments()
+
+		transform_manager.enqueue_pitch_range.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestLoadMidiMap — pitched() target type
+# ---------------------------------------------------------------------------
+
+class TestLoadMidiMapPitched:
+	"""Test load_midi_map() parsing of pitched() target assignments."""
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_pitched_oldest_target_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""pitched(oldest) target is parsed as ttype='pitched', targ='oldest', rank=0, pitch=True."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Oldest pitched
+    channel: 1
+    notes: C2..C4
+    target: pitched(oldest)
+    one_shot: false
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		# C2 = MIDI 36 on mido channel 0
+		assert (0, 36) in note_map
+		ttype, targ, rank, one_shot, pitch, _pan = note_map[(0, 36)]
+		assert ttype == "pitched"
+		assert targ == "oldest"
+		assert rank == 0
+		assert pitch is True
+		assert one_shot is False
+
+	def test_pitched_newest_target_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""pitched(newest) target is parsed correctly."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Newest pitched
+    channel: 2
+    notes: 60
+    target: pitched(newest)
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		assert (1, 60) in note_map
+		ttype, targ, rank, one_shot, pitch, _pan = note_map[(1, 60)]
+		assert ttype == "pitched"
+		assert targ == "newest"
+		assert rank == 0
+		assert pitch is True
+
+	def test_pitched_numeric_index_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""pitched(0) target is parsed with numeric selector stored as string."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Second pitched
+    channel: 1
+    notes: 60
+    target: pitched(1)
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		assert (0, 60) in note_map
+		ttype, targ, rank, _one_shot, pitch, _pan = note_map[(0, 60)]
+		assert ttype == "pitched"
+		assert targ == "1"
+		assert pitch is True
+
+	def test_pitched_invalid_selector_skipped (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""pitched() with an unrecognised selector is skipped with a WARNING."""
+		import logging
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Bad pitched
+    channel: 1
+    notes: 60
+    target: pitched(banana)
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, [])
+
+		assert len(note_map) == 0
+		assert any("banana" in r.message for r in caplog.records)
+
+	def test_pitched_negative_index_skipped (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""pitched(-1) is rejected as an invalid selector."""
+		import logging
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Negative pitched
+    channel: 1
+    notes: 60
+    target: pitched(-1)
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, [])
+
+		assert len(note_map) == 0
+
+	def test_pitched_all_notes_rank_zero_pitch_true (self, tmp_path: pathlib.Path) -> None:
+		"""All notes in a pitched() range get rank=0 and pitch=True regardless of the pitch: field."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Pitched keyboard
+    channel: 1
+    notes: [48, 50, 52]
+    target: pitched(newest)
+    one_shot: false
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		for midi_note in [48, 50, 52]:
+			ttype, targ, rank, _one_shot, pitch, _pan = note_map[(0, midi_note)]
+			assert ttype == "pitched"
+			assert rank == 0
+			assert pitch is True
+
+	def test_pitched_full_range (self, tmp_path: pathlib.Path) -> None:
+		"""pitched(oldest) with C-1..G9 maps all 128 MIDI notes."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Full keyboard
+    channel: 1
+    notes: C-1..G9
+    target: pitched(oldest)
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		assert len(note_map) == 128
+
+
+# ---------------------------------------------------------------------------
+# TestResolvePitchedSelector
+# ---------------------------------------------------------------------------
+
+class TestResolvePitchedSelector:
+	"""Tests for MidiPlayer._resolve_pitched_selector()."""
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		"""Return a minimal MidiPlayer with mocked dependencies."""
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _make_record (self, sample_id: int, stable: bool) -> unittest.mock.MagicMock:
+		"""Create a mock SampleRecord with a controllable has_stable_pitch result."""
+		record = unittest.mock.MagicMock()
+		record.sample_id = sample_id
+		record.name = f"sample-{sample_id}"
+		# Attach the stability flag so the side_effect can read it from record.spectral.
+		record.spectral._stable = stable
+		return record
+
+	def _stable_side_effect (self, spectral: unittest.mock.MagicMock, pitch: object, duration: object) -> bool:
+		return bool(spectral._stable)
+
+	def test_oldest_returns_first_stable (self) -> None:
+		"""'oldest' skips non-stable records and returns the lowest stable sample_id."""
+		player = self._make_player()
+
+		r1 = self._make_record(1, stable=False)
+		r2 = self._make_record(2, stable=True)
+		r3 = self._make_record(3, stable=True)
+		player._instrument_library.samples.return_value = [r1, r2, r3]
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", side_effect=self._stable_side_effect):
+			result = player._resolve_pitched_selector("oldest")
+
+		assert result == 2
+
+	def test_newest_returns_last_stable (self) -> None:
+		"""'newest' returns the highest stable sample_id."""
+		player = self._make_player()
+
+		r1 = self._make_record(1, stable=True)
+		r2 = self._make_record(2, stable=True)
+		r3 = self._make_record(3, stable=False)
+		player._instrument_library.samples.return_value = [r1, r2, r3]
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", side_effect=self._stable_side_effect):
+			result = player._resolve_pitched_selector("newest")
+
+		assert result == 2
+
+	def test_numeric_index (self) -> None:
+		"""Numeric selectors return the correct sample by 0-indexed position."""
+		player = self._make_player()
+
+		r1 = self._make_record(1, stable=True)
+		r2 = self._make_record(2, stable=True)
+		r3 = self._make_record(3, stable=True)
+		player._instrument_library.samples.return_value = [r1, r2, r3]
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", side_effect=self._stable_side_effect):
+			assert player._resolve_pitched_selector("0") == 1
+			assert player._resolve_pitched_selector("1") == 2
+			assert player._resolve_pitched_selector("2") == 3
+
+	def test_index_out_of_range_returns_none (self) -> None:
+		"""Numeric index beyond available samples returns None."""
+		player = self._make_player()
+
+		r1 = self._make_record(1, stable=True)
+		player._instrument_library.samples.return_value = [r1]
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", side_effect=self._stable_side_effect):
+			result = player._resolve_pitched_selector("5")
+
+		assert result is None
+
+	def test_no_stable_samples_returns_none (self) -> None:
+		"""Returns None for all selectors when no pitch-stable samples exist."""
+		player = self._make_player()
+
+		r1 = self._make_record(1, stable=False)
+		player._instrument_library.samples.return_value = [r1]
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=False):
+			assert player._resolve_pitched_selector("oldest") is None
+			assert player._resolve_pitched_selector("newest") is None
+			assert player._resolve_pitched_selector("0") is None
+
+	def test_empty_library_returns_none (self) -> None:
+		"""Returns None for all selectors when the library is empty."""
+		player = self._make_player()
+		player._instrument_library.samples.return_value = []
+
+		assert player._resolve_pitched_selector("oldest") is None
+		assert player._resolve_pitched_selector("newest") is None
+		assert player._resolve_pitched_selector("0") is None

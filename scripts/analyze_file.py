@@ -37,12 +37,12 @@ logging.basicConfig(
 _log = logging.getLogger(__name__)
 
 
-def _analyze_file (filepath_path: pathlib.Path) -> None:
+def _analyze_file (filepath: pathlib.Path) -> None:
 
 	"""Analyze a single audio file and print its metrics."""
 
 	# Try the cache first — skips CPU-intensive analysis if nothing has changed
-	cached = subsample.cache.load_cache(filepath_path)
+	cached = subsample.cache.load_cache(filepath)
 
 	if cached is not None:
 		result, rhythm, pitch, timbre, params, duration, level = cached
@@ -52,10 +52,10 @@ def _analyze_file (filepath_path: pathlib.Path) -> None:
 			# soundfile.read with dtype='float32' reads directly as float32, avoiding
 			# the default float64 intermediate; always_2d ensures shape is
 			# (n_frames, channels) regardless of mono/stereo.
-			data, samplerate = soundfile.read(str(filepath_path), always_2d=True, dtype='float32')
+			data, samplerate = soundfile.read(str(filepath), always_2d=True, dtype='float32')
 
 		except (OSError, soundfile.SoundFileError) as exc:
-			print(f"Error reading {filepath_path}: {exc}", file=sys.stderr)
+			print(f"Error reading {filepath}: {exc}", file=sys.stderr)
 			return
 
 		# Mix down to mono — analysis functions expect shape (n_frames,)
@@ -74,9 +74,9 @@ def _analyze_file (filepath_path: pathlib.Path) -> None:
 
 		# Save results for next time; log but don't fail if the filesystem is read-only
 		try:
-			audio_md5 = subsample.cache.compute_audio_md5(filepath_path)
+			audio_md5 = subsample.cache.compute_audio_md5(filepath)
 			subsample.cache.save_cache(
-				audio_path = filepath_path,
+				audio_path = filepath,
 				audio_md5  = audio_md5,
 				params     = params,
 				spectral   = result,
@@ -87,7 +87,7 @@ def _analyze_file (filepath_path: pathlib.Path) -> None:
 				level      = level,
 			)
 		except OSError as exc:
-			_log.warning("Could not save analysis cache for %s: %s", filepath_path.name, exc)
+			_log.warning("Could not save analysis cache for %s: %s", filepath.name, exc)
 
 	print(f"rhythm:   {subsample.analysis.format_rhythm_result(rhythm)}")
 	print(f"spectral: {subsample.analysis.format_result(result, duration)}")
@@ -127,11 +127,11 @@ def main () -> None:
 
 	multi = len(paths) > 1
 
-	for filepath_path in paths:
+	for filepath in paths:
 		if multi:
-			print(f"\nAnalyzing {filepath_path.name} ...")
+			print(f"\nAnalyzing {filepath.name} ...")
 
-		_analyze_file(filepath_path)
+		_analyze_file(filepath)
 
 
 if __name__ == "__main__":

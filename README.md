@@ -578,6 +578,40 @@ when the best match changes — no delay on the first trigger.
 The reference sample must have a confident, stable detected pitch (checked by `has_stable_pitch()`).
 Samples that fail this test fall back to unpitched playback.
 
+**`sample(FILENAME)`** — plays a specific sample by its filename stem (without the `.wav`
+extension). If the sample is not loaded or has been evicted from memory, the note plays silence —
+no error. Useful for building fixed kits from known recordings.
+
+```yaml
+- name: Fixed kick
+  channel: 10
+  notes: 36
+  target: sample(2026-03-24_14-37-14)
+  one_shot: true
+```
+
+**`pitched(SELECTOR)`** — selects a sample by position among all pitch-stable samples in the
+instrument library, without requiring a reference library entry. Every MIDI note in the range
+plays the selected sample pitch-shifted to match. Variants are pre-computed in the background
+when the library changes — no delay on first trigger.
+
+Selectors:
+- `pitched(oldest)` — the first (lowest ID) pitch-stable sample
+- `pitched(newest)` — the most recently added pitch-stable sample
+- `pitched(N)` — the Nth pitch-stable sample (0-indexed)
+
+```yaml
+- name: Latest tonal capture
+  channel: 2
+  notes: C2..C6
+  target: pitched(newest)
+  one_shot: false
+```
+
+If no pitch-stable samples exist or the index is out of range, the note plays silence.
+A sample is pitch-stable when it passes the same `has_stable_pitch()` gate used by
+`reference() + pitch: true`.
+
 ### Pan
 
 Pan weights are normalised to constant-power gains so perceived loudness is equal at any
