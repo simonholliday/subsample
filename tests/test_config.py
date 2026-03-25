@@ -446,13 +446,13 @@ class TestLoadCustomConfig:
 
 		assert cfg.recorder.audio.channels is None
 
-	def test_channels_omitted_yields_none (self, tmp_path: pathlib.Path) -> None:
-		"""Omitting channels entirely also resolves to None (auto-detect)."""
+	def test_channels_omitted_inherits_default (self, tmp_path: pathlib.Path) -> None:
+		"""Omitting channels in user config inherits the default value (1 = mono)."""
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(self._minimal_yaml(""))
 		cfg = subsample.config.load_config(config_file)
 
-		assert cfg.recorder.audio.channels is None
+		assert cfg.recorder.audio.channels == 1
 
 	def test_channels_zero_raises (self, tmp_path: pathlib.Path) -> None:
 		"""channels: 0 should raise ValueError at config-load time."""
@@ -574,3 +574,108 @@ class TestLoadCustomConfig:
 
 		with pytest.raises(ValueError, match="limiter_threshold_db"):
 			subsample.config.load_config(config_file)
+
+
+class TestDeepMerge:
+
+	def test_flat_override (self) -> None:
+		"""Override value replaces base value for the same key."""
+		base = {"a": 1, "b": 2}
+		override = {"b": 99}
+		assert subsample.config._deep_merge(base, override) == {"a": 1, "b": 99}
+
+	def test_nested_override_preserves_unrelated_keys (self) -> None:
+		"""Nested dict override only replaces the specified sub-key."""
+		base = {"section": {"a": 1, "b": 2}}
+		override = {"section": {"b": 99}}
+		assert subsample.config._deep_merge(base, override) == {"section": {"a": 1, "b": 99}}
+
+	def test_override_adds_new_key (self) -> None:
+		"""Keys in override that are not in base are added to the result."""
+		base = {"a": 1}
+		override = {"b": 2}
+		result = subsample.config._deep_merge(base, override)
+		assert result == {"a": 1, "b": 2}
+
+	def test_does_not_mutate_base (self) -> None:
+		base: dict[str, object] = {"a": 1, "nested": {"x": 10}}
+		override: dict[str, object] = {"a": 2, "nested": {"x": 20}}
+		_ = subsample.config._deep_merge(base, override)
+		assert base == {"a": 1, "nested": {"x": 10}}
+
+	def test_does_not_mutate_override (self) -> None:
+		base: dict[str, object] = {"a": 1}
+		override: dict[str, object] = {"b": 2}
+		_ = subsample.config._deep_merge(base, override)
+		assert override == {"b": 2}
+
+	def test_override_null_wins (self) -> None:
+		"""Explicit None in override replaces a non-None base value."""
+		base: dict[str, object] = {"channels": 1}
+		override: dict[str, object] = {"channels": None}
+		result = subsample.config._deep_merge(base, override)
+		assert result["channels"] is None
+
+	def test_deeply_nested_merge (self) -> None:
+		"""Merge works correctly across multiple levels of nesting."""
+		base = {"recorder": {"audio": {"sample_rate": 44100, "bit_depth": 16}}}
+		override = {"recorder": {"audio": {"sample_rate": 48000}}}
+		result = subsample.config._deep_merge(base, override)
+		assert result == {"recorder": {"audio": {"sample_rate": 48000, "bit_depth": 16}}}
+
+
+class TestConfigCascade:
+
+	def test_minimal_override_loads_successfully (self, tmp_path: pathlib.Path) -> None:
+		"""A config.yaml with only a device override loads with all other defaults."""
+		yaml_content = textwrap.dedent("""\
+			recorder:
+			  audio:
+			    device: "Test Mic"
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.recorder.audio.device == "Test Mic"
+		assert cfg.recorder.audio.sample_rate == 44100
+		assert cfg.recorder.audio.bit_depth == 16
+		assert cfg.detection.snr_threshold_db == 12.0
+		assert cfg.output.directory == "./samples"
+
+	def test_partial_section_inherits_sibling_keys (self, tmp_path: pathlib.Path) -> None:
+		"""Overriding one key in a section leaves sibling keys at their defaults."""
+		yaml_content = textwrap.dedent("""\
+			detection:
+			  snr_threshold_db: 6.0
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.detection.snr_threshold_db == 6.0
+		assert cfg.detection.hold_time == 0.5
+		assert cfg.detection.warmup_seconds == 1.0
+		assert cfg.detection.ema_alpha == 0.1
+
+	def test_default_path_explicit_no_double_merge (self) -> None:
+		"""Passing the default config path explicitly loads correctly without double-merging."""
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+		assert cfg.recorder.audio.sample_rate == 44100
+		assert cfg.detection.trim_pre_samples == 15
+
+	def test_channels_null_override_yields_none (self, tmp_path: pathlib.Path) -> None:
+		"""Explicitly setting channels: null in user config overrides the default (1)."""
+		yaml_content = textwrap.dedent("""\
+			recorder:
+			  audio:
+			    channels: null
+		""")
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.recorder.audio.channels is None

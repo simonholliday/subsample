@@ -1,5 +1,10 @@
 # Subsample default configuration.
-# Copy this file to config.yaml and adjust to your needs:
+#
+# This file provides all default values. To customise, create a config.yaml
+# in the same directory containing only the settings you want to override —
+# all other values are inherited from this file automatically.
+#
+# To start with a full copy you can edit freely:
 #   cp config.yaml.default config.yaml
 
 # ---------------------------------------------------------------------------

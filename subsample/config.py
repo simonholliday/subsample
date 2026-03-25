@@ -1,15 +1,21 @@
 """Configuration loading and validation for Subsample.
 
-Reads config.yaml (user-provided) or falls back to config.yaml.default
-(shipped with the package). Exposes typed, frozen dataclasses so every
-other module gets IDE completion and mypy coverage.
+Always loads config.yaml.default (shipped with the package) as the base, then
+deep-merges the user's config.yaml on top. The default file is the single source
+of truth for all default values; config.yaml only needs to specify overrides.
+Exposes typed, frozen dataclasses so every other module gets IDE completion and
+mypy coverage.
 """
 
 import dataclasses
+import logging
 import pathlib
 import typing
 
 import yaml
+
+
+_log = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -250,24 +256,60 @@ class Config:
 
 def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
 
-	"""Load configuration from a YAML file, falling back to the package default.
+	"""Load configuration, merging config.yaml.default with config.yaml.
 
-	Searches for config.yaml in the given path, the current working directory,
-	and finally the bundled config.yaml.default alongside this module.
+	Always loads config.yaml.default as the base. If a user config.yaml exists
+	(or an explicit path is given), it is deep-merged on top so user settings
+	override defaults while unspecified keys inherit default values.
 	"""
 
-	config_path = _resolve_config_path(path)
-	raw = _read_yaml(config_path)
+	default_path = _locate_default_config()
+	base = _read_yaml(default_path)
+
+	user_path = _resolve_user_config_path(path)
+
+	# Avoid loading the same file twice when the caller explicitly passes the
+	# default path (e.g. in tests).
+	if user_path is not None and user_path.resolve() == default_path.resolve():
+		user_path = None
+
+	if user_path is not None:
+		user = _read_yaml(user_path)
+		raw = _deep_merge(base, user)
+		_log.debug("Loaded config from %s + %s", default_path.name, user_path.name)
+	else:
+		raw = base
+		_log.debug("Loaded config from %s", default_path.name)
 
 	return _build_config(raw)
 
 
-def _resolve_config_path (explicit: typing.Optional[pathlib.Path]) -> pathlib.Path:
+def _locate_default_config () -> pathlib.Path:
 
-	"""Find the best available config file.
+	"""Return the path to the bundled config.yaml.default.
 
-	Preference order: explicit path → ./config.yaml → package default.
-	When an explicit path is provided it must exist; no fallback is attempted.
+	Raises FileNotFoundError if the file is missing (broken installation).
+	"""
+
+	default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+
+	if not default.exists():
+		raise FileNotFoundError(
+			f"Bundled config.yaml.default not found at {default}. "
+			"The package installation may be corrupted."
+		)
+
+	return default
+
+
+def _resolve_user_config_path (
+	explicit: typing.Optional[pathlib.Path],
+) -> typing.Optional[pathlib.Path]:
+
+	"""Return the user's config override path, or None if no user config exists.
+
+	Priority: explicit path argument → ./config.yaml in CWD → None.
+	When an explicit path is provided it must exist; no CWD fallback is tried.
 	"""
 
 	if explicit is not None:
@@ -280,15 +322,35 @@ def _resolve_config_path (explicit: typing.Optional[pathlib.Path]) -> pathlib.Pa
 	if cwd_config.exists():
 		return cwd_config
 
-	# Fall back to the default shipped with the package
-	default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
-	if default.exists():
-		return default
+	return None
 
-	raise FileNotFoundError(
-		"No config.yaml found in current directory and config.yaml.default is missing. "
-		"Run: cp config.yaml.default config.yaml"
-	)
+
+def _deep_merge (
+	base: dict[str, typing.Any],
+	override: dict[str, typing.Any],
+) -> dict[str, typing.Any]:
+
+	"""Recursively merge override onto base, returning a new dict.
+
+	For each key in override: if both values are dicts, recurse; otherwise the
+	override value wins (including explicit None / YAML null). Keys present in
+	base but absent from override are preserved unchanged. Neither input is
+	mutated.
+	"""
+
+	result = dict(base)
+
+	for key, override_value in override.items():
+		if (
+			key in result
+			and isinstance(result[key], dict)
+			and isinstance(override_value, dict)
+		):
+			result[key] = _deep_merge(result[key], override_value)
+		else:
+			result[key] = override_value
+
+	return result
 
 
 def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
@@ -461,8 +523,8 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		hold_time=float(_require(detection_raw, "hold_time", "detection")),
 		warmup_seconds=float(_require(detection_raw, "warmup_seconds", "detection")),
 		ema_alpha=float(_require(detection_raw, "ema_alpha", "detection")),
-		trim_pre_samples=int(detection_raw.get("trim_pre_samples", 0)),
-		trim_post_samples=int(detection_raw.get("trim_post_samples", 0)),
+		trim_pre_samples=int(detection_raw.get("trim_pre_samples", 15)),
+		trim_post_samples=int(detection_raw.get("trim_post_samples", 85)),
 	)
 
 	if not (0.0 < detection.ema_alpha <= 1.0):

@@ -350,8 +350,11 @@ and channel count. Detected segments are saved to the output directory.
 
 ## Configuration
 
-All settings live in `config.yaml`. The defaults are a good starting point -
-most users only need to touch a handful:
+Subsample always loads `config.yaml.default` as the base, then deep-merges
+your `config.yaml` on top. Your config only needs the settings you want to
+change — everything else is inherited from the defaults automatically.
+
+The most common overrides:
 
 - **First run:** set `recorder.audio.device` (your microphone) and `output.directory`
 - **For MIDI playback:** set `player.enabled: true`, `player.midi_device` or `player.virtual_midi_port`, and `player.audio.device`
