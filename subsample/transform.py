@@ -583,6 +583,7 @@ class TransformProcessor:
 		self._on_complete        = on_complete
 
 		n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
+		_log.info("TransformProcessor: %d worker(s) (cpu_count=%d)", n_workers, os.cpu_count() or 1)
 
 		self._executor = concurrent.futures.ThreadPoolExecutor(
 			max_workers=n_workers,
