@@ -526,19 +526,23 @@ mapping one or more MIDI notes on a given channel to sample targets.
 |-------|----------|-------------|
 | `name` | yes | Label shown in logs |
 | `channel` | yes | MIDI channel 1-16 (standard numbering) |
-| `notes` | yes | Single note, or list (see Note syntax below) |
+| `notes` | yes | Single note, list, or range (see Note syntax below) |
 | `target` | yes | Which sample(s) to play (see Target types below) |
 | `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
 | `pan` | no | Stereo position as percentage weights e.g. `[50, 50]` = centre (default) |
+| `pitch` | no | `true` = pitch-shift the matched sample to each MIDI note in the range (use with `reference()` and a note range) |
 
 ### Note syntax
 
 ```yaml
 notes: 36          # single MIDI note number
+notes: C4          # note name (C4 = MIDI 60, same as Ableton/Logic/FL Studio)
 notes: [36, 35]    # list — each gets the next similarity rank (first = best match)
+notes: C2..C4      # range — expands to every MIDI note from C2 (36) to C4 (60)
+notes: 36..60      # range with note numbers
 ```
 
-Note names (`C4`, `D#3`, etc.) and ranges (`C2..C6`) are planned for a future phase.
+Note names use the convention C4 = 60 (C-1 = 0, G9 = 127). Sharps: `C#4`, `D#3`. Flats: `Db4`, `Eb3`.
 
 ### Target types
 
@@ -556,6 +560,23 @@ if fewer samples than notes have been recorded.
 ```
 
 The reference name must match a file in your `reference.directory` (case-insensitive).
+
+**`reference(NAME)` with `pitch: true`** — plays the best-matching sample, pitch-shifted to each
+MIDI note in the range. Every note in the assignment maps to rank 0 (same sample), shifted up or
+down from the sample's detected fundamental pitch. Pitch variants are computed in the background
+when the best match changes — no delay on the first trigger.
+
+```yaml
+- name: Bass keyboard
+  channel: 1
+  notes: C2..C4
+  target: reference(BASS_TONE)
+  pitch: true
+  one_shot: false
+```
+
+The reference sample must have a confident, stable detected pitch (checked by `has_stable_pitch()`).
+Samples that fail this test fall back to unpitched playback.
 
 ### Pan
 

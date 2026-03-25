@@ -50,12 +50,13 @@ _log = logging.getLogger(__name__)
 _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 
 # Type alias for the compiled note map:
-# (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pan_gains)
+# (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pitch, pan_gains)
 #   target_type: "reference" or "sample"
 #   target_arg:  reference name (for "reference") or filename stem (for "sample")
 #   rank:        similarity rank for "reference"; unused (0) for "sample"
+#   pitch:       True = pitched keyboard assignment (all notes share rank 0; pre-computed variants)
 #   pan_gains:   float32 array of constant-power channel gains, shape (output_channels,)
-_NoteMap = dict[tuple[int, int], tuple[str, str, int, bool, numpy.ndarray]]
+_NoteMap = dict[tuple[int, int], tuple[str, str, int, bool, bool, numpy.ndarray]]
 
 
 def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_name: str) -> numpy.ndarray:
@@ -109,6 +110,146 @@ def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_
 	return result
 
 
+# Semitone offsets within an octave — used by _parse_note_name().
+# Flats and enharmonic sharps share entries (Db=C#=1, Eb=D#=3, etc.).
+_SEMITONE_MAP: dict[str, int] = {
+	"C": 0, "C#": 1, "DB": 1, "D": 2, "D#": 3, "EB": 3,
+	"E": 4, "F": 5, "F#": 6, "GB": 6, "G": 7, "G#": 8,
+	"AB": 8, "A": 9, "A#": 10, "BB": 10, "B": 11,
+}
+
+
+def _parse_note_name (name: str) -> int:
+
+	"""Parse a note name string to a MIDI note number.
+
+	Uses C4 = 60 (Ableton / Logic / FL Studio convention).
+	Octave numbers from -1 (C-1 = 0) to 9 (G9 = 127).
+
+	Sharps:   C#4, D#3, F#2
+	Flats:    Db4, Eb3, Bb2
+	Naturals: C4, A3, G2
+
+	Args:
+		name: Note name string such as 'C4', 'D#3', 'Bb2', or 'C-1'.
+
+	Returns:
+		MIDI note number in [0, 127].
+
+	Raises:
+		ValueError: If the note class is unrecognised or the result is out of MIDI range.
+	"""
+
+	name = name.strip()
+
+	# Split into note class (letter + optional accidental) and octave string.
+	# Check for a two-character class (letter + '#' or 'b') first.
+	if len(name) >= 2 and name[1] in ("#", "b"):
+		note_class = name[:2].upper()
+		octave_str = name[2:]
+	else:
+		note_class = name[:1].upper()
+		octave_str = name[1:]
+
+	if note_class not in _SEMITONE_MAP:
+		raise ValueError(
+			f"Unrecognised note class {note_class!r} in {name!r} — "
+			f"expected a letter A-G with optional # or b (e.g. C4, D#3, Bb2)"
+		)
+
+	try:
+		octave = int(octave_str)
+	except ValueError:
+		raise ValueError(
+			f"Malformed note name {name!r} — octave part {octave_str!r} is not an integer"
+		) from None
+
+	midi = (octave + 1) * 12 + _SEMITONE_MAP[note_class]
+
+	if not 0 <= midi <= 127:
+		raise ValueError(
+			f"Note {name!r} maps to MIDI {midi}, outside the valid range [0, 127] "
+			f"(C-1 = 0, G9 = 127)"
+		)
+
+	return midi
+
+
+def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
+
+	"""Parse the 'notes' field from a MIDI map assignment into MIDI note numbers.
+
+	Accepts:
+	  Integer:          36          → [36]
+	  Note name:        "C3"        → [48]
+	  Numeric range:    "36..60"    → [36, 37, ..., 60]
+	  Note name range:  "C2..C4"    → [36, 37, ..., 60]
+	  List (mixed):     [36, "C3"]  → [36, 48]
+
+	Args:
+		notes_raw:       Raw YAML value for the 'notes' field.
+		assignment_name: Assignment name used in error messages.
+
+	Returns:
+		Non-empty list of MIDI note numbers.
+
+	Raises:
+		ValueError: If any note value is malformed or outside [0, 127].
+	"""
+
+	def _single (item: typing.Any) -> int:
+		"""Resolve one note value: int, numeric string, or note-name string."""
+
+		if isinstance(item, int):
+			if not 0 <= item <= 127:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: note {item} is outside [0, 127]"
+				)
+			return item
+
+		if isinstance(item, str):
+			# Try parsing as a bare integer first ("36"), then as a note name ("C3").
+			try:
+				n = int(item)
+				if not 0 <= n <= 127:
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: note {n} is outside [0, 127]"
+					)
+				return n
+			except ValueError:
+				pass
+
+			try:
+				return _parse_note_name(item)
+			except ValueError as exc:
+				raise ValueError(f"MIDI map assignment {assignment_name!r}: {exc}") from exc
+
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unexpected note value {item!r}"
+		)
+
+	# Range syntax: "C2..C4" or "36..60"
+	if isinstance(notes_raw, str) and ".." in notes_raw:
+		lo_str, hi_str = notes_raw.split("..", 1)
+		lo = _single(lo_str.strip())
+		hi = _single(hi_str.strip())
+
+		if lo > hi:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: note range {notes_raw!r} — "
+				f"start ({lo}) must be <= end ({hi})"
+			)
+
+		return list(range(lo, hi + 1))
+
+	# Single value (int or string).
+	if isinstance(notes_raw, (int, str)):
+		return [_single(notes_raw)]
+
+	# List of mixed values.
+	return [_single(item) for item in notes_raw]
+
+
 def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
@@ -118,11 +259,12 @@ def load_midi_map (
 	"""Load a MIDI routing map from a YAML file.
 
 	Parses the assignments list and returns a lookup dict keyed by
-	(mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pan_gains).
+	(mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pitch, pan_gains).
 
 	Supported target types:
 	  reference(NAME) — resolved at trigger time via SimilarityMatrix.get_match().
 	                    Ranks are distributed by note-list position: first note = rank 0.
+	                    When pitch: true, all notes map to rank 0 and are pitch-shifted.
 	  sample(STEM)    — resolved at trigger time via InstrumentLibrary.find_by_name().
 	                    STEM is the WAV filename without extension.
 
@@ -140,7 +282,7 @@ def load_midi_map (
 		output_channels:  Number of output channels (default 2 = stereo).
 
 	Returns:
-		Dict mapping (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pan_gains).
+		Dict mapping (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pitch, pan_gains).
 		Empty dict if the file is empty or has no valid assignments.
 
 	Raises:
@@ -170,11 +312,10 @@ def load_midi_map (
 			raise ValueError(f"MIDI map assignment {name!r}: missing 'channel'")
 		mido_channel = int(channel_raw) - 1
 
-		# Notes: single int or list of ints (range syntax is a future phase)
 		notes_raw = assignment.get("notes")
 		if notes_raw is None:
 			raise ValueError(f"MIDI map assignment {name!r}: missing 'notes'")
-		notes: list[int] = [notes_raw] if isinstance(notes_raw, int) else list(notes_raw)
+		notes = _parse_note_spec(notes_raw, name)
 
 		# Target: parse target type and argument.
 		target_raw = assignment.get("target", "")
@@ -202,12 +343,23 @@ def load_midi_map (
 			continue
 
 		one_shot: bool = bool(assignment.get("one_shot", True))
+		pitch_enabled: bool = bool(assignment.get("pitch", False))
 
 		pan_gains = _parse_pan_gains(assignment.get("pan"), output_channels, name)
 
-		# Distribute ranks by note-list position (reference only; unused for sample).
-		for rank, note in enumerate(notes):
-			note_map[(mido_channel, int(note))] = (target_type, target_arg, rank, one_shot, pan_gains)
+		# When pitch: true on a reference(), every note in the list maps to rank 0
+		# (same best-matching sample) so the transform pipeline pitch-shifts it to
+		# each MIDI note.  The pitch flag is forwarded so update_pitched_assignments()
+		# can identify these entries and pre-compute variants when the best match changes.
+		#
+		# When pitch: false (default), notes distribute ranks so each note triggers a
+		# progressively-less-similar sample variant (existing behaviour).
+		if target_type == "reference" and pitch_enabled:
+			for note in notes:
+				note_map[(mido_channel, int(note))] = (target_type, target_arg, 0, one_shot, True, pan_gains)
+		else:
+			for rank, note in enumerate(notes):
+				note_map[(mido_channel, int(note))] = (target_type, target_arg, rank, one_shot, False, pan_gains)
 
 	_log.info(
 		"MIDI map loaded from %s: %d note(s) across %d assignment(s)",
@@ -438,10 +590,11 @@ class MidiPlayer:
 			len(self._note_map),
 			"\n  ".join(
 				f"ch{ch+1} note {note} → {ttype}({targ})"
-				+ (f" rank {rank}" if ttype == "reference" else "")
+				+ (f" rank {rank}" if ttype == "reference" and not pitch else "")
+				+ (" pitched" if pitch else "")
 				+ ("  one-shot" if one_shot else "")
 				+ f"  pan=[{', '.join(f'{g:.2f}' for g in pan_gains)}]"
-				for (ch, note), (ttype, targ, rank, one_shot, pan_gains) in sorted(self._note_map.items())
+				for (ch, note), (ttype, targ, rank, one_shot, pitch, pan_gains) in sorted(self._note_map.items())
 			),
 		)
 
@@ -630,7 +783,7 @@ class MidiPlayer:
 			_log.debug("MIDI ch%d note %d: no mapping", msg.channel + 1, msg.note)
 			return
 
-		target_type, target_arg, rank, one_shot, pan_gains = mapping
+		target_type, target_arg, rank, one_shot, pitch, pan_gains = mapping
 
 		if target_type == "reference":
 			# Look up the Nth-closest instrument sample for this reference.
@@ -729,6 +882,57 @@ class MidiPlayer:
 		float_audio = subsample.transform._pcm_to_float32(record.audio, self._bit_depth)
 
 		return self._render_float(float_audio, record.level, velocity, pan_gains)
+
+	def update_pitched_assignments (self) -> None:
+
+		"""Pre-compute pitch variants for all pitched keyboard assignments.
+
+		Groups notes by their reference name where pitch=True, resolves each
+		reference to its current best-matching sample, and enqueues pitch-shift
+		variants for all notes in the group.  The TransformProcessor deduplicates
+		in-flight and cached keys, so repeated calls are safe and cheap.
+
+		Call this:
+		  - At startup, after the similarity matrix is populated.
+		  - In the on_complete callback after similarity_matrix.add() changes the
+		    best match — the new match's variants are queued before the next trigger.
+
+		No-ops if no transform manager is configured or no pitched assignments exist.
+		"""
+
+		if self._transform_manager is None:
+			return
+
+		# Collect notes per reference name from all pitched keyboard assignments.
+		pitched_groups: dict[str, list[int]] = {}
+		for (_ch, note), (ttype, targ, _rank, _one_shot, pitch, _pan) in self._note_map.items():
+			if pitch:
+				pitched_groups.setdefault(targ, []).append(note)
+
+		if not pitched_groups:
+			return
+
+		for ref_name, notes in pitched_groups.items():
+			sample_id = self._similarity_matrix.get_match(ref_name, rank=0)
+			if sample_id is None:
+				continue
+
+			record = self._instrument_library.get(sample_id)
+			if record is None:
+				continue
+
+			if not subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
+				_log.warning(
+					"Pitched reference %r: best match %r has no stable pitch — skipping pre-computation",
+					ref_name, record.name,
+				)
+				continue
+
+			self._transform_manager.enqueue_pitch_range(record, notes)
+			_log.info(
+				"Pitched reference %r: queued %d variant(s) for %r",
+				ref_name, len(notes), record.name,
+			)
 
 	def _render_float (
 		self,

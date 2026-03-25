@@ -866,6 +866,28 @@ class TransformManager:
 
 		return result
 
+	def enqueue_pitch_range (
+		self,
+		record:     "subsample.library.SampleRecord",
+		midi_notes: list[int],
+	) -> None:
+
+		"""Enqueue pitch-shift variants for a set of MIDI notes.
+
+		Delegates to the underlying TransformProcessor, which deduplicates
+		in-flight and already-cached keys — safe to call repeatedly.
+
+		Called by MidiPlayer.update_pitched_assignments() when a pitched
+		keyboard assignment's best match changes and the new set of variants
+		must be pre-computed before the next trigger.
+
+		Args:
+			record:     SampleRecord to produce pitch-shifted variants from.
+			midi_notes: MIDI note numbers to pre-compute.
+		"""
+
+		self._processor.enqueue_pitch_range(record, midi_notes)
+
 	def on_sample_added (self, record: "subsample.library.SampleRecord") -> None:
 
 		"""Auto-enqueue variants when a new SampleRecord enters the library.

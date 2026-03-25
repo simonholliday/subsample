@@ -226,6 +226,7 @@ def _run_recorder (
 	shutdown_event: threading.Event,
 	store_audio: bool,
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
+	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]] = None,
 ) -> None:
 
 	"""Set up an audio input device and run the real-time capture loop.
@@ -245,6 +246,9 @@ def _run_recorder (
 		store_audio:        When True, keep PCM data in SampleRecord for playback.
 		transform_manager:  Optional transform pipeline; notified of new and evicted
 		                    samples so derivative variants are kept in sync.
+		player_cell:        Single-element list holding the active MidiPlayer, or None.
+		                    Forwarded to _make_on_complete so pitched assignments are
+		                    updated when the best match changes.
 	"""
 
 	pa = subsample.audio.create_pyaudio()
@@ -293,6 +297,7 @@ def _run_recorder (
 		on_complete=_make_on_complete(
 			reference_library, instrument_library, analysis_params,
 			similarity_matrix, store_audio, transform_manager,
+			player_cell=player_cell,
 		),
 	)
 
@@ -330,6 +335,7 @@ def _start_player (
 	instrument_library: subsample.library.InstrumentLibrary,
 	similarity_matrix: subsample.similarity.SimilarityMatrix,
 	reference_library: subsample.library.ReferenceLibrary,
+	player_cell: list[typing.Optional[subsample.player.MidiPlayer]],
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 ) -> None:
 
@@ -346,6 +352,9 @@ def _start_player (
 		instrument_library: Loaded instrument samples (must have audio in memory).
 		similarity_matrix:  Similarity index for note → sample lookup.
 		reference_library:  Reference library; provides sorted names for note mapping.
+		player_cell:        Single-element list; _start_player stores the MidiPlayer
+		                    here before calling run() so the on_complete callback can
+		                    call update_pitched_assignments() when the best match changes.
 		transform_manager:  Optional transform pipeline; enables pitched variant
 		                    playback when provided.
 	"""
@@ -382,6 +391,8 @@ def _start_player (
 			limiter_threshold_db=cfg.player.limiter_threshold_db,
 			limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 		)
+		player_cell[0] = player
+		player.update_pitched_assignments()
 		try:
 			player.run()
 		except ValueError as exc:
@@ -418,6 +429,8 @@ def _start_player (
 		limiter_threshold_db=cfg.player.limiter_threshold_db,
 		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 	)
+	player_cell[0] = player
+	player.update_pitched_assignments()
 	try:
 		player.run()
 	except ValueError as exc:
@@ -545,6 +558,11 @@ def main () -> None:
 	shutdown_event = threading.Event()
 	threads: list[threading.Thread] = []
 
+	# Shared cell so the on_complete callback can call update_pitched_assignments
+	# when the best-matching sample changes for a pitched keyboard assignment.
+	# _start_player sets this before calling player.run().
+	_player_cell: list[typing.Optional[subsample.player.MidiPlayer]] = [None]
+
 	if cfg.recorder.enabled:
 		threads.append(threading.Thread(
 			target=_run_recorder,
@@ -552,7 +570,7 @@ def main () -> None:
 				cfg, reference_library, instrument_library,
 				analysis_params, similarity_matrix,
 				shutdown_event, cfg.player.enabled,
-				transform_manager,
+				transform_manager, _player_cell,
 			),
 			name="recorder",
 		))
@@ -570,7 +588,7 @@ def main () -> None:
 				target=_start_player,
 				args=(
 					cfg, shutdown_event, instrument_library,
-					similarity_matrix, reference_library, transform_manager,
+					similarity_matrix, reference_library, _player_cell, transform_manager,
 				),
 				name="player",
 			))
@@ -638,6 +656,7 @@ def _make_on_complete (
 	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
 	store_audio: bool,
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
+	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]] = None,
 ) -> subsample.recorder._OnCompleteCallback:
 
 	"""Return the on_complete callback for the live-capture SampleProcessor.
@@ -653,6 +672,10 @@ def _make_on_complete (
 		transform_manager: Optional transform pipeline coordinator. When provided,
 		                   cascade-evicts derivatives for any evicted parents and
 		                   triggers auto-variant production for the new sample.
+		player_cell:       Single-element list holding the active MidiPlayer, or None.
+		                   When provided, update_pitched_assignments() is called after
+		                   each new sample is added to the similarity matrix so pitched
+		                   keyboard assignments pre-compute variants for the new best match.
 	"""
 
 	def on_complete (
@@ -710,5 +733,11 @@ def _make_on_complete (
 			if evicted:
 				transform_manager.on_parent_evicted(evicted)
 			transform_manager.on_sample_added(record)
+
+		# Re-compute pitched variants whenever the best match changes.
+		# update_pitched_assignments() enqueues new variants via the transform
+		# pipeline; the processor deduplicates so this is cheap when nothing changed.
+		if player_cell is not None and player_cell[0] is not None:
+			player_cell[0].update_pitched_assignments()
 
 	return on_complete

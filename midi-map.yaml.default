@@ -32,7 +32,9 @@
 #                          range maps to a single sample); false = disable
 #
 # TARGET TYPES (summary)
-#   reference(name)   similarity-ranked lookup against reference library  [IMPLEMENTED]
+#   reference(name)   similarity-ranked lookup against reference library   [IMPLEMENTED]
+#                       + pitch: true maps a note range to one sample,
+#                         pitch-shifted per note                           [IMPLEMENTED]
 #   sample(filename)  specific sample by filename (without .wav extension) [IMPLEMENTED]
 #   pitched(selector) pitched/tonal sample by position (newest/oldest/N)  [FUTURE]
 #   newest()          most recently added sample (any type)                [FUTURE]
@@ -208,53 +210,39 @@ assignments:
 
 
   # =================================================================
-  # PITCHED KEYBOARD - Channel 1  (FUTURE PHASE - not yet implemented)
+  # PITCHED KEYBOARD - Channel 1
   # =================================================================
   #
-  # Uncomment when pitched sample playback is implemented.
+  # TARGET TYPE: reference(NAME) with pitch: true
   #
-  # TARGET TYPE: pitched(selector)
+  #   Plays the best-matching sample for the named reference, pitch-shifted
+  #   to each MIDI note in the range.  Every note maps to rank 0 (same
+  #   sample) and is shifted up or down from the sample's detected pitch.
   #
-  #   Selects from samples that pass has_stable_pitch() — samples with a
-  #   confident, stable detected pitch suitable for re-pitching across a
-  #   keyboard range.
+  #   Pitch variants are pre-computed in the background when the best match
+  #   changes — no delay on the first trigger.
   #
-  #   Selectors:
-  #     pitched(newest)   most recently added pitched sample
-  #     pitched(oldest)   first loaded pitched sample
-  #     pitched(3)        3rd pitched sample (1-indexed, insertion order)
+  #   Pitch-shifting pipeline (MidiPlayer._handle_message):
+  #     1. transform_manager.get_pitched(sample_id, msg.note)
+  #        → returns a pre-computed variant if ready
+  #     2. Fall back to base variant (un-shifted, float32 copy)
+  #     3. Fall back to original PCM (first trigger only, before variants ready)
   #
-  #   Dynamic: re-evaluated on each trigger.  If no pitched sample matches
-  #   the selector, the note plays silence.
+  #   Re-evaluation on new sample:
+  #     When a new recording arrives, cli.py calls update_pitched_assignments()
+  #     which re-resolves each reference to its new best match and enqueues
+  #     new pitch variants.  The player seamlessly switches to the new sample.
   #
-  #   Pitch-shifting (implicit):
-  #     When notes is a range and the target resolves to a single sample,
-  #     pitch-shifting is automatic — each note triggers the same sample
-  #     shifted to the corresponding MIDI pitch.  Use pitch: false to
-  #     disable if you want every note to play the sample at its original
-  #     pitch.
-  #
-  #   [DEV] Pitch-shifting pipeline (TransformManager.get_pitched):
-  #       1. Check TransformCache for a pre-computed PitchShift variant
-  #       2. If miss: enqueue for background computation, return None
-  #       3. Player falls back to base variant or original until ready
-  #
-  #   [DEV] RE-EVALUATION TRIGGERS:
-  #     On new sample arrives:
-  #       - If new sample passes has_stable_pitch(), it becomes a
-  #         candidate.  pitched(newest) immediately points to it.
-  #       - Pitch variants are auto-enqueued by TransformManager.
-  #         on_sample_added() (if transform.auto_pitch is true).
-  #     On sample evicted:
-  #       - Next trigger re-evaluates and picks the new newest/oldest/Nth.
-  #       - TransformManager.on_parent_evicted() cascades variant eviction.
-  #
-  # - name: Keyboard
+  #   pitched(newest) / pitched(oldest) / pitched(N) selectors: [FUTURE]
+  #     These will select from samples that pass has_stable_pitch() directly,
+  #     without requiring a reference library entry.
+
+  # - name: Bass keyboard
   #   channel: 1
-  #   notes: C2..C6
-  #   target: pitched(newest)
+  #   notes: C2..C4
+  #   target: reference(BASS_TONE)
+  #   pitch: true
   #   one_shot: false
-  #   pitch: true            # optional; implicit when range maps to single sample
 
 
   # =================================================================

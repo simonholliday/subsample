@@ -682,7 +682,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
 		assert (9, 36) in note_map
-		ttype, ref, rank, one_shot, pan_gains = note_map[(9, 36)]
+		ttype, ref, rank, one_shot, pitch, pan_gains = note_map[(9, 36)]
 		assert ttype == "reference"
 		assert ref == "BD0025"
 		assert rank == 0
@@ -728,7 +728,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
-		_, _, _, one_shot, _ = note_map[(9, 36)]
+		_, _, _, one_shot, _, _ = note_map[(9, 36)]
 		assert one_shot is True
 
 	def test_unknown_reference_skipped (
@@ -806,7 +806,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, [])
 
 		assert (9, 36) in note_map
-		ttype, fname, rank, one_shot, pan_gains = note_map[(9, 36)]
+		ttype, fname, rank, one_shot, pitch, pan_gains = note_map[(9, 36)]
 		assert ttype == "sample"
 		assert fname == "2026-03-24_14-37-14"
 		assert one_shot is True
@@ -848,7 +848,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
 
-		_, _, _, _, pan_gains = note_map[(9, 36)]
+		_, _, _, _, _, pan_gains = note_map[(9, 36)]
 		# Centre: both channels equal power → gain = 1/sqrt(2) ≈ 0.707
 		assert pan_gains.shape == (2,)
 		numpy.testing.assert_allclose(pan_gains, [1.0 / 2**0.5, 1.0 / 2**0.5], atol=1e-5)
@@ -866,7 +866,7 @@ assignments:
     pan: {weights}
 """)
 			note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
-			_, _, _, _, pan_gains = note_map[(9, 36)]
+			_, _, _, _, _, pan_gains = note_map[(9, 36)]
 			total_power = float(numpy.sum(pan_gains ** 2))
 			numpy.testing.assert_allclose(total_power, 1.0, atol=1e-5,
 				err_msg=f"pan {weights} total power should be 1.0")
@@ -883,7 +883,7 @@ assignments:
     pan: [100, 0]
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
-		_, _, _, _, pan_gains = note_map[(9, 36)]
+		_, _, _, _, _, pan_gains = note_map[(9, 36)]
 		numpy.testing.assert_allclose(pan_gains, [1.0, 0.0], atol=1e-5)
 
 	def test_pan_wrong_channel_count_raises (self, tmp_path: pathlib.Path) -> None:
@@ -898,3 +898,266 @@ assignments:
 """)
 		with pytest.raises(ValueError, match="pan"):
 			subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
+
+	def test_pitch_true_all_notes_rank_zero (self, tmp_path: pathlib.Path) -> None:
+		"""pitch: true on reference assigns rank 0 to all notes."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Bass keyboard
+    channel: 1
+    notes: [48, 50, 52]
+    target: reference(BASS_TONE)
+    pitch: true
+    one_shot: false
+""")
+		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
+
+		for midi_note in [48, 50, 52]:
+			ttype, targ, rank, one_shot, pitch, pan_gains = note_map[(0, midi_note)]
+			assert rank == 0
+			assert pitch is True
+
+	def test_pitch_false_default_distributes_ranks (self, tmp_path: pathlib.Path) -> None:
+		"""Without pitch: true, notes get ascending ranks (existing behaviour)."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kicks
+    channel: 10
+    notes: [36, 35]
+    target: reference(BD0025)
+    one_shot: true
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		_, _, rank_36, _, pitch_36, _ = note_map[(9, 36)]
+		_, _, rank_35, _, pitch_35, _ = note_map[(9, 35)]
+		assert rank_36 == 0
+		assert rank_35 == 1
+		assert pitch_36 is False
+		assert pitch_35 is False
+
+	def test_note_name_in_map (self, tmp_path: pathlib.Path) -> None:
+		"""Note names (C4) are accepted in assignments."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: C2
+    target: reference(BD0025)
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		# C2 = MIDI 36
+		assert (9, 36) in note_map
+
+	def test_note_range_in_map (self, tmp_path: pathlib.Path) -> None:
+		"""Range syntax 'C2..C4' expands to all 25 notes."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Bass keyboard
+    channel: 1
+    notes: C2..C4
+    target: reference(BASS_TONE)
+    pitch: true
+""")
+		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
+
+		# C2=36, C4=60 → 25 notes on channel 1 (mido ch 0)
+		assert len(note_map) == 25
+		assert (0, 36) in note_map   # C2
+		assert (0, 60) in note_map   # C4
+
+
+# ---------------------------------------------------------------------------
+# _parse_note_name and _parse_note_spec
+# ---------------------------------------------------------------------------
+
+class TestParseNoteSpec:
+
+	def test_single_int (self) -> None:
+		assert subsample.player._parse_note_spec(36, "test") == [36]
+
+	def test_single_note_name_c4 (self) -> None:
+		# C4 = MIDI 60 (Ableton/Logic convention)
+		assert subsample.player._parse_note_spec("C4", "test") == [60]
+
+	def test_single_note_name_c3 (self) -> None:
+		# C3 = MIDI 48
+		assert subsample.player._parse_note_spec("C3", "test") == [48]
+
+	def test_sharp (self) -> None:
+		# C#4 = MIDI 61
+		assert subsample.player._parse_note_spec("C#4", "test") == [61]
+
+	def test_flat (self) -> None:
+		# Db4 = C#4 = MIDI 61
+		assert subsample.player._parse_note_spec("Db4", "test") == [61]
+
+	def test_bb (self) -> None:
+		# Bb2 = A#2; A2=45, Bb2=46
+		assert subsample.player._parse_note_spec("Bb2", "test") == [46]
+
+	def test_f_sharp (self) -> None:
+		# F#2: F=5 in octave 2 → (2+1)*12+5=41, F#2=42
+		assert subsample.player._parse_note_spec("F#2", "test") == [42]
+
+	def test_c_minus_one (self) -> None:
+		# C-1 = MIDI 0 (lowest note)
+		assert subsample.player._parse_note_spec("C-1", "test") == [0]
+
+	def test_list_of_ints (self) -> None:
+		assert subsample.player._parse_note_spec([36, 38], "test") == [36, 38]
+
+	def test_list_of_names (self) -> None:
+		# C3=48, D#3=51
+		assert subsample.player._parse_note_spec(["C3", "D#3"], "test") == [48, 51]
+
+	def test_mixed_list (self) -> None:
+		# C3=48
+		assert subsample.player._parse_note_spec([36, "C3"], "test") == [36, 48]
+
+	def test_int_range (self) -> None:
+		assert subsample.player._parse_note_spec("36..38", "test") == [36, 37, 38]
+
+	def test_name_range (self) -> None:
+		# C2=36, C4=60
+		result = subsample.player._parse_note_spec("C2..C4", "test")
+		assert result[0] == 36
+		assert result[-1] == 60
+		assert len(result) == 25
+
+	def test_out_of_range_raises (self) -> None:
+		with pytest.raises(ValueError):
+			subsample.player._parse_note_spec("C10", "test")
+
+	def test_malformed_name_raises (self) -> None:
+		with pytest.raises(ValueError):
+			subsample.player._parse_note_spec("X4", "test")
+
+	def test_reversed_range_raises (self) -> None:
+		with pytest.raises(ValueError, match="start"):
+			subsample.player._parse_note_spec("60..36", "test")
+
+
+# ---------------------------------------------------------------------------
+# MidiPlayer.update_pitched_assignments
+# ---------------------------------------------------------------------------
+
+class TestUpdatePitchedAssignments:
+
+	def _make_player_with_pitch_map (
+		self,
+		ref_name: str = "BASS_TONE",
+		notes: list[int] = [48, 50, 52],
+	) -> subsample.player.MidiPlayer:
+		"""Return a MidiPlayer with a pitched keyboard assignment."""
+		import numpy
+
+		note_map: subsample.player._NoteMap = {
+			(0, note): ("reference", ref_name, 0, False, True, numpy.array([0.707, 0.707], dtype=numpy.float32))
+			for note in notes
+		}
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def test_no_transform_manager_noop (self) -> None:
+		"""update_pitched_assignments() is a no-op when transform_manager is None."""
+		player = self._make_player_with_pitch_map()
+		# Should not raise even with no transform manager.
+		player.update_pitched_assignments()
+
+	def test_no_pitched_assignments_no_enqueue (self) -> None:
+		"""No enqueue calls when no pitched assignments exist."""
+		import numpy
+
+		non_pitched_map: subsample.player._NoteMap = {
+			(9, 36): ("reference", "BD0025", 0, True, False, numpy.array([0.707, 0.707], dtype=numpy.float32)),
+		}
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		transform_manager  = unittest.mock.MagicMock()
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=non_pitched_map,
+			sample_rate=44100,
+			bit_depth=16,
+			transform_manager=transform_manager,
+		)
+
+		player.update_pitched_assignments()
+
+		transform_manager.enqueue_pitch_range.assert_not_called()
+
+	def test_enqueues_for_pitched_reference (self) -> None:
+		"""enqueue_pitch_range is called with the matched record and notes."""
+		import numpy
+		import subsample.analysis
+
+		notes = [48, 50, 52]
+		player = self._make_player_with_pitch_map(notes=notes)
+
+		mock_record = unittest.mock.MagicMock()
+		mock_record.spectral = unittest.mock.MagicMock()
+		mock_record.pitch    = unittest.mock.MagicMock()
+		mock_record.duration = 1.0
+
+		player._similarity_matrix.get_match.return_value = 42
+		player._instrument_library.get.return_value = mock_record
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=True):
+			player.update_pitched_assignments()
+
+		transform_manager.enqueue_pitch_range.assert_called_once()
+		call_args = transform_manager.enqueue_pitch_range.call_args
+		assert call_args[0][0] is mock_record
+		assert sorted(call_args[0][1]) == sorted(notes)
+
+	def test_no_match_skips_enqueue (self) -> None:
+		"""No enqueue when similarity matrix returns None (no match yet)."""
+		player = self._make_player_with_pitch_map()
+
+		player._similarity_matrix.get_match.return_value = None
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+
+		player.update_pitched_assignments()
+
+		transform_manager.enqueue_pitch_range.assert_not_called()
+
+	def test_no_stable_pitch_skips_enqueue (self, caplog: pytest.LogCaptureFixture) -> None:
+		"""No enqueue and a warning when the matched sample has no stable pitch."""
+		import logging
+
+		player = self._make_player_with_pitch_map()
+
+		mock_record = unittest.mock.MagicMock()
+		mock_record.name = "some-sample"
+		player._similarity_matrix.get_match.return_value = 42
+		player._instrument_library.get.return_value = mock_record
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=False):
+			with caplog.at_level(logging.WARNING, logger="subsample.player"):
+				player.update_pitched_assignments()
+
+		transform_manager.enqueue_pitch_range.assert_not_called()
+		assert any("stable pitch" in r.message for r in caplog.records)
