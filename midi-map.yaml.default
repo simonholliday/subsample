@@ -37,8 +37,8 @@
 #                         pitch-shifted per note                           [IMPLEMENTED]
 #   sample(filename)  specific sample by filename (without .wav extension) [IMPLEMENTED]
 #   pitched(selector) pitched/tonal sample by position (newest/oldest/N)  [IMPLEMENTED]
-#   newest()          most recently added sample (any type)                [FUTURE]
-#   oldest()          oldest sample in the library (any type)              [FUTURE]
+#   newest()          most recently added sample (any type)                [IMPLEMENTED]
+#   oldest()          oldest sample in the library (any type)              [IMPLEMENTED]
 #
 # OVERLAPPING NOTES
 #   If two assignments map the same channel + note, the last one in the
@@ -318,7 +318,7 @@ assignments:
 
 
   # =================================================================
-  # NEWEST / OLDEST SAMPLE  (FUTURE PHASE - not yet implemented)
+  # NEWEST / OLDEST SAMPLE
   # =================================================================
   #
   # TARGET TYPE: newest()
@@ -329,10 +329,12 @@ assignments:
   #
   #   Combined with a note range, pitch-shifting is automatic —
   #   useful for "play whatever I just recorded across the keyboard".
+  #   If the resolved sample has no stable pitch, the base variant
+  #   plays for all notes (no pitch shift, no error).
   #
-  #   [DEV] Dynamic — always points to the current newest sample.
+  #   Dynamic — always points to the current newest sample.
   #   Eviction handled automatically: next trigger resolves to new newest.
-  #
+
   # - name: Latest capture (keyboard)
   #   channel: 2
   #   notes: C2..C6
@@ -345,10 +347,10 @@ assignments:
   #   Complement of newest() — resolves to the first sample ever added
   #   to the library in this session.  Re-evaluated on every trigger.
   #
-  #   [DEV] Dynamic — always points to the current oldest sample.
+  #   Dynamic — always points to the current oldest sample.
   #   Eviction handled automatically: if oldest is evicted, next trigger
   #   resolves to the new oldest.
-  #
+
   # - name: First capture (keyboard)
   #   channel: 3
   #   notes: C2..C6

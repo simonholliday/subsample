@@ -358,6 +358,14 @@ def load_midi_map (
 					)
 					continue
 
+		elif target_raw.startswith("newest("):
+			target_type = "newest"
+			target_arg = ""
+
+		elif target_raw.startswith("oldest("):
+			target_type = "oldest"
+			target_arg = ""
+
 		else:
 			_log.debug("MIDI map assignment %r: skipping unsupported target %r (not yet implemented)", name, target_raw)
 			continue
@@ -374,9 +382,9 @@ def load_midi_map (
 		#
 		# When pitch: false (default), notes distribute ranks so each note triggers a
 		# progressively-less-similar sample variant (existing behaviour).
-		if target_type == "pitched":
-			# pitched() is inherently a pitch-shifted keyboard — always pitch=True, rank=0.
-			# The pitch: YAML key is ignored for this target type.
+		if target_type in ("pitched", "newest", "oldest"):
+			# Inherently pitch-shifted keyboards — always pitch=True, rank=0.
+			# The pitch: YAML key is ignored for these target types.
 			for note in notes:
 				note_map[(mido_channel, int(note))] = (target_type, target_arg, 0, one_shot, True, pan_gains)
 		elif target_type == "reference" and pitch_enabled:
@@ -840,6 +848,14 @@ class MidiPlayer:
 				_log.debug("pitched(%s): no matching pitched sample in library", target_arg)
 				return
 
+		elif target_type in ("newest", "oldest"):
+			# Dynamic: resolves to the most- or least-recently added sample in the
+			# library, regardless of pitch stability.
+			sample_id = self._resolve_library_position(target_type)
+			if sample_id is None:
+				_log.debug("%s(): library empty", target_type)
+				return
+
 		else:
 			_log.debug("Unknown target type %r — skipping", target_type)
 			return
@@ -958,6 +974,8 @@ class MidiPlayer:
 				sample_id = self._similarity_matrix.get_match(targ, rank=0)
 			elif ttype == "pitched":
 				sample_id = self._resolve_pitched_selector(targ)
+			elif ttype in ("newest", "oldest"):
+				sample_id = self._resolve_library_position(ttype)
 			else:
 				continue
 
@@ -980,6 +998,24 @@ class MidiPlayer:
 				"Pitched %s(%s): queued %d variant(s) for %r",
 				ttype, targ, len(notes), record.name,
 			)
+
+	def _resolve_library_position (self, target_type: str) -> typing.Optional[int]:
+
+		"""Resolve newest() or oldest() to a sample_id.
+
+		Returns the sample_id of the most-recently (newest) or least-recently
+		(oldest) added sample in the instrument library.  Unlike pitched(),
+		no pitch-stability filtering is applied — any sample qualifies.
+
+		Returns None if the library is empty.
+		"""
+
+		samples = self._instrument_library.samples()
+		if not samples:
+			return None
+		if target_type == "newest":
+			return samples[-1].sample_id
+		return samples[0].sample_id
 
 	def _resolve_pitched_selector (self, selector: str) -> typing.Optional[int]:
 

@@ -1480,3 +1480,155 @@ class TestResolvePitchedSelector:
 		assert player._resolve_pitched_selector("oldest") is None
 		assert player._resolve_pitched_selector("newest") is None
 		assert player._resolve_pitched_selector("0") is None
+
+
+# ---------------------------------------------------------------------------
+# TestNewestOldestTarget (parsing)
+# ---------------------------------------------------------------------------
+
+class TestNewestOldestTarget:
+	"""Tests for newest() and oldest() target type parsing."""
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_newest_target_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""newest() target is parsed as ttype='newest', targ='', rank=0, pitch=True."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Latest capture
+    channel: 2
+    notes: C2..C4
+    target: newest()
+    one_shot: false
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		assert (1, 36) in note_map
+		ttype, targ, rank, one_shot, pitch, _pan = note_map[(1, 36)]
+		assert ttype == "newest"
+		assert targ == ""
+		assert rank == 0
+		assert pitch is True
+		assert one_shot is False
+
+	def test_oldest_target_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""oldest() target is parsed as ttype='oldest', targ='', rank=0, pitch=True."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: First capture
+    channel: 3
+    notes: C2..C4
+    target: oldest()
+    one_shot: false
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		assert (2, 36) in note_map
+		ttype, targ, rank, one_shot, pitch, _pan = note_map[(2, 36)]
+		assert ttype == "oldest"
+		assert targ == ""
+		assert rank == 0
+		assert pitch is True
+		assert one_shot is False
+
+	def test_newest_all_notes_pitch_true (self, tmp_path: pathlib.Path) -> None:
+		"""All notes in a newest() range get rank=0 and pitch=True."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Latest keyboard
+    channel: 2
+    notes: [48, 50, 52]
+    target: newest()
+    one_shot: false
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		for midi_note in [48, 50, 52]:
+			ttype, targ, rank, _one_shot, pitch, _pan = note_map[(1, midi_note)]
+			assert ttype == "newest"
+			assert targ == ""
+			assert rank == 0
+			assert pitch is True
+
+	def test_newest_no_reference_validation (self, tmp_path: pathlib.Path) -> None:
+		"""newest() is accepted with an empty reference list."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Latest capture
+    channel: 2
+    notes: 60
+    target: newest()
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		assert (1, 60) in note_map
+
+
+# ---------------------------------------------------------------------------
+# TestResolveLibraryPosition
+# ---------------------------------------------------------------------------
+
+class TestResolveLibraryPosition:
+	"""Tests for MidiPlayer._resolve_library_position()."""
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		"""Return a minimal MidiPlayer with mocked dependencies."""
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _make_record (self, sample_id: int) -> unittest.mock.MagicMock:
+		record = unittest.mock.MagicMock()
+		record.sample_id = sample_id
+		record.name = f"sample-{sample_id}"
+		return record
+
+	def test_newest_returns_last_sample (self) -> None:
+		"""'newest' returns the sample_id of the last (most recent) sample."""
+		player = self._make_player()
+		r1 = self._make_record(1)
+		r2 = self._make_record(2)
+		r3 = self._make_record(3)
+		player._instrument_library.samples.return_value = [r1, r2, r3]
+
+		assert player._resolve_library_position("newest") == 3
+
+	def test_oldest_returns_first_sample (self) -> None:
+		"""'oldest' returns the sample_id of the first (least recent) sample."""
+		player = self._make_player()
+		r1 = self._make_record(1)
+		r2 = self._make_record(2)
+		r3 = self._make_record(3)
+		player._instrument_library.samples.return_value = [r1, r2, r3]
+
+		assert player._resolve_library_position("oldest") == 1
+
+	def test_newest_includes_non_pitched_samples (self) -> None:
+		"""newest() resolves to any sample, not just pitch-stable ones."""
+		player = self._make_player()
+		r1 = self._make_record(10)
+		r2 = self._make_record(20)
+		player._instrument_library.samples.return_value = [r1, r2]
+
+		# No has_stable_pitch filtering — any sample qualifies
+		assert player._resolve_library_position("newest") == 20
+
+	def test_empty_library_returns_none (self) -> None:
+		"""Returns None when the library is empty."""
+		player = self._make_player()
+		player._instrument_library.samples.return_value = []
+
+		assert player._resolve_library_position("newest") is None
+		assert player._resolve_library_position("oldest") is None
