@@ -77,7 +77,7 @@ class TestSaveAndLoadRoundTrip:
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		r_spectral, r_rhythm, r_pitch, r_timbre, r_params, r_duration, r_level = result
+		r_spectral, r_rhythm, r_pitch, r_timbre, r_params, r_duration, r_level, r_band_energy = result
 
 		assert r_spectral == spectral
 		assert r_pitch    == pitch
@@ -143,7 +143,7 @@ class TestCacheInvalidation:
 
 		# Re-analysis should succeed and return a valid result tuple
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration, level = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
 		assert isinstance(spectral, subsample.analysis.AnalysisResult)
 
 	def test_version_mismatch_logs_info (
@@ -185,7 +185,7 @@ class TestCacheInvalidation:
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration, level = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
 		assert isinstance(spectral, subsample.analysis.AnalysisResult)
 
 	def test_md5_mismatch_logs_info (
@@ -359,3 +359,78 @@ class TestAudioMetadata:
 		# Should still load successfully — _deserialize_payload uses .get() defaults.
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# TestBandEnergyCache
+# ---------------------------------------------------------------------------
+
+class TestBandEnergyCache:
+
+	"""Tests for band_energy serialization in save_cache / load_cache."""
+
+	def test_band_energy_round_trip (self, tmp_path: pathlib.Path) -> None:
+		"""Band energy fractions and decay rates survive a save/load round-trip."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+
+		band_energy = subsample.analysis.BandEnergyResult(
+			energy_fractions = (0.6, 0.25, 0.1, 0.05),
+			decay_rates      = (0.8, 0.4, 0.2, 0.1),
+		)
+
+		md5 = subsample.cache.compute_audio_md5(wav)
+		subsample.cache.save_cache(
+			wav, md5,
+			tests.helpers._make_params(),
+			tests.helpers._make_spectral(),
+			tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(),
+			tests.helpers._make_timbre(),
+			1.0,
+			tests.helpers._make_level(),
+			band_energy = band_energy,
+		)
+
+		result = subsample.cache.load_cache(wav)
+		assert result is not None
+		*_, r_band_energy = result
+
+		assert isinstance(r_band_energy, subsample.analysis.BandEnergyResult)
+		assert len(r_band_energy.energy_fractions) == 4
+		assert len(r_band_energy.decay_rates) == 4
+		for expected, actual in zip(band_energy.energy_fractions, r_band_energy.energy_fractions):
+			assert abs(expected - actual) < 1e-9
+		for expected, actual in zip(band_energy.decay_rates, r_band_energy.decay_rates):
+			assert abs(expected - actual) < 1e-9
+
+	def test_band_energy_missing_defaults_to_zeros (self, tmp_path: pathlib.Path) -> None:
+		"""A sidecar without a 'band_energy' key defaults to all-zero values."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav, n_frames=44100)
+		md5 = subsample.cache.compute_audio_md5(wav)
+
+		# Write a sidecar without band_energy key (simulates a pre-v9 sidecar).
+		subsample.cache.save_cache(
+			wav, md5,
+			tests.helpers._make_params(),
+			tests.helpers._make_spectral(),
+			tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(),
+			tests.helpers._make_timbre(),
+			1.0,
+			tests.helpers._make_level(),
+		)
+
+		sidecar = subsample.cache.cache_path(wav)
+		data = json.loads(sidecar.read_text())
+		data.pop("band_energy", None)
+		sidecar.write_text(json.dumps(data), encoding="utf-8")
+
+		result = subsample.cache.load_cache(wav)
+		assert result is not None
+		*_, r_band_energy = result
+
+		assert isinstance(r_band_energy, subsample.analysis.BandEnergyResult)
+		assert all(v == 0.0 for v in r_band_energy.energy_fractions)
+		assert all(v == 0.0 for v in r_band_energy.decay_rates)

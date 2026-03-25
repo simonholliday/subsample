@@ -183,6 +183,13 @@ class SimilarityConfig:
 	discrimination (kick vs snare vs hi-hat all have similar sustain but different
 	attacks). Higher weight = attack character dominates. Range: 0.0–2.0."""
 
+	weight_band_energy: float = 1.0
+	"""Weight applied to the multi-band energy group (8 values: 4 per-band energy
+	fractions + 4 per-band decay rates across sub-bass 20-250 Hz, low-mid 250-2k Hz,
+	high-mid 2-6k Hz, and presence 6k+ Hz). Directly encodes drum-type physical
+	signatures: kick = sub-bass dominant, snare = mid + presence, hi-hat = air.
+	Range: 0.0–2.0. Set to 0.0 to disable."""
+
 
 @dataclasses.dataclass(frozen=True)
 class InstrumentConfig:
@@ -569,6 +576,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		weight_timbre       = float(similarity_raw.get("weight_timbre",        1.0)),
 		weight_timbre_delta = float(similarity_raw.get("weight_timbre_delta",  0.5)),
 		weight_timbre_onset = float(similarity_raw.get("weight_timbre_onset",  1.0)),
+		weight_band_energy  = float(similarity_raw.get("weight_band_energy",   1.0)),
 	)
 
 	for name, value in [
@@ -576,6 +584,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		("similarity.weight_timbre",        similarity.weight_timbre),
 		("similarity.weight_timbre_delta",  similarity.weight_timbre_delta),
 		("similarity.weight_timbre_onset",  similarity.weight_timbre_onset),
+		("similarity.weight_band_energy",   similarity.weight_band_energy),
 	]:
 		if value < 0.0 or value > 2.0:
 			raise ValueError(

@@ -50,6 +50,7 @@ _LoadResult = tuple[
 	subsample.analysis.AnalysisParams,
 	float,
 	subsample.analysis.LevelResult,
+	subsample.analysis.BandEnergyResult,
 ]
 
 
@@ -100,6 +101,7 @@ def save_cache (
 	timbre: subsample.analysis.TimbreResult,
 	duration: float,
 	level: typing.Optional[subsample.analysis.LevelResult] = None,
+	band_energy: typing.Optional[subsample.analysis.BandEnergyResult] = None,
 	bit_depth: int = 16,
 	channels: int = 1,
 	captured_at: typing.Optional[str] = None,
@@ -122,6 +124,8 @@ def save_cache (
 		level:       Peak and RMS amplitude. Defaults to LevelResult(0.0, 0.0)
 		             if None (for backwards-compatible callers — should always
 		             be provided in new code).
+		band_energy: Per-band energy fractions and decay rates. Defaults to all-zero
+		             BandEnergyResult if None (for backwards-compatible callers).
 		bit_depth:   Bit depth of the original audio (16, 24, or 32).
 		channels:    Number of audio channels (1=mono, 2=stereo).
 		captured_at: ISO 8601 capture timestamp for live recordings; None for
@@ -130,8 +134,17 @@ def save_cache (
 	"""
 
 	effective_level = level if level is not None else subsample.analysis.LevelResult(peak=0.0, rms=0.0)
+	effective_band_energy = (
+		band_energy
+		if band_energy is not None
+		else subsample.analysis.BandEnergyResult(
+			energy_fractions=(0.0, 0.0, 0.0, 0.0),
+			decay_rates=(0.0, 0.0, 0.0, 0.0),
+		)
+	)
 	payload = _serialize(
-		audio_md5, params, spectral, rhythm, pitch, timbre, duration, effective_level,
+		audio_md5, params, spectral, rhythm, pitch, timbre, duration,
+		effective_level, effective_band_energy,
 		bit_depth=bit_depth, channels=channels, captured_at=captured_at,
 	)
 	json_str = json.dumps(payload, indent=2)
@@ -253,17 +266,20 @@ def _reanalyze_and_save (
 	params = subsample.analysis.compute_params(file_info.sample_rate)
 	duration = len(mono) / file_info.sample_rate
 
-	spectral, rhythm, pitch, timbre, level = subsample.analysis.analyze_all(
+	spectral, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
 		mono, params, subsample.config.AnalysisConfig(),
 	)
 
 	try:
 		audio_md5 = compute_audio_md5(audio_path)
-		save_cache(audio_path, audio_md5, params, spectral, rhythm, pitch, timbre, duration, level)
+		save_cache(
+			audio_path, audio_md5, params, spectral, rhythm, pitch, timbre,
+			duration, level, band_energy,
+		)
 	except OSError as exc:
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
 
-	return (spectral, rhythm, pitch, timbre, params, duration, level)
+	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
 
 
 def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
@@ -354,25 +370,25 @@ def _deserialize_payload (
 	"""
 
 	try:
-		spectral = _deserialize_spectral(payload["spectral"])
-		rhythm   = _deserialize_rhythm(payload["rhythm"])
-		pitch    = _deserialize_pitch(payload["pitch"])
-		timbre   = _deserialize_timbre(payload["timbre"])
-		params   = _deserialize_params(payload["params"])
-		duration = float(payload["duration"])
-		# "level" uses .get() with an empty-dict default so that sidecars
-		# written before the field existed (any version before it was added) can
-		# still be deserialised.  The ANALYSIS_VERSION check invalidates truly
-		# stale files before reaching this point; this default is a belt-and-
-		# braces guard against any edge case where the key is absent despite a
-		# matching version (e.g. manual editing, partial writes).
-		level    = _deserialize_level(payload.get("level", {}))
+		spectral    = _deserialize_spectral(payload["spectral"])
+		rhythm      = _deserialize_rhythm(payload["rhythm"])
+		pitch       = _deserialize_pitch(payload["pitch"])
+		timbre      = _deserialize_timbre(payload["timbre"])
+		params      = _deserialize_params(payload["params"])
+		duration    = float(payload["duration"])
+		# "level" and "band_energy" use .get() with empty-dict defaults so that
+		# sidecars written before each field existed can still be deserialised.
+		# The ANALYSIS_VERSION check invalidates truly stale files before reaching
+		# this point; these defaults are belt-and-braces guards against edge cases
+		# where a key is absent despite a matching version (e.g. manual editing).
+		level       = _deserialize_level(payload.get("level", {}))
+		band_energy = _deserialize_band_energy(payload.get("band_energy", {}))
 
 	except (KeyError, TypeError, ValueError) as exc:
 		_log.warning("Ignoring corrupt %s: %s", label, exc)
 		return None
 
-	return spectral, rhythm, pitch, timbre, params, duration, level
+	return spectral, rhythm, pitch, timbre, params, duration, level, band_energy
 
 
 def _serialize (
@@ -384,6 +400,7 @@ def _serialize (
 	timbre: subsample.analysis.TimbreResult,
 	duration: float,
 	level: subsample.analysis.LevelResult,
+	band_energy: subsample.analysis.BandEnergyResult,
 	bit_depth: int = 16,
 	channels: int = 1,
 	captured_at: typing.Optional[str] = None,
@@ -425,6 +442,7 @@ def _serialize (
 		"pitch":            pitch_dict,
 		"timbre":           timbre_dict,
 		"level":            dataclasses.asdict(level),
+		"band_energy":      dataclasses.asdict(band_energy),
 	}
 
 
@@ -557,4 +575,36 @@ def _deserialize_level (data: dict[str, typing.Any]) -> subsample.analysis.Level
 	return subsample.analysis.LevelResult(
 		peak = float(data.get("peak", 0.0)),
 		rms  = float(data.get("rms",  0.0)),
+	)
+
+
+def _deserialize_band_energy (data: dict[str, typing.Any]) -> subsample.analysis.BandEnergyResult:
+
+	"""Reconstruct a BandEnergyResult from a JSON dict.
+
+	Defaults to all-zero tuples when the key is absent (sidecars written
+	before this field was added) or when values are missing. The version
+	check upstream will re-analyse stale files; this is a belt-and-braces
+	guard for edge cases.
+
+	Raises ValueError if either tuple has an unexpected length, so that
+	_deserialize_payload can catch and report the corruption.
+	"""
+
+	energy_fractions = tuple(float(v) for v in data.get("energy_fractions", [0.0] * 4))
+	decay_rates      = tuple(float(v) for v in data.get("decay_rates",      [0.0] * 4))
+
+	if len(energy_fractions) != 4:
+		raise ValueError(
+			f"band_energy.energy_fractions has {len(energy_fractions)} elements (expected 4)"
+		)
+
+	if len(decay_rates) != 4:
+		raise ValueError(
+			f"band_energy.decay_rates has {len(decay_rates)} elements (expected 4)"
+		)
+
+	return subsample.analysis.BandEnergyResult(
+		energy_fractions = energy_fractions,
+		decay_rates      = decay_rates,
 	)

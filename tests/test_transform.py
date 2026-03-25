@@ -62,16 +62,17 @@ def _make_record (
 	)
 
 	return subsample.library.SampleRecord(
-		sample_id = sample_id,
-		name      = f"test_{sample_id}",
-		spectral  = tests.helpers._make_spectral(),
-		rhythm    = rhythm,
-		pitch     = tests.helpers._make_pitch(),
-		timbre    = tests.helpers._make_timbre(),
-		level     = tests.helpers._make_level(),
-		params    = tests.helpers._make_params(),
-		duration  = float(audio.shape[0]) / 44100.0,
-		audio     = audio,
+		sample_id  = sample_id,
+		name       = f"test_{sample_id}",
+		spectral   = tests.helpers._make_spectral(),
+		rhythm     = rhythm,
+		pitch      = tests.helpers._make_pitch(),
+		timbre     = tests.helpers._make_timbre(),
+		level      = tests.helpers._make_level(),
+		band_energy = tests.helpers._make_band_energy(),
+		params     = tests.helpers._make_params(),
+		duration   = float(audio.shape[0]) / 44100.0,
+		audio      = audio,
 	)
 
 
@@ -107,19 +108,20 @@ def _make_record_unpitched (
 	audio = _make_pcm_audio()
 
 	return subsample.library.SampleRecord(
-		sample_id = sample_id,
-		name      = f"unpitched_{sample_id}",
-		spectral  = spectral,
-		rhythm    = subsample.analysis.RhythmResult(
+		sample_id  = sample_id,
+		name       = f"unpitched_{sample_id}",
+		spectral   = spectral,
+		rhythm     = subsample.analysis.RhythmResult(
 			tempo_bpm=0.0, beat_times=(), pulse_curve=numpy.zeros(0, dtype=numpy.float32),
 			pulse_peak_times=(), onset_times=(), onset_count=0,
 		),
-		pitch     = pitch,
-		timbre    = tests.helpers._make_timbre(),
-		level     = tests.helpers._make_level(),
-		params    = tests.helpers._make_params(),
-		duration  = float(audio.shape[0]) / 44100.0,
-		audio     = audio,
+		pitch      = pitch,
+		timbre     = tests.helpers._make_timbre(),
+		level      = tests.helpers._make_level(),
+		band_energy = tests.helpers._make_band_energy(),
+		params     = tests.helpers._make_params(),
+		duration   = float(audio.shape[0]) / 44100.0,
+		audio      = audio,
 	)
 
 

@@ -72,11 +72,12 @@ class SampleRecord:
 		sample_id: Session-unique numeric ID (allocated by allocate_id()).
 		name:      Stem of the audio filename (e.g. "BD0025", "kick").
 		           Preserves original casing from the filename.
-		spectral:  Eleven normalised [0, 1] spectral metrics (the spectral fingerprint).
-		rhythm:    Tempo, beat grid, pulse curve, onset times.
-		pitch:     Fundamental frequency, chroma profile, pitch class.
-		timbre:    MFCC timbral fingerprints (mfcc, mfcc_delta, mfcc_onset).
-		level:     Peak and RMS amplitude (used for playback level normalisation).
+		spectral:    Eleven normalised [0, 1] spectral metrics (the spectral fingerprint).
+		rhythm:      Tempo, beat grid, pulse curve, onset times.
+		pitch:       Fundamental frequency, chroma profile, pitch class.
+		timbre:      MFCC timbral fingerprints (mfcc, mfcc_delta, mfcc_onset).
+		level:       Peak and RMS amplitude (used for playback level normalisation).
+		band_energy: Per-band energy fractions and decay rates (4 bands, 8 values total).
 		params:    FFT parameters used when the analysis was computed.
 		duration:  Recording length in seconds.
 		audio:     Original capture-format PCM as a numpy array, shape
@@ -86,17 +87,18 @@ class SampleRecord:
 		           samples not yet (or never) written to disk.
 	"""
 
-	sample_id: int
-	name:      str
-	spectral:  subsample.analysis.AnalysisResult
-	rhythm:    subsample.analysis.RhythmResult
-	pitch:     subsample.analysis.PitchResult
-	timbre:    subsample.analysis.TimbreResult
-	level:     subsample.analysis.LevelResult
-	params:    subsample.analysis.AnalysisParams
-	duration:  float
-	audio:     typing.Optional[numpy.ndarray] = None
-	filepath:  typing.Optional[pathlib.Path]  = None
+	sample_id:   int
+	name:        str
+	spectral:    subsample.analysis.AnalysisResult
+	rhythm:      subsample.analysis.RhythmResult
+	pitch:       subsample.analysis.PitchResult
+	timbre:      subsample.analysis.TimbreResult
+	level:       subsample.analysis.LevelResult
+	band_energy: subsample.analysis.BandEnergyResult
+	params:      subsample.analysis.AnalysisParams
+	duration:    float
+	audio:       typing.Optional[numpy.ndarray] = None
+	filepath:    typing.Optional[pathlib.Path]  = None
 
 	def as_vector (self) -> numpy.ndarray:
 
@@ -348,23 +350,24 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 		if result is None:
 			continue
 
-		spectral, rhythm, pitch, timbre, params, duration, level = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
 
 		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
 		name = pathlib.Path(audio_name).stem
 
 		records.append(SampleRecord(
-			sample_id = allocate_id(),
-			name      = name,
-			spectral  = spectral,
-			rhythm    = rhythm,
-			pitch     = pitch,
-			timbre    = timbre,
-			level     = level,
-			params    = params,
-			duration  = duration,
-			audio     = None,
-			filepath  = None,
+			sample_id   = allocate_id(),
+			name        = name,
+			spectral    = spectral,
+			rhythm      = rhythm,
+			pitch       = pitch,
+			timbre      = timbre,
+			level       = level,
+			band_energy = band_energy,
+			params      = params,
+			duration    = duration,
+			audio       = None,
+			filepath    = None,
 		))
 
 	_log.info("Loaded %d reference sample(s) from %s", len(records), directory)
@@ -382,16 +385,17 @@ class _LoadedSample:
 	allocate_id() is called in sorted order, preserving FIFO semantics.
 	"""
 
-	spectral:   subsample.analysis.AnalysisResult
-	rhythm:     subsample.analysis.RhythmResult
-	pitch:      subsample.analysis.PitchResult
-	timbre:     subsample.analysis.TimbreResult
-	level:      subsample.analysis.LevelResult
-	params:     subsample.analysis.AnalysisParams
-	duration:   float
-	name:       str
-	audio_path: pathlib.Path
-	audio:      typing.Optional[numpy.ndarray]
+	spectral:    subsample.analysis.AnalysisResult
+	rhythm:      subsample.analysis.RhythmResult
+	pitch:       subsample.analysis.PitchResult
+	timbre:      subsample.analysis.TimbreResult
+	level:       subsample.analysis.LevelResult
+	band_energy: subsample.analysis.BandEnergyResult
+	params:      subsample.analysis.AnalysisParams
+	duration:    float
+	name:        str
+	audio_path:  pathlib.Path
+	audio:       typing.Optional[numpy.ndarray]
 
 
 def _load_one_sample (
@@ -424,7 +428,7 @@ def _load_one_sample (
 	if result is None:
 		return None
 
-	spectral, rhythm, pitch, timbre, params, duration, level = result
+	spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
 
 	audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
 	audio_path = sidecar_path.parent / audio_name
@@ -470,7 +474,7 @@ def _load_one_sample (
 
 	return _LoadedSample(
 		spectral=spectral, rhythm=rhythm, pitch=pitch, timbre=timbre,
-		level=level, params=params, duration=duration,
+		level=level, band_energy=band_energy, params=params, duration=duration,
 		name=name, audio_path=audio_path, audio=audio,
 	)
 
@@ -562,17 +566,18 @@ def load_instrument_library (
 			continue
 
 		record = SampleRecord(
-			sample_id = allocate_id(),
-			name      = loaded_sample.name,
-			spectral  = loaded_sample.spectral,
-			rhythm    = loaded_sample.rhythm,
-			pitch     = loaded_sample.pitch,
-			timbre    = loaded_sample.timbre,
-			level     = loaded_sample.level,
-			params    = loaded_sample.params,
-			duration  = loaded_sample.duration,
-			audio     = loaded_sample.audio,
-			filepath  = loaded_sample.audio_path,
+			sample_id   = allocate_id(),
+			name        = loaded_sample.name,
+			spectral    = loaded_sample.spectral,
+			rhythm      = loaded_sample.rhythm,
+			pitch       = loaded_sample.pitch,
+			timbre      = loaded_sample.timbre,
+			level       = loaded_sample.level,
+			band_energy = loaded_sample.band_energy,
+			params      = loaded_sample.params,
+			duration    = loaded_sample.duration,
+			audio       = loaded_sample.audio,
+			filepath    = loaded_sample.audio_path,
 		)
 
 		lib.add(record)

@@ -50,7 +50,7 @@ recordings.
 
 ### 2. Analyse
 
-Each captured sound is fingerprinted across 47 acoustic dimensions spanning four
+Each captured sound is fingerprinted across 55 acoustic dimensions spanning five
 groups:
 
 | Group | Dimensions | What it captures |
@@ -59,6 +59,7 @@ groups:
 | Sustained timbre | 12 | Steady-state tonal colour |
 | Timbre dynamics | 12 | How the sound evolves over time |
 | Attack character | 12 | Transient signature |
+| Band energy | 8 | Per-band energy distribution and decay (drum-type signature) |
 
 Tonal sounds are identified by a seven-criterion pitch stability gate - only
 samples with a single, confident, stable pitch are flagged for chromatic mapping.
@@ -72,7 +73,7 @@ improves, stale sidecars are detected and re-analysed automatically on startup.
 ### 3. Assign
 
 Sounds are matched to your reference library using cosine similarity on the
-47-element feature vector. The best kick-like sound maps to your kick pad; the
+55-element feature vector. The best kick-like sound maps to your kick pad; the
 best snare maps to your snare. When multiple notes share a reference, they
 receive ranked matches: first note gets the best match, second note gets the
 second-best, and so on.
@@ -299,11 +300,11 @@ in the background by a worker pool; no latency is added at trigger time.
 ## Similarity engine
 
 Every new sample is scored against every reference using cosine similarity on a
-47-element composite feature vector built from four groups: spectral shape (11
-dimensions), sustained timbre (12), timbre dynamics (12), and attack character
-(12). Each group is independently normalised and scaled by a configurable weight
-(`similarity.weight_*`), so you can emphasise whichever acoustic qualities matter
-most for your material.
+55-element composite feature vector built from five groups: spectral shape (11
+dimensions), sustained timbre (12), timbre dynamics (12), attack character (12),
+and band energy (8). Each group is independently normalised and scaled by a
+configurable weight (`similarity.weight_*`), so you can emphasise whichever
+acoustic qualities matter most for your material.
 
 The key insight: **the same comparison method works for both percussive and tonal
 sounds without needing to classify them first.** A kick drum naturally scores
@@ -608,13 +609,6 @@ Reference: BD0025
   sidecars are currently re-analysed sequentially; large libraries should use the
   existing worker pool for parallel re-analysis.
 
-### Analysis
-
-- **Multi-band energy envelope** - split the spectrum into frequency bands and
-  compute per-band energy and decay rate. This would directly encode the physical
-  signature of drum types (kick = sub-bass dominant; snare = mid + presence;
-  hi-hat = air) and improve classification accuracy.
-
 ### Additional targets
 
 - **`pitched(random)`** - random selection from all pitched samples.
@@ -649,7 +643,7 @@ recording concurrently and independently.
 ### Similarity engine
 
 Every new instrument sample is scored against every reference using cosine
-similarity on a 47-element composite vector. The vector is split into four
+similarity on a 55-element composite vector. The vector is split into five
 groups, each independently L2-normalised so that no single group dominates by
 scale:
 
@@ -659,6 +653,7 @@ Group 1 (x11): spectral shape   [flatness, attack, release, centroid, bandwidth,
 Group 2 (x12): sustained MFCC   [mean timbre, coefficients 1-12]
 Group 3 (x12): delta-MFCC       [timbre trajectory, coefficients 1-12]
 Group 4 (x12): onset-weighted   [attack character, coefficients 1-12]
+Group 5 (x8):  band energy      [sub-bass/low-mid/high-mid/presence fractions + decay rates]
 ```
 
 Each group is scaled by a configurable weight (`similarity.weight_*`). This

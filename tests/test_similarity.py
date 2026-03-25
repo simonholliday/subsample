@@ -11,6 +11,8 @@ import subsample.config
 import subsample.library
 import subsample.similarity
 
+import tests.helpers
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,6 +27,7 @@ _SPECTRAL_ONLY_CFG = subsample.config.SimilarityConfig(
 	weight_timbre       = 0.0,
 	weight_timbre_delta = 0.0,
 	weight_timbre_onset = 0.0,
+	weight_band_energy  = 0.0,
 )
 
 # A SimilarityConfig that uses only the timbre groups.
@@ -33,6 +36,7 @@ _TIMBRE_ONLY_CFG = subsample.config.SimilarityConfig(
 	weight_timbre       = 1.0,
 	weight_timbre_delta = 0.5,
 	weight_timbre_onset = 1.0,
+	weight_band_energy  = 0.0,
 )
 
 
@@ -96,15 +100,16 @@ def _make_record (
 	params = subsample.analysis.compute_params(44100)
 
 	return subsample.library.SampleRecord(
-		sample_id = subsample.library.allocate_id(),
-		name      = name,
-		spectral  = spectral,
-		rhythm    = rhythm,
-		pitch     = pitch,
-		timbre    = timbre if timbre is not None else _make_timbre(),
-		level     = subsample.analysis.LevelResult(peak=0.5, rms=0.2),
-		params    = params,
-		duration  = 1.0,
+		sample_id   = subsample.library.allocate_id(),
+		name        = name,
+		spectral    = spectral,
+		rhythm      = rhythm,
+		pitch       = pitch,
+		timbre      = timbre if timbre is not None else _make_timbre(),
+		level       = subsample.analysis.LevelResult(peak=0.5, rms=0.2),
+		band_energy = tests.helpers._make_band_energy(),
+		params      = params,
+		duration    = 1.0,
 	)
 
 
@@ -150,10 +155,10 @@ class TestAsVector:
 class TestBuildFeatureVector:
 
 	def test_full_vector_length (self) -> None:
-		# Default config: all 4 groups active → 11 + 12 + 12 + 12 = 47
+		# Default config: all 5 groups active → 11 + 12 + 12 + 12 + 8 = 55
 		record = _make_record("X", _make_spectral())
 		v = subsample.similarity._build_feature_vector(record, _DEFAULT_CFG)
-		assert len(v) == 47
+		assert len(v) == 55
 
 	def test_spectral_only_length (self) -> None:
 		record = _make_record("X", _make_spectral())
@@ -168,10 +173,11 @@ class TestBuildFeatureVector:
 
 	def test_all_weights_zero_returns_empty (self) -> None:
 		cfg = subsample.config.SimilarityConfig(
-			weight_spectral=0.0,
-			weight_timbre=0.0,
-			weight_timbre_delta=0.0,
-			weight_timbre_onset=0.0,
+			weight_spectral     = 0.0,
+			weight_timbre       = 0.0,
+			weight_timbre_delta = 0.0,
+			weight_timbre_onset = 0.0,
+			weight_band_energy  = 0.0,
 		)
 		record = _make_record("X", _make_spectral())
 		v = subsample.similarity._build_feature_vector(record, cfg)
@@ -637,10 +643,10 @@ class TestLevelIndependence:
 		timbre   = _make_timbre()
 
 		record_quiet = subsample.library.SampleRecord(
-			sample_id = subsample.library.allocate_id(),
-			name      = "quiet",
-			spectral  = spectral,
-			rhythm    = subsample.analysis.RhythmResult(
+			sample_id   = subsample.library.allocate_id(),
+			name        = "quiet",
+			spectral    = spectral,
+			rhythm      = subsample.analysis.RhythmResult(
 				tempo_bpm=120.0,
 				beat_times=(),
 				pulse_curve=numpy.array([], dtype=numpy.float32),
@@ -648,7 +654,7 @@ class TestLevelIndependence:
 				onset_times=(),
 				onset_count=0,
 			),
-			pitch     = subsample.analysis.PitchResult(
+			pitch       = subsample.analysis.PitchResult(
 				dominant_pitch_hz=0.0,
 				pitch_confidence=0.0,
 				chroma_profile=tuple(0.0 for _ in range(12)),
@@ -656,17 +662,18 @@ class TestLevelIndependence:
 				pitch_stability=0.0,
 				voiced_frame_count=0,
 			),
-			timbre    = timbre,
-			level     = subsample.analysis.LevelResult(peak=0.1, rms=0.03),
-			params    = subsample.analysis.compute_params(44100),
-			duration  = 1.0,
+			timbre      = timbre,
+			level       = subsample.analysis.LevelResult(peak=0.1, rms=0.03),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = subsample.analysis.compute_params(44100),
+			duration    = 1.0,
 		)
 
 		record_loud = subsample.library.SampleRecord(
-			sample_id = subsample.library.allocate_id(),
-			name      = "loud",
-			spectral  = spectral,
-			rhythm    = subsample.analysis.RhythmResult(
+			sample_id   = subsample.library.allocate_id(),
+			name        = "loud",
+			spectral    = spectral,
+			rhythm      = subsample.analysis.RhythmResult(
 				tempo_bpm=120.0,
 				beat_times=(),
 				pulse_curve=numpy.array([], dtype=numpy.float32),
@@ -674,7 +681,7 @@ class TestLevelIndependence:
 				onset_times=(),
 				onset_count=0,
 			),
-			pitch     = subsample.analysis.PitchResult(
+			pitch       = subsample.analysis.PitchResult(
 				dominant_pitch_hz=0.0,
 				pitch_confidence=0.0,
 				chroma_profile=tuple(0.0 for _ in range(12)),
@@ -682,10 +689,11 @@ class TestLevelIndependence:
 				pitch_stability=0.0,
 				voiced_frame_count=0,
 			),
-			timbre    = timbre,
-			level     = subsample.analysis.LevelResult(peak=0.95, rms=0.70),
-			params    = subsample.analysis.compute_params(44100),
-			duration  = 1.0,
+			timbre      = timbre,
+			level       = subsample.analysis.LevelResult(peak=0.95, rms=0.70),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = subsample.analysis.compute_params(44100),
+			duration    = 1.0,
 		)
 
 		ref = _make_record("REF", _make_spectral())
@@ -698,3 +706,65 @@ class TestLevelIndependence:
 		assert len(scores_quiet) == 1
 		assert len(scores_loud)  == 1
 		assert scores_quiet[0].score == pytest.approx(scores_loud[0].score, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# TestBandEnergyGroup
+# ---------------------------------------------------------------------------
+
+class TestBandEnergyGroup:
+
+	"""Tests for the band-energy 5th group in _build_feature_vector()."""
+
+	def _cfg_band_only (self) -> subsample.config.SimilarityConfig:
+		"""Config that uses ONLY the band-energy group."""
+		return subsample.config.SimilarityConfig(
+			weight_spectral     = 0.0,
+			weight_timbre       = 0.0,
+			weight_timbre_delta = 0.0,
+			weight_timbre_onset = 0.0,
+			weight_band_energy  = 1.0,
+		)
+
+	def test_band_energy_weight_zero_excludes_group (self) -> None:
+		"""Setting weight_band_energy=0 should produce a 47-element vector."""
+		cfg = subsample.config.SimilarityConfig(weight_band_energy=0.0)
+		record = _make_record("X", _make_spectral())
+		v = subsample.similarity._build_feature_vector(record, cfg)
+		assert len(v) == 47
+
+	def test_band_energy_only_has_8_elements (self) -> None:
+		"""Band-energy-only config should produce an 8-element vector."""
+		record = _make_record("X", _make_spectral())
+		v = subsample.similarity._build_feature_vector(record, self._cfg_band_only())
+		assert len(v) == 8
+
+	def test_band_energy_kick_vs_hihat (self) -> None:
+		"""A kick-like band profile should be more similar to kick ref than to hi-hat ref."""
+		kick_profile = subsample.analysis.BandEnergyResult(
+			energy_fractions = (0.7, 0.2, 0.05, 0.05),  # sub-bass dominant
+			decay_rates      = (0.8, 0.3, 0.1, 0.1),
+		)
+		hihat_profile = subsample.analysis.BandEnergyResult(
+			energy_fractions = (0.05, 0.05, 0.2, 0.7),  # presence dominant
+			decay_rates      = (0.1, 0.1, 0.5, 0.9),
+		)
+
+		spectral = _make_spectral()
+
+		kick_ref  = _make_record("BD", spectral)
+		kick_ref  = dataclasses.replace(kick_ref, band_energy=kick_profile)
+		hihat_ref = _make_record("HH", spectral)
+		hihat_ref = dataclasses.replace(hihat_ref, band_energy=hihat_profile)
+
+		query = _make_record("Q", spectral)
+		query = dataclasses.replace(query, band_energy=kick_profile)
+
+		lib = _library_with(kick_ref, hihat_ref)
+		cfg = self._cfg_band_only()
+		scores = subsample.similarity.score_against_library(query, lib, cfg)
+
+		assert len(scores) == 2
+		kick_score  = next(s for s in scores if s.name == "BD")
+		hihat_score = next(s for s in scores if s.name == "HH")
+		assert kick_score.score > hihat_score.score

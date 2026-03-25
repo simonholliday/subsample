@@ -63,6 +63,7 @@ _OnCompleteCallback = typing.Callable[
 		subsample.analysis.PitchResult,
 		subsample.analysis.TimbreResult,
 		subsample.analysis.LevelResult,
+		subsample.analysis.BandEnergyResult,
 		float,           # duration in seconds
 		numpy.ndarray,   # original capture-format PCM (int16/int32, shape n_frames×channels)
 	],
@@ -269,14 +270,14 @@ class SampleProcessor:
 			# analysis, avoiding running it twice (~200-300 ms saving per recording).
 			mono = subsample.analysis.to_mono_float(req.audio, effective_bit_depth)
 
-			result, rhythm, pitch, timbre, level = subsample.analysis.analyze_all(
+			result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
 				mono,
 				self._analysis_params,
 				self._cfg.analysis,
 			)
 
 			write_result = self._write_wav(
-				req.audio, req.timestamp, rhythm, result, pitch, timbre, level,
+				req.audio, req.timestamp, rhythm, result, pitch, timbre, level, band_energy,
 				filename_base=req.filename_base,
 				sample_rate=req.sample_rate,
 				bit_depth=req.bit_depth,
@@ -284,7 +285,7 @@ class SampleProcessor:
 
 			if self._on_complete is not None and write_result is not None:
 				filepath, duration = write_result
-				self._on_complete(filepath, result, rhythm, pitch, timbre, level, duration, req.audio)
+				self._on_complete(filepath, result, rhythm, pitch, timbre, level, band_energy, duration, req.audio)
 
 		except Exception as exc:
 			_log.error("Failed to process recording: %s — WAV may be intact", exc, exc_info=True)
@@ -298,6 +299,7 @@ class SampleProcessor:
 		pitch: subsample.analysis.PitchResult,
 		timbre: subsample.analysis.TimbreResult,
 		level: subsample.analysis.LevelResult,
+		band_energy: subsample.analysis.BandEnergyResult,
 		filename_base: typing.Optional[str] = None,
 		sample_rate: typing.Optional[int] = None,
 		bit_depth: typing.Optional[int] = None,
@@ -394,6 +396,7 @@ class SampleProcessor:
 			timbre      = timbre,
 			duration    = duration,
 			level       = level,
+			band_energy = band_energy,
 			bit_depth   = effective_bit_depth,
 			channels    = n_channels,
 			captured_at = timestamp.isoformat(),

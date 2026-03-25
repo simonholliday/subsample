@@ -692,31 +692,34 @@ def _make_on_complete (
 		pitch: subsample.analysis.PitchResult,
 		timbre: subsample.analysis.TimbreResult,
 		level: subsample.analysis.LevelResult,
+		band_energy: subsample.analysis.BandEnergyResult,
 		duration: float,
 		audio: numpy.ndarray,
 	) -> None:
 
 		_log.info(
-			"Recorded %s  (%.2fs)\n  %s\n  %s\n  %s\n  %s",
+			"Recorded %s  (%.2fs)\n  %s\n  %s\n  %s\n  %s\n  %s",
 			filepath.name, duration,
 			subsample.analysis.format_result(spectral, duration),
 			subsample.analysis.format_rhythm_result(rhythm),
 			subsample.analysis.format_pitch_result(pitch),
 			subsample.analysis.format_level_result(level),
+			subsample.analysis.format_band_energy_result(band_energy),
 		)
 
 		record = subsample.library.SampleRecord(
-			sample_id = subsample.library.allocate_id(),
-			name      = filepath.stem,
-			spectral  = spectral,
-			rhythm    = rhythm,
-			pitch     = pitch,
-			timbre    = timbre,
-			level     = level,
-			params    = analysis_params,
-			duration  = duration,
-			audio     = audio if store_audio else None,
-			filepath  = filepath,
+			sample_id   = subsample.library.allocate_id(),
+			name        = filepath.stem,
+			spectral    = spectral,
+			rhythm      = rhythm,
+			pitch       = pitch,
+			timbre      = timbre,
+			level       = level,
+			band_energy = band_energy,
+			params      = analysis_params,
+			duration    = duration,
+			audio       = audio if store_audio else None,
+			filepath    = filepath,
 		)
 
 		evicted = instrument_library.add(record)

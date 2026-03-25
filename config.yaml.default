@@ -259,6 +259,16 @@ analysis:
 #   # percussive sounds: kick, snare, and hi-hat all share similar sustained
 #   # timbre but have clearly different attacks. Increase for percussion-heavy
 #   # libraries. Range: 0.0–2.0. Set to 0.0 to disable.
+#
+#   weight_band_energy: 1.0
+#   # Influence of the multi-band energy group on similarity scoring.
+#   # 8 values: 4 per-band energy fractions + 4 per-band decay rates across
+#   # sub-bass (20-250 Hz), low-mid (250-2k Hz), high-mid (2-6k Hz), and
+#   # presence (6k+ Hz) bands. Directly encodes drum-type physical signatures:
+#   # kick = sub-bass dominant, snare = mid + presence, hi-hat = air. This
+#   # group is particularly effective for percussion classification. Increase
+#   # for drum-heavy libraries; decrease for pitched instrument libraries.
+#   # Range: 0.0-2.0. Set to 0.0 to disable.
 
 # reference:
 #   directory: "./reference"

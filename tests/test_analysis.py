@@ -1363,3 +1363,110 @@ class TestHasStablePitch:
 	def test_short_duration_fails (self) -> None:
 		"""Duration < 0.1 s — too short to be a useful keyboard sample."""
 		assert subsample.analysis.has_stable_pitch(self._spectral(), self._pitch(), 0.05) is False
+
+
+# ---------------------------------------------------------------------------
+# TestAnalyzeBandEnergy
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeBandEnergy:
+
+	"""Tests for analyze_band_energy() and format_band_energy_result()."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def _sine (self, frequency: float, duration: float = 1.0) -> numpy.ndarray:
+		"""Return a float32 mono sine wave at the given frequency."""
+		n = int(duration * 44100)
+		t = numpy.arange(n, dtype=numpy.float32) / 44100
+		return (numpy.sin(2 * numpy.pi * frequency * t) * 0.9).astype(numpy.float32)
+
+	def _white_noise (self, duration: float = 1.0) -> numpy.ndarray:
+		rng = numpy.random.default_rng(seed=42)
+		n = int(duration * 44100)
+		return rng.uniform(-1.0, 1.0, n).astype(numpy.float32)
+
+	def test_returns_band_energy_result_type (self) -> None:
+		"""analyze_band_energy() should return a BandEnergyResult."""
+		result = subsample.analysis.analyze_band_energy(self._sine(440.0), self._params())
+		assert isinstance(result, subsample.analysis.BandEnergyResult)
+
+	def test_energy_fractions_have_four_elements (self) -> None:
+		"""energy_fractions must always have exactly 4 elements."""
+		result = subsample.analysis.analyze_band_energy(self._sine(440.0), self._params())
+		assert len(result.energy_fractions) == 4
+
+	def test_decay_rates_have_four_elements (self) -> None:
+		"""decay_rates must always have exactly 4 elements."""
+		result = subsample.analysis.analyze_band_energy(self._sine(440.0), self._params())
+		assert len(result.decay_rates) == 4
+
+	def test_fractions_sum_to_approximately_one (self) -> None:
+		"""Energy fractions across the 4 bands should sum close to 1.0.
+
+		The band definitions top out at 20 kHz; the remaining energy (Nyquist
+		gap 20-22.05 kHz) is excluded, so the sum may fall slightly below 1.0.
+		"""
+		result = subsample.analysis.analyze_band_energy(self._white_noise(), self._params())
+		total = sum(result.energy_fractions)
+		assert 0.8 <= total <= 1.0
+
+	def test_all_values_in_unit_range (self) -> None:
+		"""All fractions and decay rates must be in [0.0, 1.0]."""
+		for signal in [self._sine(440.0), self._white_noise()]:
+			result = subsample.analysis.analyze_band_energy(signal, self._params())
+			for v in result.energy_fractions:
+				assert 0.0 <= v <= 1.0
+			for v in result.decay_rates:
+				assert 0.0 <= v <= 1.0
+
+	def test_empty_array_returns_zeros (self) -> None:
+		"""An empty array should return all-zero result without error."""
+		empty = numpy.zeros(0, dtype=numpy.float32)
+		result = subsample.analysis.analyze_band_energy(empty, self._params())
+		assert all(v == 0.0 for v in result.energy_fractions)
+		assert all(v == 0.0 for v in result.decay_rates)
+
+	def test_sub_bass_sine_dominates_first_band (self) -> None:
+		"""A 100 Hz sine should have most of its energy in the sub-bass band (index 0)."""
+		result = subsample.analysis.analyze_band_energy(self._sine(100.0), self._params())
+		# Sub-bass (20-250 Hz) should dominate
+		assert result.energy_fractions[0] > result.energy_fractions[2]
+		assert result.energy_fractions[0] > result.energy_fractions[3]
+
+	def test_high_freq_sine_dominates_upper_bands (self) -> None:
+		"""A 10 kHz sine should have most of its energy in the upper bands."""
+		result = subsample.analysis.analyze_band_energy(self._sine(10000.0), self._params())
+		# Upper bands (high-mid or presence) should dominate
+		upper_energy = result.energy_fractions[2] + result.energy_fractions[3]
+		lower_energy = result.energy_fractions[0] + result.energy_fractions[1]
+		assert upper_energy > lower_energy
+
+	def test_short_signal_does_not_crash (self) -> None:
+		"""A very short signal (< n_fft) should return a valid result without error."""
+		short = numpy.zeros(100, dtype=numpy.float32)
+		short[:10] = 0.5
+		result = subsample.analysis.analyze_band_energy(short, self._params())
+		assert isinstance(result, subsample.analysis.BandEnergyResult)
+
+	def test_analyze_all_returns_six_tuple (self) -> None:
+		"""analyze_all() should return a 6-tuple including BandEnergyResult."""
+		import subsample.config
+		# analyze_all expects a pre-converted float32 mono array
+		mono = numpy.zeros(22050, dtype=numpy.float32)
+		params = self._params()
+		cfg = subsample.config.AnalysisConfig()
+		result = subsample.analysis.analyze_all(mono, params, rhythm_cfg=cfg)
+		assert len(result) == 6
+		assert isinstance(result[5], subsample.analysis.BandEnergyResult)
+
+	def test_format_band_energy_result_is_single_line (self) -> None:
+		"""format_band_energy_result() should return a single line."""
+		result = subsample.analysis.BandEnergyResult(
+			energy_fractions = (0.4, 0.3, 0.2, 0.1),
+			decay_rates      = (0.8, 0.5, 0.3, 0.1),
+		)
+		s = subsample.analysis.format_band_energy_result(result)
+		assert "\n" not in s
+		assert len(s) > 0

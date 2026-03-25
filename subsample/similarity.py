@@ -1,20 +1,21 @@
 """Spectral fingerprint similarity scoring for Subsample.
 
 Compares recordings against reference samples using cosine similarity on a
-composite feature vector built from four independently-weighted groups:
+composite feature vector built from five independently-weighted groups:
 
-  Spectral (11)        — all AnalysisResult fields, already normalised [0, 1]
+  Spectral (11)           — all AnalysisResult fields, already normalised [0, 1]
   Timbre / sustained (12) — MFCC coefficients 1–12 (mean across duration)
-  Timbre / delta (12)  — delta-MFCC coefficients 1–12 (timbre trajectory)
-  Timbre / onset (12)  — onset-weighted MFCC coefficients 1–12 (attack)
+  Timbre / delta (12)     — delta-MFCC coefficients 1–12 (timbre trajectory)
+  Timbre / onset (12)     — onset-weighted MFCC coefficients 1–12 (attack)
+  Band energy (8)         — 4 per-band energy fractions + 4 per-band decay rates
 
 Each group is L2-normalised independently before being scaled by its
 configured weight and concatenated. Cosine similarity on the result is
 mathematically equivalent to a weighted average of the per-group cosine
 similarities:
 
-  sim = (w₁²·cos_spectral + w₂²·cos_timbre + w₃²·cos_delta + w₄²·cos_onset)
-      / (w₁² + w₂² + w₃² + w₄²)
+  sim = (w₁²·cos_spectral + w₂²·cos_timbre + w₃²·cos_delta + w₄²·cos_onset + w₅²·cos_band)
+      / (w₁² + w₂² + w₃² + w₄² + w₅²)
 
 MFCC coefficient 0 is excluded from all groups because it encodes overall
 log-energy (loudness). Within a group, including the energy coefficient would
@@ -401,21 +402,23 @@ def _build_feature_vector (
 
 	"""Build the composite similarity feature vector for a sample record.
 
-	Assembles up to four feature groups, each independently L2-normalised and
+	Assembles up to five feature groups, each independently L2-normalised and
 	scaled by its configured weight, then concatenates them into a single 1-D
 	float32 array. Groups with weight 0.0 are omitted entirely.
 
 	Groups:
-	  Spectral (11):        all AnalysisResult fields, already in [0, 1].
+	  Spectral (11):           all AnalysisResult fields, already in [0, 1].
 	  Timbre / sustained (12): MFCC coefficients 1–12 (mean over duration).
-	  Timbre / delta (12):  delta-MFCC coefficients 1–12 (timbre trajectory).
-	  Timbre / onset (12):  onset-weighted MFCC coefficients 1–12 (attack).
+	  Timbre / delta (12):     delta-MFCC coefficients 1–12 (timbre trajectory).
+	  Timbre / onset (12):     onset-weighted MFCC coefficients 1–12 (attack).
+	  Band energy (8):         4 energy fractions + 4 decay rates across sub-bass,
+	                           low-mid, high-mid, and presence bands.
 
-	MFCC coefficient 0 is excluded from all groups because it encodes overall
-	log-energy. Within a group, coeff 0 would bias similarity toward loudness
-	rather than spectral shape; coeff 1–12 carry the timbral information.
+	MFCC coefficient 0 is excluded from all MFCC groups because it encodes
+	overall log-energy. Within a group, coeff 0 would bias similarity toward
+	loudness rather than spectral shape; coeff 1–12 carry the timbral information.
 
-	When all four groups are active the result is a 47-element vector. Cosine
+	When all five groups are active the result is a 55-element vector. Cosine
 	similarity on this vector equals a weighted average of per-group cosine
 	similarities (weights squared, renormalised). See module docstring.
 
@@ -459,6 +462,16 @@ def _build_feature_vector (
 	if cfg.weight_timbre_onset > 0.0:
 		onset = numpy.array(record.timbre.mfcc_onset[1:], dtype=numpy.float32)
 		parts.append(_l2_normalize(onset) * cfg.weight_timbre_onset)
+
+	# --- Band energy group (8 values: 4 fractions + 4 decay rates) ---
+	# Fractions encode WHERE energy lives; decay rates encode HOW FAST it dissipates.
+	# Together they directly capture drum-type physical signatures.
+	if cfg.weight_band_energy > 0.0:
+		band = numpy.array(
+			list(record.band_energy.energy_fractions) + list(record.band_energy.decay_rates),
+			dtype=numpy.float32,
+		)
+		parts.append(_l2_normalize(band) * cfg.weight_band_energy)
 
 	if not parts:
 		return numpy.array([], dtype=numpy.float32)

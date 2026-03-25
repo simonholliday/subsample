@@ -48,6 +48,16 @@ Level metrics (LevelResult) — amplitude measurements, NOT used for similarity:
   peak               — peak absolute amplitude in [0, 1] (max(|signal|) on float32 mono)
   rms                — RMS amplitude in [0, 1] (sqrt(mean(signal²)) on float32 mono)
   Used at playback time to normalise levels across samples recorded at different volumes.
+
+Band energy metrics (BandEnergyResult) — per-band energy distribution, used for similarity:
+
+  energy_fractions   — 4-element tuple: fraction of total energy in each band (sums to ~1.0)
+                       bands: sub-bass (20-250 Hz), low-mid (250-2k Hz),
+                              high-mid (2-6k Hz), presence (6k+ Hz)
+  decay_rates        — 4-element tuple: per-band decay rate, log-normalised to [0, 1]
+                       0.0 = instant decay (≤ 1 ms), 1.0 = very long decay (≥ 2 s)
+  Directly encodes drum-type signatures: kick = sub-bass dominant, snare = mid + presence,
+  hi-hat = air. Included in the similarity feature vector as the 5th independent group.
 """
 
 import dataclasses
@@ -95,7 +105,7 @@ warnings.filterwarnings("ignore", message="Empty filters detected in mel frequen
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "8"
+ANALYSIS_VERSION: str = "9"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -165,6 +175,21 @@ _ONSET_DECAY_MS: float = 50.0
 # Log normalisation spreads the useful range; values outside are clamped.
 _FLUX_MIN: float = 0.01
 _FLUX_MAX: float = 5.0
+
+# Multi-band energy envelope: frequency band boundaries in Hz.
+# These four bands directly encode the physical signatures of drum types:
+#   sub-bass  (20-250 Hz)    — kick drum fundamentals and body
+#   low-mid   (250-2000 Hz)  — snare body, tom resonance
+#   high-mid  (2000-6000 Hz) — snare crack, cymbal body, stick attack
+#   presence  (6000+ Hz)     — hi-hat sizzle, cymbal shimmer, air
+# Fixed constants: changing these boundaries would invalidate all cached analysis.
+_BAND_EDGES: tuple[tuple[float, float], ...] = (
+	(20.0, 250.0),
+	(250.0, 2000.0),
+	(2000.0, 6000.0),
+	(6000.0, 20000.0),
+)
+_N_BANDS: int = len(_BAND_EDGES)
 
 # Pitch class names for formatting: index 0=C, 1=C#, …, 11=B.
 _PITCH_CLASSES: tuple[str, ...] = (
@@ -444,6 +469,40 @@ class LevelResult:
 	"""Root mean square amplitude: sqrt(mean(signal²)).
 	0.0 = silence. Represents perceived average loudness and is the primary
 	value used to normalise levels across samples with different recording volumes."""
+
+
+@dataclasses.dataclass(frozen=True)
+class BandEnergyResult:
+
+	"""Per-band energy distribution and decay rates for drum-type classification.
+
+	Splits the spectrum into four frequency bands and captures how much energy
+	lives in each band (energy_fractions) and how quickly that energy decays
+	after the onset peak (decay_rates). Together these directly encode the
+	physical signatures of common drum types:
+
+	  kick drum  — sub-bass dominant (fraction[0] high), slow bass decay
+	  snare drum — low-mid body + high-mid crack, faster decay
+	  hi-hat     — presence dominated (fraction[3] high), very fast decay
+
+	Band order (index 0–3):
+	  0: sub-bass  (20–250 Hz)
+	  1: low-mid   (250–2000 Hz)
+	  2: high-mid  (2000–6000 Hz)
+	  3: presence  (6000+ Hz)
+
+	Used in the similarity feature vector as Group 5 (8 values total).
+	"""
+
+	energy_fractions: tuple[float, ...]
+	"""4-element tuple: fraction of total energy in each frequency band.
+	Values are in [0.0, 1.0] and sum to approximately 1.0.
+	0.0 = no energy in this band; 1.0 = all energy concentrated here."""
+
+	decay_rates: tuple[float, ...]
+	"""4-element tuple: per-band decay rate, log-normalised to [0.0, 1.0].
+	Measures time from peak band energy to -20 dB (10 % of peak).
+	0.0 = instant decay (≤ 1 ms — sharp transient); 1.0 = very long decay (≥ 2 s)."""
 
 
 def compute_params (sample_rate: int) -> AnalysisParams:
@@ -928,6 +987,128 @@ def format_level_result (result: LevelResult) -> str:
 	)
 
 
+def analyze_band_energy (
+	mono: numpy.ndarray,
+	params: AnalysisParams,
+) -> BandEnergyResult:
+
+	"""Compute per-band energy fractions and decay rates from a mono signal.
+
+	Splits the spectrum into four frequency bands (sub-bass, low-mid, high-mid,
+	presence) and measures how much energy lives in each band and how quickly
+	that energy decays after the onset peak.
+
+	The energy fractions sum to approximately 1.0 and directly encode the
+	frequency distribution: a kick drum has most energy in sub-bass; a hi-hat
+	has most energy in the presence band. The decay rates capture how each
+	band behaves over time, further discriminating drum types.
+
+	Args:
+		mono:   Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+		params: Pre-computed FFT parameters from compute_params().
+
+	Returns:
+		BandEnergyResult with 4-element energy_fractions and decay_rates tuples.
+		All-zero values are returned for empty or silent signals.
+	"""
+
+	if mono.shape[0] == 0:
+		return BandEnergyResult(
+			energy_fractions=tuple(0.0 for _ in range(_N_BANDS)),
+			decay_rates=tuple(0.0 for _ in range(_N_BANDS)),
+		)
+
+	# Clamp to signal length for short recordings, matching analyze_mono().
+	effective_n_fft = min(params.n_fft, len(mono))
+	effective_hop   = min(params.hop_length, effective_n_fft)
+
+	# Compute STFT once; reuse power spectrogram for all bands.
+	D       = librosa.stft(mono, n_fft=effective_n_fft, hop_length=effective_hop)
+	S_power = numpy.abs(D) ** 2
+
+	# Map FFT bin indices to their centre frequencies.
+	freqs = librosa.fft_frequencies(sr=params.sample_rate, n_fft=effective_n_fft)
+
+	total_energy = float(S_power.sum())
+
+	energy_fractions: list[float] = []
+	decay_rates:      list[float] = []
+
+	for band_low, band_high in _BAND_EDGES:
+
+		# Clamp upper edge to Nyquist; band may be empty at low sample rates.
+		effective_high = min(band_high, params.sample_rate / 2.0)
+		band_mask = (freqs >= band_low) & (freqs < effective_high)
+
+		if not band_mask.any():
+			energy_fractions.append(0.0)
+			decay_rates.append(0.0)
+			continue
+
+		# Sum power across the band's frequency bins per frame, then take RMS.
+		band_power_per_frame = S_power[band_mask, :].sum(axis=0)
+		band_rms = numpy.sqrt(band_power_per_frame)
+
+		# --- Energy fraction: proportion of total power in this band ---
+		band_total = float(band_power_per_frame.sum())
+		fraction   = band_total / total_energy if total_energy > 1e-20 else 0.0
+		energy_fractions.append(float(numpy.clip(fraction, 0.0, 1.0)))
+
+		# --- Decay rate: time from peak to -20 dB (10 % of peak) ---
+		peak_val = float(numpy.max(band_rms))
+
+		if peak_val < 1e-9:
+			decay_rates.append(0.0)
+			continue
+
+		peak_frame = int(numpy.argmax(band_rms))
+		threshold  = peak_val * _ACTIVE_THRESHOLD_RATIO
+		post_peak  = band_rms[peak_frame:]
+
+		below = numpy.where(post_peak < threshold)[0]
+
+		if below.size > 0:
+			decay_frames = int(below[0])
+		else:
+			# Energy never drops to threshold — treat as maximum decay duration.
+			decay_frames = len(post_peak)
+
+		decay_seconds = decay_frames * effective_hop / params.sample_rate
+		decay_rate    = _log_normalize(decay_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
+		decay_rates.append(decay_rate)
+
+	return BandEnergyResult(
+		energy_fractions=tuple(energy_fractions),
+		decay_rates=tuple(decay_rates),
+	)
+
+
+def format_band_energy_result (result: BandEnergyResult) -> str:
+
+	"""Return a single-line human-readable summary of band energy analysis.
+
+	Shows energy fraction and decay rate for each of the four bands.
+
+	Args:
+		result: Computed band energy metrics.
+
+	Returns:
+		String of the form:
+		"sub=0.45(d=0.7)  mid=0.30(d=0.4)  hi=0.15(d=0.2)  air=0.10(d=0.1)"
+	"""
+
+	labels = ("sub", "mid", "hi", "air")
+
+	parts = [
+		f"{label}={frac:.2f}(d={decay:.2f})"
+		for label, frac, decay in zip(
+			labels, result.energy_fractions, result.decay_rates
+		)
+	]
+
+	return "  ".join(parts)
+
+
 def analyze_pitch (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
@@ -1120,9 +1301,9 @@ def analyze_all (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
 	rhythm_cfg: subsample.config.AnalysisConfig,
-) -> tuple[AnalysisResult, RhythmResult, PitchResult, TimbreResult, LevelResult]:
+) -> tuple[AnalysisResult, RhythmResult, PitchResult, TimbreResult, LevelResult, BandEnergyResult]:
 
-	"""Run all analyses (spectral, rhythm, pitch, timbre, level) with shared pyin computation.
+	"""Run all analyses with shared pyin computation.
 
 	Preferred entry point for the recorder and any code that needs all results.
 	Runs pyin once and passes the result to both analyze_mono() and
@@ -1134,18 +1315,19 @@ def analyze_all (
 		rhythm_cfg: Configurable tempo priors from AnalysisConfig.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, level) — five result dataclasses.
+		(spectral, rhythm, pitch, timbre, level, band_energy) — six result dataclasses.
 	"""
 
 	# Run pyin once; share the result between spectral (voiced_fraction) and pitch.
 	pyin = _run_pyin(mono, params)
 
-	rhythm   = analyze_rhythm(mono, params, rhythm_cfg)
-	spectral = analyze_mono(mono, params, _pyin_voiced_flag=pyin[1] if pyin is not None else None)
+	rhythm      = analyze_rhythm(mono, params, rhythm_cfg)
+	spectral    = analyze_mono(mono, params, _pyin_voiced_flag=pyin[1] if pyin is not None else None)
 	pitch, timbre = analyze_pitch(mono, params, _pyin_result=pyin)
-	level    = compute_level(mono)
+	level       = compute_level(mono)
+	band_energy = analyze_band_energy(mono, params)
 
-	return spectral, rhythm, pitch, timbre, level
+	return spectral, rhythm, pitch, timbre, level, band_energy
 
 
 # ---------------------------------------------------------------------------

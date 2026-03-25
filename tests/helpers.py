@@ -100,6 +100,16 @@ def _make_level () -> subsample.analysis.LevelResult:
 	return subsample.analysis.LevelResult(peak=0.85, rms=0.25)
 
 
+def _make_band_energy () -> subsample.analysis.BandEnergyResult:
+
+	"""Return a representative BandEnergyResult with plausible drum-like values."""
+
+	return subsample.analysis.BandEnergyResult(
+		energy_fractions = (0.4, 0.3, 0.2, 0.1),
+		decay_rates      = (0.6, 0.4, 0.2, 0.1),
+	)
+
+
 def _make_params (sample_rate: int = 44100) -> subsample.analysis.AnalysisParams:
 
 	"""Return AnalysisParams computed for the given sample rate."""
