@@ -242,8 +242,8 @@ class SampleProcessor:
 		"""
 
 		with self._futures_lock:
-			if self._was_backed_up and not any(
-				not f.done() for f in self._futures
+			if self._was_backed_up and all(
+				f.done() for f in self._futures
 			):
 				_log.info("sample-processor queue drained")
 				self._was_backed_up = False

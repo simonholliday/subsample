@@ -28,11 +28,10 @@ import threading
 import time
 import typing
 
-import yaml
-
 import mido
 import numpy
 import pyaudio
+import yaml
 
 import subsample.analysis
 import subsample.audio

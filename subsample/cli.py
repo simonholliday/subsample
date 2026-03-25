@@ -477,11 +477,11 @@ def main () -> None:
 	# Create instrument library. PCM audio is only needed when the player is
 	# active — skipping it saves memory when player is disabled.
 	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
-	if cfg.instrument.directory is not None:
+	if cfg.instrument.directory is not None and cfg.player.enabled:
 		instrument_library = subsample.library.load_instrument_library(
 			pathlib.Path(cfg.instrument.directory),
 			max_instrument_bytes,
-			load_audio=cfg.player.enabled,
+			load_audio=True,
 			clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
 		)
 		print(
