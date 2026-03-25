@@ -39,6 +39,8 @@
 #   pitched(selector) pitched/tonal sample by position (newest/oldest/N)  [IMPLEMENTED]
 #   newest()          most recently added sample (any type)                [IMPLEMENTED]
 #   oldest()          oldest sample in the library (any type)              [IMPLEMENTED]
+#   chain             YAML dict with "chain:" key listing 2+ targets;      [IMPLEMENTED]
+#                       tries each in order, uses first that resolves
 #
 # OVERLAPPING NOTES
 #   If two assignments map the same channel + note, the last one in the
@@ -359,18 +361,63 @@ assignments:
 
 
   # =================================================================
+  # CHAIN TARGET
+  # =================================================================
+  #
+  # TARGET TYPE: chain
+  #
+  #   Tries a list of targets in order and uses the first one that
+  #   resolves to a sample.  Useful as a fallback: try a specific named
+  #   sample, fall back to similarity matching if it has been evicted.
+  #
+  #   Syntax: target is a YAML dict with a "chain" key containing a
+  #   list of 2 or more target strings.  Each sub-target uses the same
+  #   format as a standalone target ("reference(NAME)", "sample(STEM)",
+  #   "pitched(SEL)", "newest()", "oldest()").  Nested chains are not
+  #   supported.
+  #
+  #   Validation: all sub-targets are validated at load time using the
+  #   same rules as standalone targets (e.g. reference sub-targets must
+  #   exist in the reference library).  One invalid sub-target skips
+  #   the entire assignment with a WARNING.
+  #
+  #   Resolution: dynamic — each sub-target is resolved fresh on every
+  #   trigger.  The first sub-target that returns a sample wins.  If
+  #   all sub-targets resolve to None (e.g. the named sample is evicted
+  #   and no similarity match exists yet), the note plays silence.
+  #
+  #   Pitch: pitch: true works with chain.  When the chain resolves to
+  #   a pitch-stable sample, variants are pre-computed automatically.
+  #   If the resolved sample has no stable pitch, the base variant plays.
+  #
+  #   Eviction: re-evaluated on every trigger, so eviction of a static
+  #   sub-target (sample) causes fallback to the next sub-target
+  #   automatically.
+
+  # - name: Kick with fallback
+  #   channel: 10
+  #   notes: 36
+  #   target:
+  #     chain:
+  #       - sample(my-favourite-kick)
+  #       - reference(BD0025)
+  #   one_shot: true
+
+
+  # =================================================================
   # EVICTION BEHAVIOUR
   # =================================================================
   #
   # The instrument library has a memory cap (instrument.max_memory_mb)
   # and evicts old samples when exceeded.
   #
-  # Dynamic targets (reference, pitched, newest) re-evaluate on every
-  # trigger and always reflect the current library state — eviction is
-  # handled automatically.
+  # Dynamic targets (reference, pitched, newest, oldest, chain) re-evaluate
+  # on every trigger and always reflect the current library state — eviction
+  # is handled automatically.
   #
   # Static targets (sample) may point to an evicted sample.  The note
-  # plays silence until the sample is reloaded.
+  # plays silence until the sample is reloaded.  Use chain with a
+  # sample() primary and a reference() fallback to handle eviction gracefully.
 
 
   # =================================================================
@@ -404,18 +451,6 @@ assignments:
   #           target: reference(BD_soft)
   #         - range: [65, 127]
   #           target: reference(BD0025)
-  #
-  # chain: [t1, t2, ...]
-  #   Try targets in order; use the first that resolves to a sample.
-  #   Useful as a fallback: try a named sample, fall back to similarity.
-  #   Example:
-  #     - name: Kick with fallback
-  #       channel: 10
-  #       notes: 36
-  #       target:
-  #         chain:
-  #           - sample(my-favourite-kick)
-  #           - reference(BD0025)
   #
   # pitched(random)
   #   Random selection from all pitched samples.

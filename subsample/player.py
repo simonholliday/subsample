@@ -48,15 +48,21 @@ _log = logging.getLogger(__name__)
 # actual output sample rate so the duration is correct regardless of device.
 _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 
+# Parsed sub-targets for chain() assignments: ordered list of (target_type, target_arg) pairs.
+# Each pair uses the same semantics as a standalone target of that type, always at rank 0.
+_ChainTargets = tuple[tuple[str, str], ...]
+
 # Type alias for the compiled note map:
 # (mido_channel, midi_note) -> (target_type, target_arg, rank, one_shot, pitch, pan_gains)
-#   target_type: "reference", "sample", or "pitched"
+#   target_type: "reference", "sample", "pitched", "newest", "oldest", or "chain"
 #   target_arg:  reference name (for "reference") | filename stem (for "sample")
 #                | selector string (for "pitched": "oldest", "newest", or "N")
-#   rank:        similarity rank for "reference"; unused (0) for "sample" and "pitched"
+#                | empty string (for "newest" / "oldest")
+#                | _ChainTargets tuple (for "chain": ordered fallback list of sub-targets)
+#   rank:        similarity rank for "reference"; unused (0) for all other types
 #   pitch:       True = pitched keyboard assignment (all notes share rank 0; pre-computed variants)
 #   pan_gains:   float32 array of constant-power channel gains, shape (output_channels,)
-_NoteMap = dict[tuple[int, int], tuple[str, str, int, bool, bool, numpy.ndarray]]
+_NoteMap = dict[tuple[int, int], tuple[str, str | _ChainTargets, int, bool, bool, numpy.ndarray]]
 
 
 def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_name: str) -> numpy.ndarray:
@@ -251,6 +257,83 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 	return [_single(item) for item in notes_raw]
 
 
+def _parse_target_string (
+	target_raw: str,
+	reference_set: set[str],
+	assignment_name: str,
+) -> typing.Optional[tuple[str, str]]:
+
+	"""Parse one target string into a (target_type, target_arg) pair.
+
+	Used both for standalone targets and for sub-targets inside a chain().
+	Validates reference names against reference_set; logs a WARNING and returns
+	None when the target is invalid or the reference is not in the library.
+
+	Nested chain() targets are not supported — returns None with a WARNING.
+
+	Args:
+		target_raw:      Raw target string, e.g. "reference(BD0025)".
+		reference_set:   Uppercased reference library names for validation.
+		assignment_name: Used in log messages.
+
+	Returns:
+		(target_type, target_arg) tuple, or None if invalid / unsupported.
+	"""
+
+	if target_raw.startswith("reference("):
+		target_arg = target_raw[len("reference("):].split(")")[0].split(",")[0].strip()
+
+		if target_arg.upper() not in reference_set:
+			_log.warning(
+				"MIDI map assignment %r: reference %r not in reference library — skipping",
+				assignment_name, target_arg,
+			)
+			return None
+
+		return ("reference", target_arg)
+
+	if target_raw.startswith("sample("):
+		target_arg = target_raw[len("sample("):].split(")")[0].strip()
+		return ("sample", target_arg)
+
+	if target_raw.startswith("pitched("):
+		target_arg = target_raw[len("pitched("):].split(")")[0].strip()
+
+		if target_arg not in ("oldest", "newest"):
+			try:
+				_idx = int(target_arg)
+				if _idx < 0:
+					raise ValueError("negative index")
+			except ValueError:
+				_log.warning(
+					"MIDI map assignment %r: pitched(%r) is not a valid selector "
+					"(expected oldest, newest, or non-negative integer) — skipping",
+					assignment_name, target_arg,
+				)
+				return None
+
+		return ("pitched", target_arg)
+
+	if target_raw.startswith("newest("):
+		return ("newest", "")
+
+	if target_raw.startswith("oldest("):
+		return ("oldest", "")
+
+	if target_raw.startswith("chain("):
+		_log.warning(
+			"MIDI map assignment %r: nested chain() is not supported — skipping",
+			assignment_name,
+		)
+		return None
+
+	_log.debug(
+		"MIDI map assignment %r: skipping unsupported target %r (not yet implemented)",
+		assignment_name, target_raw,
+	)
+	return None
+
+
 def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
@@ -268,6 +351,13 @@ def load_midi_map (
 	                    When pitch: true, all notes map to rank 0 and are pitch-shifted.
 	  sample(STEM)    — resolved at trigger time via InstrumentLibrary.find_by_name().
 	                    STEM is the WAV filename without extension.
+	  pitched(SEL)    — selects from pitch-stable samples by position (oldest/newest/N).
+	  newest()        — most recently added sample in the library (any type).
+	  oldest()        — oldest sample in the library (any type).
+	  chain           — YAML dict with a "chain" key listing 2+ target strings in order.
+	                    At trigger time, each sub-target is tried in sequence; the first
+	                    one that resolves to a sample wins.  All sub-targets are validated
+	                    at load time; one invalid sub-target skips the whole assignment.
 
 	Pan weights are normalised to constant-power gains: gain[i] = sqrt(w[i]/sum(w)).
 	Channel order follows SMPTE: 2.0 = L R; 5.1 = L R C LFE Ls Rs; 7.1 adds Lrs Rrs.
@@ -319,54 +409,58 @@ def load_midi_map (
 		notes = _parse_note_spec(notes_raw, name)
 
 		# Target: parse target type and argument.
+		# Targets are either a string ("reference(NAME)", "sample(STEM)", etc.)
+		# or a dict with a "chain" key containing a list of target strings.
 		target_raw = assignment.get("target", "")
-		if not isinstance(target_raw, str):
-			_log.debug("MIDI map assignment %r: skipping unsupported target %r", name, target_raw)
-			continue
 
-		if target_raw.startswith("reference("):
-			target_type = "reference"
-			target_arg = target_raw[len("reference("):].split(")")[0].split(",")[0].strip()
+		target_type: str
+		target_arg: str | _ChainTargets
 
-			if target_arg.upper() not in reference_set:
+		if isinstance(target_raw, dict) and "chain" in target_raw:
+			# chain: ordered fallback list — try each target in sequence, use first hit.
+			chain_raw = target_raw["chain"]
+
+			if not isinstance(chain_raw, list) or len(chain_raw) < 2:
 				_log.warning(
-					"MIDI map assignment %r: reference %r not in reference library — skipping",
-					name, target_arg,
+					"MIDI map assignment %r: chain must be a list of at least 2 targets — skipping",
+					name,
 				)
 				continue
 
-		elif target_raw.startswith("sample("):
-			target_type = "sample"
-			target_arg = target_raw[len("sample("):].split(")")[0].strip()
+			parsed_chain: list[tuple[str, str]] = []
+			valid = True
 
-		elif target_raw.startswith("pitched("):
-			target_type = "pitched"
-			target_arg = target_raw[len("pitched("):].split(")")[0].strip()
-
-			# Validate selector: must be "oldest", "newest", or a non-negative integer.
-			if target_arg not in ("oldest", "newest"):
-				try:
-					_idx = int(target_arg)
-					if _idx < 0:
-						raise ValueError("negative index")
-				except ValueError:
+			for sub_raw in chain_raw:
+				if not isinstance(sub_raw, str):
 					_log.warning(
-						"MIDI map assignment %r: pitched(%r) is not a valid selector "
-						"(expected oldest, newest, or non-negative integer) — skipping",
-						name, target_arg,
+						"MIDI map assignment %r: chain sub-target %r must be a string — skipping assignment",
+						name, sub_raw,
 					)
-					continue
+					valid = False
+					break
 
-		elif target_raw.startswith("newest("):
-			target_type = "newest"
-			target_arg = ""
+				parsed = _parse_target_string(sub_raw, reference_set, name)
+				if parsed is None:
+					valid = False
+					break
 
-		elif target_raw.startswith("oldest("):
-			target_type = "oldest"
-			target_arg = ""
+				parsed_chain.append(parsed)
+
+			if not valid:
+				continue
+
+			target_type = "chain"
+			target_arg = tuple(parsed_chain)
+
+		elif isinstance(target_raw, str):
+			parsed_single = _parse_target_string(target_raw, reference_set, name)
+			if parsed_single is None:
+				continue
+
+			target_type, target_arg = parsed_single
 
 		else:
-			_log.debug("MIDI map assignment %r: skipping unsupported target %r (not yet implemented)", name, target_raw)
+			_log.debug("MIDI map assignment %r: skipping unsupported target %r", name, target_raw)
 			continue
 
 		one_shot: bool = bool(assignment.get("one_shot", True))
@@ -379,19 +473,29 @@ def load_midi_map (
 		# each MIDI note.  The pitch flag is forwarded so update_pitched_assignments()
 		# can identify these entries and pre-compute variants when the best match changes.
 		#
-		# When pitch: false (default), notes distribute ranks so each note triggers a
-		# progressively-less-similar sample variant (existing behaviour).
+		# When pitch: false (default) on a reference(), notes distribute ranks so each
+		# note triggers a progressively-less-similar sample variant (existing behaviour).
+		#
+		# Rank distribution is a reference()-only concept.  chain(), sample(), pitched(),
+		# newest(), and oldest() always use rank=0 — the rank field is ignored at resolution
+		# time for all of these types.
 		if target_type in ("pitched", "newest", "oldest"):
 			# Inherently pitch-shifted keyboards — always pitch=True, rank=0.
 			# The pitch: YAML key is ignored for these target types.
 			for note in notes:
 				note_map[(mido_channel, int(note))] = (target_type, target_arg, 0, one_shot, True, pan_gains)
-		elif target_type == "reference" and pitch_enabled:
+		elif target_type in ("reference", "chain") and pitch_enabled:
 			for note in notes:
 				note_map[(mido_channel, int(note))] = (target_type, target_arg, 0, one_shot, True, pan_gains)
-		else:
+		elif target_type == "reference":
+			# Distribute similarity ranks across the note list: first note = rank 0 (best match),
+			# second = rank 1 (second-best), etc.  Gives each note a different sample hit.
 			for rank, note in enumerate(notes):
 				note_map[(mido_channel, int(note))] = (target_type, target_arg, rank, one_shot, False, pan_gains)
+		else:
+			# chain() and sample(): rank is meaningless; every note maps to rank 0.
+			for note in notes:
+				note_map[(mido_channel, int(note))] = (target_type, target_arg, 0, one_shot, False, pan_gains)
 
 	_log.info(
 		"MIDI map loaded from %s: %d note(s) across %d assignment(s)",
@@ -817,13 +921,13 @@ class MidiPlayer:
 
 		target_type, target_arg, rank, one_shot, pitch, pan_gains = mapping
 
+		# target_arg is str for all types except "chain" (which uses _ChainTargets).
+		# Branches that know the type is str cast explicitly to satisfy mypy.
 		if target_type == "reference":
 			# Look up the Nth-closest instrument sample for this reference.
 			# If rank N doesn't exist yet (e.g. only one hit recorded), fall back
 			# to rank 0 so the note always triggers something.
-			sample_id = self._similarity_matrix.get_match(target_arg, rank=rank)
-			if sample_id is None and rank > 0:
-				sample_id = self._similarity_matrix.get_match(target_arg, rank=0)
+			sample_id = self._resolve_target("reference", typing.cast(str, target_arg), rank)
 			if sample_id is None:
 				_log.debug("No instrument match for reference %r — library empty?", target_arg)
 				return
@@ -832,7 +936,7 @@ class MidiPlayer:
 			# Direct lookup by filename stem — O(1) via InstrumentLibrary._name_index.
 			# Returns None if the sample is not currently loaded (evicted or not yet
 			# recorded); in that case the note plays silence, no error.
-			sample_id = self._instrument_library.find_by_name(target_arg)
+			sample_id = self._resolve_target("sample", typing.cast(str, target_arg))
 			if sample_id is None:
 				_log.debug("sample(%r) not in library — not yet loaded or evicted", target_arg)
 				return
@@ -842,7 +946,7 @@ class MidiPlayer:
 			# and select by position.  Variants are pre-computed by
 			# update_pitched_assignments(), so get_pitched() below usually finds a
 			# cached variant immediately.
-			sample_id = self._resolve_pitched_selector(target_arg)
+			sample_id = self._resolve_target("pitched", typing.cast(str, target_arg))
 			if sample_id is None:
 				_log.debug("pitched(%s): no matching pitched sample in library", target_arg)
 				return
@@ -850,9 +954,25 @@ class MidiPlayer:
 		elif target_type in ("newest", "oldest"):
 			# Dynamic: resolves to the most- or least-recently added sample in the
 			# library, regardless of pitch stability.
-			sample_id = self._resolve_library_position(target_type)
+			sample_id = self._resolve_target(target_type, "")
 			if sample_id is None:
 				_log.debug("%s(): library empty", target_type)
+				return
+
+		elif target_type == "chain":
+			# Try each sub-target in order; use the first one that resolves to a sample.
+			# All sub-targets were validated at load time, so invalid entries cannot appear here.
+			sample_id = None
+			for sub_type, sub_arg in typing.cast(_ChainTargets, target_arg):
+				sample_id = self._resolve_target(sub_type, sub_arg)
+				if sample_id is not None:
+					break
+
+			if sample_id is None:
+				_log.debug(
+					"chain: all %d sub-target(s) resolved to None",
+					len(typing.cast(_ChainTargets, target_arg)),
+				)
 				return
 
 		else:
@@ -957,8 +1077,9 @@ class MidiPlayer:
 		# Collect notes per (target_type, target_arg) from all pitched keyboard assignments.
 		# Keying on (ttype, targ) avoids a collision if a reference name accidentally
 		# matches a selector string ("oldest", "newest"), and clearly separates the
-		# two resolution paths below.
-		pitched_groups: dict[tuple[str, str], list[int]] = {}
+		# resolution paths below.  Chain targets use their _ChainTargets tuple as the key
+		# (tuples are hashable), so two identical chains share one entry.
+		pitched_groups: dict[tuple[str, str | _ChainTargets], list[int]] = {}
 		for (_ch, note), (ttype, targ, _rank, _one_shot, pitch, _pan) in self._note_map.items():
 			if pitch:
 				pitched_groups.setdefault((ttype, targ), []).append(note)
@@ -968,15 +1089,17 @@ class MidiPlayer:
 
 		for (ttype, targ), notes in pitched_groups.items():
 
-			# Resolve to sample_id using the appropriate strategy for each target type.
-			if ttype == "reference":
-				sample_id = self._similarity_matrix.get_match(targ, rank=0)
-			elif ttype == "pitched":
-				sample_id = self._resolve_pitched_selector(targ)
-			elif ttype in ("newest", "oldest"):
-				sample_id = self._resolve_library_position(ttype)
+			# Resolve to sample_id for this pitched group.
+			if ttype == "chain":
+				# Try each chain sub-target in order; use the first that resolves.
+				sample_id = None
+				for sub_type, sub_arg in typing.cast(_ChainTargets, targ):
+					sample_id = self._resolve_target(sub_type, sub_arg)
+					if sample_id is not None:
+						break
+
 			else:
-				continue
+				sample_id = self._resolve_target(ttype, typing.cast(str, targ))
 
 			if sample_id is None:
 				continue
@@ -986,16 +1109,19 @@ class MidiPlayer:
 				continue
 
 			if not subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
+				label = "chain" if ttype == "chain" else f"{ttype}({targ})"
 				_log.warning(
-					"Pitched %s(%s): best match %r has no stable pitch — skipping pre-computation",
-					ttype, targ, record.name,
+					"Pitched %s: best match %r has no stable pitch — skipping pre-computation",
+					label, record.name,
 				)
 				continue
 
 			self._transform_manager.enqueue_pitch_range(record, notes)
+
+			label = "chain" if ttype == "chain" else f"{ttype}({targ})"
 			_log.info(
-				"Pitched %s(%s): queued %d variant(s) for %r",
-				ttype, targ, len(notes), record.name,
+				"Pitched %s: queued %d variant(s) for %r",
+				label, len(notes), record.name,
 			)
 
 	def _resolve_library_position (self, target_type: str) -> typing.Optional[int]:
@@ -1053,6 +1179,42 @@ class MidiPlayer:
 			return None
 
 		return pitched[idx].sample_id
+
+	def _resolve_target (self, target_type: str, target_arg: str, rank: int = 0) -> typing.Optional[int]:
+
+		"""Resolve a single target to a sample_id, or None if no match.
+
+		Encapsulates the per-target-type resolution logic shared by _handle_message()
+		(for chain sub-target fallback) and update_pitched_assignments() (for
+		variant pre-computation).  For "reference" targets, falls back from rank N to
+		rank 0 when rank N has no match yet.
+
+		Args:
+			target_type: One of "reference", "sample", "pitched", "newest", "oldest".
+			target_arg:  Type-specific argument string (reference name, sample stem,
+			             pitched selector, or empty string for newest/oldest).
+			rank:        Similarity rank for "reference" targets; ignored for others.
+
+		Returns:
+			sample_id integer, or None if the target could not be resolved.
+		"""
+
+		if target_type == "reference":
+			sample_id = self._similarity_matrix.get_match(target_arg, rank=rank)
+			if sample_id is None and rank > 0:
+				sample_id = self._similarity_matrix.get_match(target_arg, rank=0)
+			return sample_id
+
+		if target_type == "sample":
+			return self._instrument_library.find_by_name(target_arg)
+
+		if target_type == "pitched":
+			return self._resolve_pitched_selector(target_arg)
+
+		if target_type in ("newest", "oldest"):
+			return self._resolve_library_position(target_type)
+
+		return None
 
 	def _render_float (
 		self,

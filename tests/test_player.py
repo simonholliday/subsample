@@ -1632,3 +1632,321 @@ class TestResolveLibraryPosition:
 
 		assert player._resolve_library_position("newest") is None
 		assert player._resolve_library_position("oldest") is None
+
+
+# ---------------------------------------------------------------------------
+# TestLoadMidiMapChain — load_midi_map() parsing of chain targets
+# ---------------------------------------------------------------------------
+
+class TestLoadMidiMapChain:
+	"""Test load_midi_map() parsing of chain target assignments."""
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_basic_chain_is_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""Chain with two valid sub-targets stores target_type='chain' and _ChainTargets."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick with fallback
+    channel: 10
+    notes: 36
+    target:
+      chain:
+        - sample(my-kick)
+        - reference(BD0025)
+    one_shot: true
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		assert (9, 36) in note_map
+		ttype, targ, rank, one_shot, pitch, _ = note_map[(9, 36)]
+		assert ttype == "chain"
+		assert targ == (("sample", "my-kick"), ("reference", "BD0025"))
+		assert rank == 0
+		assert one_shot is True
+		assert pitch is False
+
+	def test_chain_sub_targets_preserve_order (self, tmp_path: pathlib.Path) -> None:
+		"""Sub-target order in the chain matches the YAML list order."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Multi-chain
+    channel: 1
+    notes: 60
+    target:
+      chain:
+        - oldest()
+        - newest()
+        - sample(fallback)
+""")
+		note_map = subsample.player.load_midi_map(path, [])
+
+		ttype, targ, _, _, _, _ = note_map[(0, 60)]
+		assert ttype == "chain"
+		assert targ == (("oldest", ""), ("newest", ""), ("sample", "fallback"))
+
+	def test_chain_with_pitch_true (self, tmp_path: pathlib.Path) -> None:
+		"""Chain with pitch: true sets pitch flag and rank 0 for every note."""
+		import logging
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Pitched fallback
+    channel: 1
+    notes: C2..C3
+    target:
+      chain:
+        - sample(my-tone)
+        - reference(BASS_TONE)
+    pitch: true
+""")
+		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
+
+		for midi_note in range(36, 49):
+			assert (0, midi_note) in note_map
+			ttype, targ, rank, _, pitch, _ = note_map[(0, midi_note)]
+			assert ttype == "chain"
+			assert rank == 0
+			assert pitch is True
+
+	def test_chain_single_element_is_skipped (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A chain with fewer than 2 sub-targets is skipped with a WARNING."""
+		import logging
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Too short
+    channel: 10
+    notes: 36
+    target:
+      chain:
+        - sample(my-kick)
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, [])
+
+		assert len(note_map) == 0
+		assert any("at least 2" in r.message for r in caplog.records)
+
+	def test_chain_invalid_reference_skips_assignment (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A chain with a reference sub-target not in the library is skipped."""
+		import logging
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick bad ref
+    channel: 10
+    notes: 36
+    target:
+      chain:
+        - sample(my-kick)
+        - reference(UNKNOWN)
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, [])
+
+		assert len(note_map) == 0
+
+	def test_chain_nested_chain_is_skipped (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A chain() sub-target inside a chain is rejected with a WARNING."""
+		import logging
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Nested
+    channel: 10
+    notes: 36
+    target:
+      chain:
+        - sample(kick)
+        - chain(something)
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, [])
+
+		assert len(note_map) == 0
+		assert any("nested chain" in r.message.lower() for r in caplog.records)
+
+	def test_chain_all_notes_get_same_chain (self, tmp_path: pathlib.Path) -> None:
+		"""Multi-note chain: every note in the list stores the same chain (no rank distribution)."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kicks
+    channel: 10
+    notes: [36, 35, 37]
+    target:
+      chain:
+        - sample(my-kick)
+        - reference(BD0025)
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+
+		for midi_note in [36, 35, 37]:
+			ttype, targ, rank, _, _, _ = note_map[(9, midi_note)]
+			assert ttype == "chain"
+			assert targ == (("sample", "my-kick"), ("reference", "BD0025"))
+			assert rank == 0
+
+
+# ---------------------------------------------------------------------------
+# TestResolveTarget — MidiPlayer._resolve_target()
+# ---------------------------------------------------------------------------
+
+class TestResolveTarget:
+	"""Tests for MidiPlayer._resolve_target() resolution helper."""
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def test_sample_found (self) -> None:
+		"""'sample' target returns the sample_id from find_by_name."""
+		player = self._make_player()
+		player._instrument_library.find_by_name.return_value = 42
+
+		assert player._resolve_target("sample", "my-kick") == 42
+		player._instrument_library.find_by_name.assert_called_once_with("my-kick")
+
+	def test_sample_not_found (self) -> None:
+		"""'sample' target returns None when the sample is not in the library."""
+		player = self._make_player()
+		player._instrument_library.find_by_name.return_value = None
+
+		assert player._resolve_target("sample", "missing") is None
+
+	def test_reference_found (self) -> None:
+		"""'reference' target returns sample_id from similarity_matrix."""
+		player = self._make_player()
+		player._similarity_matrix.get_match.return_value = 7
+
+		assert player._resolve_target("reference", "BD0025", rank=0) == 7
+
+	def test_reference_rank_fallback (self) -> None:
+		"""'reference' at rank N falls back to rank 0 when rank N has no match."""
+		player = self._make_player()
+		player._similarity_matrix.get_match.side_effect = [None, 5]
+
+		result = player._resolve_target("reference", "BD0025", rank=1)
+
+		assert result == 5
+		assert player._similarity_matrix.get_match.call_count == 2
+
+	def test_unknown_type_returns_none (self) -> None:
+		"""An unknown target type returns None rather than raising."""
+		player = self._make_player()
+		assert player._resolve_target("bogus", "") is None
+
+
+# ---------------------------------------------------------------------------
+# TestChainResolution — chain dispatch in _handle_message()
+# ---------------------------------------------------------------------------
+
+class TestChainResolution:
+	"""Integration tests for chain target resolution inside _handle_message()."""
+
+	def _make_player (
+		self,
+		chain_targets: subsample.player._ChainTargets,
+		pitch: bool = False,
+	) -> subsample.player.MidiPlayer:
+		"""Return a MidiPlayer with a single chain-mapped note (ch 1, note 60)."""
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		midi_map: subsample.player._NoteMap = {
+			(0, 60): ("chain", chain_targets, 0, True, pitch, subsample.player._parse_pan_gains(None, 2, "test")),
+		}
+
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=midi_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _note_on (self, note: int = 60, velocity: int = 100) -> "unittest.mock.MagicMock":
+		msg = unittest.mock.MagicMock()
+		msg.type = "note_on"
+		msg.channel = 0
+		msg.note = note
+		msg.velocity = velocity
+		return msg
+
+	def test_first_target_resolves (self) -> None:
+		"""Chain uses the first sub-target when it resolves to a sample."""
+		import numpy
+		player = self._make_player((("sample", "first"), ("sample", "second")))
+
+		record = unittest.mock.MagicMock()
+		record.audio = numpy.zeros((100, 1), dtype=numpy.int16)
+		record.level = unittest.mock.MagicMock()
+		record.level.peak = 0.5
+		record.level.rms = 0.1
+		record.name = "first"
+		record.duration = 0.01
+
+		player._instrument_library.find_by_name.side_effect = lambda name: 1 if name == "first" else None
+		player._instrument_library.get.return_value = record
+
+		player._handle_message(self._note_on())
+
+		with player._voices_lock:
+			assert len(player._voices) == 1
+
+	def test_first_fails_second_used (self) -> None:
+		"""Chain falls back to the second sub-target when the first returns None."""
+		import numpy
+		player = self._make_player((("sample", "missing"), ("sample", "present")))
+
+		record = unittest.mock.MagicMock()
+		record.audio = numpy.zeros((100, 1), dtype=numpy.int16)
+		record.level = unittest.mock.MagicMock()
+		record.level.peak = 0.5
+		record.level.rms = 0.1
+		record.name = "present"
+		record.duration = 0.01
+
+		player._instrument_library.find_by_name.side_effect = (
+			lambda name: 2 if name == "present" else None
+		)
+		player._instrument_library.get.return_value = record
+
+		player._handle_message(self._note_on())
+
+		with player._voices_lock:
+			assert len(player._voices) == 1
+
+	def test_all_fail_plays_silence (self) -> None:
+		"""Chain plays silence (no voice added) when all sub-targets return None."""
+		player = self._make_player((("sample", "a"), ("sample", "b")))
+
+		player._instrument_library.find_by_name.return_value = None
+
+		player._handle_message(self._note_on())
+
+		with player._voices_lock:
+			assert len(player._voices) == 0
