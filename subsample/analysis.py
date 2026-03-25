@@ -1014,8 +1014,8 @@ def analyze_band_energy (
 
 	if mono.shape[0] == 0:
 		return BandEnergyResult(
-			energy_fractions=tuple(0.0 for _ in range(_N_BANDS)),
-			decay_rates=tuple(0.0 for _ in range(_N_BANDS)),
+			energy_fractions=(0.0,) * _N_BANDS,
+			decay_rates=(0.0,) * _N_BANDS,
 		)
 
 	# Clamp to signal length for short recordings, matching analyze_mono().

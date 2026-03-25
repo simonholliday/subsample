@@ -468,7 +468,7 @@ def _build_feature_vector (
 	# Together they directly capture drum-type physical signatures.
 	if cfg.weight_band_energy > 0.0:
 		band = numpy.array(
-			list(record.band_energy.energy_fractions) + list(record.band_energy.decay_rates),
+			record.band_energy.energy_fractions + record.band_energy.decay_rates,
 			dtype=numpy.float32,
 		)
 		parts.append(_l2_normalize(band) * cfg.weight_band_energy)

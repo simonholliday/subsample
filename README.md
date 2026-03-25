@@ -9,7 +9,7 @@ sound into a playable MIDI instrument - automatically, in real time.
 Most samplers require you to manually record, chop, name, categorise, and map
 every sample by hand. Subsample automates the entire pipeline: it detects
 individual sounds from a live audio stream or pre-recorded files, builds a
-47-element acoustic fingerprint for each one, and assigns them to MIDI notes
+55-element acoustic fingerprint for each one, and assigns them to MIDI notes
 based on how they sound. The chaotic environment becomes an organised, playable
 sample pack - without you lifting a finger.
 
