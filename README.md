@@ -2,350 +2,330 @@
 
 *A combine harvester for sound.*
 
-Subsample is an automatic field recorder, sample analyzer, and MIDI playback
-device.
+Subsample is an automatic sample harvester and MIDI instrument. Point a
+microphone at the world and it captures, analyses, and organises every usable
+sound into a playable MIDI instrument - automatically, in real time.
 
-Point a microphone at the world and Subsample continuously listens - automatically
-capturing every usable sound, trimming the silence, and analyzing each clip for its
-spectral, rhythmic, and pitch character.
+Most samplers require you to manually record, chop, name, categorise, and map
+every sample by hand. Subsample automates the entire pipeline: it detects
+individual sounds from a live audio stream or pre-recorded files, builds a
+47-element acoustic fingerprint for each one, and assigns them to MIDI notes
+based on how they sound. The chaotic environment becomes an organised, playable
+sample pack - without you lifting a finger.
 
-Most samplers ask you to manually record a chunk of audio, chop it up, and figure out
-where each piece belongs. Subsample automates the entire pipeline: it harvests sounds
-from a live stream or a pre-recorded file, sorts them intelligently (tonal vs.
-percussive, pitched vs. unpitched), and builds a feature vector for each one.
+## What sets Subsample apart
 
-The end goal is a live instrument - sounds are assigned to MIDI notes as they are
-discovered, pitch-mapped tonal samples become playable across a keyboard, and an
-external controller can trigger the whole collection in real time. The chaotic
-environment becomes an instant, organised sample pack.
-
-## Architecture Highlights
-
-### End-to-end 32-bit float processing
-
-Every audio sample is converted to 32-bit float immediately after capture and stays
-in that format through every stage - analysis, peak normalisation, pitch shifting,
-gain staging, polyphonic mixing. The only integer conversion is a single pack to the
-hardware's native bit depth (16, 24, or 32-bit PCM), performed once per audio
-callback frame.
-
-Float32 has 24 bits of mantissa precision, making it lossless for 16-bit sources and
-effectively lossless for 24-bit. Peak-normalising a quiet sample or pitch-shifting it
-across two octaves introduces no measurable rounding error. This is the same internal
-format used by professional DAWs, and unusual for a Python audio tool.
-
-### Zero-conversion playback
-
-When a sample enters the library, a background worker immediately produces a *base
-variant*: a float32, peak-normalised copy resampled to the output device's sample rate
-(using `librosa.resample` with the soxr high-quality algorithm). Tonal samples also
-receive a full set of pitch-shifted variants at the same output format. By the time the
-first MIDI note fires, the work is already done - playback is a memory copy into the
-mix buffer, not an on-the-fly calculation.
-
-A three-tier fallback guarantees playback is never blocked:
-
-1. **Pitch variant** - pre-computed, pitch-corrected float32 (tonal samples)
-2. **Base variant** - pre-normalised float32, no DSP (all samples)
-3. **On-the-fly render** - PCM conversion as a last resort on the very first trigger only
-
-After the first trigger, every subsequent note fires at zero conversion overhead.
-
-### Classification-free similarity
-
-The similarity engine uses cosine distance on a 47-element composite feature vector
-built from four independently L2-normalised groups:
-
-| Group | Dimensions | Captures |
-|-------|-----------|----------|
-| Spectral shape | 11 | Brightness, noisiness, attack/release character |
-| Sustained MFCC | 12 | Steady-state timbral colour |
-| Delta-MFCC | 12 | How timbre evolves over time |
-| Onset-weighted MFCC | 12 | Attack transient character |
-
-Each group is independently normalised so no single group dominates by scale, then
-weighted via `similarity.weight_*` in config. The key insight: **the same distance
-metric works for kicks and violins without needing to classify them first.** A kick
-drum naturally scores high on attack character; a violin scores high on sustained
-timbre. No classifier, no training data, no labelling - just geometry.
-
-### Non-blocking concurrent capture
-
-The recorder never drops audio waiting for analysis. A PortAudio callback on a
-high-priority thread does minimal work (`queue.put_nowait(raw_bytes)`) and returns
-immediately. Analysis runs in a separate auto-scaled worker pool
-(`max(1, (cpu_count - 2) / 2)` threads), so back-to-back sounds are captured reliably
-even when spectral analysis is slow. This is critical for USB audio devices, which use
-isochronous transfers with no retransmit and are sensitive to any timing jitter.
-
-## Implemented
-
-### Audio capture
-
-- **Live audio capture** - continuous monitoring via PyAudio callback mode; adaptive
-  SNR-triggered recording using exponential moving average ambient tracking;
-  auto-silence trimming with S-curve (half-cosine) fade in/out; timestamped WAV output.
-- **Stereo capture** - recordings preserve the original channel count. Set
-  `recorder.audio.channels: null` (or omit it) to auto-detect from the device; a
-  stereo USB microphone will record and play back in stereo without any manual setting.
-- **Device selection** - specify the input device by name in `config.yaml`; falls back
-  to interactive menu or auto-select when one device is present.
-- **File input mode** - process WAV files through the detector pipeline by passing them
-  as positional arguments (`subsample recording.wav` or `subsample ./recordings/*.wav`).
-  Files are processed at their native sample rate, bit depth, and channel count; detected
-  segments are saved with the original filename stem plus an index. Useful for batch
-  processing, testing on known material, and building sample libraries without live
-  capture hardware.
-
-### Analysis
-
-- **Rich acoustic feature analysis** - each sample is characterised by:
-  - *11 normalised spectral metrics* - flatness, attack, release, centroid, bandwidth,
-    zero-crossing rate, harmonic ratio, spectral contrast, voiced fraction, log-attack
-    time, spectral flux; all in [0, 1] for direct comparison.
-  - *Rhythm analysis* - BPM, beat grid, pulse curve (PLP algorithm), onset times.
-  - *Pitch analysis* - fundamental frequency (pyin), dominant pitch class, full 12-bin
-    chroma profile, pitch confidence, pitch stability (semitone std dev across voiced
-    frames), voiced frame count.
-  - *Timbre fingerprinting* - three independently computed 13-coefficient MFCC vectors:
-    mean (steady-state timbre), delta (how timbre changes over time), and onset-weighted
-    (emphasises the attack portion). Together these encode both the tonal colour and the
-    physical envelope of the sound.
-  - *Amplitude metadata* - peak and RMS amplitude measured on the normalised signal,
-    stored for per-sample gain normalisation at playback time.
-- **Intelligent stable-pitch detection** - before producing pitch variants, a seven-criterion
-  filter checks that a sample has a single, confident, stable pitch worth shifting:
-  voiced fraction > 50%, at least 5 voiced frames (~60 ms), pyin confidence > 50%,
-  pitch stability < 0.5 semitones, harmonic ratio > 40%, dominant Hz > 0, and duration
-  ≥ 100 ms. Only samples that pass all seven produce variants; percussive sounds are
-  silently skipped.
-- **Versioned analysis cache with auto-invalidation** - each `.analysis.json` sidecar
-  carries an `analysis_version` string and an MD5 of the WAV file. On startup, stale
-  sidecars are detected and re-analysed automatically. The re-analysis log message
-  includes the old → new version (`analysis version 7 → 8`) so the cause is always
-  clear. Sidecars also record `bit_depth`, `channels`, and `captured_at` (ISO 8601
-  timestamp for live captures; null for imported files), making them self-describing.
-
-### Similarity and classification
-
-- **Composite similarity matching** - compare each recording against reference samples
-  using the 47-element composite vector described above. For each reference, an in-memory
-  ranked list of instrument matches is maintained and updated incrementally as new
-  recordings arrive or old ones are evicted.
-- **Similarity-ranked note routing** - the GM drum note map resolves each MIDI note to
-  `(reference_name, rank, one_shot)`. `rank=0` triggers the most-similar recorded sample;
-  `rank=1` the second-most-similar. Kick_1 and Kick_2 therefore automatically select
-  different recorded hits from the same reference class. If a second hit has not yet been
-  recorded, it falls back to rank 0.
-- **Reference sample library** - load pre-analyzed reference sounds from disk; audio
-  files not required (`.analysis.json` sidecars only). Lookups are case-insensitive;
-  filenames preserve their original casing.
-- **Instrument sample library** - every recording is added to an in-memory library with
-  its PCM audio and full analysis. A configurable memory cap (default 100 MB) keeps the
-  newest samples in RAM using FIFO eviction. An optional startup directory pre-populates
-  the library from previously recorded files.
-
-### Playback
-
-MIDI routing is config-driven via `midi-map.yaml`. See the [MIDI Map](#midi-map) section
-for the format. The remaining hard-coded items (output channel count, note→reference
-mapping for pitched channels) will move to config in future phases.
-
-- **MIDI-triggered polyphonic sample playback** - `player.enabled: true` opens a MIDI
-  input device and plays the best-matching instrument sample for each note trigger via a
-  callback-based mix buffer. Multiple voices play simultaneously. Device selected by
-  name substring match, auto-select, or interactive menu.
-- **Per-sample gain normalisation** - every sample carries `LevelResult` (peak and RMS
-  on the normalised signal). At playback: `gain = target_rms / sample.rms × velocity²`,
-  clamped by `1.0 / sample.peak` to prevent single-voice clipping. RMS normalisation
-  ensures a quiet recording and a loud one play at comparable levels at the same velocity;
-  MIDI velocity still controls loudness in the usual way (softer hit = quieter note).
-- **Two-stage mix protection** - the output level is controlled at two layers that work
-  together. Set both in `config.yaml` to avoid clipping and distortion on the output:
-
-  **Stage 1 - `max_polyphony` (primary gain staging):** sets the per-voice RMS target to
-  `1.0 / max_polyphony`. With the default of 8, each voice is normalised to 0.125 RMS
-  (~-18 dBFS), leaving enough headroom that 8 simultaneous drum hits sum to approximately
-  full scale. Raise this value if you expect many simultaneous notes; lower it if you want
-  louder individual voices and rarely trigger more than 2–3 at once.
-
-  **Stage 2 - safety limiter (`limiter_threshold_db` / `limiter_ceiling_db`):** a
-  [tanh](https://en.wikipedia.org/wiki/Hyperbolic_functions) soft-clipper applied to the
-  mixed output buffer. Signals below the threshold (-1.5 dBFS by default) pass completely
-  untouched. Above the threshold, the signal is smoothly compressed toward the ceiling
-  (-0.1 dBFS by default), asymptotically approaching it - the output never exceeds the
-  ceiling, no matter how many voices overlap. This eliminates the harsh digital distortion
-  of a hard clip while preserving the character of the sound. The defaults are recommended
-  for all setups:
-
-  ```yaml
-  player:
-    max_polyphony: 8
-    limiter_threshold_db: -1.5   # transparent below -1.5 dBFS; only catches near-clip peaks
-    limiter_ceiling_db: -0.1     # output never exceeds this level
-  ```
-
-  If the player logs a clipping warning, raise `max_polyphony` first (reduces all voices
-  equally). Adjust `limiter_threshold_db` only if you need more or less aggressive
-  compression on peaks.
-- **One-shot / note-off handling** - each drum note carries a `one_shot` flag
-  and a 10 ms cosine fade-out prevents clicks when `note_off` cuts a playing voice.
-  Currently all drum notes are set to one-shot; the intended GM behaviour (hi-hats
-  responding to `note_off` for closed-pedal-silences-open-hat) is not yet wired.
-- **Output format control** - the output stream format defaults to the recorder's sample
-  rate and bit depth, preserving capture quality end-to-end. Override with
-  `player.audio.sample_rate` and `player.audio.bit_depth` if the output device requires
-  a different format (e.g. 16-bit only). Never configure the output higher than the
-  source - upsampling adds no quality.
-
-### Transforms
-
-- **Automatic pitch variants** - tonal samples with a stable, confident pitch are
-  automatically pitch-shifted to every MIDI note within ±12 semitones of the detected
-  pitch (configurable via `transform.pitch_range_semitones`; default = 25 variants per
-  sample). Uses Rubber Band via `pyrubberband` in offline mode with the finer engine for
-  highest quality. Variants are produced in the background by a worker pool; the player
-  falls back gracefully until a variant is ready.
-- **Variants tailored to the playback device** - base and pitch variants are produced at
-  the output device's sample rate and format. The sample rate conversion uses
-  `librosa.resample` (soxr high-quality algorithm). Configure the output rate via
-  `player.audio.sample_rate`; if unset, the recorder's rate is used.
-
-### Virtual MIDI (WIP)
-
-- **Virtual MIDI input port** - set `player.virtual_midi_port: "Subsample Virtual MIDI"`
-  to create a named virtual MIDI input port at startup instead of connecting to a hardware
-  device. This is the primary way to drive Subsample from another application running on
-  the same machine - for example, a Python sequencer such as
-  [Subsequence](https://github.com/simonholliday/subsequence) can send a drum pattern
-  directly to Subsample's virtual port without any physical MIDI hardware. From the
-  sequencer's side, Subsample's port appears as a MIDI output destination while Subsample
-  is running. Overrides `player.midi_device`.
-
-  > **Performance note:** running a MIDI sequencer and Subsample simultaneously on the
-  > same machine means two real-time workloads compete for CPU and I/O. This works well
-  > on a modern multi-core machine but may cause xruns or timing drift on lower-powered
-  > hardware. If you experience dropouts, reduce `recorder.audio.chunk_size`, lower the
-  > sequencer's buffer size, or disable the recorder (`recorder.enabled: false`) to run
-  > Subsample in playback-only mode.
-
-### Scripts
-
-- **Analysis file script** - `scripts/analyze_file.py` runs the same analysis pipeline
-  on any local WAV file and prints formatted results.
-- **Similarity report script** - `scripts/similarity_report.py` prints the top-N most
-  similar instrument samples for each reference, using the same config and sample IDs as
-  the live application.
-
-## In Progress
-
-- **Automatic sample classification** - infrastructure in place; next: wire ranked match
-  results to a simple classifier (e.g. "if top reference match is KICK, classify as KICK").
-- **Time-stretch and envelope transforms** - `TimeStretch` and `EnvelopeAdjust` dataclasses
-  are scaffolded; only the apply-function implementations and handler registrations remain.
-  See `transform.target_bpm` in `config.yaml`.
-## Planned
-
-- **BPM time-stretching** - `TransformManager.on_bpm_change()` and `transform.target_bpm`
-  are in place; only `_apply_time_stretch()` remains to implement and register.
-- **Envelope shaping** - `EnvelopeAdjust` dataclass (attack/release in ms) is defined;
-  only `_apply_envelope()` remains to implement and register.
-- **Parallel startup re-analysis** - when the analysis version bumps, stale sidecars are
-  currently re-analysed sequentially; for large libraries this can block for several
-  minutes. Re-analysis should be parallelised using the existing `SampleProcessor` pool.
-- **Multi-band energy envelope** - split the spectrum into 3–5 frequency bands and
-  compute per-band peak energy and decay rate. This would directly encode the physical
-  signature of drum types (kick = sub-bass dominant; snare = mid + presence; hi-hat =
-  air) and improve classification and similarity for percussion.
-- **Config-driven note mapping** - move MIDI channel, note range, and note→reference
-  mapping from hard-coded constants to `config.yaml`; allows different pad layouts and
-  instruments without code changes.
-- **Interactive classification** - live adjustment of classification thresholds; manual
-  sample reassignment during a session.
-- **Independent modes** - recording, analysis, MIDI assignment, and playback can each
-  run separately or together.
+- **Automatic similarity-based MIDI assignment** - sounds are matched to your
+  reference library and mapped to MIDI notes as they arrive. No manual
+  drag-and-drop, no folder browsing, no per-pad assignment.
+- **Classification-free matching** - the same engine works for kicks and violins
+  without training data, labels, or pre-defined categories. It is pure geometry:
+  similar sounds cluster together naturally in feature space.
+- **Real-time capture with zero-gap detection** - the input thread is never
+  blocked waiting for analysis. Back-to-back sounds are captured reliably, even
+  on USB audio.
+- **Pitch-aware** - tonal samples are automatically detected and mapped
+  chromatically across a keyboard range, with background pitch-shifting at the
+  highest available quality.
+- **Config-driven** - everything is YAML. MIDI routing, similarity weights,
+  detection tuning, output format. Version-controllable, reproducible, no GUI
+  required.
+- **Headless** - runs on anything from a Raspberry Pi to a studio rack server.
+  Drive it from a DAW, hardware controller, or Python sequencer over MIDI.
 
 ## How it works
 
-Subsample is built around three concurrent pipelines that interact through thread-safe
-shared state.
+### 1. Capture
 
-### Live capture pipeline
+Subsample listens continuously to a live audio input and captures every distinct
+sound event. An adaptive noise floor (exponential moving average) tracks the
+ambient level in real time, so it works equally well in a quiet studio and a
+noisy rehearsal space. Each captured sound is trimmed with smooth S-curve fades
+to avoid clicks. Stereo recordings are preserved end-to-end - a stereo
+microphone records and plays back in stereo without any manual setting.
 
-```
-PortAudio callback → raw PCM bytes → unpack_audio() → CircularBuffer
-                                                               ↓
-                                              LevelDetector.process_chunk()
-                                              (EMA ambient tracking + SNR gate)
-                                                               ↓
-                                              trim_silence() → segment PCM
-                                                               ↓
-                                              SampleProcessor worker pool
-                                              (auto-scaled: (cpu_count - 2) / 2)
-                                                               ↓
-                           to_mono_float() → analyze_all() → WAV + sidecar + SampleRecord
-```
+You can also feed it pre-recorded WAV files - they pass through the same
+detection pipeline, making it easy to build sample libraries from existing
+recordings.
 
-The input thread is never blocked waiting for analysis. Back-to-back sounds are captured
-reliably even when analysis is slow - worker threads handle each recording concurrently
-and independently.
+### 2. Analyse
 
-### Similarity engine
+Each captured sound is fingerprinted across 47 acoustic dimensions spanning four
+groups:
 
-Every new instrument sample is scored against every reference using cosine similarity on
-a 47-element composite vector. The vector is split into four groups, each independently
-L2-normalised so that no single group dominates by scale:
+| Group | Dimensions | What it captures |
+|-------|-----------|------------------|
+| Spectral shape | 11 | Brightness, noisiness, attack/release character |
+| Sustained timbre | 12 | Steady-state tonal colour |
+| Timbre dynamics | 12 | How the sound evolves over time |
+| Attack character | 12 | Transient signature |
 
-```
-Group 1 (×11): spectral shape   [flatness, attack, release, centroid, bandwidth, zcr,
-                                  harmonic, contrast, voiced, log_attack, flux]
-Group 2 (×12): sustained MFCC   [mean timbre, coefficients 1–12]
-Group 3 (×12): delta-MFCC       [timbre trajectory, coefficients 1–12]
-Group 4 (×12): onset-weighted   [attack character, coefficients 1–12]
-```
+Tonal sounds are identified by a seven-criterion pitch stability gate - only
+samples with a single, confident, stable pitch are flagged for chromatic mapping.
+Percussive sounds are handled naturally by the same feature space without special
+treatment.
 
-Each group is scaled by a configurable weight (`similarity.weight_*`). This design means
-the same comparison method works for both percussive (attack character dominates) and
-tonal (sustained timbre dominates) sounds without needing to classify them first.
+Analysis results are cached as `.analysis.json` sidecar files alongside each
+WAV. The cache is versioned and auto-invalidating - when the analysis algorithm
+improves, stale sidecars are detected and re-analysed automatically on startup.
 
-### Transform pipeline
+### 3. Assign
 
-```
-SampleRecord added to library
-    → TransformManager.on_sample_added()
-        → enqueue base variant (always)         ← float32 peak-normalised copy
-        → enqueue pitch variants (tonal only)   ← Rubber Band offline finer engine
-            → TransformProcessor worker pool
-                → TransformCache (parent-priority FIFO eviction, 50 MB default)
-```
+Sounds are matched to your reference library using cosine similarity on the
+47-element feature vector. The best kick-like sound maps to your kick pad; the
+best snare maps to your snare. When multiple notes share a reference, they
+receive ranked matches: first note gets the best match, second note gets the
+second-best, and so on.
 
-The base variant (identity spec: no DSP) is produced for every sample - percussive and
-tonal alike - so the playback path never pays the float32 conversion cost at trigger
-time. Pitch variants are additional cache entries, derived from the same PCM source.
+As new sounds arrive, assignments update dynamically. Evicted samples are
+replaced by the next-best match. The instrument stays playable and fresh without
+any manual intervention.
 
-When a variant set for a parent sample would exceed the memory budget, the entire oldest
-parent's variant family is evicted together, keeping the remaining families intact and
-playable.
+## MIDI map
 
-### Playback path
+MIDI routing is defined in a YAML file - by default `midi-map.yaml` in the
+project directory, referenced from `config.yaml`:
 
-```
-MIDI note_on (channel 10)
-    → similarity_matrix.get_match(ref_name, rank) → sample_id
-    → transform_manager.get_pitched()  → pitch variant (tonal samples)
-    → transform_manager.get_base()     → base variant  (all samples)
-    → _render()                        → on-the-fly fallback (first trigger only)
-    → _render_float(): apply gain · velocity² · anti-clip ceiling
-    → append _Voice (float32 stereo, pre-rendered)
-    ↓
-PyAudio callback (PortAudio high-priority thread)
-    → sum all active voices (float32 addition)
-    → clip to [-1, 1]
-    → float32_to_pcm_bytes(mixed, output_bit_depth)  → int16/24/32 bytes to hardware
+```yaml
+player:
+  midi_map: "./midi-map.yaml"
 ```
 
-All mixing happens in float32 - the only integer conversion is the final output packing.
-Multiple simultaneous voices are summed correctly regardless of the output device's bit depth.
+Copy `midi-map.yaml.default` as your starting point. The file lists
+**assignments** - each mapping one or more MIDI notes on a given channel to
+sample targets.
+
+### Assignment fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Label shown in logs |
+| `channel` | yes | MIDI channel 1-16 (standard numbering) |
+| `notes` | yes | Single note, list, or range (see Note syntax below) |
+| `target` | yes | Which sample(s) to play (see Target types below) |
+| `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
+| `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
+| `pan` | no | Stereo position as percentage weights e.g. `[50, 50]` = centre (default) |
+| `pitch` | no | `true` = pitch-shift the matched sample to each MIDI note in the range. Works with `reference()`, `chain`, `newest()`, and `oldest()` |
+
+### Note syntax
+
+```yaml
+notes: 36          # single MIDI note number
+notes: C4          # note name (C4 = MIDI 60, same as Ableton/Logic/FL Studio)
+notes: [36, 35]    # list - each gets the next similarity rank (first = best match)
+notes: C2..C4      # range - expands to every MIDI note from C2 (36) to C4 (60)
+notes: 36..60      # range with note numbers
+```
+
+Note names use the convention C4 = 60 (C-1 = 0, G9 = 127). Sharps: `C#4`,
+`D#3`. Flats: `Db4`, `Eb3`.
+
+### Target types
+
+**`reference(NAME)`** - plays the recorded instrument sample most similar to the
+named reference. When multiple notes share a reference, they receive ranked
+matches: first note in the list gets rank 0 (best match), second gets rank 1,
+and so on. Falls back to rank 0 if fewer samples than notes have been recorded.
+
+```yaml
+- name: Kicks
+  channel: 10
+  notes: [36, 35]          # note 36 → most kick-like; note 35 → second-most
+  target: reference(BD0025)
+  one_shot: true
+```
+
+The reference name must match a file in your `reference.directory`
+(case-insensitive).
+
+**`reference(NAME)` with `pitch: true`** - plays the best-matching sample,
+pitch-shifted to each MIDI note in the range. Every note in the assignment maps
+to rank 0 (same sample), shifted up or down from the sample's detected
+fundamental pitch. Pitch variants are computed in the background when the best
+match changes - no delay on the first trigger.
+
+```yaml
+- name: Bass keyboard
+  channel: 1
+  notes: C2..C4
+  target: reference(BASS_TONE)
+  pitch: true
+  one_shot: false
+```
+
+The reference sample must have a confident, stable detected pitch (checked by
+`has_stable_pitch()`). Samples that fail this test fall back to unpitched
+playback.
+
+**`sample(FILENAME)`** - plays a specific sample by its filename stem (without
+the `.wav` extension). If the sample is not loaded or has been evicted from
+memory, the note plays silence - no error. Useful for building fixed kits from
+known recordings.
+
+```yaml
+- name: Fixed kick
+  channel: 10
+  notes: 36
+  target: sample(2026-03-24_14-37-14)
+  one_shot: true
+```
+
+**`pitched(SELECTOR)`** - selects a sample by position among all pitch-stable
+samples in the instrument library, without requiring a reference library entry.
+Every MIDI note in the range plays the selected sample pitch-shifted to match.
+Variants are pre-computed in the background when the library changes - no delay
+on first trigger.
+
+Selectors:
+- `pitched(oldest)` - the first (lowest ID) pitch-stable sample
+- `pitched(newest)` - the most recently added pitch-stable sample
+- `pitched(N)` - the Nth pitch-stable sample (0-indexed)
+
+```yaml
+- name: Latest tonal capture
+  channel: 2
+  notes: C2..C6
+  target: pitched(newest)
+  one_shot: false
+```
+
+If no pitch-stable samples exist or the index is out of range, the note plays
+silence. A sample is pitch-stable when it passes the same `has_stable_pitch()`
+gate used by `reference() + pitch: true`.
+
+**`newest()`** - always resolves to the most recently added sample in the
+instrument library, whether pitched or percussive. Re-evaluated on every trigger,
+so the mapping always reflects the latest capture. Combine with `pitch: true` and
+a note range for an instant chromatic keyboard from whatever you just recorded.
+
+```yaml
+- name: Latest capture (keyboard)
+  channel: 2
+  notes: C2..C6
+  target: newest()
+  one_shot: false
+```
+
+**`oldest()`** - complement of `newest()`. Always resolves to the first sample
+added to the library in this session. Re-evaluated on every trigger - if the
+oldest sample is evicted, the next trigger resolves to the new oldest.
+
+```yaml
+- name: First capture (keyboard)
+  channel: 3
+  notes: C2..C6
+  target: oldest()
+  one_shot: false
+```
+
+**`chain`** - ordered fallback. Tries a list of targets in sequence and uses the
+first one that resolves to a sample. Useful for resilient mappings: try a
+specific named sample, fall back to similarity matching if it has been evicted.
+
+```yaml
+- name: Kick with fallback
+  channel: 10
+  notes: 36
+  target:
+    chain:
+      - sample(my-favourite-kick)
+      - reference(BD0025)
+  one_shot: true
+```
+
+Each sub-target uses the same syntax as a standalone target. Requires at least 2
+sub-targets. Nested chains are not supported. All sub-targets are validated at
+load time - one invalid sub-target skips the entire assignment.
+
+### Pan
+
+Pan weights are normalised to constant-power gains so perceived loudness is
+equal at any pan position:
+
+```yaml
+pan: [50, 50]    # centre (default)
+pan: [100, 0]    # hard left
+pan: [75, 25]    # left of centre
+```
+
+Channel order follows SMPTE: `[L, R]` for stereo; `[L, R, C, LFE, Ls, Rs]` for
+5.1. Multichannel output is planned - stereo is the current output format.
+
+## Performance
+
+### Zero-latency playback
+
+When a sample enters the library, a background worker immediately produces a
+pre-rendered copy at the output device's sample rate and format. Tonal samples
+also receive a full set of pitch-shifted variants. By the time the first MIDI
+note fires, the work is already done - playback is a memory copy into the mix
+buffer, not an on-the-fly calculation. A three-tier fallback guarantees playback
+is never blocked:
+
+1. **Pitch variant** - pre-computed, pitch-corrected (tonal samples)
+2. **Base variant** - pre-normalised, no DSP (all samples)
+3. **On-the-fly render** - last resort on the very first trigger only
+
+### End-to-end 32-bit float
+
+Every audio sample is converted to float32 immediately after capture and stays in
+that format through every stage - analysis, normalisation, pitch shifting, gain
+staging, polyphonic mixing. The only integer conversion is a single pack to the
+hardware's native bit depth at the output. This is the same internal format used
+by professional DAWs, and means that peak-normalising a quiet recording or
+pitch-shifting it across two octaves introduces no measurable quality loss.
+
+### Non-blocking capture
+
+The audio input thread does minimal work and returns immediately. Analysis runs
+in a separate auto-scaled worker pool, so back-to-back sounds are captured
+reliably even when spectral analysis is slow. This is critical for USB audio
+devices, which use isochronous transfers and are sensitive to timing jitter.
+
+### Professional gain staging
+
+Every voice is RMS-normalised so a quiet recording and a loud one play at
+comparable levels at the same MIDI velocity. A tanh soft-limiter on the mix bus
+smoothly compresses peaks that approach 0 dBFS - the output never clips, no
+matter how many voices overlap, and the character of the sound is preserved.
+
+### Pitch shifting quality
+
+Pitch variants are produced using the Rubber Band library's offline finer engine,
+the highest quality pitch-shifting algorithm available. Variants are pre-computed
+in the background by a worker pool; no latency is added at trigger time.
+
+## Similarity engine
+
+Every new sample is scored against every reference using cosine similarity on a
+47-element composite feature vector built from four groups: spectral shape (11
+dimensions), sustained timbre (12), timbre dynamics (12), and attack character
+(12). Each group is independently normalised and scaled by a configurable weight
+(`similarity.weight_*`), so you can emphasise whichever acoustic qualities matter
+most for your material.
+
+The key insight: **the same comparison method works for both percussive and tonal
+sounds without needing to classify them first.** A kick drum naturally scores
+high on attack character; a violin scores high on sustained timbre. No
+classifier, no training data, no labelling - just geometry.
+
+For each reference, an in-memory ranked list of matches is maintained and updated
+incrementally as new recordings arrive or old ones are evicted. See
+[Architecture](#architecture) for the full vector breakdown.
+
+## Transforms
+
+Tonal samples with a stable, confident pitch are automatically pitch-shifted to
+every MIDI note within a configurable range (default ±12 semitones = 25 variants
+per sample). Variants are produced in the background by a worker pool and cached
+in a memory-bounded store with parent-priority FIFO eviction - when a variant
+family would exceed the memory budget, the entire oldest family is evicted
+together, keeping remaining families intact and playable.
+
+All variants are produced at the output device's sample rate and format using
+high-quality sample rate conversion (soxr algorithm), so the playback path never
+pays a conversion cost at trigger time.
 
 ## Quick start
 
@@ -361,25 +341,25 @@ subsample recording.wav                # Single file
 subsample ./recordings/*.wav           # Multiple files (glob expansion)
 ```
 
-**Live capture mode:** Subsample lists available audio input devices and lets you choose
-one (or auto-selects if only one is present). It calibrates ambient noise for a few
-seconds before listening for events.
+**Live capture mode:** Subsample lists available audio input devices and lets you
+choose one (or auto-selects if only one is present). It calibrates ambient noise
+for a few seconds before listening for events.
 
-**File input mode:** Each file is processed at its native sample rate, bit depth, and
-channel count. Detected segments are saved to the output directory.
+**File input mode:** Each file is processed at its native sample rate, bit depth,
+and channel count. Detected segments are saved to the output directory.
 
 ## Configuration
 
-All settings live in `config.yaml`. The defaults are a good starting point - most users
-only need to touch a handful:
+All settings live in `config.yaml`. The defaults are a good starting point -
+most users only need to touch a handful:
 
 - **First run:** set `recorder.audio.device` (your microphone) and `output.directory`
 - **For MIDI playback:** set `player.enabled: true`, `player.midi_device` or `player.virtual_midi_port`, and `player.audio.device`
 - **If you hear clipping:** raise `player.max_polyphony`; the `limiter_threshold_db` and `limiter_ceiling_db` defaults protect against distortion automatically
 - **If recordings miss quiet sounds or trigger on noise:** tune `detection.snr_threshold_db`
 
-Everything else - chunk sizes, buffer lengths, transform settings, similarity weights - is
-optional and rarely needs changing.
+Everything else - chunk sizes, buffer lengths, transform settings, similarity
+weights - is optional and rarely needs changing.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -416,7 +396,7 @@ optional and rarely needs changing.
 | `instrument.clean_orphaned_sidecars` | `false` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
 | `reference.directory` | `none` | Optional directory of reference sounds for similarity classification |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (11 metrics) |
-| `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1–12) |
+| `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
 | `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack character |
 | `transform.max_memory_mb` | `50.0` | Memory budget (MB) for pitch-shifted variants |
@@ -437,7 +417,8 @@ samples/
   2026-03-17_14-35-44.wav
 ```
 
-**File input mode** - filenames from the original audio file's stem plus a segment index:
+**File input mode** - filenames from the original audio file's stem plus a
+segment index:
 
 ```
 samples/
@@ -445,15 +426,15 @@ samples/
   field_recording_2.wav
 ```
 
-Both modes write to the same output directory. Point `instrument.directory` at the same
-path to get a persistent library that grows on disk across sessions.
+Both modes write to the same output directory. Point `instrument.directory` at
+the same path to get a persistent library that grows on disk across sessions.
 
 ## Instrument sample library
 
-Every recording is automatically added to an in-memory instrument library alongside its
-full analysis data. A configurable memory cap (default 100 MB) prevents unbounded growth;
-the oldest samples are evicted when a new one would exceed the limit. WAV files on disk
-are never deleted.
+Every recording is automatically added to an in-memory instrument library
+alongside its full analysis data. A configurable memory cap (default 100 MB)
+prevents unbounded growth; the oldest samples are evicted when a new one would
+exceed the limit. WAV files on disk are never deleted.
 
 ### Persistent library across sessions
 
@@ -465,23 +446,24 @@ instrument:
   directory: "./samples"
 ```
 
-On startup, Subsample pre-loads all existing WAV files from `./samples`. As new recordings
-arrive they are written to disk and added to memory in one step. The memory cap keeps only
-the most recent window of captures in RAM; the full archive on disk is unaffected.
+On startup, Subsample pre-loads all existing WAV files from `./samples`. As new
+recordings arrive they are written to disk and added to memory in one step. The
+memory cap keeps only the most recent window of captures in RAM; the full archive
+on disk is unaffected.
 
 ## Reference sample library
 
-Reference samples define the canonical sound classes you want to match against - kick
-drum, snare, hi-hat, etc. Each reference is represented by its `.analysis.json` sidecar
-file only; the original audio is not required.
+Reference samples define the canonical sound classes you want to match against -
+kick drum, snare, hi-hat, etc. Each reference is represented by its
+`.analysis.json` sidecar file only; the original audio is not required.
 
 ```yaml
 reference:
   directory: "./reference"
 ```
 
-Place one sidecar per sound class in the reference directory. The name is taken from
-the audio filename stem:
+Place one sidecar per sound class in the reference directory. The name is taken
+from the audio filename stem:
 
 ```
 reference/
@@ -490,10 +472,11 @@ reference/
   CH.wav.analysis.json       →  "CH"
 ```
 
-At startup, reference samples are loaded before instrument samples. For every instrument
-sample, Subsample computes cosine similarity against every reference and maintains a
-ranked list per reference - most similar instrument first. When a sample is evicted from
-the instrument library, it is also removed from the ranked lists.
+At startup, reference samples are loaded before instrument samples. For every
+instrument sample, Subsample computes cosine similarity against every reference
+and maintains a ranked list per reference - most similar instrument first. When a
+sample is evicted from the instrument library, it is also removed from the ranked
+lists.
 
 Query the ranked lists programmatically:
 
@@ -507,124 +490,23 @@ sample_id = similarity_matrix.get_match("BD0025", rank=1)
 
 Lookup is case-insensitive.
 
-## MIDI Map
+## Virtual MIDI
 
-MIDI routing is defined in a YAML file — by default `midi-map.yaml` in the project
-directory, referenced from `config.yaml`:
+Set `player.virtual_midi_port: "Subsample Virtual MIDI"` to create a named
+virtual MIDI input port at startup instead of connecting to a hardware device.
+This is the primary way to drive Subsample from another application running on
+the same machine - for example, a Python sequencer such as
+[Subsequence](https://github.com/simonholliday/subsequence) can send a drum
+pattern directly to Subsample's virtual port without any physical MIDI hardware.
+From the sequencer's side, Subsample's port appears as a MIDI output destination
+while Subsample is running. Overrides `player.midi_device`.
 
-```yaml
-player:
-  midi_map: "./midi-map.yaml"
-```
-
-Copy `midi-map.yaml.default` as your starting point. The file lists **assignments** — each
-mapping one or more MIDI notes on a given channel to sample targets.
-
-### Assignment fields
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | yes | Label shown in logs |
-| `channel` | yes | MIDI channel 1-16 (standard numbering) |
-| `notes` | yes | Single note, list, or range (see Note syntax below) |
-| `target` | yes | Which sample(s) to play (see Target types below) |
-| `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
-| `pan` | no | Stereo position as percentage weights e.g. `[50, 50]` = centre (default) |
-| `pitch` | no | `true` = pitch-shift the matched sample to each MIDI note in the range (use with `reference()` and a note range) |
-
-### Note syntax
-
-```yaml
-notes: 36          # single MIDI note number
-notes: C4          # note name (C4 = MIDI 60, same as Ableton/Logic/FL Studio)
-notes: [36, 35]    # list — each gets the next similarity rank (first = best match)
-notes: C2..C4      # range — expands to every MIDI note from C2 (36) to C4 (60)
-notes: 36..60      # range with note numbers
-```
-
-Note names use the convention C4 = 60 (C-1 = 0, G9 = 127). Sharps: `C#4`, `D#3`. Flats: `Db4`, `Eb3`.
-
-### Target types
-
-**`reference(NAME)`** — plays the recorded instrument sample most similar to the named
-reference. When multiple notes share a reference, they receive ranked matches: first note
-in the list gets rank 0 (best match), second gets rank 1, and so on. Falls back to rank 0
-if fewer samples than notes have been recorded.
-
-```yaml
-- name: Kicks
-  channel: 10
-  notes: [36, 35]          # note 36 → most kick-like; note 35 → second-most
-  target: reference(BD0025)
-  one_shot: true
-```
-
-The reference name must match a file in your `reference.directory` (case-insensitive).
-
-**`reference(NAME)` with `pitch: true`** — plays the best-matching sample, pitch-shifted to each
-MIDI note in the range. Every note in the assignment maps to rank 0 (same sample), shifted up or
-down from the sample's detected fundamental pitch. Pitch variants are computed in the background
-when the best match changes — no delay on the first trigger.
-
-```yaml
-- name: Bass keyboard
-  channel: 1
-  notes: C2..C4
-  target: reference(BASS_TONE)
-  pitch: true
-  one_shot: false
-```
-
-The reference sample must have a confident, stable detected pitch (checked by `has_stable_pitch()`).
-Samples that fail this test fall back to unpitched playback.
-
-**`sample(FILENAME)`** — plays a specific sample by its filename stem (without the `.wav`
-extension). If the sample is not loaded or has been evicted from memory, the note plays silence —
-no error. Useful for building fixed kits from known recordings.
-
-```yaml
-- name: Fixed kick
-  channel: 10
-  notes: 36
-  target: sample(2026-03-24_14-37-14)
-  one_shot: true
-```
-
-**`pitched(SELECTOR)`** — selects a sample by position among all pitch-stable samples in the
-instrument library, without requiring a reference library entry. Every MIDI note in the range
-plays the selected sample pitch-shifted to match. Variants are pre-computed in the background
-when the library changes — no delay on first trigger.
-
-Selectors:
-- `pitched(oldest)` — the first (lowest ID) pitch-stable sample
-- `pitched(newest)` — the most recently added pitch-stable sample
-- `pitched(N)` — the Nth pitch-stable sample (0-indexed)
-
-```yaml
-- name: Latest tonal capture
-  channel: 2
-  notes: C2..C6
-  target: pitched(newest)
-  one_shot: false
-```
-
-If no pitch-stable samples exist or the index is out of range, the note plays silence.
-A sample is pitch-stable when it passes the same `has_stable_pitch()` gate used by
-`reference() + pitch: true`.
-
-### Pan
-
-Pan weights are normalised to constant-power gains so perceived loudness is equal at any
-pan position:
-
-```yaml
-pan: [50, 50]    # centre (default)
-pan: [100, 0]    # hard left
-pan: [75, 25]    # left of centre
-```
-
-Channel order follows SMPTE: `[L, R]` for stereo; `[L, R, C, LFE, Ls, Rs]` for 5.1.
-Multichannel output is planned — stereo is the current output format.
+> **Performance note:** running a MIDI sequencer and Subsample simultaneously on
+> the same machine means two real-time workloads compete for CPU and I/O. This
+> works well on a modern multi-core machine but may cause xruns or timing drift
+> on lower-powered hardware. If you experience dropouts, reduce
+> `recorder.audio.chunk_size`, lower the sequencer's buffer size, or disable the
+> recorder (`recorder.enabled: false`) to run Subsample in playback-only mode.
 
 ## Scripts
 
@@ -657,16 +539,16 @@ Spectral metrics (all [0, 1]):
 
 Pitch data (raw values):
 - **pitch** - dominant fundamental frequency in Hz, or "none" for unpitched audio
-- **chroma** - dominant pitch class (C–B), or "none"
+- **chroma** - dominant pitch class (C-B), or "none"
 - **pitch_conf** - pyin confidence [0, 1]; use with `voiced` to judge reliability
 
 Amplitude metadata:
 - **peak** - peak absolute amplitude [0, 1] with dBFS equivalent
 - **rms** - RMS loudness [0, 1] with dBFS equivalent; drives playback gain normalisation
 
-Three MFCC timbre fingerprints are stored in the sidecar (used for similarity, not shown
-in script output): `mfcc` (mean, average timbre), `mfcc_delta` (first-order trajectory),
-and `mfcc_onset` (onset-weighted, attack emphasis).
+Three MFCC timbre fingerprints are stored in the sidecar (used for similarity,
+not shown in script output): `mfcc` (mean, average timbre), `mfcc_delta`
+(first-order trajectory), and `mfcc_onset` (onset-weighted, attack emphasis).
 
 ### Similarity report
 
@@ -682,6 +564,145 @@ Reference: BD0025
   2.  #7     0.8134  kick_hard       ./samples/kick_hard.wav
   3.  #8     0.7601  kick_soft       ./samples/kick_soft.wav
 ```
+
+## Roadmap
+
+### MIDI expressiveness
+
+- **Mute groups** - notes in a named group silence each other when triggered.
+  Classic use: closed hi-hat silences open hi-hat.
+- **Velocity layers** - different targets at different velocity ranges (pp/mp/ff
+  layers) for more expressive performance.
+- **Round-robin** - cycle through sample variants on repeated triggers to avoid
+  the machine-gun effect on rapid notes.
+- **MIDI CC mapping** - mod wheel, volume, sustain pedal, expression - map
+  continuous controllers to parameters in real time.
+- **Program change** - switch between MIDI map presets on the fly via MIDI
+  program change messages.
+
+### Playback and sound design
+
+- **Time-stretching** - BPM-aware variants that match loops and phrases to a
+  target tempo. Infrastructure is in place (`transform.target_bpm` in config);
+  the DSP implementation is next.
+- **Envelope shaping** - per-voice attack/release adjustment. The data model is
+  in place; the DSP implementation is next.
+- **Effects processing** - filter, reverb, delay - per-voice or per-bus effects
+  for shaping the output without an external mixer.
+- **Loop playback** - sustain loops for pads, drones, and textures that play
+  continuously while a key is held.
+- **Multichannel output** - surround sound output beyond stereo, using SMPTE
+  channel ordering (5.1, 7.1). Pan weights already support arbitrary channel
+  counts; the output path needs to be extended.
+
+### Sample management
+
+- **Auto-slicing** - chop loops and long recordings into individual hits by
+  transient detection, then add each slice to the library as a separate sample.
+- **Similar-to-this query** - "find more sounds like this one" by exposing the
+  similarity engine as a user-facing search.
+- **Parallel startup re-analysis** - when the analysis version bumps, stale
+  sidecars are currently re-analysed sequentially; large libraries should use the
+  existing worker pool for parallel re-analysis.
+
+### Analysis
+
+- **Multi-band energy envelope** - split the spectrum into frequency bands and
+  compute per-band energy and decay rate. This would directly encode the physical
+  signature of drum types (kick = sub-bass dominant; snare = mid + presence;
+  hi-hat = air) and improve classification accuracy.
+
+### Additional targets
+
+- **`pitched(random)`** - random selection from all pitched samples.
+- **`all_pitched()`** - distribute a note range across all pitched samples, one
+  per note, each pitch-shifted to match.
+
+## Architecture
+
+Subsample is built around three concurrent pipelines that interact through
+thread-safe shared state.
+
+### Live capture pipeline
+
+```
+PortAudio callback → raw PCM bytes → unpack_audio() → CircularBuffer
+                                                               ↓
+                                              LevelDetector.process_chunk()
+                                              (EMA ambient tracking + SNR gate)
+                                                               ↓
+                                              trim_silence() → segment PCM
+                                                               ↓
+                                              SampleProcessor worker pool
+                                              (auto-scaled: (cpu_count - 2) / 2)
+                                                               ↓
+                           to_mono_float() → analyze_all() → WAV + sidecar + SampleRecord
+```
+
+The input thread is never blocked waiting for analysis. Back-to-back sounds are
+captured reliably even when analysis is slow - worker threads handle each
+recording concurrently and independently.
+
+### Similarity engine
+
+Every new instrument sample is scored against every reference using cosine
+similarity on a 47-element composite vector. The vector is split into four
+groups, each independently L2-normalised so that no single group dominates by
+scale:
+
+```
+Group 1 (x11): spectral shape   [flatness, attack, release, centroid, bandwidth, zcr,
+                                  harmonic, contrast, voiced, log_attack, flux]
+Group 2 (x12): sustained MFCC   [mean timbre, coefficients 1-12]
+Group 3 (x12): delta-MFCC       [timbre trajectory, coefficients 1-12]
+Group 4 (x12): onset-weighted   [attack character, coefficients 1-12]
+```
+
+Each group is scaled by a configurable weight (`similarity.weight_*`). This
+design means the same comparison method works for both percussive (attack
+character dominates) and tonal (sustained timbre dominates) sounds without
+needing to classify them first.
+
+### Transform pipeline
+
+```
+SampleRecord added to library
+    → TransformManager.on_sample_added()
+        → enqueue base variant (always)         ← float32 peak-normalised copy
+        → enqueue pitch variants (tonal only)   ← Rubber Band offline finer engine
+            → TransformProcessor worker pool
+                → TransformCache (parent-priority FIFO eviction, 50 MB default)
+```
+
+The base variant (identity spec: no DSP) is produced for every sample -
+percussive and tonal alike - so the playback path never pays the float32
+conversion cost at trigger time. Pitch variants are additional cache entries,
+derived from the same PCM source.
+
+When a variant set for a parent sample would exceed the memory budget, the entire
+oldest parent's variant family is evicted together, keeping the remaining
+families intact and playable.
+
+### Playback path
+
+```
+MIDI note_on (channel 10)
+    → similarity_matrix.get_match(ref_name, rank) → sample_id
+    → transform_manager.get_pitched()  → pitch variant (tonal samples)
+    → transform_manager.get_base()     → base variant  (all samples)
+    → _render()                        → on-the-fly fallback (first trigger only)
+    → _render_float(): apply gain · velocity² · anti-clip ceiling
+    → append _Voice (float32 stereo, pre-rendered)
+    ↓
+PyAudio callback (PortAudio high-priority thread)
+    → sum all active voices (float32 addition)
+    → clip to [-1, 1]
+    → float32_to_pcm_bytes(mixed, output_bit_depth)  → int16/24/32 bytes to hardware
+```
+
+All mixing happens in float32 - the only integer conversion is the final output
+packing. Multiple simultaneous voices are summed correctly regardless of the
+output device's bit depth.
 
 ## Requirements
 
