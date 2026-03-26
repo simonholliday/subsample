@@ -103,11 +103,11 @@ sample targets.
 | `name` | yes | Label shown in logs |
 | `channel` | yes | MIDI channel 1-16 (standard numbering) |
 | `notes` | yes | Single note, list, or range (see Note syntax below) |
-| `target` | yes | Which sample(s) to play (see Target types below) |
+| `select` | yes | Which sample to play (see Select below) |
+| `process` | no | How to present it (see Process below) |
 | `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
-| `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
+| `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder. *Planned - parsed but not yet applied to playback* |
 | `pan` | no | Stereo position as percentage weights e.g. `[50, 50]` = centre (default) |
-| `pitch` | no | `true` = pitch-shift the matched sample to each MIDI note in the range. Works with `reference()`, `chain`, `newest()`, and `oldest()` |
 
 ### Note syntax
 
@@ -122,122 +122,106 @@ notes: 36..60      # range with note numbers
 Note names use the convention C4 = 60 (C-1 = 0, G9 = 127). Sharps: `C#4`,
 `D#3`. Flats: `Db4`, `Eb3`.
 
-### Target types
+### Select - which sample to play
 
-**`reference(NAME)`** - plays the recorded instrument sample most similar to the
-named reference. When multiple notes share a reference, they receive ranked
-matches: first note in the list gets rank 0 (best match), second gets rank 1,
-and so on. Falls back to rank 0 if fewer samples than notes have been recorded.
-
-```yaml
-- name: Kicks
-  channel: 10
-  notes: [36, 35]          # note 36 → most kick-like; note 35 → second-most
-  target: reference(BD0025)
-  one_shot: true
-```
-
-The reference name must match a file in your `reference.directory`
-(case-insensitive).
-
-**`reference(NAME)` with `pitch: true`** - plays the best-matching sample,
-pitch-shifted to each MIDI note in the range. Every note in the assignment maps
-to rank 0 (same sample), shifted up or down from the sample's detected
-fundamental pitch. Pitch variants are computed in the background when the best
-match changes - no delay on the first trigger.
+The `select` block defines how to choose a sample from the instrument library.
+It has three parts: filter predicates (`where`), a sort order (`order_by`), and
+a pick position (`pick`).
 
 ```yaml
-- name: Bass keyboard
-  channel: 1
-  notes: C2..C4
-  target: reference(BASS_TONE)
-  pitch: true
-  one_shot: false
+select:
+  where:
+    min_duration: 1.0      # at least 1 second long
+    min_onsets: 4           # at least 4 transient hits
+  order_by: newest          # most recently captured first
+  pick: 1                   # take the first match
 ```
 
-The reference sample must have a confident, stable detected pitch (checked by
-`has_stable_pitch()`). Samples that fail this test fall back to unpitched
-playback.
+All `where` predicates must pass (AND logic). Available predicates:
 
-**`sample(FILENAME)`** - plays a specific sample by its filename stem (without
-the `.wav` extension). If the sample is not loaded or has been evicted from
-memory, the note plays silence - no error. Useful for building fixed kits from
-known recordings.
+| Predicate | Type | Description |
+|-----------|------|-------------|
+| `min_duration` / `max_duration` | float (seconds) | Filter by sample length |
+| `min_onsets` / `max_onsets` | int | Filter by detected transient count |
+| `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
+| `min_tempo` / `max_tempo` | float (BPM) | Filter by detected tempo |
+| `min_pitch` / `max_pitch` | Hz or note name | Filter by detected frequency |
+| `reference` | string | Similarity match against a named reference sample |
+| `name` | string | Exact filename stem match |
+
+Available `order_by` values: `newest`, `oldest`, `similarity` (requires
+`reference`), `duration_asc`, `duration_desc`, `pitch_asc`, `pitch_desc`,
+`onsets_asc`, `onsets_desc`, `tempo_asc`, `tempo_desc`, `loudest`, `quietest`.
+Default: `newest`. When `reference` is in `where` and no explicit `order_by` is
+given, defaults to `similarity`.
+
+`pick` is 1-indexed. Default: 1 (first match). For multi-note assignments
+without explicit `pick`, each note gets the next position (rank distribution) -
+so `notes: [36, 35]` gives note 36 pick 1 (best match) and note 35 pick 2.
+
+**Fallback chains** - `select` can be a list of specs tried in order. The first
+that returns a result wins:
 
 ```yaml
-- name: Fixed kick
-  channel: 10
-  notes: 36
-  target: sample(2026-03-24_14-37-14)
-  one_shot: true
+select:
+  - where: { name: my-favourite-kick }     # try specific sample first
+  - where: { reference: BD0025 }           # fall back to similarity match
 ```
 
-**`pitched(SELECTOR)`** - selects a sample by position among all pitch-stable
-samples in the instrument library, without requiring a reference library entry.
-Every MIDI note in the range plays the selected sample pitch-shifted to match.
-Variants are pre-computed in the background when the library changes - no delay
-on first trigger.
-
-Selectors:
-- `pitched(oldest)` - the first (lowest ID) pitch-stable sample
-- `pitched(newest)` - the most recently added pitch-stable sample
-- `pitched(N)` - the Nth pitch-stable sample (0-indexed)
+#### Examples
 
 ```yaml
-- name: Latest tonal capture
-  channel: 2
-  notes: C2..C6
-  target: pitched(newest)
-  one_shot: false
+# GM kicks - ranked by similarity to a kick reference
+select:
+  where:
+    reference: BD0025
+  order_by: similarity
+
+# Pitched keyboard - oldest tonal sample, repitched per note
+select:
+  where:
+    pitched: true
+  order_by: oldest
+  pick: 1
+
+# Rhythmic loops - recent, long, with enough beats
+select:
+  where:
+    min_duration: 1.0
+    min_onsets: 4
+  order_by: newest
+
+# Highest-pitched sample in the library
+select:
+  where:
+    pitched: true
+  order_by: pitch_desc
+  pick: 1
 ```
 
-If no pitch-stable samples exist or the index is out of range, the note plays
-silence. A sample is pitch-stable when it passes the same `has_stable_pitch()`
-gate used by `reference() + pitch: true`.
+### Process - how to present the sample
 
-**`newest()`** - always resolves to the most recently added sample in the
-instrument library, whether pitched or percussive. Re-evaluated on every trigger,
-so the mapping always reflects the latest capture. Combine with `pitch: true` and
-a note range for an instant chromatic keyboard from whatever you just recorded.
+The optional `process` block declares an ordered list of audio processors
+applied after sample selection. Omit it entirely for unprocessed playback.
 
 ```yaml
-- name: Latest capture (keyboard)
-  channel: 2
-  notes: C2..C6
-  target: newest()
-  one_shot: false
+process:
+  - repitch: true                  # pitch-shift to match the MIDI note
+  - beat_match: { grid: 16 }      # time-stretch to the session target BPM
 ```
 
-**`oldest()`** - complement of `newest()`. Always resolves to the first sample
-added to the library in this session. Re-evaluated on every trigger - if the
-oldest sample is evicted, the next trigger resolves to the new oldest.
+Available processors:
 
-```yaml
-- name: First capture (keyboard)
-  channel: 3
-  notes: C2..C6
-  target: oldest()
-  one_shot: false
-```
+| Processor | Parameters | Description |
+|-----------|-----------|-------------|
+| `repitch: true` | none | Pitch-shift to match the triggering MIDI note |
+| `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
+| `beat_match: { grid: 16 }` | grid subdivision | Time-stretch to session `target_bpm` |
+| `beat_match: { bpm: 120, grid: 8 }` | explicit BPM + grid | Time-stretch to a specific BPM |
 
-**`chain`** - ordered fallback. Tries a list of targets in sequence and uses the
-first one that resolves to a sample. Useful for resilient mappings: try a
-specific named sample, fall back to similarity matching if it has been evicted.
-
-```yaml
-- name: Kick with fallback
-  channel: 10
-  notes: 36
-  target:
-    chain:
-      - sample(my-favourite-kick)
-      - reference(BD0025)
-  one_shot: true
-```
-
-Each sub-target uses the same syntax as a standalone target. Requires at least 2
-sub-targets. Nested chains are not supported. All sub-targets are validated at
-load time - one invalid sub-target skips the entire assignment.
+When `repitch` is in the process list, all notes in a multi-note assignment
+share pick 1 (same sample, pitched per note). Without `repitch`, each note gets
+the next rank.
 
 ### Pan
 
@@ -264,9 +248,10 @@ note fires, the work is already done - playback is a memory copy into the mix
 buffer, not an on-the-fly calculation. A three-tier fallback guarantees playback
 is never blocked:
 
-1. **Pitch variant** - pre-computed, pitch-corrected (tonal samples)
-2. **Base variant** - pre-normalised, no DSP (all samples)
-3. **On-the-fly render** - last resort on the very first trigger only
+1. **Pitch variant** - pre-computed, pitch-corrected (assignments with `repitch`)
+2. **Time-stretch variant** - pre-computed, beat-quantised (assignments with `beat_match`)
+3. **Base variant** - pre-normalised, no DSP (all samples)
+4. **On-the-fly render** - last resort on the very first trigger only
 
 ### End-to-end 32-bit float
 
@@ -694,11 +679,12 @@ Reference: BD0025
   sidecars are currently re-analysed sequentially; large libraries should use the
   existing worker pool for parallel re-analysis.
 
-### Additional targets
+### Additional select/process features
 
-- **`pitched(random)`** - random selection from all pitched samples.
-- **`all_pitched()`** - distribute a note range across all pitched samples, one
-  per note, each pitch-shifted to match.
+- **Random selection** - `order_by: random` to pick a different sample on each
+  trigger.
+- **CC modulation** - map MIDI CC messages to real-time parameter control
+  (volume, pan, filter cutoff).
 
 ## Architecture
 
@@ -770,10 +756,12 @@ families intact and playable.
 ### Playback path
 
 ```
-MIDI note_on (channel 10)
-    → similarity_matrix.get_match(ref_name, rank) → sample_id
-    → transform_manager.get_pitched()  → pitch variant (tonal samples)
-    → transform_manager.get_base()     → base variant  (all samples)
+MIDI note_on
+    → query engine: filter → order → pick → sample_id
+        (fallback: try each select spec in order)
+    → transform_manager.get_pitched()  → pitch variant (repitch assignments)
+    → transform_manager.get_at_bpm()   → time-stretch variant (beat_match assignments)
+    → transform_manager.get_base()     → base variant (all samples)
     → _render()                        → on-the-fly fallback (first trigger only)
     → _render_float(): apply gain · velocity² · anti-clip ceiling
     → append _Voice (float32 stereo, pre-rendered)

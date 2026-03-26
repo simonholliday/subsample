@@ -1,13 +1,10 @@
 # ===================================================================
-# midi-map.yaml - Subsample MIDI routing map
+# midi-map.yaml — Subsample MIDI routing map
 # ===================================================================
 #
 # This file maps MIDI input (channel + note) to sample playback.
 # Copy and customise it for your controller, reference library,
 # or performance setup.
-#
-# Comments marked [DEV] are implementation references — they will be
-# trimmed from the user-facing version of this file when complete.
 #
 # CONVENTIONS
 #   Channels:   1-16 (standard MIDI numbering)
@@ -16,58 +13,88 @@
 #               Sharps: C#4, D#4    Flats: Db4, Eb4
 #   Note specs: single (36 or C3), list ([36, 38]), range (C2..C4)
 #
-# ASSIGNMENT FIELDS (summary)
+# ===================================================================
+# ASSIGNMENT STRUCTURE
+# ===================================================================
+#
+# Each assignment maps one or more MIDI notes to a sample selection
+# and an optional processing pipeline:
+#
 #   name:      required  Human-readable label shown in logs
 #   channel:   required  MIDI channel 1-16
 #   notes:     required  Note spec (see above)
-#   target:    required  Which sample(s) to play (see TARGET TYPES below)
-#   one_shot:  optional  true = ignore note_off (default); false = fade on note_off
-#   gain:      optional  Level offset in dB (default 0.0).
-#                          Negative = quieter, positive = louder.
-#   pan:       optional  Stereo weights e.g. [50,50] = centre (default)
-#   select:    optional  When a target resolves to multiple samples on one note:
-#                          round_robin (default) - cycle through in order
-#                          random                - pick randomly each trigger
-#   pitch:     optional  true = pitch-shift to match MIDI note (default when a
-#                          range maps to a single sample); false = disable
-#
-# TARGET TYPES (summary)
-#   reference(name)   similarity-ranked lookup against reference library   [IMPLEMENTED]
-#                       + pitch: true maps a note range to one sample,
-#                         pitch-shifted per note                           [IMPLEMENTED]
-#   sample(filename)  specific sample by filename (without .wav extension) [IMPLEMENTED]
-#   pitched(selector) pitched/tonal sample by position (newest/oldest/N)  [IMPLEMENTED]
-#   newest()          most recently added sample (any type)                [IMPLEMENTED]
-#   oldest()          oldest sample in the library (any type)              [IMPLEMENTED]
-#   chain             YAML dict with "chain:" key listing 2+ targets;      [IMPLEMENTED]
-#                       tries each in order, uses first that resolves
-#
-# OVERLAPPING NOTES
-#   If two assignments map the same channel + note, the last one in the
-#   file wins.  Earlier assignments for that note are silently replaced.
-#
-# UNMAPPED NOTES
-#   Notes with no assignment are silently ignored.  This is normal —
-#   most setups only map a subset of the 128 available notes.
+#   select:    required  How to choose the sample (see SELECT below)
+#   process:   optional  How to present it (see PROCESS below)
+#   one_shot:  optional  true (default) = ignore note_off
+#   gain:      optional  Level offset in dB (default 0.0)
+#   pan:       optional  Stereo weights [L, R], default [50, 50] = centre
 #
 # PAN
 #   pan: [L, R]  (stereo; SMPTE channel order)
 #   Weights are normalised to constant-power gains: gain[i] = sqrt(w[i]/sum(w))
 #   So [50,50] = centre, [100,0] = hard left, [75,25] = left of centre.
-#   Omit pan entirely to default to centre ([50,50] for stereo).
 #
-#   Channel order by layout (SMPTE standard):
-#     2.0 Stereo:   L, R
-#     4.0 Quad:     L, R, Ls, Rs
-#     5.1 Surround: L, R, C, LFE, Ls, Rs
-#     7.1 Surround: L, R, C, LFE, Ls, Rs, Lrs, Rrs
+# ===================================================================
+# SELECT — which sample to play
+# ===================================================================
 #
-#   [DEV] MULTICHANNEL TODO:
-#   Output channel count is fixed at 2 (stereo); pan list must have exactly
-#   2 values.  To support multichannel, the device channel count must be known
-#   before load_midi_map() is called in cli.py.  Options: (a) open PyAudio
-#   early to query maxOutputChannels, or (b) store raw weights and compute
-#   gains in MidiPlayer.run() once the device is known.
+# The select block defines how to choose a sample from the instrument
+# library.  It has three parts:
+#
+#   where:     Filter predicates (all must pass).  Optional — omit to
+#              include all samples.
+#   order_by:  How to sort the qualifying samples (default: newest).
+#   pick:      Which position in the sorted list (1-indexed, default: 1).
+#
+# FILTER PREDICATES (where)
+#
+#   min_duration / max_duration   float seconds
+#   min_onsets / max_onsets       int (onset_count)
+#   pitched                       true = has stable pitch; false = not pitched
+#   min_tempo / max_tempo         float BPM
+#   min_pitch / max_pitch         float Hz or note name (e.g. C3)
+#   reference                     string — similarity match against a named
+#                                 reference sample
+#   name                          string — exact filename stem match
+#
+# ORDER_BY VALUES
+#
+#   newest / oldest               by arrival time (sample_id)
+#   similarity                    by similarity score (requires reference in where)
+#   duration_asc / duration_desc  by duration
+#   pitch_asc / pitch_desc        by dominant frequency
+#   onsets_asc / onsets_desc       by onset count
+#   tempo_asc / tempo_desc        by detected BPM
+#   loudest / quietest            by RMS level
+#
+# PICK
+#
+#   1-indexed position in the sorted list.  Default: 1 (first match).
+#   For multi-note assignments without explicit pick, each note gets
+#   the next position (rank distribution).  When process includes
+#   repitch, all notes share pick 1 (same sample, pitched per note).
+#
+# FALLBACK (select as a list)
+#
+#   select can be a list of specs tried in order — the first one that
+#   returns a result wins:
+#
+#   select:
+#     - where: { name: my-favourite-kick }
+#     - where: { reference: BD0025 }
+#
+# ===================================================================
+# PROCESS — how to present the sample
+# ===================================================================
+#
+# The process block is an optional ordered list of processors:
+#
+#   repitch: true           Pitch-shift to match the triggering MIDI note
+#   repitch: { note: C4 }  Pitch-shift to a fixed note
+#   beat_match: { grid: 16 }        Time-stretch to session target_bpm
+#   beat_match: { bpm: 120, grid: 8 }  Time-stretch to specific BPM
+#
+# Omit process entirely for unprocessed playback (base variant).
 #
 # ===================================================================
 
@@ -76,396 +103,183 @@ assignments:
 
 
   # =================================================================
-  # GM DRUMS - Channel 10
+  # GM DRUMS — Channel 10
   # =================================================================
   #
-  # These assignments replicate the built-in _GM_DRUM_NOTE_MAP from
-  # player.py.  Each maps one or more GM drum notes to a reference
-  # sound class via the similarity engine.
-  #
-  # TARGET TYPE: reference(name)
-  #
-  #   Resolution:
-  #     At trigger time, calls:
-  #       similarity_matrix.get_match(name, rank=N)
-  #     where N is this note's position in the notes list (0-indexed).
-  #     Returns a sample_id (int) or None.
-  #
-  #   Rank distribution (multi-note assignments):
-  #     When notes is a list, each note gets the next similarity rank:
-  #       notes: [36, 35]  ->  note 36 = rank 0 (best match)
-  #                             note 35 = rank 1 (second-best)
-  #     If rank N doesn't exist (fewer recorded samples than notes),
-  #     fall back to rank 0.  All notes in the group play SOMETHING
-  #     as long as at least one matching sample exists.
-  #
-  #   [DEV] Current code path (player.py _handle_message):
-  #     ref_name, rank, one_shot, pan_gains = self._note_map[(msg.channel, msg.note)]
-  #     sample_id = self._similarity_matrix.get_match(ref_name, rank)
-  #     if sample_id is None and rank > 0:
-  #         sample_id = self._similarity_matrix.get_match(ref_name, 0)
-  #
-  #   [DEV] RE-EVALUATION TRIGGERS:
-  #
-  #   On new sample arrives:
-  #     - SimilarityMatrix.add() called by cli.py _make_on_complete()
-  #     - Matrix rescores new sample against all references; ranked
-  #       lists updated automatically
-  #     - No action needed by the map: next get_match() at trigger time
-  #       sees the updated ranking
-  #
-  #   On sample evicted:
-  #     - SimilarityMatrix.remove(sample_id) called by cli.py eviction
-  #       callback; sample_id removed from all ranked lists
-  #     - No action needed by the map: next get_match() returns new
-  #       best match; if no match remains, note plays silence
-  #
-  #   On reference library loaded:
-  #     - Happens once at startup; assignments whose reference name is
-  #       not in the library are skipped with a WARNING at load time
-  #
-  #   [DEV] IMPLEMENTATION NOTES:
-  #   - reference() is LAZY: resolved at trigger time, not at load
-  #   - _note_map: dict[(mido_channel, note), (ref_name, rank, one_shot, pan_gains)]
-  # =================================================================
+  # Each maps one or more GM drum notes to a reference sound class
+  # via the similarity engine.  Multi-note assignments distribute
+  # ranks: first note = best match, second = second-best, etc.
 
 
   # --- Kicks ---
   # GM notes 36 (Bass Drum 1) and 35 (Bass Drum 2).
-  # Two notes, one reference: note 36 gets the most kick-like sample
-  # in the library (rank 0), note 35 gets the second-most (rank 1).
-  # Both are one-shot: note_off is ignored, the sample plays out.
 
   - name: Kicks
     channel: 10
     notes: [36, 35]
-    target: reference(BD0025)
-    one_shot: true
+    select:
+      where:
+        reference: BD0025
+      order_by: similarity
 
 
   # --- Snares ---
   # GM notes 38 (Acoustic Snare) and 40 (Electric Snare).
-  # Same pattern as kicks: two ranked variations of one reference.
 
   - name: Snares
     channel: 10
     notes: [38, 40]
-    target: reference(SD5075)
-    one_shot: true
+    select:
+      where:
+        reference: SD5075
+      order_by: similarity
+    pan: [50, 87]
 
 
   # --- Clap ---
-  # GM note 39 (Hand Clap).  Single note, single reference (rank 0).
+  # GM note 39 (Hand Clap).
 
   - name: Clap
     channel: 10
     notes: 39
-    target: reference(CP)
-    one_shot: true
+    select:
+      where:
+        reference: CP
+      order_by: similarity
 
 
   # --- Closed hi-hat ---
-  # GM note 42 (Closed Hi-Hat).  Single note, single reference.
-  # one_shot: true for now.  In a future phase, hi-hats should
-  # interact via mute_group (closed hat silences open hat).
+  # GM note 42 (Closed Hi-Hat).
 
   - name: Closed hi-hat
     channel: 10
     notes: 42
-    target: reference(CH)
-    one_shot: true
+    select:
+      where:
+        reference: CH
+      order_by: similarity
+    pan: [87, 50]
 
 
   # --- Open hi-hat ---
-  # GM note 46 (Open Hi-Hat).  Single note, single reference.
-  # one_shot: true for now.  See mute_group note above.
+  # GM note 46 (Open Hi-Hat).
 
   - name: Open hi-hat
     channel: 10
     notes: 46
-    target: reference(OH25)
-    one_shot: true
+    select:
+      where:
+        reference: OH25
+      order_by: similarity
 
 
   # --- Crashes and splash ---
   # GM notes 49 (Crash 1), 57 (Crash 2), 55 (Splash).
-  # Three notes, one reference: ranked 0, 1, 2.  If only one
-  # cymbal-like sample exists, all three play the same one.
 
   - name: Crashes
     channel: 10
     notes: [49, 57, 55]
-    target: reference(CY5050)
-    one_shot: true
+    select:
+      where:
+        reference: CY5050
+      order_by: similarity
 
 
   # --- Cowbell ---
-  # GM note 56 (Cowbell).  Single note, single reference.
-  # gain: -3.0 shown here as an example — adjust to taste.
+  # GM note 56 (Cowbell).
 
   - name: Cowbell
     channel: 10
     notes: 56
-    target: reference(CB)
-    one_shot: true
+    select:
+      where:
+        reference: CB
+      order_by: similarity
     gain: -3.0
 
 
   # =================================================================
-  # PITCHED KEYBOARD - Channel 1
+  # PITCHED KEYBOARD — Channel 1
   # =================================================================
   #
-  # TARGET TYPE: reference(NAME) with pitch: true
-  #
-  #   Plays the best-matching sample for the named reference, pitch-shifted
-  #   to each MIDI note in the range.  Every note maps to rank 0 (same
-  #   sample) and is shifted up or down from the sample's detected pitch.
-  #
-  #   Pitch variants are pre-computed in the background when the best match
-  #   changes — no delay on the first trigger.
-  #
-  #   Pitch-shifting pipeline (MidiPlayer._handle_message):
-  #     1. transform_manager.get_pitched(sample_id, msg.note)
-  #        → returns a pre-computed variant if ready
-  #     2. Fall back to base variant (un-shifted, float32 copy)
-  #     3. Fall back to original PCM (first trigger only, before variants ready)
-  #
-  #   Re-evaluation on new sample:
-  #     When a new recording arrives, cli.py calls update_pitched_assignments()
-  #     which re-resolves each reference to its new best match and enqueues
-  #     new pitch variants.  The player seamlessly switches to the new sample.
-  #
-  #   pitched(newest) / pitched(oldest) / pitched(N) selectors:
-  #     These select from samples that pass has_stable_pitch() directly,
-  #     without requiring a reference library entry.  See the PITCHED
-  #     SELECTOR section below for full documentation.
+  # Plays the oldest pitch-stable sample across the full note range,
+  # pitch-shifted to each MIDI note.
 
-  # - name: Bass keyboard
-  #   channel: 1
-  #   notes: C2..C4
-  #   target: reference(BASS_TONE)
-  #   pitch: true
-  #   one_shot: false
+  - name: Pitched keyboard
+    channel: 1
+    notes: C-1..G9
+    select:
+      where:
+        pitched: true
+      order_by: oldest
+      pick: 1
+    process:
+      - repitch: true
+    one_shot: false
 
 
   # =================================================================
-  # PITCHED SELECTOR
+  # EXAMPLE ASSIGNMENTS (commented out)
   # =================================================================
-  #
-  # TARGET TYPE: pitched(selector)
-  #
-  #   Selects a sample directly by its position among all pitch-stable
-  #   samples in the instrument library, without requiring a reference
-  #   library entry.  A sample is pitch-stable when it passes
-  #   has_stable_pitch() — a 7-criterion gate ensuring a confident,
-  #   stable fundamental pitch suitable for keyboard playback.
-  #
-  #   Selectors:
-  #     pitched(oldest)  lowest sample_id that passes has_stable_pitch()
-  #     pitched(newest)  highest sample_id that passes has_stable_pitch()
-  #     pitched(N)       Nth sample (0-indexed) by sample_id
-  #
-  #   Resolution: dynamic — re-evaluated when update_pitched_assignments()
-  #   is called (at startup and after each new sample arrives).  When
-  #   the resolved sample changes, variants are pre-computed before the
-  #   next trigger — no delay on first press.
-  #
-  #   If no pitch-stable samples exist, or N is out of range, the note
-  #   plays silence (no error, no crash).
-  #
-  #   No reference library required — works even when reference.directory
-  #   is not configured.
 
-  # - name: Latest tonal capture
-  #   channel: 2
-  #   notes: C2..C6
-  #   target: pitched(newest)
-  #   one_shot: false
-
-  # - name: First tonal capture
-  #   channel: 3
-  #   notes: C2..C6
-  #   target: pitched(oldest)
-  #   one_shot: false
-
-  # - name: Second tonal capture
-  #   channel: 4
-  #   notes: C2..C6
-  #   target: pitched(1)
-  #   one_shot: false
-
-
-  # =================================================================
-  # SAMPLE BY NAME
-  # =================================================================
-  #
-  # TARGET TYPE: sample(filename)
-  #
-  #   Resolves to a specific sample by its WAV filename without the
-  #   .wav extension.  If the sample is not loaded or has been evicted,
-  #   the note plays silence — no error, no crash.  The assignment
-  #   stays in the map; if the sample is reloaded (e.g. the user
-  #   restarts with the same instrument.directory), it becomes active.
-  #
-  #   Useful for building fixed kits from known recordings.
-  #
-  #   Eviction: static — if the named sample is evicted from the
-  #   library, the note plays silence until it is reloaded.
-  #
+  # --- Specific sample by name ---
   # - name: Fixed kick
   #   channel: 10
   #   notes: 36
-  #   target: sample(2026-03-24_14-37-14)
-  #   one_shot: true
+  #   select:
+  #     where:
+  #       name: 2026-03-24_14-37-14
 
-
-  # =================================================================
-  # NEWEST / OLDEST SAMPLE
-  # =================================================================
-  #
-  # TARGET TYPE: newest()
-  #
-  #   Always resolves to the most recently added sample in the
-  #   instrument library, whether pitched or percussive.
-  #   Re-evaluated on every trigger.
-  #
-  #   Combined with a note range, pitch-shifting is automatic —
-  #   useful for "play whatever I just recorded across the keyboard".
-  #   If the resolved sample has no stable pitch, the base variant
-  #   plays for all notes (no pitch shift, no error).
-  #
-  #   Dynamic — always points to the current newest sample.
-  #   Eviction handled automatically: next trigger resolves to new newest.
-
-  # - name: Latest capture (keyboard)
+  # --- Newest sample (keyboard) ---
+  # - name: Latest capture
   #   channel: 2
   #   notes: C2..C6
-  #   target: newest()
+  #   select:
+  #     order_by: newest
+  #     pick: 1
+  #   process:
+  #     - repitch: true
   #   one_shot: false
 
-
-  # TARGET TYPE: oldest()
-  #
-  #   Complement of newest() — resolves to the first sample ever added
-  #   to the library in this session.  Re-evaluated on every trigger.
-  #
-  #   Dynamic — always points to the current oldest sample.
-  #   Eviction handled automatically: if oldest is evicted, next trigger
-  #   resolves to the new oldest.
-
-  # - name: First capture (keyboard)
+  # --- Rhythmic loops, beat-matched ---
+  # - name: Loop pad
   #   channel: 3
-  #   notes: C2..C6
-  #   target: oldest()
+  #   notes: C2..C4
+  #   select:
+  #     where:
+  #       min_duration: 1.0
+  #       min_onsets: 4
+  #     order_by: newest
+  #     pick: 1
+  #   process:
+  #     - beat_match: { grid: 16 }
   #   one_shot: false
 
+  # --- Highest-pitched sample ---
+  # - name: High tone
+  #   channel: 4
+  #   notes: C3..C5
+  #   select:
+  #     where:
+  #       pitched: true
+  #     order_by: pitch_desc
+  #     pick: 1
+  #   process:
+  #     - repitch: true
+  #   one_shot: false
 
-  # =================================================================
-  # CHAIN TARGET
-  # =================================================================
-  #
-  # TARGET TYPE: chain
-  #
-  #   Tries a list of targets in order and uses the first one that
-  #   resolves to a sample.  Useful as a fallback: try a specific named
-  #   sample, fall back to similarity matching if it has been evicted.
-  #
-  #   Syntax: target is a YAML dict with a "chain" key containing a
-  #   list of 2 or more target strings.  Each sub-target uses the same
-  #   format as a standalone target ("reference(NAME)", "sample(STEM)",
-  #   "pitched(SEL)", "newest()", "oldest()").  Nested chains are not
-  #   supported.
-  #
-  #   Validation: all sub-targets are validated at load time using the
-  #   same rules as standalone targets (e.g. reference sub-targets must
-  #   exist in the reference library).  One invalid sub-target skips
-  #   the entire assignment with a WARNING.
-  #
-  #   Resolution: dynamic — each sub-target is resolved fresh on every
-  #   trigger.  The first sub-target that returns a sample wins.  If
-  #   all sub-targets resolve to None (e.g. the named sample is evicted
-  #   and no similarity match exists yet), the note plays silence.
-  #
-  #   Pitch: pitch: true works with chain.  When the chain resolves to
-  #   a pitch-stable sample, variants are pre-computed automatically.
-  #   If the resolved sample has no stable pitch, the base variant plays.
-  #
-  #   Eviction: re-evaluated on every trigger, so eviction of a static
-  #   sub-target (sample) causes fallback to the next sub-target
-  #   automatically.
+  # --- Third longest sample ---
+  # - name: Third longest
+  #   channel: 5
+  #   notes: 60
+  #   select:
+  #     order_by: duration_desc
+  #     pick: 3
 
+  # --- Fallback chain: try specific sample, then reference ---
   # - name: Kick with fallback
   #   channel: 10
   #   notes: 36
-  #   target:
-  #     chain:
-  #       - sample(my-favourite-kick)
-  #       - reference(BD0025)
-  #   one_shot: true
-
-
-  # =================================================================
-  # EVICTION BEHAVIOUR
-  # =================================================================
-  #
-  # The instrument library has a memory cap (instrument.max_memory_mb)
-  # and evicts old samples when exceeded.
-  #
-  # Dynamic targets (reference, pitched, newest, oldest, chain) re-evaluate
-  # on every trigger and always reflect the current library state — eviction
-  # is handled automatically.
-  #
-  # Static targets (sample) may point to an evicted sample.  The note
-  # plays silence until the sample is reloaded.  Use chain with a
-  # sample() primary and a reference() fallback to handle eviction gracefully.
-
-
-  # =================================================================
-  # FUTURE EXTENSIONS (not yet planned for implementation)
-  # =================================================================
-  #
-  # The function-style target syntax is deliberately extensible.
-  # New target types are just new function names in the parser.
-  #
-  # mute_group: "hihats"
-  #   Notes in the same named group silence each other when triggered.
-  #   Classic use: closed hi-hat (42) silences open hi-hat (46).
-  #   Example:
-  #     - name: Closed hi-hat
-  #       notes: 42
-  #       target: reference(CH)
-  #       mute_group: hihats
-  #     - name: Open hi-hat
-  #       notes: 46
-  #       target: reference(OH25)
-  #       mute_group: hihats
-  #
-  # velocity_layer:
-  #   Different targets at different velocity ranges (pp/mp/ff layers).
-  #   Example:
-  #     - name: Kick (layered)
-  #       channel: 10
-  #       notes: 36
-  #       velocity_layer:
-  #         - range: [0, 64]
-  #           target: reference(BD_soft)
-  #         - range: [65, 127]
-  #           target: reference(BD0025)
-  #
-  # pitched(random)
-  #   Random selection from all pitched samples.
-  #
-  # all_pitched()
-  #   Distribute a note range across all pitched samples: one sample per
-  #   note, each pitch-shifted to match.
-  #
-  # type: cc
-  #   Map MIDI Control Change messages to parameters.
-  #   CC#1  (mod wheel)      — modulate a target parameter in real time
-  #   CC#7  (volume)         — per-channel volume control
-  #   CC#10 (pan)            — real-time pan override
-  #   CC#64 (sustain pedal)  — hold note_off for non-one-shot voices
-  #
-  # type: program_change
-  #   Switch between map presets via MIDI program change messages.
-  #   Could load a different midi-map.yaml on the fly.
+  #   select:
+  #     - where: { name: my-favourite-kick }
+  #     - where: { reference: BD0025, order_by: similarity }

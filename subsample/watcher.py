@@ -24,7 +24,6 @@ import typing
 import watchdog.events
 import watchdog.observers
 
-import subsample.analysis
 import subsample.audio
 import subsample.cache
 import subsample.library

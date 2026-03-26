@@ -881,30 +881,35 @@ class TransformManager:
 
 		return result
 
-	def get_at_bpm (self, sample_id: int) -> typing.Optional[TransformResult]:
+	def get_at_bpm (
+		self,
+		sample_id:  int,
+		target_bpm: typing.Optional[float] = None,
+		resolution: typing.Optional[int]   = None,
+	) -> typing.Optional[TransformResult]:
 
 		"""Return a cached time-stretch variant, or None.
 
-		Reads target_bpm, quantize_resolution, and min_onset_count from the
-		stored config so the caller (player) does not need to know the BPM.
-		This keeps the player decoupled from transform config — a future
-		MIDI-clock BPM source only needs to update the manager, not the player.
+		By default reads target_bpm and quantize_resolution from the stored
+		config.  Per-assignment overrides can be passed explicitly — this
+		supports beat_match processors that declare their own BPM/grid.
 
 		On a cache miss for a qualifying sample, enqueues the transform and
 		returns None so the variant is ready on the next trigger.
 
 		Returns None immediately when:
-		  - target_bpm is disabled (0.0)
+		  - effective target_bpm is 0.0 (disabled)
 		  - the sample has no detected rhythm
 		  - the sample has fewer onsets than min_onset_count
 		"""
 
-		if self._cfg.target_bpm <= 0.0:
+		bpm = target_bpm if target_bpm is not None else self._cfg.target_bpm
+		res = resolution if resolution is not None else self._cfg.quantize_resolution
+
+		if bpm <= 0.0:
 			return None
 
 		# Check whether this sample qualifies for time-stretching.
-		# Without this gate, every MIDI trigger would enqueue a stretch
-		# job for non-rhythmic samples on cache miss.
 		record = self._instrument_library.get(sample_id)
 
 		if record is None:
@@ -915,8 +920,8 @@ class TransformManager:
 			return None
 
 		spec = TransformSpec(steps=(TimeStretch(
-			target_bpm=self._cfg.target_bpm,
-			resolution=self._cfg.quantize_resolution,
+			target_bpm=bpm,
+			resolution=res,
 		),))
 
 		key    = TransformKey(sample_id=sample_id, spec=spec)

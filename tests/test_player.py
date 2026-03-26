@@ -2,13 +2,92 @@
 
 import pathlib
 import threading
+import typing
 import unittest.mock
 
+import numpy
 import pytest
 
 import subsample.library
 import subsample.player
+import subsample.query
 import subsample.similarity
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers for building NoteMap entries in the new format
+# ---------------------------------------------------------------------------
+
+def _make_assignment (
+	name: str = "test",
+	reference: typing.Optional[str] = None,
+	sample_name: typing.Optional[str] = None,
+	pitched_filter: typing.Optional[bool] = None,
+	order_by: str = "newest",
+	repitch: bool = False,
+	beat_match: bool = False,
+	one_shot: bool = True,
+	pan_gains: typing.Optional[numpy.ndarray] = None,
+) -> subsample.query.Assignment:
+
+	"""Build an Assignment with common defaults for tests."""
+
+	where_kwargs: dict[str, typing.Any] = {}
+
+	if reference is not None:
+		where_kwargs["reference"] = reference
+
+	if sample_name is not None:
+		where_kwargs["name"] = sample_name
+
+	if pitched_filter is not None:
+		where_kwargs["pitched"] = pitched_filter
+
+	where = subsample.query.WherePredicate(**where_kwargs)
+
+	if reference is not None and order_by == "newest":
+		order_by = "similarity"
+
+	select = (subsample.query.SelectSpec(where=where, order_by=order_by),)
+
+	steps: list[subsample.query.ProcessorStep] = []
+
+	if repitch:
+		steps.append(subsample.query.ProcessorStep(name="repitch"))
+
+	if beat_match:
+		steps.append(subsample.query.ProcessorStep(name="beat_match", params=(("grid", 16),)))
+
+	process = subsample.query.ProcessSpec(steps=tuple(steps))
+
+	if pan_gains is None:
+		pan_gains = numpy.array([0.7071068, 0.7071068], dtype=numpy.float32)
+
+	return subsample.query.Assignment(
+		name=name,
+		select=select,
+		process=process,
+		one_shot=one_shot,
+		pan_gains=pan_gains,
+	)
+
+
+def _make_note_map (
+	assignment: subsample.query.Assignment,
+	channel: int,
+	notes: list[int],
+	per_note_pick: bool = False,
+) -> subsample.player.NoteMap:
+
+	"""Build a NoteMap for one assignment across multiple notes."""
+
+	note_map: subsample.player.NoteMap = {}
+
+	for i, note in enumerate(notes):
+		pick = (i + 1) if per_note_pick else 1
+		note_map[(channel, note)] = (assignment, pick)
+
+	return note_map
 
 
 # ---------------------------------------------------------------------------
@@ -670,38 +749,43 @@ class TestLoadMidiMap:
 		return p
 
 	def test_single_note_reference (self, tmp_path: pathlib.Path) -> None:
-		"""Single-note assignment: one note, rank 0."""
+		"""Single-note reference assignment."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
+      order_by: similarity
     one_shot: true
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
 		assert (9, 36) in note_map
-		ttype, ref, rank, one_shot, pitch, pan_gains = note_map[(9, 36)]
-		assert ttype == "reference"
-		assert ref == "BD0025"
-		assert rank == 0
-		assert one_shot is True
+		asgn, pick = note_map[(9, 36)]
+		assert asgn.select[0].where.reference == "BD0025"
+		assert asgn.one_shot is True
+		assert pick == 1
 
 	def test_multi_note_rank_distribution (self, tmp_path: pathlib.Path) -> None:
-		"""Note list distributes ranks: first note = rank 0, second = rank 1."""
+		"""Note list distributes picks: first note = pick 1, second = pick 2."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kicks
     channel: 10
     notes: [36, 35]
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
+      order_by: similarity
     one_shot: true
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
-		assert note_map[(9, 36)][2] == 0   # rank 0
-		assert note_map[(9, 35)][2] == 1   # rank 1
+		assert note_map[(9, 36)][1] == 1   # pick 1
+		assert note_map[(9, 35)][1] == 2   # pick 2
 
 	def test_channel_conversion (self, tmp_path: pathlib.Path) -> None:
 		"""User-facing channel 10 converts to mido channel 9."""
@@ -710,7 +794,9 @@ assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
@@ -724,12 +810,14 @@ assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
-		_, _, _, one_shot, _, _ = note_map[(9, 36)]
-		assert one_shot is True
+		asgn, _ = note_map[(9, 36)]
+		assert asgn.one_shot is True
 
 	def test_unknown_reference_skipped (
 		self,
@@ -743,7 +831,9 @@ assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
 """)
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
 			note_map = subsample.player.load_midi_map(path, [])
@@ -758,7 +848,9 @@ assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(bd0025)
+    select:
+      where:
+        reference: bd0025
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
@@ -773,56 +865,61 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 		assert note_map == {}
 
-	def test_multiple_assignments_different_channels (self, tmp_path: pathlib.Path) -> None:
-		"""Assignments on different channels coexist in the map."""
+	def test_multiple_assignments (self, tmp_path: pathlib.Path) -> None:
+		"""Multiple assignments coexist in the map."""
 		path = self._write_map(tmp_path, """
 assignments:
-  - name: Kick ch10
+  - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
-  - name: Snare ch10
+    select:
+      where:
+        reference: BD0025
+  - name: Snare
     channel: 10
     notes: 38
-    target: reference(SD5075)
+    select:
+      where:
+        reference: SD5075
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025", "SD5075"])
 
 		assert (9, 36) in note_map
 		assert (9, 38) in note_map
-		assert note_map[(9, 36)][1] == "BD0025"
-		assert note_map[(9, 38)][1] == "SD5075"
+		assert note_map[(9, 36)][0].select[0].where.reference == "BD0025"
+		assert note_map[(9, 38)][0].select[0].where.reference == "SD5075"
 
-	def test_sample_target_parsed (self, tmp_path: pathlib.Path) -> None:
-		"""sample(filename) target is parsed into the note map with target_type 'sample'."""
+	def test_name_filter (self, tmp_path: pathlib.Path) -> None:
+		"""where: { name: stem } is parsed correctly."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Fixed kick
     channel: 10
     notes: 36
-    target: sample(2026-03-24_14-37-14)
+    select:
+      where:
+        name: 2026-03-24_14-37-14
     one_shot: true
 """)
 		note_map = subsample.player.load_midi_map(path, [])
 
 		assert (9, 36) in note_map
-		ttype, fname, rank, one_shot, pitch, pan_gains = note_map[(9, 36)]
-		assert ttype == "sample"
-		assert fname == "2026-03-24_14-37-14"
-		assert one_shot is True
+		asgn, _ = note_map[(9, 36)]
+		assert asgn.select[0].where.name == "2026-03-24_14-37-14"
+		assert asgn.one_shot is True
 
-	def test_sample_target_no_reference_validation (self, tmp_path: pathlib.Path) -> None:
-		"""sample() targets are not validated against the reference library at load time."""
+	def test_name_filter_no_reference_validation (self, tmp_path: pathlib.Path) -> None:
+		"""name filters are not validated against the reference library."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Fixed kick
     channel: 10
     notes: 36
-    target: sample(some-recording)
+    select:
+      where:
+        name: some-recording
 """)
-		# Empty reference_names — sample() should still be accepted
 		note_map = subsample.player.load_midi_map(path, [])
-
 		assert (9, 36) in note_map
 
 	def test_default_map_parses (self) -> None:
@@ -832,59 +929,60 @@ assignments:
 		note_map = subsample.player.load_midi_map(default_path, refs)
 
 		assert len(note_map) > 0
-		# Kick on note 36 (mido ch 9)
 		assert (9, 36) in note_map
-		assert note_map[(9, 36)][1] == "BD0025"
+		assert note_map[(9, 36)][0].select[0].where.reference == "BD0025"
 
 	def test_default_pan_is_centre (self, tmp_path: pathlib.Path) -> None:
 		"""Omitted pan defaults to equal power across all output channels."""
-		import numpy
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
 
-		_, _, _, _, _, pan_gains = note_map[(9, 36)]
-		# Centre: both channels equal power → gain = 1/sqrt(2) ≈ 0.707
-		assert pan_gains.shape == (2,)
-		numpy.testing.assert_allclose(pan_gains, [1.0 / 2**0.5, 1.0 / 2**0.5], atol=1e-5)
+		asgn, _ = note_map[(9, 36)]
+		assert asgn.pan_gains.shape == (2,)
+		numpy.testing.assert_allclose(asgn.pan_gains, [1.0 / 2**0.5, 1.0 / 2**0.5], atol=1e-5)
 
 	def test_explicit_pan_constant_power (self, tmp_path: pathlib.Path) -> None:
 		"""Constant-power law: sum(gains**2) == 1.0 for any pan position."""
-		import numpy
 		for weights in [[100, 0], [0, 100], [50, 50], [75, 25], [30, 70]]:
 			path = self._write_map(tmp_path, f"""
 assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
     pan: {weights}
 """)
 			note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
-			_, _, _, _, _, pan_gains = note_map[(9, 36)]
-			total_power = float(numpy.sum(pan_gains ** 2))
+			asgn, _ = note_map[(9, 36)]
+			total_power = float(numpy.sum(asgn.pan_gains ** 2))
 			numpy.testing.assert_allclose(total_power, 1.0, atol=1e-5,
 				err_msg=f"pan {weights} total power should be 1.0")
 
 	def test_pan_hard_left (self, tmp_path: pathlib.Path) -> None:
 		"""pan: [100, 0] produces gain 1.0 on left, 0.0 on right."""
-		import numpy
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
     pan: [100, 0]
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
-		_, _, _, _, _, pan_gains = note_map[(9, 36)]
-		numpy.testing.assert_allclose(pan_gains, [1.0, 0.0], atol=1e-5)
+		asgn, _ = note_map[(9, 36)]
+		numpy.testing.assert_allclose(asgn.pan_gains, [1.0, 0.0], atol=1e-5)
 
 	def test_pan_wrong_channel_count_raises (self, tmp_path: pathlib.Path) -> None:
 		"""pan list length must match output_channels."""
@@ -893,61 +991,67 @@ assignments:
   - name: Kick
     channel: 10
     notes: 36
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
     pan: [50, 50, 50]
 """)
 		with pytest.raises(ValueError, match="pan"):
 			subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
 
-	def test_pitch_true_all_notes_rank_zero (self, tmp_path: pathlib.Path) -> None:
-		"""pitch: true on reference assigns rank 0 to all notes."""
+	def test_repitch_all_notes_same_pick (self, tmp_path: pathlib.Path) -> None:
+		"""repitch in process: all notes share pick 1 (same sample, pitched per note)."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Bass keyboard
     channel: 1
     notes: [48, 50, 52]
-    target: reference(BASS_TONE)
-    pitch: true
+    select:
+      where:
+        reference: BASS_TONE
+      order_by: similarity
+    process:
+      - repitch: true
     one_shot: false
 """)
 		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
 
 		for midi_note in [48, 50, 52]:
-			ttype, targ, rank, one_shot, pitch, pan_gains = note_map[(0, midi_note)]
-			assert rank == 0
-			assert pitch is True
+			asgn, pick = note_map[(0, midi_note)]
+			assert pick == 1
+			assert asgn.process.has_repitch()
 
-	def test_pitch_false_default_distributes_ranks (self, tmp_path: pathlib.Path) -> None:
-		"""Without pitch: true, notes get ascending ranks (existing behaviour)."""
+	def test_no_repitch_distributes_picks (self, tmp_path: pathlib.Path) -> None:
+		"""Without repitch, notes get ascending picks (rank distribution)."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kicks
     channel: 10
     notes: [36, 35]
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
+      order_by: similarity
     one_shot: true
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
-		_, _, rank_36, _, pitch_36, _ = note_map[(9, 36)]
-		_, _, rank_35, _, pitch_35, _ = note_map[(9, 35)]
-		assert rank_36 == 0
-		assert rank_35 == 1
-		assert pitch_36 is False
-		assert pitch_35 is False
+		assert note_map[(9, 36)][1] == 1
+		assert note_map[(9, 35)][1] == 2
+		assert not note_map[(9, 36)][0].process.has_repitch()
 
 	def test_note_name_in_map (self, tmp_path: pathlib.Path) -> None:
-		"""Note names (C4) are accepted in assignments."""
+		"""Note names (C2) are accepted in assignments."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick
     channel: 10
     notes: C2
-    target: reference(BD0025)
+    select:
+      where:
+        reference: BD0025
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
-
-		# C2 = MIDI 36
 		assert (9, 36) in note_map
 
 	def test_note_range_in_map (self, tmp_path: pathlib.Path) -> None:
@@ -957,15 +1061,18 @@ assignments:
   - name: Bass keyboard
     channel: 1
     notes: C2..C4
-    target: reference(BASS_TONE)
-    pitch: true
+    select:
+      where:
+        reference: BASS_TONE
+      order_by: similarity
+    process:
+      - repitch: true
 """)
 		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
 
-		# C2=36, C4=60 → 25 notes on channel 1 (mido ch 0)
 		assert len(note_map) == 25
-		assert (0, 36) in note_map   # C2
-		assert (0, 60) in note_map   # C4
+		assert (0, 36) in note_map
+		assert (0, 60) in note_map
 
 
 # ---------------------------------------------------------------------------
@@ -1051,12 +1158,9 @@ class TestUpdatePitchedAssignments:
 		notes: list[int] = [48, 50, 52],
 	) -> subsample.player.MidiPlayer:
 		"""Return a MidiPlayer with a pitched keyboard assignment."""
-		import numpy
 
-		note_map: subsample.player._NoteMap = {
-			(0, note): ("reference", ref_name, 0, False, True, numpy.array([0.707, 0.707], dtype=numpy.float32))
-			for note in notes
-		}
+		asgn = _make_assignment(name="Pitched", reference=ref_name, repitch=True, one_shot=False)
+		note_map = _make_note_map(asgn, channel=0, notes=notes)
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
@@ -1079,11 +1183,9 @@ class TestUpdatePitchedAssignments:
 
 	def test_no_pitched_assignments_no_enqueue (self) -> None:
 		"""No enqueue calls when no pitched assignments exist."""
-		import numpy
 
-		non_pitched_map: subsample.player._NoteMap = {
-			(9, 36): ("reference", "BD0025", 0, True, False, numpy.array([0.707, 0.707], dtype=numpy.float32)),
-		}
+		asgn = _make_assignment(name="Kicks", reference="BD0025", repitch=False)
+		non_pitched_map = _make_note_map(asgn, channel=9, notes=[36])
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
@@ -1106,19 +1208,25 @@ class TestUpdatePitchedAssignments:
 
 	def test_enqueues_for_pitched_reference (self) -> None:
 		"""enqueue_pitch_range is called with the matched record and notes."""
-		import numpy
-		import subsample.analysis
 
 		notes = [48, 50, 52]
 		player = self._make_player_with_pitch_map(notes=notes)
 
 		mock_record = unittest.mock.MagicMock()
+		mock_record.sample_id = 42
 		mock_record.spectral = unittest.mock.MagicMock()
 		mock_record.pitch    = unittest.mock.MagicMock()
 		mock_record.duration = 1.0
+		mock_record.name     = "tonal-sample"
 
-		player._similarity_matrix.get_match.return_value = 42
+		# The query engine calls instrument_library.samples() to get the
+		# candidate list, and similarity_matrix.get_matches() for ranked results.
+		player._instrument_library.samples.return_value = [mock_record]
 		player._instrument_library.get.return_value = mock_record
+		player._similarity_matrix.get_matches.return_value = [
+			unittest.mock.MagicMock(sample_id=42),
+		]
+
 		transform_manager = unittest.mock.MagicMock()
 		player._transform_manager = transform_manager
 
@@ -1149,9 +1257,17 @@ class TestUpdatePitchedAssignments:
 		player = self._make_player_with_pitch_map()
 
 		mock_record = unittest.mock.MagicMock()
+		mock_record.sample_id = 42
 		mock_record.name = "some-sample"
-		player._similarity_matrix.get_match.return_value = 42
+
+		# The query engine needs samples() to return the record, and
+		# get_matches() to provide ranked results for the reference.
+		player._instrument_library.samples.return_value = [mock_record]
 		player._instrument_library.get.return_value = mock_record
+		player._similarity_matrix.get_matches.return_value = [
+			unittest.mock.MagicMock(sample_id=42),
+		]
+
 		transform_manager = unittest.mock.MagicMock()
 		player._transform_manager = transform_manager
 
@@ -1162,15 +1278,12 @@ class TestUpdatePitchedAssignments:
 		transform_manager.enqueue_pitch_range.assert_not_called()
 		assert any("stable pitch" in r.message for r in caplog.records)
 
-	def test_enqueues_for_pitched_selector (self) -> None:
-		"""enqueue_pitch_range is called for a pitched() selector assignment."""
-		import numpy
+	def test_enqueues_for_pitched_filter (self) -> None:
+		"""enqueue_pitch_range is called for an assignment with pitched: true filter."""
 
 		notes = [48, 50, 52]
-		note_map: subsample.player._NoteMap = {
-			(0, note): ("pitched", "newest", 0, False, True, numpy.array([0.707, 0.707], dtype=numpy.float32))
-			for note in notes
-		}
+		asgn = _make_assignment(name="Pitched newest", pitched_filter=True, order_by="newest", repitch=True, one_shot=False)
+		note_map = _make_note_map(asgn, channel=0, notes=notes)
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
@@ -1186,15 +1299,20 @@ class TestUpdatePitchedAssignments:
 		)
 
 		mock_record = unittest.mock.MagicMock()
+		mock_record.sample_id = 42
 		mock_record.name = "tonal-sample"
+
+		# The query engine calls has_stable_pitch internally via the
+		# WherePredicate.matches() method when pitched=True.  We mock it
+		# to return True so the record passes the filter.
+		player._instrument_library.samples.return_value = [mock_record]
+		player._instrument_library.get.return_value = mock_record
 
 		transform_manager = unittest.mock.MagicMock()
 		player._transform_manager = transform_manager
-		player._instrument_library.get.return_value = mock_record
 
-		with unittest.mock.patch.object(player, "_resolve_pitched_selector", return_value=42):
-			with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=True):
-				player.update_pitched_assignments()
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=True):
+			player.update_pitched_assignments()
 
 		transform_manager.enqueue_pitch_range.assert_called_once()
 		call_args = transform_manager.enqueue_pitch_range.call_args
@@ -1202,12 +1320,10 @@ class TestUpdatePitchedAssignments:
 		assert sorted(call_args[0][1]) == sorted(notes)
 
 	def test_pitched_selector_no_match_skips (self) -> None:
-		"""No enqueue when pitched() selector resolves to None."""
-		import numpy
+		"""No enqueue when query returns no results."""
 
-		note_map: subsample.player._NoteMap = {
-			(0, 60): ("pitched", "newest", 0, False, True, numpy.array([0.707, 0.707], dtype=numpy.float32)),
-		}
+		asgn = _make_assignment(name="Pitched newest", pitched_filter=True, order_by="newest", repitch=True, one_shot=False)
+		note_map = _make_note_map(asgn, channel=0, notes=[60])
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
@@ -1225,261 +1341,222 @@ class TestUpdatePitchedAssignments:
 		transform_manager = unittest.mock.MagicMock()
 		player._transform_manager = transform_manager
 
-		with unittest.mock.patch.object(player, "_resolve_pitched_selector", return_value=None):
-			player.update_pitched_assignments()
+		# Mock the instrument library to return no samples (empty query result).
+		player._instrument_library.samples.return_value = []
+
+		player.update_pitched_assignments()
 
 		transform_manager.enqueue_pitch_range.assert_not_called()
 
+	def test_beat_match_pre_computation (self) -> None:
+		"""update_assignments() calls get_at_bpm() for beat_match assignments."""
+
+		asgn = _make_assignment(
+			name="Loops", beat_match=True, repitch=False,
+			order_by="newest", one_shot=False,
+		)
+		note_map = _make_note_map(asgn, channel=0, notes=[60])
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		mock_record = unittest.mock.MagicMock()
+		mock_record.sample_id = 7
+		mock_record.name = "loop-sample"
+
+		player._instrument_library.samples.return_value = [mock_record]
+		player._instrument_library.get.return_value = mock_record
+
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+
+		player.update_assignments()
+
+		# get_at_bpm should have been called to pre-compute the time-stretch variant.
+		transform_manager.get_at_bpm.assert_called_once()
+		call_args = transform_manager.get_at_bpm.call_args
+		assert call_args[0][0] == 7  # sample_id
+
+	def test_beat_match_with_explicit_bpm (self) -> None:
+		"""Per-assignment BPM override is passed to get_at_bpm."""
+
+		# beat_match with explicit bpm=120, grid=8
+		asgn = subsample.query.Assignment(
+			name="Explicit BPM",
+			select=(subsample.query.SelectSpec(order_by="newest"),),
+			process=subsample.query.ProcessSpec(steps=(
+				subsample.query.ProcessorStep(name="beat_match", params=(("bpm", 120), ("grid", 8))),
+			)),
+			one_shot=False,
+		)
+		note_map: subsample.player.NoteMap = {(0, 60): (asgn, 1)}
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		mock_record = unittest.mock.MagicMock()
+		mock_record.sample_id = 7
+
+		player._instrument_library.samples.return_value = [mock_record]
+		player._instrument_library.get.return_value = mock_record
+
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+
+		player.update_assignments()
+
+		transform_manager.get_at_bpm.assert_called_once()
+		call_kwargs = transform_manager.get_at_bpm.call_args[1]
+		assert call_kwargs["target_bpm"] == 120.0
+		assert call_kwargs["resolution"] == 8
+
 
 # ---------------------------------------------------------------------------
-# TestLoadMidiMap — pitched() target type
+# TestLoadMidiMapPitched — pitched select + repitch process
 # ---------------------------------------------------------------------------
 
 class TestLoadMidiMapPitched:
-	"""Test load_midi_map() parsing of pitched() target assignments."""
+	"""Test load_midi_map() parsing of pitched select + repitch process."""
 
 	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
 		p = tmp_path / "test-map.yaml"
 		p.write_text(content, encoding="utf-8")
 		return p
 
-	def test_pitched_oldest_target_parsed (self, tmp_path: pathlib.Path) -> None:
-		"""pitched(oldest) target is parsed as ttype='pitched', targ='oldest', rank=0, pitch=True."""
+	def test_pitched_oldest (self, tmp_path: pathlib.Path) -> None:
+		"""Pitched oldest: where pitched, order oldest, repitch."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Oldest pitched
     channel: 1
     notes: C2..C4
-    target: pitched(oldest)
+    select:
+      where:
+        pitched: true
+      order_by: oldest
+      pick: 1
+    process:
+      - repitch: true
     one_shot: false
 """)
 		note_map = subsample.player.load_midi_map(path, [])
 
-		# C2 = MIDI 36 on mido channel 0
 		assert (0, 36) in note_map
-		ttype, targ, rank, one_shot, pitch, _pan = note_map[(0, 36)]
-		assert ttype == "pitched"
-		assert targ == "oldest"
-		assert rank == 0
-		assert pitch is True
-		assert one_shot is False
+		asgn, pick = note_map[(0, 36)]
+		assert asgn.select[0].where.pitched is True
+		assert asgn.select[0].order_by == "oldest"
+		assert asgn.process.has_repitch()
+		assert asgn.one_shot is False
+		assert pick == 1
 
-	def test_pitched_newest_target_parsed (self, tmp_path: pathlib.Path) -> None:
-		"""pitched(newest) target is parsed correctly."""
+	def test_pitched_newest (self, tmp_path: pathlib.Path) -> None:
+		"""Pitched newest: where pitched, order newest, repitch."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Newest pitched
     channel: 2
     notes: 60
-    target: pitched(newest)
+    select:
+      where:
+        pitched: true
+      order_by: newest
+      pick: 1
+    process:
+      - repitch: true
 """)
 		note_map = subsample.player.load_midi_map(path, [])
 
 		assert (1, 60) in note_map
-		ttype, targ, rank, one_shot, pitch, _pan = note_map[(1, 60)]
-		assert ttype == "pitched"
-		assert targ == "newest"
-		assert rank == 0
-		assert pitch is True
+		asgn, _ = note_map[(1, 60)]
+		assert asgn.select[0].order_by == "newest"
+		assert asgn.process.has_repitch()
 
-	def test_pitched_numeric_index_parsed (self, tmp_path: pathlib.Path) -> None:
-		"""pitched(0) target is parsed with numeric selector stored as string."""
+	def test_pitched_nth (self, tmp_path: pathlib.Path) -> None:
+		"""Pitched pick 2: second pitch-stable sample."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Second pitched
     channel: 1
     notes: 60
-    target: pitched(1)
+    select:
+      where:
+        pitched: true
+      order_by: oldest
+      pick: 2
+    process:
+      - repitch: true
 """)
 		note_map = subsample.player.load_midi_map(path, [])
 
 		assert (0, 60) in note_map
-		ttype, targ, rank, _one_shot, pitch, _pan = note_map[(0, 60)]
-		assert ttype == "pitched"
-		assert targ == "1"
-		assert pitch is True
+		asgn, pick = note_map[(0, 60)]
+		assert asgn.select[0].pick == 2
+		assert pick == 2
 
-	def test_pitched_invalid_selector_skipped (
-		self,
-		tmp_path: pathlib.Path,
-		caplog: pytest.LogCaptureFixture,
-	) -> None:
-		"""pitched() with an unrecognised selector is skipped with a WARNING."""
-		import logging
-
-		path = self._write_map(tmp_path, """
-assignments:
-  - name: Bad pitched
-    channel: 1
-    notes: 60
-    target: pitched(banana)
-""")
-		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			note_map = subsample.player.load_midi_map(path, [])
-
-		assert len(note_map) == 0
-		assert any("banana" in r.message for r in caplog.records)
-
-	def test_pitched_negative_index_skipped (
-		self,
-		tmp_path: pathlib.Path,
-		caplog: pytest.LogCaptureFixture,
-	) -> None:
-		"""pitched(-1) is rejected as an invalid selector."""
-		import logging
-
-		path = self._write_map(tmp_path, """
-assignments:
-  - name: Negative pitched
-    channel: 1
-    notes: 60
-    target: pitched(-1)
-""")
-		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			note_map = subsample.player.load_midi_map(path, [])
-
-		assert len(note_map) == 0
-
-	def test_pitched_all_notes_rank_zero_pitch_true (self, tmp_path: pathlib.Path) -> None:
-		"""All notes in a pitched() range get rank=0 and pitch=True regardless of the pitch: field."""
+	def test_repitch_all_notes_same_pick (self, tmp_path: pathlib.Path) -> None:
+		"""All notes in a repitched range share pick 1."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Pitched keyboard
     channel: 1
     notes: [48, 50, 52]
-    target: pitched(newest)
+    select:
+      where:
+        pitched: true
+      order_by: newest
+      pick: 1
+    process:
+      - repitch: true
     one_shot: false
 """)
 		note_map = subsample.player.load_midi_map(path, [])
 
 		for midi_note in [48, 50, 52]:
-			ttype, targ, rank, _one_shot, pitch, _pan = note_map[(0, midi_note)]
-			assert ttype == "pitched"
-			assert rank == 0
-			assert pitch is True
+			asgn, pick = note_map[(0, midi_note)]
+			assert pick == 1
+			assert asgn.process.has_repitch()
 
 	def test_pitched_full_range (self, tmp_path: pathlib.Path) -> None:
-		"""pitched(oldest) with C-1..G9 maps all 128 MIDI notes."""
+		"""Pitched with C-1..G9 maps all 128 MIDI notes."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Full keyboard
     channel: 1
     notes: C-1..G9
-    target: pitched(oldest)
+    select:
+      where:
+        pitched: true
+      order_by: oldest
+    process:
+      - repitch: true
 """)
 		note_map = subsample.player.load_midi_map(path, [])
-
 		assert len(note_map) == 128
 
 
-# ---------------------------------------------------------------------------
-# TestResolvePitchedSelector
-# ---------------------------------------------------------------------------
-
-class TestResolvePitchedSelector:
-	"""Tests for MidiPlayer._resolve_pitched_selector()."""
-
-	def _make_player (self) -> subsample.player.MidiPlayer:
-		"""Return a minimal MidiPlayer with mocked dependencies."""
-		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
-		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
-
-		return subsample.player.MidiPlayer(
-			"Test Device",
-			threading.Event(),
-			instrument_library=instrument_library,
-			similarity_matrix=similarity_matrix,
-			midi_map={},
-			sample_rate=44100,
-			bit_depth=16,
-		)
-
-	def _make_record (self, sample_id: int, stable: bool) -> unittest.mock.MagicMock:
-		"""Create a mock SampleRecord with a controllable has_stable_pitch result."""
-		record = unittest.mock.MagicMock()
-		record.sample_id = sample_id
-		record.name = f"sample-{sample_id}"
-		# Attach the stability flag so the side_effect can read it from record.spectral.
-		record.spectral._stable = stable
-		return record
-
-	def _stable_side_effect (self, spectral: unittest.mock.MagicMock, pitch: object, duration: object) -> bool:
-		return bool(spectral._stable)
-
-	def test_oldest_returns_first_stable (self) -> None:
-		"""'oldest' skips non-stable records and returns the lowest stable sample_id."""
-		player = self._make_player()
-
-		r1 = self._make_record(1, stable=False)
-		r2 = self._make_record(2, stable=True)
-		r3 = self._make_record(3, stable=True)
-		player._instrument_library.samples.return_value = [r1, r2, r3]
-
-		with unittest.mock.patch("subsample.analysis.has_stable_pitch", side_effect=self._stable_side_effect):
-			result = player._resolve_pitched_selector("oldest")
-
-		assert result == 2
-
-	def test_newest_returns_last_stable (self) -> None:
-		"""'newest' returns the highest stable sample_id."""
-		player = self._make_player()
-
-		r1 = self._make_record(1, stable=True)
-		r2 = self._make_record(2, stable=True)
-		r3 = self._make_record(3, stable=False)
-		player._instrument_library.samples.return_value = [r1, r2, r3]
-
-		with unittest.mock.patch("subsample.analysis.has_stable_pitch", side_effect=self._stable_side_effect):
-			result = player._resolve_pitched_selector("newest")
-
-		assert result == 2
-
-	def test_numeric_index (self) -> None:
-		"""Numeric selectors return the correct sample by 0-indexed position."""
-		player = self._make_player()
-
-		r1 = self._make_record(1, stable=True)
-		r2 = self._make_record(2, stable=True)
-		r3 = self._make_record(3, stable=True)
-		player._instrument_library.samples.return_value = [r1, r2, r3]
-
-		with unittest.mock.patch("subsample.analysis.has_stable_pitch", side_effect=self._stable_side_effect):
-			assert player._resolve_pitched_selector("0") == 1
-			assert player._resolve_pitched_selector("1") == 2
-			assert player._resolve_pitched_selector("2") == 3
-
-	def test_index_out_of_range_returns_none (self) -> None:
-		"""Numeric index beyond available samples returns None."""
-		player = self._make_player()
-
-		r1 = self._make_record(1, stable=True)
-		player._instrument_library.samples.return_value = [r1]
-
-		with unittest.mock.patch("subsample.analysis.has_stable_pitch", side_effect=self._stable_side_effect):
-			result = player._resolve_pitched_selector("5")
-
-		assert result is None
-
-	def test_no_stable_samples_returns_none (self) -> None:
-		"""Returns None for all selectors when no pitch-stable samples exist."""
-		player = self._make_player()
-
-		r1 = self._make_record(1, stable=False)
-		player._instrument_library.samples.return_value = [r1]
-
-		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=False):
-			assert player._resolve_pitched_selector("oldest") is None
-			assert player._resolve_pitched_selector("newest") is None
-			assert player._resolve_pitched_selector("0") is None
-
-	def test_empty_library_returns_none (self) -> None:
-		"""Returns None for all selectors when the library is empty."""
-		player = self._make_player()
-		player._instrument_library.samples.return_value = []
-
-		assert player._resolve_pitched_selector("oldest") is None
-		assert player._resolve_pitched_selector("newest") is None
-		assert player._resolve_pitched_selector("0") is None
+# NOTE: TestResolvePitchedSelector, TestResolveLibraryPosition, and
+# TestResolveTarget were removed in the select/process redesign.
+# Resolution logic is now in the query engine (tested in test_query.py).
 
 
 # ---------------------------------------------------------------------------
@@ -1487,403 +1564,203 @@ class TestResolvePitchedSelector:
 # ---------------------------------------------------------------------------
 
 class TestNewestOldestTarget:
-	"""Tests for newest() and oldest() target type parsing."""
+	"""Tests for newest/oldest ordering in the new select format."""
 
 	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
 		p = tmp_path / "test-map.yaml"
 		p.write_text(content, encoding="utf-8")
 		return p
 
-	def test_newest_target_parsed (self, tmp_path: pathlib.Path) -> None:
-		"""newest() target is parsed as ttype='newest', targ='', rank=0, pitch=True."""
+	def test_newest_order (self, tmp_path: pathlib.Path) -> None:
+		"""order_by: newest parsed correctly."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Latest capture
     channel: 2
     notes: C2..C4
-    target: newest()
+    select:
+      order_by: newest
+      pick: 1
+    process:
+      - repitch: true
     one_shot: false
 """)
 		note_map = subsample.player.load_midi_map(path, [])
 
 		assert (1, 36) in note_map
-		ttype, targ, rank, one_shot, pitch, _pan = note_map[(1, 36)]
-		assert ttype == "newest"
-		assert targ == ""
-		assert rank == 0
-		assert pitch is True
-		assert one_shot is False
+		asgn, pick = note_map[(1, 36)]
+		assert asgn.select[0].order_by == "newest"
+		assert asgn.process.has_repitch()
+		assert asgn.one_shot is False
 
-	def test_oldest_target_parsed (self, tmp_path: pathlib.Path) -> None:
-		"""oldest() target is parsed as ttype='oldest', targ='', rank=0, pitch=True."""
+	def test_oldest_order (self, tmp_path: pathlib.Path) -> None:
+		"""order_by: oldest parsed correctly."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: First capture
     channel: 3
     notes: C2..C4
-    target: oldest()
+    select:
+      order_by: oldest
+      pick: 1
     one_shot: false
 """)
 		note_map = subsample.player.load_midi_map(path, [])
 
 		assert (2, 36) in note_map
-		ttype, targ, rank, one_shot, pitch, _pan = note_map[(2, 36)]
-		assert ttype == "oldest"
-		assert targ == ""
-		assert rank == 0
-		assert pitch is True
-		assert one_shot is False
+		asgn, _ = note_map[(2, 36)]
+		assert asgn.select[0].order_by == "oldest"
+		assert asgn.one_shot is False
 
-	def test_newest_all_notes_pitch_true (self, tmp_path: pathlib.Path) -> None:
-		"""All notes in a newest() range get rank=0 and pitch=True."""
-		path = self._write_map(tmp_path, """
-assignments:
-  - name: Latest keyboard
-    channel: 2
-    notes: [48, 50, 52]
-    target: newest()
-    one_shot: false
-""")
-		note_map = subsample.player.load_midi_map(path, [])
-
-		for midi_note in [48, 50, 52]:
-			ttype, targ, rank, _one_shot, pitch, _pan = note_map[(1, midi_note)]
-			assert ttype == "newest"
-			assert targ == ""
-			assert rank == 0
-			assert pitch is True
-
-	def test_newest_no_reference_validation (self, tmp_path: pathlib.Path) -> None:
-		"""newest() is accepted with an empty reference list."""
+	def test_newest_no_reference_needed (self, tmp_path: pathlib.Path) -> None:
+		"""newest ordering is accepted with an empty reference list."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Latest capture
     channel: 2
     notes: 60
-    target: newest()
+    select:
+      order_by: newest
 """)
 		note_map = subsample.player.load_midi_map(path, [])
-
 		assert (1, 60) in note_map
 
 
-# ---------------------------------------------------------------------------
-# TestResolveLibraryPosition
-# ---------------------------------------------------------------------------
-
-class TestResolveLibraryPosition:
-	"""Tests for MidiPlayer._resolve_library_position()."""
-
-	def _make_player (self) -> subsample.player.MidiPlayer:
-		"""Return a minimal MidiPlayer with mocked dependencies."""
-		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
-		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
-
-		return subsample.player.MidiPlayer(
-			"Test Device",
-			threading.Event(),
-			instrument_library=instrument_library,
-			similarity_matrix=similarity_matrix,
-			midi_map={},
-			sample_rate=44100,
-			bit_depth=16,
-		)
-
-	def _make_record (self, sample_id: int) -> unittest.mock.MagicMock:
-		record = unittest.mock.MagicMock()
-		record.sample_id = sample_id
-		record.name = f"sample-{sample_id}"
-		return record
-
-	def test_newest_returns_last_sample (self) -> None:
-		"""'newest' returns the sample_id of the last (most recent) sample."""
-		player = self._make_player()
-		r1 = self._make_record(1)
-		r2 = self._make_record(2)
-		r3 = self._make_record(3)
-		player._instrument_library.samples.return_value = [r1, r2, r3]
-
-		assert player._resolve_library_position("newest") == 3
-
-	def test_oldest_returns_first_sample (self) -> None:
-		"""'oldest' returns the sample_id of the first (least recent) sample."""
-		player = self._make_player()
-		r1 = self._make_record(1)
-		r2 = self._make_record(2)
-		r3 = self._make_record(3)
-		player._instrument_library.samples.return_value = [r1, r2, r3]
-
-		assert player._resolve_library_position("oldest") == 1
-
-	def test_newest_includes_non_pitched_samples (self) -> None:
-		"""newest() resolves to any sample, not just pitch-stable ones."""
-		player = self._make_player()
-		r1 = self._make_record(10)
-		r2 = self._make_record(20)
-		player._instrument_library.samples.return_value = [r1, r2]
-
-		# No has_stable_pitch filtering — any sample qualifies
-		assert player._resolve_library_position("newest") == 20
-
-	def test_empty_library_returns_none (self) -> None:
-		"""Returns None when the library is empty."""
-		player = self._make_player()
-		player._instrument_library.samples.return_value = []
-
-		assert player._resolve_library_position("newest") is None
-		assert player._resolve_library_position("oldest") is None
+# NOTE: TestResolveLibraryPosition removed — logic is now in query engine.
 
 
 # ---------------------------------------------------------------------------
 # TestLoadMidiMapChain — load_midi_map() parsing of chain targets
 # ---------------------------------------------------------------------------
 
-class TestLoadMidiMapChain:
-	"""Test load_midi_map() parsing of chain target assignments."""
+class TestLoadMidiMapFallback:
+	"""Test load_midi_map() parsing of select-as-list (fallback chain)."""
 
 	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
 		p = tmp_path / "test-map.yaml"
 		p.write_text(content, encoding="utf-8")
 		return p
 
-	def test_basic_chain_is_parsed (self, tmp_path: pathlib.Path) -> None:
-		"""Chain with two valid sub-targets stores target_type='chain' and _ChainTargets."""
+	def test_fallback_list_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""select as a list creates a multi-spec fallback chain."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick with fallback
     channel: 10
     notes: 36
-    target:
-      chain:
-        - sample(my-kick)
-        - reference(BD0025)
+    select:
+      - where:
+          name: my-kick
+      - where:
+          reference: BD0025
     one_shot: true
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"])
 
 		assert (9, 36) in note_map
-		ttype, targ, rank, one_shot, pitch, _ = note_map[(9, 36)]
-		assert ttype == "chain"
-		assert targ == (("sample", "my-kick"), ("reference", "BD0025"))
-		assert rank == 0
-		assert one_shot is True
-		assert pitch is False
+		asgn, _ = note_map[(9, 36)]
+		assert len(asgn.select) == 2
+		assert asgn.select[0].where.name == "my-kick"
+		assert asgn.select[1].where.reference == "BD0025"
+		assert asgn.one_shot is True
 
-	def test_chain_sub_targets_preserve_order (self, tmp_path: pathlib.Path) -> None:
-		"""Sub-target order in the chain matches the YAML list order."""
+	def test_fallback_preserves_order (self, tmp_path: pathlib.Path) -> None:
+		"""Fallback specs maintain their YAML list order."""
 		path = self._write_map(tmp_path, """
 assignments:
-  - name: Multi-chain
+  - name: Multi-fallback
     channel: 1
     notes: 60
-    target:
-      chain:
-        - oldest()
-        - newest()
-        - sample(fallback)
+    select:
+      - where:
+          name: first-choice
+      - order_by: oldest
+      - order_by: newest
 """)
 		note_map = subsample.player.load_midi_map(path, [])
 
-		ttype, targ, _, _, _, _ = note_map[(0, 60)]
-		assert ttype == "chain"
-		assert targ == (("oldest", ""), ("newest", ""), ("sample", "fallback"))
+		asgn, _ = note_map[(0, 60)]
+		assert len(asgn.select) == 3
+		assert asgn.select[0].where.name == "first-choice"
+		assert asgn.select[1].order_by == "oldest"
+		assert asgn.select[2].order_by == "newest"
 
-	def test_chain_with_pitch_true (self, tmp_path: pathlib.Path) -> None:
-		"""Chain with pitch: true sets pitch flag and rank 0 for every note."""
-		import logging
+	def test_fallback_with_repitch (self, tmp_path: pathlib.Path) -> None:
+		"""Fallback chain with repitch: all notes share pick 1."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Pitched fallback
     channel: 1
     notes: C2..C3
-    target:
-      chain:
-        - sample(my-tone)
-        - reference(BASS_TONE)
-    pitch: true
+    select:
+      - where:
+          name: my-tone
+      - where:
+          reference: BASS_TONE
+    process:
+      - repitch: true
 """)
 		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
 
 		for midi_note in range(36, 49):
 			assert (0, midi_note) in note_map
-			ttype, targ, rank, _, pitch, _ = note_map[(0, midi_note)]
-			assert ttype == "chain"
-			assert rank == 0
-			assert pitch is True
+			asgn, pick = note_map[(0, midi_note)]
+			assert pick == 1
+			assert asgn.process.has_repitch()
 
-	def test_chain_single_element_is_skipped (
+	def test_fallback_invalid_reference_skips (
 		self,
 		tmp_path: pathlib.Path,
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
-		"""A chain with fewer than 2 sub-targets is skipped with a WARNING."""
+		"""Fallback with unknown reference is skipped."""
 		import logging
 		path = self._write_map(tmp_path, """
 assignments:
-  - name: Too short
+  - name: Bad ref
     channel: 10
     notes: 36
-    target:
-      chain:
-        - sample(my-kick)
+    select:
+      - where:
+          name: my-kick
+      - where:
+          reference: UNKNOWN
 """)
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
 			note_map = subsample.player.load_midi_map(path, [])
 
 		assert len(note_map) == 0
-		assert any("at least 2" in r.message for r in caplog.records)
-
-	def test_chain_invalid_reference_skips_assignment (
-		self,
-		tmp_path: pathlib.Path,
-		caplog: pytest.LogCaptureFixture,
-	) -> None:
-		"""A chain with a reference sub-target not in the library is skipped."""
-		import logging
-		path = self._write_map(tmp_path, """
-assignments:
-  - name: Kick bad ref
-    channel: 10
-    notes: 36
-    target:
-      chain:
-        - sample(my-kick)
-        - reference(UNKNOWN)
-""")
-		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			note_map = subsample.player.load_midi_map(path, [])
-
-		assert len(note_map) == 0
-
-	def test_chain_nested_chain_is_skipped (
-		self,
-		tmp_path: pathlib.Path,
-		caplog: pytest.LogCaptureFixture,
-	) -> None:
-		"""A chain() sub-target inside a chain is rejected with a WARNING."""
-		import logging
-		path = self._write_map(tmp_path, """
-assignments:
-  - name: Nested
-    channel: 10
-    notes: 36
-    target:
-      chain:
-        - sample(kick)
-        - chain(something)
-""")
-		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			note_map = subsample.player.load_midi_map(path, [])
-
-		assert len(note_map) == 0
-		assert any("nested chain" in r.message.lower() for r in caplog.records)
-
-	def test_chain_all_notes_get_same_chain (self, tmp_path: pathlib.Path) -> None:
-		"""Multi-note chain: every note in the list stores the same chain (no rank distribution)."""
-		path = self._write_map(tmp_path, """
-assignments:
-  - name: Kicks
-    channel: 10
-    notes: [36, 35, 37]
-    target:
-      chain:
-        - sample(my-kick)
-        - reference(BD0025)
-""")
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
-
-		for midi_note in [36, 35, 37]:
-			ttype, targ, rank, _, _, _ = note_map[(9, midi_note)]
-			assert ttype == "chain"
-			assert targ == (("sample", "my-kick"), ("reference", "BD0025"))
-			assert rank == 0
 
 
 # ---------------------------------------------------------------------------
-# TestResolveTarget — MidiPlayer._resolve_target()
+# TestFallbackResolution — select-as-list fallback in _handle_message()
 # ---------------------------------------------------------------------------
 
-class TestResolveTarget:
-	"""Tests for MidiPlayer._resolve_target() resolution helper."""
+class TestFallbackResolution:
+	"""Integration tests for select-as-a-list fallback in _handle_message()."""
 
-	def _make_player (self) -> subsample.player.MidiPlayer:
+	def _make_player_with_fallback (
+		self,
+		select_specs: tuple[subsample.query.SelectSpec, ...],
+	) -> subsample.player.MidiPlayer:
+		"""Return a MidiPlayer with a fallback-chain assignment on ch 1, note 60."""
+
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
 
-		return subsample.player.MidiPlayer(
-			"Test Device",
-			threading.Event(),
-			instrument_library=instrument_library,
-			similarity_matrix=similarity_matrix,
-			midi_map={},
-			sample_rate=44100,
-			bit_depth=16,
+		asgn = subsample.query.Assignment(
+			name="Fallback test",
+			select=select_specs,
 		)
 
-	def test_sample_found (self) -> None:
-		"""'sample' target returns the sample_id from find_by_name."""
-		player = self._make_player()
-		player._instrument_library.find_by_name.return_value = 42
-
-		assert player._resolve_target("sample", "my-kick") == 42
-		player._instrument_library.find_by_name.assert_called_once_with("my-kick")
-
-	def test_sample_not_found (self) -> None:
-		"""'sample' target returns None when the sample is not in the library."""
-		player = self._make_player()
-		player._instrument_library.find_by_name.return_value = None
-
-		assert player._resolve_target("sample", "missing") is None
-
-	def test_reference_found (self) -> None:
-		"""'reference' target returns sample_id from similarity_matrix."""
-		player = self._make_player()
-		player._similarity_matrix.get_match.return_value = 7
-
-		assert player._resolve_target("reference", "BD0025", rank=0) == 7
-
-	def test_reference_rank_fallback (self) -> None:
-		"""'reference' at rank N falls back to rank 0 when rank N has no match."""
-		player = self._make_player()
-		player._similarity_matrix.get_match.side_effect = [None, 5]
-
-		result = player._resolve_target("reference", "BD0025", rank=1)
-
-		assert result == 5
-		assert player._similarity_matrix.get_match.call_count == 2
-
-	def test_unknown_type_returns_none (self) -> None:
-		"""An unknown target type returns None rather than raising."""
-		player = self._make_player()
-		assert player._resolve_target("bogus", "") is None
-
-
-# ---------------------------------------------------------------------------
-# TestChainResolution — chain dispatch in _handle_message()
-# ---------------------------------------------------------------------------
-
-class TestChainResolution:
-	"""Integration tests for chain target resolution inside _handle_message()."""
-
-	def _make_player (
-		self,
-		chain_targets: subsample.player._ChainTargets,
-		pitch: bool = False,
-	) -> subsample.player.MidiPlayer:
-		"""Return a MidiPlayer with a single chain-mapped note (ch 1, note 60)."""
-		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
-		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
-
-		midi_map: subsample.player._NoteMap = {
-			(0, 60): ("chain", chain_targets, 0, True, pitch, subsample.player._parse_pan_gains(None, 2, "test")),
-		}
+		note_map: subsample.player.NoteMap = {(0, 60): (asgn, 1)}
 
 		return subsample.player.MidiPlayer(
 			"Test Device",
 			threading.Event(),
 			instrument_library=instrument_library,
 			similarity_matrix=similarity_matrix,
-			midi_map=midi_map,
+			midi_map=note_map,
 			sample_rate=44100,
 			bit_depth=16,
 		)
@@ -1896,55 +1773,16 @@ class TestChainResolution:
 		msg.velocity = velocity
 		return msg
 
-	def test_first_target_resolves (self) -> None:
-		"""Chain uses the first sub-target when it resolves to a sample."""
-		import numpy
-		player = self._make_player((("sample", "first"), ("sample", "second")))
-
-		record = unittest.mock.MagicMock()
-		record.audio = numpy.zeros((100, 1), dtype=numpy.int16)
-		record.level = unittest.mock.MagicMock()
-		record.level.peak = 0.5
-		record.level.rms = 0.1
-		record.name = "first"
-		record.duration = 0.01
-
-		player._instrument_library.find_by_name.side_effect = lambda name: 1 if name == "first" else None
-		player._instrument_library.get.return_value = record
-
-		player._handle_message(self._note_on())
-
-		with player._voices_lock:
-			assert len(player._voices) == 1
-
-	def test_first_fails_second_used (self) -> None:
-		"""Chain falls back to the second sub-target when the first returns None."""
-		import numpy
-		player = self._make_player((("sample", "missing"), ("sample", "present")))
-
-		record = unittest.mock.MagicMock()
-		record.audio = numpy.zeros((100, 1), dtype=numpy.int16)
-		record.level = unittest.mock.MagicMock()
-		record.level.peak = 0.5
-		record.level.rms = 0.1
-		record.name = "present"
-		record.duration = 0.01
-
-		player._instrument_library.find_by_name.side_effect = (
-			lambda name: 2 if name == "present" else None
-		)
-		player._instrument_library.get.return_value = record
-
-		player._handle_message(self._note_on())
-
-		with player._voices_lock:
-			assert len(player._voices) == 1
-
 	def test_all_fail_plays_silence (self) -> None:
-		"""Chain plays silence (no voice added) when all sub-targets return None."""
-		player = self._make_player((("sample", "a"), ("sample", "b")))
+		"""Fallback plays silence when all select specs return no results."""
 
-		player._instrument_library.find_by_name.return_value = None
+		player = self._make_player_with_fallback((
+			subsample.query.SelectSpec(where=subsample.query.WherePredicate(name="a")),
+			subsample.query.SelectSpec(where=subsample.query.WherePredicate(name="b")),
+		))
+
+		# Empty library → no matches.
+		player._instrument_library.samples.return_value = []
 
 		player._handle_message(self._note_on())
 

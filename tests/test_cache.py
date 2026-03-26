@@ -103,6 +103,7 @@ class TestSaveAndLoadRoundTrip:
 		assert r_rhythm.beat_times       == rhythm.beat_times
 		assert r_rhythm.pulse_peak_times == rhythm.pulse_peak_times
 		assert r_rhythm.onset_times      == rhythm.onset_times
+		assert r_rhythm.attack_times     == rhythm.attack_times
 		assert r_rhythm.onset_count      == rhythm.onset_count
 		assert numpy.allclose(r_rhythm.pulse_curve, rhythm.pulse_curve)
 
