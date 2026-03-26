@@ -968,7 +968,22 @@ class MidiPlayer:
 				)
 				return
 
-			# 2. Fall back to the base variant (float32, peak-normalised, no DSP).
+			# 2. Check for a time-stretch variant (rhythmic samples).
+			# Returns None immediately when target_bpm is disabled (0.0) or
+			# the variant is not yet cached (enqueued for next trigger).
+			stretched = self._transform_manager.get_at_bpm(sample_id)
+
+			if stretched is not None:
+				rendered = self._render_float(stretched.audio, stretched.level, msg.velocity, pan_gains)
+				with self._voices_lock:
+					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
+				_log.debug(
+					"note %d (vel %d) → %r → %r (stretched variant)  (%.2fs)",
+					msg.note, msg.velocity, target_arg, record.name, stretched.duration,
+				)
+				return
+
+			# 3. Fall back to the base variant (float32, peak-normalised, no DSP).
 			# Available for every sample once the background worker has run.
 			base = self._transform_manager.get_base(sample_id)
 

@@ -53,7 +53,13 @@ Data flow
   MIDI note trigger
       → TransformManager.get_pitched(sample_id, midi_note)
           → hit:  return TransformResult  (player applies gain + pan, no conversion)
-          → miss: enqueue for next trigger, return None  (player uses original)
+          → miss: try next tier
+      → TransformManager.get_at_bpm(sample_id)
+          → hit:  return TransformResult  (beat-quantised variant)
+          → miss/skip: enqueue if qualifying, return None  (player falls back)
+      → TransformManager.get_base(sample_id)
+          → hit:  return TransformResult  (float32 copy, no DSP)
+          → miss: player converts from int PCM on this trigger
 
   InstrumentLibrary evicts sample_id
       → TransformManager.on_parent_evicted([sample_id])
@@ -62,7 +68,8 @@ Data flow
   Target BPM changes
       → TransformManager.on_bpm_change(new_bpm)
           → TransformCache.remove_by_step_type(TimeStretch)
-          → TransformProcessor.enqueue_bpm_change(all_rhythmic_records, new_bpm)
+          → filter by min_onset_count
+          → TransformProcessor.enqueue_bpm_change(qualifying_records, new_bpm)
 
 How to add a new transform type
 --------------------------------
@@ -180,15 +187,20 @@ class TimeStretch:
 
 	"""Time-stretch the audio to match a target tempo without changing pitch.
 
+	Uses beat-quantized non-linear stretching: detected onsets are snapped to
+	a grid at target_bpm / resolution, then pyrubberband.timemap_stretch()
+	applies the mapping in a single high-quality offline Rubber Band call.
+	Samples with fewer than 2 onsets receive a simple global time-stretch.
+
 	target_bpm: The desired playback tempo in BPM.
-	The stretch ratio is computed from the parent sample's rhythm.tempo_bpm
-	and target_bpm: ratio = source_bpm / target_bpm.
-	Unimplemented — handler not yet registered in TransformProcessor._HANDLERS.
+	resolution: Grid subdivision (1=whole, 2=half, 4=quarter, 8=eighth,
+	            16=sixteenth).  Higher values give finer onset alignment.
 	"""
 
 	PRIORITY: typing.ClassVar[int] = TIME_STRETCH_PRIORITY
 
-	target_bpm: float
+	target_bpm:  float
+	resolution:  int = 16
 
 
 # Union of all known transform step types.
@@ -408,13 +420,17 @@ class TransformCache:
 		self,
 		sample_id:  int,
 		target_bpm: float,
+		resolution: int = 16,
 	) -> typing.Optional[TransformResult]:
 
 		"""Convenience: look up a time-stretch-only variant by sample ID and BPM."""
 
 		key = TransformKey(
 			sample_id=sample_id,
-			spec=TransformSpec(steps=(TimeStretch(target_bpm=target_bpm),)),
+			spec=TransformSpec(steps=(TimeStretch(
+				target_bpm=target_bpm,
+				resolution=resolution,
+			),)),
 		)
 
 		return self.get(key)
@@ -573,10 +589,9 @@ class TransformProcessor:
 	"""
 
 	# Dispatch table: step type → apply function.
-	# PitchShift registered at module load (Phase 2, pyrubberband).
+	# PitchShift and TimeStretch are registered at module load.
 	# Populate here as further transforms are implemented:
-	#   _HANDLERS[EnvelopeAdjust] = _apply_envelope     (Phase 3)
-	#   _HANDLERS[TimeStretch]    = _apply_time_stretch (Phase 3)
+	#   _HANDLERS[EnvelopeAdjust] = _apply_envelope
 	_HANDLERS: typing.ClassVar[dict[type, _ApplyFn]] = {}
 
 	def __init__ (
@@ -634,9 +649,8 @@ class TransformProcessor:
 			return
 
 		# Guard: don't submit jobs that will always fail because a handler is
-		# not yet registered.  In Phase 1 _HANDLERS is empty, so all enqueue
-		# calls from get_pitched() / on_sample_added() are silently dropped.
-		# Once a handler is registered this check passes and jobs run normally.
+		# not yet registered (e.g. EnvelopeAdjust).  Once a handler is
+		# registered the check passes and jobs run normally.
 		if not all(type(step) in self._HANDLERS for step in spec.steps):
 			return
 
@@ -675,6 +689,7 @@ class TransformProcessor:
 		self,
 		records:    list["subsample.library.SampleRecord"],
 		target_bpm: float,
+		resolution: int = 16,
 	) -> None:
 
 		"""Submit time-stretch jobs for all rhythmic samples.
@@ -683,7 +698,10 @@ class TransformProcessor:
 		(rhythm.tempo_bpm > 0).  Samples with no beat grid are skipped.
 		"""
 
-		spec = TransformSpec(steps=(TimeStretch(target_bpm=target_bpm),))
+		spec = TransformSpec(steps=(TimeStretch(
+			target_bpm=target_bpm,
+			resolution=resolution,
+		),))
 
 		for record in records:
 			if record.rhythm.tempo_bpm > 0.0:
@@ -863,24 +881,49 @@ class TransformManager:
 
 		return result
 
-	def get_at_bpm (
-		self,
-		sample_id:  int,
-		target_bpm: float,
-	) -> typing.Optional[TransformResult]:
+	def get_at_bpm (self, sample_id: int) -> typing.Optional[TransformResult]:
 
 		"""Return a cached time-stretch variant, or None.
 
-		On a cache miss, enqueues the transform and returns None.
+		Reads target_bpm, quantize_resolution, and min_onset_count from the
+		stored config so the caller (player) does not need to know the BPM.
+		This keeps the player decoupled from transform config — a future
+		MIDI-clock BPM source only needs to update the manager, not the player.
+
+		On a cache miss for a qualifying sample, enqueues the transform and
+		returns None so the variant is ready on the next trigger.
+
+		Returns None immediately when:
+		  - target_bpm is disabled (0.0)
+		  - the sample has no detected rhythm
+		  - the sample has fewer onsets than min_onset_count
 		"""
 
-		result = self._cache.get_stretched(sample_id, target_bpm)
+		if self._cfg.target_bpm <= 0.0:
+			return None
+
+		# Check whether this sample qualifies for time-stretching.
+		# Without this gate, every MIDI trigger would enqueue a stretch
+		# job for non-rhythmic samples on cache miss.
+		record = self._instrument_library.get(sample_id)
+
+		if record is None:
+			return None
+
+		if (record.rhythm.tempo_bpm <= 0.0
+				or record.rhythm.onset_count < self._cfg.min_onset_count):
+			return None
+
+		spec = TransformSpec(steps=(TimeStretch(
+			target_bpm=self._cfg.target_bpm,
+			resolution=self._cfg.quantize_resolution,
+		),))
+
+		key    = TransformKey(sample_id=sample_id, spec=spec)
+		result = self._cache.get(key)
 
 		if result is None:
-			record = self._instrument_library.get(sample_id)
-			if record is not None:
-				spec = TransformSpec(steps=(TimeStretch(target_bpm=target_bpm),))
-				self._processor.enqueue(record, spec)
+			self._processor.enqueue(record, spec)
 
 		return result
 
@@ -949,17 +992,22 @@ class TransformManager:
 		enqueue_pitch_range().  This avoids a fixed-range cap and ensures the
 		full assigned note range is covered.
 
-		If target_bpm > 0 and the sample has detected rhythmic content, a
-		TimeStretch variant is also enqueued (requires Phase 3 handler).
+		If target_bpm > 0 and the sample has detected rhythm with at least
+		min_onset_count transients, a TimeStretch variant is also enqueued.
 		"""
 
 		# Base variant: always enqueue regardless of pitch content.
 		self._processor.enqueue(record, _BASE_VARIANT_SPEC)
 
-		# Auto-BPM time-stretch: enqueue if target set and sample has detected rhythm.
-		# TimeStretch handler not yet registered (Phase 3) — enqueue() silently skips.
-		if self._cfg.target_bpm > 0.0 and record.rhythm.tempo_bpm > 0.0:
-			spec = TransformSpec(steps=(TimeStretch(target_bpm=self._cfg.target_bpm),))
+		# Auto-BPM time-stretch: enqueue if target set, sample has detected rhythm,
+		# and enough onsets to be considered genuinely rhythmic.
+		if (self._cfg.target_bpm > 0.0
+				and record.rhythm.tempo_bpm > 0.0
+				and record.rhythm.onset_count >= self._cfg.min_onset_count):
+			spec = TransformSpec(steps=(TimeStretch(
+				target_bpm=self._cfg.target_bpm,
+				resolution=self._cfg.quantize_resolution,
+			),))
 			self._processor.enqueue(record, spec)
 
 	def on_parent_evicted (self, sample_ids: list[int]) -> None:
@@ -996,8 +1044,16 @@ class TransformManager:
 			new_bpm, len(invalidated),
 		)
 
-		all_records = self._instrument_library.samples()
-		self._processor.enqueue_bpm_change(all_records, new_bpm)
+		# Filter to samples that meet the onset threshold before enqueuing.
+		min_onsets = self._cfg.min_onset_count
+		qualifying = [
+			r for r in self._instrument_library.samples()
+			if r.rhythm.tempo_bpm > 0.0 and r.rhythm.onset_count >= min_onsets
+		]
+
+		self._processor.enqueue_bpm_change(
+			qualifying, new_bpm, resolution=self._cfg.quantize_resolution,
+		)
 
 	def has_pitch_variant (self, sample_id: int, midi_note: int) -> bool:
 
@@ -1113,7 +1169,232 @@ def _apply_pitch (
 	)
 
 
+# ---------------------------------------------------------------------------
+# Time-stretch handler — beat-quantised non-linear stretching
+# ---------------------------------------------------------------------------
+
+# Pre-onset margin: audio before each onset is included so the transient
+# attack is not clipped.  2 ms matches the perceptual attack resolution of
+# the human ear.
+_PRE_ONSET_SECONDS: float = 0.002
+
+
+def _build_quantize_grid (target_bpm: float, resolution: int, max_seconds: float, min_points: int = 0) -> list[float]:
+
+	"""Build a regularly-spaced time grid at the target BPM and subdivision.
+
+	Args:
+		target_bpm:  Target tempo in BPM.
+		resolution:  Grid subdivision (1=whole, 2=half, 4=quarter, 8=eighth,
+		             16=sixteenth).
+		max_seconds: Generate grid points up to at least this time.
+		min_points:  Guarantee at least this many grid points.  The greedy
+		             onset snapper consumes one point per onset, so pass
+		             len(onset_times) + a margin to avoid exhaustion.
+
+	Returns:
+		List of grid-point times in seconds, starting at 0.0.
+	"""
+
+	grid_interval = 60.0 / target_bpm / (resolution / 4.0)
+	count = max(int(max_seconds / grid_interval) + 2, min_points)
+
+	return [i * grid_interval for i in range(count)]
+
+
+def _snap_onsets_to_grid (onset_times: tuple[float, ...], grid: list[float]) -> list[float]:
+
+	"""Snap each onset to the nearest available grid point.
+
+	Uses greedy left-to-right assignment: each onset takes the closest grid
+	point that has not been claimed by an earlier onset.  This guarantees
+	monotonically increasing target times and prevents two onsets from
+	landing on the same grid point.
+
+	Args:
+		onset_times: Source onset positions in seconds (sorted, ascending).
+		grid:        Sorted list of grid-point times from _build_quantize_grid().
+
+	Returns:
+		List of target times (one per onset), in the same order.
+	"""
+
+	assigned: list[float] = []
+	next_min_idx = 0
+
+	for onset in onset_times:
+		best_idx = next_min_idx
+		best_dist = abs(onset - grid[best_idx])
+
+		for j in range(next_min_idx + 1, len(grid)):
+			dist = abs(onset - grid[j])
+
+			if dist < best_dist:
+				best_idx = j
+				best_dist = dist
+			elif dist >= best_dist:
+				# Grid is sorted — distances will only increase from here.
+				break
+
+		best_idx = max(best_idx, next_min_idx)
+		assigned.append(grid[best_idx])
+		next_min_idx = best_idx + 1
+
+	return assigned
+
+
+def _build_time_map (
+	onset_source_samples: list[int],
+	onset_target_samples: list[int],
+	source_length:        int,
+	target_length:        int,
+) -> list[tuple[int, int]]:
+
+	"""Construct the time map for pyrubberband.timemap_stretch().
+
+	Each entry is (source_sample, target_sample).  The first entry anchors
+	the start and the last entry anchors the end — required by the API.
+	All entries are monotonically increasing and non-negative.
+
+	Args:
+		onset_source_samples: Source sample positions for each onset.
+		onset_target_samples: Corresponding target sample positions.
+		source_length:        Total source audio length in samples.
+		target_length:        Desired total target audio length in samples.
+
+	Returns:
+		Time map suitable for pyrubberband.timemap_stretch().
+	"""
+
+	time_map: list[tuple[int, int]] = [(0, 0)]
+
+	for src, tgt in zip(onset_source_samples, onset_target_samples):
+
+		# Ensure strict monotonicity with previous entry.
+		prev_src, prev_tgt = time_map[-1]
+
+		if src > prev_src and tgt > prev_tgt:
+			time_map.append((src, tgt))
+
+	# Final anchor: source and target endpoints.
+	time_map.append((source_length, target_length))
+
+	return time_map
+
+
+def _apply_time_stretch (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        TimeStretch,
+) -> numpy.ndarray:
+
+	"""Beat-quantised time-stretch using Rubber Band's offline finer engine.
+
+	Detected onsets are snapped to a grid at the target BPM and subdivision,
+	then pyrubberband.timemap_stretch() applies the non-linear mapping in a
+	single high-quality call.  Samples with fewer than 2 onsets receive a
+	simple global time-stretch instead.
+
+	Args:
+		audio:       float32, shape (n_frames, channels).
+		sample_rate: Hz (e.g. 44100).
+		record:      Parent SampleRecord — provides rhythm analysis.
+		step:        TimeStretch with target_bpm and resolution.
+
+	Returns:
+		float32, shape (n_frames_out, channels) — time-stretched audio.
+		n_frames_out will differ from n_frames when the tempos differ.
+	"""
+
+	source_bpm = record.rhythm.tempo_bpm
+
+	if source_bpm <= 0.0:
+		return audio
+
+	# Duration ratio: >1 means output is longer (slower tempo), <1 means shorter.
+	# pyrubberband.time_stretch rate is the inverse (speed multiplier).
+	duration_ratio = source_bpm / step.target_bpm
+	onset_times    = record.rhythm.onset_times
+
+	# Single-hit or no-onset samples: simple global stretch.
+	if len(onset_times) < 2:
+		return pyrubberband.time_stretch(  # type: ignore[no-any-return]
+			audio, sample_rate, 1.0 / duration_ratio, rbargs={"--fine": ""},
+		)
+
+	# ── Crop to first onset ──────────────────────────────────────────────
+
+	first_onset_sec  = onset_times[0]
+	crop_start_sec   = max(0.0, first_onset_sec - _PRE_ONSET_SECONDS)
+	crop_start_frame = int(crop_start_sec * sample_rate)
+
+	audio = audio[crop_start_frame:]
+
+	# Rebase onset times relative to the crop point.
+	rebased = [t - crop_start_sec for t in onset_times]
+
+	# ── Build target grid and snap onsets ─────────────────────────────────
+
+	# Generous upper bound: twice the rebased duration or last onset, whichever
+	# is larger, ensures the grid extends far enough for any stretch direction.
+	# min_points guarantees the greedy snapper never runs out of grid slots
+	# even when many tightly-spaced onsets each consume their own point.
+	audio_duration_sec = audio.shape[0] / sample_rate
+	max_grid_sec = max(rebased[-1], audio_duration_sec) * 2.0
+
+	grid     = _build_quantize_grid(
+		step.target_bpm, step.resolution, max_grid_sec,
+		min_points=len(rebased) + 2,
+	)
+	snapped  = _snap_onsets_to_grid(tuple(rebased), grid)
+
+	# ── Build time map (source sample → target sample) ────────────────────
+
+	onset_src = [int(t * sample_rate) for t in rebased]
+	onset_tgt = [int(t * sample_rate) for t in snapped]
+
+	# Tail after the last onset: scale by the duration ratio so the decay
+	# sounds natural rather than being forced to fill a grid slot.
+	tail_src_sec = max(0.0, audio_duration_sec - rebased[-1])
+	tail_tgt_sec = tail_src_sec * duration_ratio
+
+	source_length = audio.shape[0]
+	target_length = max(
+		int((snapped[-1] + tail_tgt_sec) * sample_rate),
+		onset_tgt[-1] + 1,
+	)
+
+	# The final anchor must be strictly greater than any intermediate entry
+	# for pyrubberband to accept the time map.
+	if target_length <= onset_tgt[-1]:
+		target_length = onset_tgt[-1] + 1
+
+	time_map = _build_time_map(onset_src, onset_tgt, source_length, target_length)
+
+	_log.debug(
+		"Time-stretch %s: %.1f → %.1f BPM (res=%d), %d onsets, "
+		"%.3fs → %.3fs",
+		record.name, source_bpm, step.target_bpm, step.resolution,
+		len(onset_times), audio_duration_sec, target_length / sample_rate,
+	)
+
+	# ── Apply via Rubber Band's offline finer engine ──────────────────────
+
+	return pyrubberband.timemap_stretch(  # type: ignore[no-any-return]
+		audio, sample_rate, time_map, rbargs={"--fine": ""},
+	)
+
+
+# ---------------------------------------------------------------------------
+# Handler registration
+# ---------------------------------------------------------------------------
+
 # Register the pitch-shift handler so TransformProcessor can dispatch to it.
 # All enqueue() calls for PitchShift specs are now live; previously they were
 # silently dropped because _HANDLERS was empty (Phase 1 scaffold).
 TransformProcessor._HANDLERS[PitchShift] = _apply_pitch
+
+# Register the time-stretch handler — beat-quantised non-linear stretching
+# via pyrubberband.timemap_stretch() with Rubber Band's offline finer engine.
+TransformProcessor._HANDLERS[TimeStretch] = _apply_time_stretch

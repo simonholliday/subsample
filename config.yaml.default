@@ -336,7 +336,7 @@ analysis:
 # for percussive use. Derivatives are held in memory only — they are never
 # written to disk and are regenerated on demand.
 #
-# Phase 2: pitch shifting is active (requires rubberband-cli installed).
+# Pitch shifting and time-stretching are active (requires rubberband-cli).
 # See README-AGENTS.md "Transform pipeline" for implementation guidance.
 
 # transform:
@@ -356,5 +356,19 @@ analysis:
 #
 #   target_bpm: 0.0
 #   # Target BPM for automatic time-stretch variants. 0.0 = disabled.
-#   # When > 0, a stretched variant is produced for every sample with detected
-#   # rhythmic content. Requires Phase 3 time-stretch implementation.
+#   # When > 0, a beat-quantised time-stretch variant is produced for samples
+#   # that have a detected tempo AND at least min_onset_count transients.
+#   # Onsets are snapped to a grid at the target tempo and processed by
+#   # Rubber Band's offline finer engine for highest quality.
+#
+#   quantize_resolution: 16
+#   # Grid subdivision for beat-quantised time-stretch. Determines the note
+#   # value that onsets are snapped to at the target BPM.
+#   # 1 = whole notes, 2 = half, 4 = quarter, 8 = eighth, 16 = sixteenth.
+#   # Higher values give finer onset alignment.
+#
+#   min_onset_count: 4
+#   # Minimum detected onsets for a sample to be time-stretched.
+#   # Filters out single hits and ambient sounds that librosa flags as
+#   # rhythmic but have no meaningful beat pattern.  0 = no filter.
+#   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values

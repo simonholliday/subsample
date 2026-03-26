@@ -45,6 +45,7 @@ def _make_record (
 	sample_id: int = 1,
 	audio: typing.Optional[numpy.ndarray] = None,
 	tempo_bpm: float = 0.0,
+	onset_times: tuple[float, ...] = (),
 ) -> subsample.library.SampleRecord:
 
 	"""Return a minimal SampleRecord suitable for transform tests."""
@@ -57,8 +58,8 @@ def _make_record (
 		beat_times       = (),
 		pulse_curve      = numpy.zeros(0, dtype=numpy.float32),
 		pulse_peak_times = (),
-		onset_times      = (),
-		onset_count      = 0,
+		onset_times      = onset_times,
+		onset_count      = len(onset_times),
 	)
 
 	return subsample.library.SampleRecord(
@@ -965,6 +966,496 @@ class TestTransformConfig:
 
 	def test_default_transform_values (self) -> None:
 		cfg = subsample.config.load_config(self._DEFAULT_CONFIG_PATH)
-		assert cfg.transform.max_memory_mb == 50.0
-		assert cfg.transform.auto_pitch    is True
-		assert cfg.transform.target_bpm    == 0.0
+		assert cfg.transform.max_memory_mb       == 50.0
+		assert cfg.transform.auto_pitch          is True
+		assert cfg.transform.target_bpm          == 0.0
+		assert cfg.transform.quantize_resolution == 16
+		assert cfg.transform.min_onset_count     == 4
+
+	def test_valid_quantize_resolutions (self) -> None:
+
+		"""All valid subdivision values (1, 2, 4, 8, 16) are accepted."""
+
+		for res in (1, 2, 4, 8, 16):
+			cfg = subsample.config.TransformConfig(quantize_resolution=res)
+			assert cfg.quantize_resolution == res
+
+	def test_invalid_quantize_resolution_raises (self) -> None:
+
+		"""Values outside {1, 2, 4, 8, 16} are rejected by the parser."""
+
+		# Load the full default config as a raw dict, then inject bad values.
+		import yaml
+		base_raw: dict[str, typing.Any] = yaml.safe_load(
+			self._DEFAULT_CONFIG_PATH.read_text()
+		) or {}
+
+		for bad_value in (0, 3, 6, 7, 32):
+			raw = dict(base_raw)
+			raw["transform"] = {"quantize_resolution": bad_value}
+
+			with pytest.raises(ValueError, match="quantize_resolution"):
+				subsample.config._build_config(raw)
+
+
+# ---------------------------------------------------------------------------
+# TestQuantizeGrid
+# ---------------------------------------------------------------------------
+
+class TestQuantizeGrid:
+
+	"""Tests for _build_quantize_grid()."""
+
+	def test_quarter_notes_120bpm (self) -> None:
+
+		"""At 120 BPM, resolution=4 → 0.5s grid spacing."""
+
+		grid = subsample.transform._build_quantize_grid(120.0, 4, 2.0)
+		assert grid[0] == 0.0
+		assert abs(grid[1] - 0.5) < 1e-9
+		assert abs(grid[2] - 1.0) < 1e-9
+
+	def test_sixteenth_notes_120bpm (self) -> None:
+
+		"""At 120 BPM, resolution=16 → 0.125s grid spacing."""
+
+		grid = subsample.transform._build_quantize_grid(120.0, 16, 1.0)
+		assert abs(grid[1] - 0.125) < 1e-9
+
+	def test_eighth_notes_90bpm (self) -> None:
+
+		"""At 90 BPM, resolution=8 → 1/(1.5*2) ≈ 0.333s grid spacing."""
+
+		grid = subsample.transform._build_quantize_grid(90.0, 8, 1.0)
+		expected = 60.0 / 90.0 / 2.0
+		assert abs(grid[1] - expected) < 1e-9
+
+	def test_grid_covers_max_time (self) -> None:
+
+		"""Grid extends at least to the requested maximum time."""
+
+		grid = subsample.transform._build_quantize_grid(120.0, 16, 5.0)
+		assert grid[-1] >= 5.0
+
+
+# ---------------------------------------------------------------------------
+# TestSnapOnsets
+# ---------------------------------------------------------------------------
+
+class TestSnapOnsets:
+
+	"""Tests for _snap_onsets_to_grid()."""
+
+	def test_onsets_snap_to_nearest (self) -> None:
+
+		"""Each onset lands on the closest grid point."""
+
+		grid = subsample.transform._build_quantize_grid(120.0, 16, 2.0)
+
+		# Onsets near 0.12 and 0.63 should snap to 0.125 and 0.625.
+		result = subsample.transform._snap_onsets_to_grid((0.12, 0.63), grid)
+		assert abs(result[0] - 0.125) < 1e-9
+		assert abs(result[1] - 0.625) < 1e-9
+
+	def test_no_two_onsets_on_same_grid_point (self) -> None:
+
+		"""Tightly spaced onsets are pushed to successive grid points."""
+
+		grid = subsample.transform._build_quantize_grid(120.0, 16, 2.0)
+
+		# Three onsets all near 0.125 — first gets 0.125, others are pushed.
+		result = subsample.transform._snap_onsets_to_grid((0.10, 0.11, 0.12), grid)
+		assert result[0] < result[1] < result[2]
+
+	def test_onsets_already_on_grid (self) -> None:
+
+		"""Onsets exactly on grid points remain unchanged."""
+
+		grid = subsample.transform._build_quantize_grid(120.0, 16, 2.0)
+		result = subsample.transform._snap_onsets_to_grid((0.0, 0.125, 0.25), grid)
+		assert abs(result[0] - 0.0)   < 1e-9
+		assert abs(result[1] - 0.125) < 1e-9
+		assert abs(result[2] - 0.25)  < 1e-9
+
+	def test_monotonically_increasing (self) -> None:
+
+		"""Output target times are always strictly increasing."""
+
+		grid = subsample.transform._build_quantize_grid(100.0, 8, 4.0)
+		onsets = (0.05, 0.35, 0.65, 0.95, 1.25)
+		result = subsample.transform._snap_onsets_to_grid(onsets, grid)
+
+		for i in range(1, len(result)):
+			assert result[i] > result[i - 1]
+
+	def test_empty_onsets (self) -> None:
+
+		"""No onsets produces an empty result."""
+
+		grid = subsample.transform._build_quantize_grid(120.0, 16, 2.0)
+		result = subsample.transform._snap_onsets_to_grid((), grid)
+		assert result == []
+
+	def test_many_tightly_packed_onsets (self) -> None:
+
+		"""Many onsets closer than grid spacing don't exhaust the grid."""
+
+		# 20 onsets all within 0.5s — much denser than the 0.125s grid spacing
+		# at 120 BPM / resolution 16.  The grid must have enough points.
+		onsets = tuple(i * 0.025 for i in range(20))
+
+		grid = subsample.transform._build_quantize_grid(
+			120.0, 16, 1.0, min_points=len(onsets) + 2,
+		)
+		result = subsample.transform._snap_onsets_to_grid(onsets, grid)
+
+		assert len(result) == 20
+
+		for i in range(1, len(result)):
+			assert result[i] > result[i - 1]
+
+
+# ---------------------------------------------------------------------------
+# TestBuildTimeMap
+# ---------------------------------------------------------------------------
+
+class TestBuildTimeMap:
+
+	"""Tests for _build_time_map()."""
+
+	def test_includes_start_and_end_anchors (self) -> None:
+
+		"""Time map always starts at (0,0) and ends at (source_len, target_len)."""
+
+		time_map = subsample.transform._build_time_map(
+			[1000, 2000], [1100, 2200], 4410, 4800,
+		)
+		assert time_map[0]  == (0, 0)
+		assert time_map[-1] == (4410, 4800)
+
+	def test_monotonically_increasing (self) -> None:
+
+		"""All entries are strictly increasing in both source and target."""
+
+		time_map = subsample.transform._build_time_map(
+			[500, 1500, 2500], [600, 1700, 2800], 4410, 5000,
+		)
+
+		for i in range(1, len(time_map)):
+			assert time_map[i][0] > time_map[i - 1][0]
+			assert time_map[i][1] > time_map[i - 1][1]
+
+	def test_skips_non_monotonic_entries (self) -> None:
+
+		"""Entries that would violate monotonicity are dropped."""
+
+		# Second onset has source=0, which is not > previous source=0.
+		time_map = subsample.transform._build_time_map(
+			[0, 500], [0, 600], 4410, 5000,
+		)
+
+		# (0, 0) start anchor + (500, 600) + (4410, 5000) end anchor.
+		assert len(time_map) == 3
+
+
+# ---------------------------------------------------------------------------
+# TestTimeStretchHandler
+# ---------------------------------------------------------------------------
+
+class TestTimeStretchHandler:
+
+	"""Tests for the _apply_time_stretch handler."""
+
+	def test_handler_registered (self) -> None:
+
+		"""TimeStretch handler is registered in the dispatch table."""
+
+		assert subsample.transform.TimeStretch in subsample.transform.TransformProcessor._HANDLERS
+
+	def test_no_stretch_when_no_rhythm (self) -> None:
+
+		"""Samples with no detected tempo are returned unchanged."""
+
+		audio = _make_audio(n_frames=4410, channels=2)
+		record = _make_record(tempo_bpm=0.0)
+		step = subsample.transform.TimeStretch(target_bpm=120.0)
+
+		result = subsample.transform._apply_time_stretch(audio, 44100, record, step)
+		assert result.shape == audio.shape
+		numpy.testing.assert_array_equal(result, audio)
+
+	def test_global_stretch_for_single_onset (self) -> None:
+
+		"""A sample with only 1 onset gets a simple global stretch."""
+
+		sr = 44100
+		duration_sec = 1.0
+		n_frames = int(duration_sec * sr)
+
+		# Create audio with a click at the onset.
+		audio = numpy.zeros((n_frames, 1), dtype=numpy.float32)
+		audio[100:110, :] = 0.8
+
+		record = _make_record(
+			audio=numpy.zeros((n_frames, 1), dtype=numpy.int16),
+			tempo_bpm=120.0,
+			onset_times=(0.01,),
+		)
+
+		step = subsample.transform.TimeStretch(target_bpm=60.0)
+		result = subsample.transform._apply_time_stretch(audio, sr, record, step)
+
+		# 120 → 60 BPM means double the duration (ratio = 120/60 = 2.0).
+		# Allow some tolerance for Rubber Band's processing.
+		expected_frames = n_frames * 2
+		assert abs(result.shape[0] - expected_frames) < sr * 0.1  # within 100ms
+
+	def test_beat_quantized_stretch_preserves_channels (self) -> None:
+
+		"""Stereo audio stays stereo after beat-quantized stretching."""
+
+		sr = 44100
+		n_frames = int(1.0 * sr)
+		audio = numpy.zeros((n_frames, 2), dtype=numpy.float32)
+
+		# Place clicks at onset positions.
+		for onset_sec in (0.0, 0.25, 0.5, 0.75):
+			idx = int(onset_sec * sr)
+			audio[idx:idx + 50, :] = 0.8
+
+		record = _make_record(
+			audio=numpy.zeros((n_frames, 2), dtype=numpy.int16),
+			tempo_bpm=120.0,
+			onset_times=(0.0, 0.25, 0.5, 0.75),
+		)
+
+		step = subsample.transform.TimeStretch(target_bpm=100.0, resolution=8)
+		result = subsample.transform._apply_time_stretch(audio, sr, record, step)
+
+		assert result.ndim == 2
+		assert result.shape[1] == 2
+		assert result.dtype == numpy.float32
+
+	def test_stretch_changes_duration (self) -> None:
+
+		"""Stretching to a slower tempo produces longer audio."""
+
+		sr = 44100
+		n_frames = int(1.0 * sr)
+		audio = numpy.zeros((n_frames, 1), dtype=numpy.float32)
+
+		for onset_sec in (0.0, 0.25, 0.5, 0.75):
+			idx = int(onset_sec * sr)
+			audio[idx:idx + 50, :] = 0.8
+
+		record = _make_record(
+			audio=numpy.zeros((n_frames, 1), dtype=numpy.int16),
+			tempo_bpm=120.0,
+			onset_times=(0.0, 0.25, 0.5, 0.75),
+		)
+
+		# Slow down: 120 → 90 BPM → longer output.
+		step = subsample.transform.TimeStretch(target_bpm=90.0, resolution=16)
+		result = subsample.transform._apply_time_stretch(audio, sr, record, step)
+		assert result.shape[0] > n_frames
+
+	def test_stretch_to_faster_tempo_shortens (self) -> None:
+
+		"""Stretching to a faster tempo produces shorter audio."""
+
+		sr = 44100
+		n_frames = int(1.0 * sr)
+		audio = numpy.zeros((n_frames, 1), dtype=numpy.float32)
+
+		for onset_sec in (0.0, 0.25, 0.5, 0.75):
+			idx = int(onset_sec * sr)
+			audio[idx:idx + 50, :] = 0.8
+
+		record = _make_record(
+			audio=numpy.zeros((n_frames, 1), dtype=numpy.int16),
+			tempo_bpm=120.0,
+			onset_times=(0.0, 0.25, 0.5, 0.75),
+		)
+
+		# Speed up: 120 → 160 BPM → shorter output.
+		step = subsample.transform.TimeStretch(target_bpm=160.0, resolution=8)
+		result = subsample.transform._apply_time_stretch(audio, sr, record, step)
+		assert result.shape[0] < n_frames
+
+
+# ---------------------------------------------------------------------------
+# TestMinOnsetCountConfig
+# ---------------------------------------------------------------------------
+
+class TestMinOnsetCountConfig:
+
+	"""Config validation for transform.min_onset_count."""
+
+	_DEFAULT_CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+
+	def test_negative_raises (self) -> None:
+
+		"""Negative min_onset_count is rejected."""
+
+		import yaml
+		base_raw: dict[str, typing.Any] = yaml.safe_load(
+			self._DEFAULT_CONFIG_PATH.read_text()
+		) or {}
+
+		raw = dict(base_raw)
+		raw["transform"] = {"min_onset_count": -1}
+
+		with pytest.raises(ValueError, match="min_onset_count"):
+			subsample.config._build_config(raw)
+
+	def test_zero_accepted (self) -> None:
+
+		"""Zero disables the filter — all rhythmic samples qualify."""
+
+		cfg = subsample.config.TransformConfig(min_onset_count=0)
+		assert cfg.min_onset_count == 0
+
+
+# ---------------------------------------------------------------------------
+# TestOnsetFilter
+# ---------------------------------------------------------------------------
+
+class TestOnsetFilter:
+
+	"""on_sample_added() respects min_onset_count for time-stretch enqueue."""
+
+	def test_skips_below_threshold (self) -> None:
+
+		"""Record with onset_count < min_onset_count is not time-stretch enqueued."""
+
+		enqueued_specs: list[subsample.transform.TransformSpec] = []
+
+		cfg = subsample.config.TransformConfig(target_bpm=120.0, min_onset_count=4)
+
+		# Minimal mock: capture enqueue calls.
+		class _FakeProcessor:
+			def enqueue (self, record: typing.Any, spec: subsample.transform.TransformSpec) -> None:
+				enqueued_specs.append(spec)
+
+		class _FakeCache:
+			def put (self, result: typing.Any) -> None:
+				pass
+
+		manager = subsample.transform.TransformManager(
+			cache=_FakeCache(),  # type: ignore[arg-type]
+			processor=_FakeProcessor(),  # type: ignore[arg-type]
+			instrument_library=subsample.library.InstrumentLibrary(max_memory_bytes=100_000_000),
+			cfg=cfg,
+		)
+
+		# 2 onsets — below threshold of 4.
+		record = _make_record(tempo_bpm=120.0, onset_times=(0.1, 0.5))
+		manager.on_sample_added(record)
+
+		# Should only have the base variant, no TimeStretch.
+		time_stretch_specs = [
+			s for s in enqueued_specs
+			if any(isinstance(step, subsample.transform.TimeStretch) for step in s.steps)
+		]
+		assert len(time_stretch_specs) == 0
+
+	def test_enqueues_above_threshold (self) -> None:
+
+		"""Record with onset_count >= min_onset_count gets time-stretch enqueued."""
+
+		enqueued_specs: list[subsample.transform.TransformSpec] = []
+
+		cfg = subsample.config.TransformConfig(target_bpm=120.0, min_onset_count=4)
+
+		class _FakeProcessor:
+			def enqueue (self, record: typing.Any, spec: subsample.transform.TransformSpec) -> None:
+				enqueued_specs.append(spec)
+
+		class _FakeCache:
+			def put (self, result: typing.Any) -> None:
+				pass
+
+		manager = subsample.transform.TransformManager(
+			cache=_FakeCache(),  # type: ignore[arg-type]
+			processor=_FakeProcessor(),  # type: ignore[arg-type]
+			instrument_library=subsample.library.InstrumentLibrary(max_memory_bytes=100_000_000),
+			cfg=cfg,
+		)
+
+		# 5 onsets — above threshold.
+		record = _make_record(tempo_bpm=120.0, onset_times=(0.0, 0.2, 0.4, 0.6, 0.8))
+		manager.on_sample_added(record)
+
+		time_stretch_specs = [
+			s for s in enqueued_specs
+			if any(isinstance(step, subsample.transform.TimeStretch) for step in s.steps)
+		]
+		assert len(time_stretch_specs) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestGetAtBpm
+# ---------------------------------------------------------------------------
+
+class TestGetAtBpm:
+
+	"""TransformManager.get_at_bpm() returns None when disabled or on miss."""
+
+	def test_returns_none_when_disabled (self) -> None:
+
+		"""target_bpm=0.0 means get_at_bpm always returns None."""
+
+		cfg = subsample.config.TransformConfig(target_bpm=0.0)
+		cache = subsample.transform.TransformCache(max_memory_bytes=10_000_000)
+
+		class _FakeProcessor:
+			def enqueue (self, record: typing.Any, spec: typing.Any) -> None:
+				pass
+
+		manager = subsample.transform.TransformManager(
+			cache=cache,
+			processor=_FakeProcessor(),  # type: ignore[arg-type]
+			instrument_library=subsample.library.InstrumentLibrary(max_memory_bytes=100_000_000),
+			cfg=cfg,
+		)
+
+		assert manager.get_at_bpm(42) is None
+
+	def test_cache_hit_with_matching_resolution (self) -> None:
+
+		"""get_at_bpm() finds a cached variant when resolution matches config."""
+
+		cfg = subsample.config.TransformConfig(
+			target_bpm=120.0, quantize_resolution=8, min_onset_count=4,
+		)
+		cache = subsample.transform.TransformCache(max_memory_bytes=10_000_000)
+
+		# Insert a result keyed with resolution=8.
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.TimeStretch(target_bpm=120.0, resolution=8),)
+		)
+		result = _make_result(sample_id=7, spec=spec)
+		cache.put(result)
+
+		# The library must contain a qualifying record for this sample_id.
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=100_000_000)
+		record = _make_record(
+			sample_id=7, tempo_bpm=120.0,
+			onset_times=(0.0, 0.2, 0.4, 0.6, 0.8),
+		)
+		library.add(record)
+
+		class _FakeProcessor:
+			def enqueue (self, record: typing.Any, spec: typing.Any) -> None:
+				pass
+
+		manager = subsample.transform.TransformManager(
+			cache=cache,
+			processor=_FakeProcessor(),  # type: ignore[arg-type]
+			instrument_library=library,
+			cfg=cfg,
+		)
+
+		hit = manager.get_at_bpm(7)
+		assert hit is not None
+		assert hit.key.sample_id == 7

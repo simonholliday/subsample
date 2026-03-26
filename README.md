@@ -324,6 +324,13 @@ in a memory-bounded store with parent-priority FIFO eviction - when a variant
 family would exceed the memory budget, the entire oldest family is evicted
 together, keeping remaining families intact and playable.
 
+Samples with sufficient rhythmic content can be time-stretched to a target tempo
+by setting `transform.target_bpm`. A sample qualifies when it has a detected
+tempo and at least `transform.min_onset_count` transients (default 4 - enough
+to establish a genuine beat pattern). Onsets are snapped to a quantised beat grid
+(resolution controlled by `transform.quantize_resolution`) and the entire
+mapping is applied in a single pass using Rubber Band's offline finer engine.
+
 All variants are produced at the output device's sample rate and format using
 high-quality sample rate conversion (soxr algorithm), so the playback path never
 pays a conversion cost at trigger time.
@@ -405,9 +412,11 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
 | `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack character |
 | `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
-| `transform.max_memory_mb` | `50.0` | Memory budget (MB) for pitch-shifted variants |
+| `transform.max_memory_mb` | `50.0` | Memory budget (MB) for transform variants (pitch-shifted + time-stretched) |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
-| `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables |
+| `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantised to the target tempo |
+| `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
+| `transform.min_onset_count` | `4` | Minimum detected onsets for a sample to be time-stretched. Filters out single hits and ambient false positives. 0 = no filter |
 
 ## Output
 
@@ -638,9 +647,6 @@ Reference: BD0025
 
 ### Playback and sound design
 
-- **Time-stretching** - BPM-aware variants that match loops and phrases to a
-  target tempo. Infrastructure is in place (`transform.target_bpm` in config);
-  the DSP implementation is next.
 - **Envelope shaping** - per-voice attack/release adjustment. The data model is
   in place; the DSP implementation is next.
 - **Effects processing** - filter, reverb, delay - per-voice or per-bus effects
@@ -718,16 +724,17 @@ needing to classify them first.
 ```
 SampleRecord added to library
     → TransformManager.on_sample_added()
-        → enqueue base variant (always)         ← float32 peak-normalised copy
-        → enqueue pitch variants (tonal only)   ← Rubber Band offline finer engine
+        → enqueue base variant (always)             ← float32 peak-normalised copy
+        → enqueue pitch variants (tonal only)       ← Rubber Band offline finer engine
+        → enqueue time-stretch (if BPM set + enough onsets) ← beat-quantised timemap_stretch
             → TransformProcessor worker pool
                 → TransformCache (parent-priority FIFO eviction, 50 MB default)
 ```
 
 The base variant (identity spec: no DSP) is produced for every sample -
 percussive and tonal alike - so the playback path never pays the float32
-conversion cost at trigger time. Pitch variants are additional cache entries,
-derived from the same PCM source.
+conversion cost at trigger time. Pitch and time-stretch variants are additional
+cache entries, derived from the same PCM source.
 
 When a variant set for a parent sample would exceed the memory budget, the entire
 oldest parent's variant family is evicted together, keeping the remaining
@@ -788,7 +795,9 @@ Subsample makes use of these excellent open-source libraries:
 | [SoundFile ↗](https://python-soundfile.readthedocs.io/) | WAV file reading for library pre-load | BSD-3-Clause |
 | [mido ↗](https://github.com/mido/mido) | MIDI message parsing and I/O | MIT |
 | [python-rtmidi ↗](https://github.com/SpotlightKid/python-rtmidi) | MIDI device access (RtMidi bindings) | MIT |
-| [pyrubberband ↗](https://github.com/bmcfee/pyrubberband) | Pitch shifting (Rubber Band wrapper) | ISC |
+| [pyrubberband ↗](https://github.com/bmcfee/pyrubberband) | Pitch shifting and time-stretching (Rubber Band wrapper) | ISC |
+| [watchdog ↗](https://github.com/gorakhargosh/watchdog) | Filesystem monitoring for multi-machine sample hot-loading | Apache-2.0 |
+| [PyMidiDefs ↗](https://github.com/simonholliday/PyMidiDefs) | MIDI constant definitions (notes, CC, drums, GM) | MIT |
 
 ## About the Author
 

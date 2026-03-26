@@ -250,8 +250,21 @@ class TransformConfig:
 
 	target_bpm: float = 0.0
 	"""Target BPM for automatic time-stretch variants.  0.0 = disabled.
-	When > 0, a time-stretch variant is produced for every sample that has
-	detected rhythmic content (rhythm.tempo_bpm > 0)."""
+	When > 0, a time-stretch variant is produced for samples that have a
+	detected tempo (rhythm.tempo_bpm > 0) and at least min_onset_count
+	transients."""
+
+	quantize_resolution: int = 16
+	"""Grid subdivision for beat-quantized time-stretch.
+	Determines the note value that onsets are snapped to at the target BPM.
+	1 = whole notes, 2 = half, 4 = quarter, 8 = eighth, 16 = sixteenth.
+	Higher values give finer onset alignment but stretch more segments."""
+
+	min_onset_count: int = 4
+	"""Minimum number of detected onsets for a sample to receive a
+	beat-quantised time-stretch variant.  Samples below this threshold
+	are skipped entirely — not even globally stretched.
+	Set to 0 to disable the filter (stretch everything with tempo > 0)."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -608,10 +621,27 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		reference = None
 
 	transform_raw: dict[str, typing.Any] = raw.get("transform", {})
+	quantize_resolution = int(transform_raw.get("quantize_resolution", 16))
+
+	if quantize_resolution not in {1, 2, 4, 8, 16}:
+		raise ValueError(
+			f"transform.quantize_resolution must be one of 1, 2, 4, 8, 16 "
+			f"(got {quantize_resolution})"
+		)
+
+	min_onset_count = int(transform_raw.get("min_onset_count", 4))
+
+	if min_onset_count < 0:
+		raise ValueError(
+			f"transform.min_onset_count must be >= 0 (got {min_onset_count})"
+		)
+
 	transform = TransformConfig(
-		max_memory_mb = float(transform_raw.get("max_memory_mb", 50.0)),
-		auto_pitch    = bool(transform_raw.get("auto_pitch",     True)),
-		target_bpm    = float(transform_raw.get("target_bpm",    0.0)),
+		max_memory_mb       = float(transform_raw.get("max_memory_mb", 50.0)),
+		auto_pitch          = bool(transform_raw.get("auto_pitch",     True)),
+		target_bpm          = float(transform_raw.get("target_bpm",    0.0)),
+		quantize_resolution = quantize_resolution,
+		min_onset_count     = min_onset_count,
 	)
 
 	return Config(
