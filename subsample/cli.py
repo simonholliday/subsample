@@ -570,6 +570,26 @@ def main () -> None:
 			for _record in instrument_library.samples():
 				transform_manager.on_sample_added(_record)
 
+		# Log which samples qualified for beat-quantised time-stretching so
+		# the user knows which ones will have stretched variants available.
+		if cfg.transform.target_bpm > 0.0:
+			_stretch_names = [
+				r.name for r in instrument_library.samples()
+				if r.rhythm.tempo_bpm > 0.0
+				and r.rhythm.onset_count >= cfg.transform.min_onset_count
+			]
+
+			if _stretch_names:
+				_log.info(
+					"Time-stretch: %d sample(s) qualifying at %.1f BPM "
+					"(min_onset_count=%d, resolution=%d)",
+					len(_stretch_names), cfg.transform.target_bpm,
+					cfg.transform.min_onset_count, cfg.transform.quantize_resolution,
+				)
+
+				for _name in _stretch_names:
+					_log.info("  → %s", _name)
+
 	# --- Thread-based orchestration ---
 	# Both the recorder and player have blocking loops, so each runs on its own
 	# thread. The main thread waits on shutdown_event and forwards Ctrl+C.

@@ -77,6 +77,7 @@ def _write_sidecar (
 			"pulse_curve":      rhythm.pulse_curve.tolist(),
 			"pulse_peak_times": list(rhythm.pulse_peak_times),
 			"onset_times":      list(rhythm.onset_times),
+			"attack_times":     list(rhythm.attack_times),
 			"onset_count":      rhythm.onset_count,
 		},
 		"pitch": {

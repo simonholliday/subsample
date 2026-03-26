@@ -1291,10 +1291,11 @@ def _apply_time_stretch (
 
 	"""Beat-quantised time-stretch using Rubber Band's offline finer engine.
 
-	Detected onsets are snapped to a grid at the target BPM and subdivision,
-	then pyrubberband.timemap_stretch() applies the non-linear mapping in a
-	single high-quality call.  Samples with fewer than 2 onsets receive a
-	simple global time-stretch instead.
+	Uses sample-accurate attack_times (refined from librosa onsets via
+	amplitude-envelope analysis) for grid alignment, so percussive hits
+	land precisely on the beat.  Falls back to onset_times for pre-v10
+	analysis data.  Samples with fewer than 2 attacks receive a simple
+	global time-stretch instead.
 
 	Args:
 		audio:       float32, shape (n_frames, channels).
@@ -1315,24 +1316,31 @@ def _apply_time_stretch (
 	# Duration ratio: >1 means output is longer (slower tempo), <1 means shorter.
 	# pyrubberband.time_stretch rate is the inverse (speed multiplier).
 	duration_ratio = source_bpm / step.target_bpm
-	onset_times    = record.rhythm.onset_times
+
+	# Prefer sample-accurate attack times for grid alignment — they mark
+	# where each transient becomes audible, not where spectral flux peaks.
+	# Fall back to onset_times for pre-v10 analysis data.
+	attack_times = record.rhythm.attack_times
+
+	if not attack_times:
+		attack_times = record.rhythm.onset_times
 
 	# Single-hit or no-onset samples: simple global stretch.
-	if len(onset_times) < 2:
+	if len(attack_times) < 2:
 		return pyrubberband.time_stretch(  # type: ignore[no-any-return]
 			audio, sample_rate, 1.0 / duration_ratio, rbargs={"--fine": ""},
 		)
 
-	# ── Crop to first onset ──────────────────────────────────────────────
+	# ── Crop to first attack ─────────────────────────────────────────────
 
-	first_onset_sec  = onset_times[0]
-	crop_start_sec   = max(0.0, first_onset_sec - _PRE_ONSET_SECONDS)
+	first_attack_sec = attack_times[0]
+	crop_start_sec   = max(0.0, first_attack_sec - _PRE_ONSET_SECONDS)
 	crop_start_frame = int(crop_start_sec * sample_rate)
 
 	audio = audio[crop_start_frame:]
 
-	# Rebase onset times relative to the crop point.
-	rebased = [t - crop_start_sec for t in onset_times]
+	# Rebase attack times relative to the crop point.
+	rebased = [t - crop_start_sec for t in attack_times]
 
 	# ── Build target grid and snap onsets ─────────────────────────────────
 
@@ -1373,10 +1381,10 @@ def _apply_time_stretch (
 	time_map = _build_time_map(onset_src, onset_tgt, source_length, target_length)
 
 	_log.debug(
-		"Time-stretch %s: %.1f → %.1f BPM (res=%d), %d onsets, "
+		"Time-stretch %s: %.1f → %.1f BPM (res=%d), %d attacks, "
 		"%.3fs → %.3fs",
 		record.name, source_bpm, step.target_bpm, step.resolution,
-		len(onset_times), audio_duration_sec, target_length / sample_rate,
+		len(attack_times), audio_duration_sec, target_length / sample_rate,
 	)
 
 	# ── Apply via Rubber Band's offline finer engine ──────────────────────

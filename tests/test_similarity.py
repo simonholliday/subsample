@@ -87,6 +87,7 @@ def _make_record (
 		pulse_curve=numpy.array([], dtype=numpy.float32),
 		pulse_peak_times=(),
 		onset_times=(),
+		attack_times=(),
 		onset_count=0,
 	)
 	pitch = subsample.analysis.PitchResult(
@@ -652,6 +653,7 @@ class TestLevelIndependence:
 				pulse_curve=numpy.array([], dtype=numpy.float32),
 				pulse_peak_times=(),
 				onset_times=(),
+				attack_times=(),
 				onset_count=0,
 			),
 			pitch       = subsample.analysis.PitchResult(
@@ -679,6 +681,7 @@ class TestLevelIndependence:
 				pulse_curve=numpy.array([], dtype=numpy.float32),
 				pulse_peak_times=(),
 				onset_times=(),
+				attack_times=(),
 				onset_count=0,
 			),
 			pitch       = subsample.analysis.PitchResult(

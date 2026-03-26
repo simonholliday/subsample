@@ -1507,3 +1507,99 @@ class TestToMonoFloat:
 
 		assert result.shape == (1,)
 		assert abs(float(result[0]) - 1.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# _refine_onsets_to_attacks
+# ---------------------------------------------------------------------------
+
+class TestRefineOnsetsToAttacks:
+
+	"""Tests for sample-accurate attack refinement."""
+
+	def test_empty_onsets_returns_empty (self) -> None:
+
+		"""No onsets → no attacks."""
+
+		mono = numpy.zeros(44100, dtype=numpy.float32)
+		result = subsample.analysis._refine_onsets_to_attacks(mono, (), 44100, 512)
+		assert result == ()
+
+	def test_same_length_as_onsets (self) -> None:
+
+		"""One attack time per onset."""
+
+		sr = 44100
+		mono = numpy.zeros(sr, dtype=numpy.float32)
+
+		# Two clicks
+		mono[5000] = 1.0
+		mono[20000] = 1.0
+
+		onsets = (5000 / sr, 20000 / sr)
+		attacks = subsample.analysis._refine_onsets_to_attacks(mono, onsets, sr, 512)
+		assert len(attacks) == len(onsets)
+
+	def test_attacks_precede_or_equal_onsets (self) -> None:
+
+		"""Each attack time is at or before the corresponding onset."""
+
+		sr = 44100
+		mono = numpy.zeros(sr, dtype=numpy.float32)
+		mono[5000] = 1.0
+		mono[20000] = 1.0
+
+		onsets = (5000 / sr, 20000 / sr)
+		attacks = subsample.analysis._refine_onsets_to_attacks(mono, onsets, sr, 512)
+
+		for attack, onset in zip(attacks, onsets):
+			assert attack <= onset + 0.0001
+
+	def test_click_refined_to_click_start (self) -> None:
+
+		"""A sharp click should refine to very close to the actual spike."""
+
+		sr = 44100
+		mono = numpy.zeros(sr, dtype=numpy.float32)
+
+		# Place a click at exactly sample 10000.
+		click_sample = 10000
+		mono[click_sample:click_sample + 5] = 0.9
+
+		# librosa would detect this somewhere near the click.
+		# Simulate a librosa onset slightly after the true attack.
+		fake_onset_sec = (click_sample + 300) / sr  # 300 samples (~6.8ms) after
+
+		attacks = subsample.analysis._refine_onsets_to_attacks(
+			mono, (fake_onset_sec,), sr, 512,
+		)
+
+		# The refined attack should be much closer to the true click position
+		# than the fake onset was.
+		attack_sample = int(attacks[0] * sr)
+		assert abs(attack_sample - click_sample) < 100  # within ~2ms
+
+	def test_attack_times_in_rhythm_result (self) -> None:
+
+		"""analyze_rhythm() populates attack_times alongside onset_times."""
+
+		sr = 44100
+		params = subsample.analysis.compute_params(sr)
+		cfg = subsample.config.AnalysisConfig()
+
+		# Click track: clear transients at known positions.
+		n = int(2.0 * sr)
+		mono = numpy.zeros(n, dtype=numpy.float32)
+		beat_interval = int(sr * 60.0 / 120.0)
+
+		for i in range(0, n, beat_interval):
+			mono[i] = 1.0
+
+		result = subsample.analysis.analyze_rhythm(mono, params, cfg)
+
+		assert isinstance(result.attack_times, tuple)
+		assert len(result.attack_times) == len(result.onset_times)
+
+		for attack, onset in zip(result.attack_times, result.onset_times):
+			assert isinstance(attack, float)
+			assert attack <= onset + 0.0001

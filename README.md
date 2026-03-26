@@ -327,9 +327,36 @@ together, keeping remaining families intact and playable.
 Samples with sufficient rhythmic content can be time-stretched to a target tempo
 by setting `transform.target_bpm`. A sample qualifies when it has a detected
 tempo and at least `transform.min_onset_count` transients (default 4 - enough
-to establish a genuine beat pattern). Onsets are snapped to a quantised beat grid
-(resolution controlled by `transform.quantize_resolution`) and the entire
-mapping is applied in a single pass using Rubber Band's offline finer engine.
+to establish a genuine beat pattern). Detected attacks are snapped to a quantised
+beat grid (resolution controlled by `transform.quantize_resolution`) and the
+entire mapping is applied in a single pass using Rubber Band's offline finer
+engine.
+
+### Attack-accurate onset detection
+
+Standard spectral onset detection (as used by librosa and most audio analysis
+tools) identifies the frame where spectral energy changes most rapidly - the
+peak of the onset strength envelope. For percussive sounds this peak typically
+lags the actual attack by 10-30 ms, which is enough to make beat-quantised
+hits sound noticeably off the grid.
+
+Subsample refines each detected onset to sample-accurate precision using a
+two-stage approach:
+
+1. **Coarse detection** - librosa's onset detector finds approximate positions
+   at frame resolution (~11.6 ms at 44100 Hz / hop 512).
+2. **Attack refinement** - for each onset, a short-window amplitude envelope
+   (32 samples, ~0.7 ms) is searched backward to find the inter-hit valley
+   (quietest point between consecutive transients), then forward to find where
+   energy first rises above 20% of the local peak. This threshold crossing is
+   the perceptual attack start - the moment a musician would tap along.
+
+The search is bounded by the midpoint to the previous onset (preventing bleed
+into the prior hit's tail) and a maximum of 50 ms (the physical upper bound on
+STFT detection lag). The result is stored as `attack_times` in the analysis
+sidecar alongside the original `onset_times`, giving the time-stretch handler
+precise alignment points without sacrificing the coarse onsets that other
+subsystems rely on.
 
 All variants are produced at the output device's sample rate and format using
 high-quality sample rate conversion (soxr algorithm), so the playback path never

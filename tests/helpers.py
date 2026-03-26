@@ -53,6 +53,7 @@ def _make_rhythm () -> subsample.analysis.RhythmResult:
 		pulse_curve      = numpy.array([0.1, 0.2, 0.3, 0.4], dtype=numpy.float32),
 		pulse_peak_times = (0.5, 1.5),
 		onset_times      = (0.1, 0.6),
+		attack_times     = (0.08, 0.57),
 		onset_count      = 2,
 	)
 

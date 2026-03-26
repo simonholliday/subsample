@@ -425,6 +425,7 @@ def _serialize (
 		"pulse_curve":     rhythm.pulse_curve.tolist(),
 		"pulse_peak_times": list(rhythm.pulse_peak_times),
 		"onset_times":     list(rhythm.onset_times),
+		"attack_times":    list(rhythm.attack_times),
 		"onset_count":     rhythm.onset_count,
 	}
 
@@ -487,6 +488,7 @@ def _deserialize_rhythm (data: dict[str, typing.Any]) -> subsample.analysis.Rhyt
 		pulse_curve      = numpy.array(data.get("pulse_curve", []), dtype=numpy.float32),
 		pulse_peak_times = tuple(float(t) for t in data.get("pulse_peak_times", [])),
 		onset_times      = tuple(float(t) for t in data.get("onset_times", [])),
+		attack_times     = tuple(float(t) for t in data.get("attack_times", [])),
 		onset_count      = int(data.get("onset_count", 0)),
 	)
 

@@ -46,6 +46,7 @@ def _make_record (
 	audio: typing.Optional[numpy.ndarray] = None,
 	tempo_bpm: float = 0.0,
 	onset_times: tuple[float, ...] = (),
+	attack_times: typing.Optional[tuple[float, ...]] = None,
 ) -> subsample.library.SampleRecord:
 
 	"""Return a minimal SampleRecord suitable for transform tests."""
@@ -53,12 +54,17 @@ def _make_record (
 	if audio is None:
 		audio = _make_pcm_audio()
 
+	# Default attack_times to onset_times if not provided.
+	if attack_times is None:
+		attack_times = onset_times
+
 	rhythm = subsample.analysis.RhythmResult(
 		tempo_bpm        = tempo_bpm,
 		beat_times       = (),
 		pulse_curve      = numpy.zeros(0, dtype=numpy.float32),
 		pulse_peak_times = (),
 		onset_times      = onset_times,
+		attack_times     = attack_times,
 		onset_count      = len(onset_times),
 	)
 
@@ -114,7 +120,7 @@ def _make_record_unpitched (
 		spectral   = spectral,
 		rhythm     = subsample.analysis.RhythmResult(
 			tempo_bpm=0.0, beat_times=(), pulse_curve=numpy.zeros(0, dtype=numpy.float32),
-			pulse_peak_times=(), onset_times=(), onset_count=0,
+			pulse_peak_times=(), onset_times=(), attack_times=(), onset_count=0,
 		),
 		pitch      = pitch,
 		timbre     = tests.helpers._make_timbre(),

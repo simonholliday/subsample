@@ -105,7 +105,7 @@ warnings.filterwarnings("ignore", message="Empty filters detected in mel frequen
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "9"
+ANALYSIS_VERSION: str = "10"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -340,6 +340,14 @@ class RhythmResult:
 	Marks the start of each audible event (hit, pluck, attack). Unlike beat_times,
 	these are not quantised to a grid — they reflect the raw signal structure.
 	Useful for slicing multi-hit recordings into individual one-shots."""
+
+	attack_times: tuple[float, ...]
+	"""Sample-accurate attack start times in seconds, one per onset.
+	Refined from onset_times by searching backward in the amplitude envelope
+	to find where energy first rises above 10% of the local peak.  These
+	align with the perceptual "hit" — the moment a musician would tap — and
+	are used by the time-stretch handler for beat-grid alignment.
+	Same length as onset_times; each value <= the corresponding onset time."""
 
 	onset_count: int
 	"""Number of detected onsets. Convenience field equivalent to len(onset_times)."""
@@ -671,6 +679,116 @@ def analyze_mono (
 	)
 
 
+def _refine_onsets_to_attacks (
+	mono:        numpy.ndarray,
+	onset_times: tuple[float, ...],
+	sample_rate: int,
+	hop_length:  int,
+) -> tuple[float, ...]:
+
+	"""Refine librosa onset times to sample-accurate attack start positions.
+
+	librosa.onset.onset_detect() returns the frame where spectral flux peaks,
+	which is typically 10-30 ms after the percussive transient begins.  This
+	function searches the amplitude envelope near each onset to find where
+	the energy first rises above the local noise floor — the moment a
+	musician would perceive as "the hit".
+
+	Algorithm for each onset:
+	  1. Define a search region bounded by the midpoint to the previous onset
+	     (prevents bleeding into the prior hit's tail) and a maximum of 50 ms
+	     backward (the physical upper bound on STFT lag for the analysis window).
+	  2. Find the valley (minimum amplitude) in the first 60% of the region —
+	     this is the noise floor between hits.
+	  3. Find the peak amplitude near the onset.
+	  4. Threshold = valley + 20% of (peak − valley).
+	  5. Scan forward from the valley to find the first threshold crossing.
+
+	The 32-sample envelope window (~0.7 ms at 44100 Hz) gives near-sample
+	precision without being dominated by individual waveform cycles.  The 20%
+	threshold corresponds to ~-14 dB below peak — well above typical noise.
+
+	Args:
+		mono:        float32 mono audio, shape (n_samples,).
+		onset_times: Onset positions in seconds from onset_detect().
+		sample_rate: Hz.
+		hop_length:  Analysis hop length (used to bound the peak search).
+
+	Returns:
+		Tuple of attack start times in seconds, same length as onset_times.
+		Each value is <= the corresponding onset time.
+	"""
+
+	if len(onset_times) == 0:
+		return ()
+
+	# Short-window amplitude envelope for near-sample precision.
+	_ENVELOPE_WINDOW = 32
+	abs_audio = numpy.abs(mono)
+	cumsum = numpy.concatenate(
+		[numpy.zeros(1, dtype=mono.dtype), numpy.cumsum(abs_audio)],
+	)
+	n_env = len(abs_audio) - _ENVELOPE_WINDOW + 1
+
+	if n_env < 1:
+		return onset_times
+
+	envelope = (cumsum[_ENVELOPE_WINDOW:_ENVELOPE_WINDOW + n_env] - cumsum[:n_env]) / _ENVELOPE_WINDOW
+	# Pad to match audio length so sample indices correspond directly.
+	envelope = numpy.concatenate([envelope, numpy.zeros(_ENVELOPE_WINDOW - 1, dtype=envelope.dtype)])
+
+	max_search = int(0.050 * sample_rate)  # 50 ms
+	_THRESHOLD_RATIO = 0.20
+
+	attacks: list[float] = []
+
+	for i, onset_sec in enumerate(onset_times):
+		onset_sample = int(onset_sec * sample_rate)
+
+		# Backward limit: midpoint to previous onset, capped at 50 ms.
+		if i > 0:
+			prev_sample = int(onset_times[i - 1] * sample_rate)
+			midpoint = (prev_sample + onset_sample) // 2
+			search_start = max(midpoint, onset_sample - max_search)
+		else:
+			search_start = max(0, onset_sample - max_search)
+
+		search_end = min(len(envelope), onset_sample + hop_length)
+
+		if search_end <= search_start + 1:
+			attacks.append(onset_sec)
+			continue
+
+		region = envelope[search_start:search_end]
+
+		# Valley: minimum in the first 60% of the region (before the rise).
+		valley_zone = max(1, int(len(region) * 0.6))
+		valley_idx = int(numpy.argmin(region[:valley_zone]))
+		valley_value = float(region[valley_idx])
+
+		# Peak: maximum in the full region.
+		peak_value = float(numpy.max(region))
+
+		if peak_value <= valley_value:
+			attacks.append(onset_sec)
+			continue
+
+		threshold = valley_value + _THRESHOLD_RATIO * (peak_value - valley_value)
+
+		# Scan forward from the valley to find the threshold crossing.
+		attack_idx = len(region) - 1
+
+		for s in range(valley_idx, len(region)):
+			if region[s] >= threshold:
+				attack_idx = s
+				break
+
+		attack_sample = min(search_start + attack_idx, onset_sample)
+		attacks.append(attack_sample / sample_rate)
+
+	return tuple(attacks)
+
+
 def analyze_rhythm (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
@@ -709,6 +827,7 @@ def analyze_rhythm (
 			pulse_curve=numpy.zeros(0, dtype=numpy.float32),
 			pulse_peak_times=(),
 			onset_times=(),
+			attack_times=(),
 			onset_count=0,
 		)
 
@@ -784,12 +903,20 @@ def analyze_rhythm (
 
 	onset_times: tuple[float, ...] = tuple(float(t) for t in onset_times_raw)
 
+	# Refine each librosa onset to the sample-accurate attack start — the
+	# moment the transient becomes audible.  Used by the time-stretch handler
+	# for beat-grid alignment.
+	attack_times = _refine_onsets_to_attacks(
+		mono, onset_times, params.sample_rate, params.hop_length,
+	)
+
 	return RhythmResult(
 		tempo_bpm=tempo_bpm,
 		beat_times=beat_times,
 		pulse_curve=pulse_curve,
 		pulse_peak_times=pulse_peak_times,
 		onset_times=onset_times,
+		attack_times=attack_times,
 		onset_count=len(onset_times),
 	)
 
