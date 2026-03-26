@@ -33,6 +33,7 @@ import numpy
 import pyaudio
 import yaml
 
+import pymididefs.notes
 import subsample.analysis
 import subsample.audio
 import subsample.library
@@ -117,91 +118,9 @@ def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_
 	return result
 
 
-# Note class names indexed by semitone offset — used by _midi_to_note_name().
-_NOTE_CLASSES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
-
-
-def _midi_to_note_name (midi_note: int) -> str:
-
-	"""Convert a MIDI note number to a human-readable note name.
-
-	Inverse of _parse_note_name().  Uses sharps only (C#, not Db) and
-	the C4 = 60 convention (octave range -1 to 9).
-
-	>>> _midi_to_note_name(0)
-	'C-1'
-	>>> _midi_to_note_name(60)
-	'C4'
-	>>> _midi_to_note_name(127)
-	'G9'
-	"""
-
-	return f"{_NOTE_CLASSES[midi_note % 12]}{(midi_note // 12) - 1}"
-
-
-# Semitone offsets within an octave — used by _parse_note_name().
-# Flats and enharmonic sharps share entries (Db=C#=1, Eb=D#=3, etc.).
-_SEMITONE_MAP: dict[str, int] = {
-	"C": 0, "C#": 1, "DB": 1, "D": 2, "D#": 3, "EB": 3,
-	"E": 4, "F": 5, "F#": 6, "GB": 6, "G": 7, "G#": 8,
-	"AB": 8, "A": 9, "A#": 10, "BB": 10, "B": 11,
-}
-
-
-def _parse_note_name (name: str) -> int:
-
-	"""Parse a note name string to a MIDI note number.
-
-	Uses C4 = 60 (Ableton / Logic / FL Studio convention).
-	Octave numbers from -1 (C-1 = 0) to 9 (G9 = 127).
-
-	Sharps:   C#4, D#3, F#2
-	Flats:    Db4, Eb3, Bb2
-	Naturals: C4, A3, G2
-
-	Args:
-		name: Note name string such as 'C4', 'D#3', 'Bb2', or 'C-1'.
-
-	Returns:
-		MIDI note number in [0, 127].
-
-	Raises:
-		ValueError: If the note class is unrecognised or the result is out of MIDI range.
-	"""
-
-	name = name.strip()
-
-	# Split into note class (letter + optional accidental) and octave string.
-	# Check for a two-character class (letter + '#' or 'b') first.
-	if len(name) >= 2 and name[1] in ("#", "b"):
-		note_class = name[:2].upper()
-		octave_str = name[2:]
-	else:
-		note_class = name[:1].upper()
-		octave_str = name[1:]
-
-	if note_class not in _SEMITONE_MAP:
-		raise ValueError(
-			f"Unrecognised note class {note_class!r} in {name!r} — "
-			f"expected a letter A-G with optional # or b (e.g. C4, D#3, Bb2)"
-		)
-
-	try:
-		octave = int(octave_str)
-	except ValueError:
-		raise ValueError(
-			f"Malformed note name {name!r} — octave part {octave_str!r} is not an integer"
-		) from None
-
-	midi = (octave + 1) * 12 + _SEMITONE_MAP[note_class]
-
-	if not 0 <= midi <= 127:
-		raise ValueError(
-			f"Note {name!r} maps to MIDI {midi}, outside the valid range [0, 127] "
-			f"(C-1 = 0, G9 = 127)"
-		)
-
-	return midi
+# Note name conversion — delegated to pymididefs.
+_midi_to_note_name = pymididefs.notes.note_to_name
+_parse_note_name = pymididefs.notes.name_to_note
 
 
 def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
