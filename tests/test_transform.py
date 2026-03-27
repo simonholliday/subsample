@@ -187,13 +187,13 @@ class TestTransformSpec:
 
 	def test_declaration_order_is_cache_key (self) -> None:
 		"""Steps stay in declaration order — this is the cache key identity."""
-		pitch    = subsample.transform.PitchShift(target_midi_note=69)
-		envelope = subsample.transform.EnvelopeAdjust(attack_ms=10.0, release_ms=50.0)
-		stretch  = subsample.transform.TimeStretch(target_bpm=90.0)
+		pitch   = subsample.transform.PitchShift(target_midi_note=69)
+		filt    = subsample.transform.LowPassFilter(freq=1000.0)
+		stretch = subsample.transform.TimeStretch(target_bpm=90.0)
 
-		spec = subsample.transform.TransformSpec(steps=(stretch, envelope, pitch))
+		spec = subsample.transform.TransformSpec(steps=(stretch, filt, pitch))
 
-		assert spec.steps == (stretch, envelope, pitch)
+		assert spec.steps == (stretch, filt, pitch)
 
 	def test_spec_is_hashable (self) -> None:
 		spec = subsample.transform.TransformSpec(

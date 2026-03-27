@@ -151,19 +151,6 @@ class PitchShift:
 	target_midi_note: int
 
 
-@dataclasses.dataclass(frozen=True)
-class EnvelopeAdjust:
-
-	"""Modify the attack and/or release shape of the audio.
-
-	attack_ms:  Target attack duration in milliseconds.  0.0 = unchanged.
-	release_ms: Target release duration in milliseconds.  0.0 = unchanged.
-	Unimplemented — handler not yet registered in TransformProcessor._HANDLERS.
-	"""
-
-	attack_ms:  float
-	release_ms: float
-
 
 @dataclasses.dataclass(frozen=True)
 class TimeStretch:
@@ -283,7 +270,6 @@ TransformStep = typing.Union[
 	Saturate,
 	HpssHarmonic,
 	HpssPercussive,
-	EnvelopeAdjust,
 	TimeStretch,
 ]
 
@@ -953,8 +939,8 @@ class TransformProcessor:
 			return
 
 		# Guard: don't submit jobs that will always fail because a handler is
-		# not yet registered (e.g. EnvelopeAdjust).  Once a handler is
-		# registered the check passes and jobs run normally.
+		# not registered.  Once a handler is registered the check passes and
+		# jobs run normally.
 		if not all(type(step) in self._HANDLERS for step in spec.steps):
 			return
 
