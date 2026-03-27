@@ -55,7 +55,7 @@ Data flow
           → hit:  return TransformResult  (player applies gain + pan, no conversion)
           → miss: try next tier
       → TransformManager.get_at_bpm(sample_id)
-          → hit:  return TransformResult  (beat-quantised variant)
+          → hit:  return TransformResult  (beat-quantized variant)
           → miss/skip: enqueue if qualifying, return None  (player falls back)
       → TransformManager.get_base(sample_id)
           → hit:  return TransformResult  (float32 copy, no DSP)
@@ -68,7 +68,7 @@ Data flow
   Target BPM changes
       → TransformManager.on_bpm_change(new_bpm)
           → TransformCache.remove_by_step_type(TimeStretch)
-          → filter by min_onset_count
+          → filter by tempo_bpm > 0
           → TransformProcessor.enqueue_bpm_change(qualifying_records, new_bpm)
 
 How to add a new transform type
@@ -892,15 +892,14 @@ class TransformManager:
 
 		By default reads target_bpm and quantize_resolution from the stored
 		config.  Per-assignment overrides can be passed explicitly — this
-		supports beat_match processors that declare their own BPM/grid.
+		supports beat_quantize processors that declare their own BPM/grid.
 
-		On a cache miss for a qualifying sample, enqueues the transform and
-		returns None so the variant is ready on the next trigger.
+		On a cache miss, enqueues the transform and returns None so the
+		variant is ready on the next trigger.
 
 		Returns None immediately when:
 		  - effective target_bpm is 0.0 (disabled)
-		  - the sample has no detected rhythm
-		  - the sample has fewer onsets than min_onset_count
+		  - the sample has no detected rhythm (tempo_bpm <= 0)
 		"""
 
 		bpm = target_bpm if target_bpm is not None else self._cfg.target_bpm
@@ -909,14 +908,12 @@ class TransformManager:
 		if bpm <= 0.0:
 			return None
 
-		# Check whether this sample qualifies for time-stretching.
 		record = self._instrument_library.get(sample_id)
 
 		if record is None:
 			return None
 
-		if (record.rhythm.tempo_bpm <= 0.0
-				or record.rhythm.onset_count < self._cfg.min_onset_count):
+		if record.rhythm.tempo_bpm <= 0.0:
 			return None
 
 		spec = TransformSpec(steps=(TimeStretch(
@@ -991,29 +988,14 @@ class TransformManager:
 		no DSP) so the playback path has a pre-converted copy ready for every
 		sample without calling _pcm_to_float32() at trigger time.
 
-		Pitch variants are NOT enqueued here — they are driven by
-		MidiPlayer.update_pitched_assignments(), which reads the MIDI map to know
-		exactly which notes are needed and submits the precise set via
-		enqueue_pitch_range().  This avoids a fixed-range cap and ensures the
-		full assigned note range is covered.
-
-		If target_bpm > 0 and the sample has detected rhythm with at least
-		min_onset_count transients, a TimeStretch variant is also enqueued.
+		Pitch and time-stretch variants are NOT enqueued here — they are
+		driven by MidiPlayer.update_assignments(), which reads the MIDI map
+		to know exactly which samples need which processors and submits the
+		precise set.
 		"""
 
 		# Base variant: always enqueue regardless of pitch content.
 		self._processor.enqueue(record, _BASE_VARIANT_SPEC)
-
-		# Auto-BPM time-stretch: enqueue if target set, sample has detected rhythm,
-		# and enough onsets to be considered genuinely rhythmic.
-		if (self._cfg.target_bpm > 0.0
-				and record.rhythm.tempo_bpm > 0.0
-				and record.rhythm.onset_count >= self._cfg.min_onset_count):
-			spec = TransformSpec(steps=(TimeStretch(
-				target_bpm=self._cfg.target_bpm,
-				resolution=self._cfg.quantize_resolution,
-			),))
-			self._processor.enqueue(record, spec)
 
 	def on_parent_evicted (self, sample_ids: list[int]) -> None:
 
@@ -1049,11 +1031,9 @@ class TransformManager:
 			new_bpm, len(invalidated),
 		)
 
-		# Filter to samples that meet the onset threshold before enqueuing.
-		min_onsets = self._cfg.min_onset_count
 		qualifying = [
 			r for r in self._instrument_library.samples()
-			if r.rhythm.tempo_bpm > 0.0 and r.rhythm.onset_count >= min_onsets
+			if r.rhythm.tempo_bpm > 0.0
 		]
 
 		self._processor.enqueue_bpm_change(
@@ -1175,7 +1155,7 @@ def _apply_pitch (
 
 
 # ---------------------------------------------------------------------------
-# Time-stretch handler — beat-quantised non-linear stretching
+# Time-stretch handler — beat-quantized non-linear stretching
 # ---------------------------------------------------------------------------
 
 # Pre-onset margin: audio before each onset is included so the transient
@@ -1294,7 +1274,7 @@ def _apply_time_stretch (
 	step:        TimeStretch,
 ) -> numpy.ndarray:
 
-	"""Beat-quantised time-stretch using Rubber Band's offline finer engine.
+	"""Beat-quantized time-stretch using Rubber Band's offline finer engine.
 
 	Uses sample-accurate attack_times (refined from librosa onsets via
 	amplitude-envelope analysis) for grid alignment, so percussive hits
@@ -1408,6 +1388,6 @@ def _apply_time_stretch (
 # silently dropped because _HANDLERS was empty (Phase 1 scaffold).
 TransformProcessor._HANDLERS[PitchShift] = _apply_pitch
 
-# Register the time-stretch handler — beat-quantised non-linear stretching
+# Register the time-stretch handler — beat-quantized non-linear stretching
 # via pyrubberband.timemap_stretch() with Rubber Band's offline finer engine.
 TransformProcessor._HANDLERS[TimeStretch] = _apply_time_stretch

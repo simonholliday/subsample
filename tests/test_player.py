@@ -25,7 +25,7 @@ def _make_assignment (
 	pitched_filter: typing.Optional[bool] = None,
 	order_by: str = "newest",
 	repitch: bool = False,
-	beat_match: bool = False,
+	beat_quantize: bool = False,
 	one_shot: bool = True,
 	pan_gains: typing.Optional[numpy.ndarray] = None,
 ) -> subsample.query.Assignment:
@@ -55,8 +55,8 @@ def _make_assignment (
 	if repitch:
 		steps.append(subsample.query.ProcessorStep(name="repitch"))
 
-	if beat_match:
-		steps.append(subsample.query.ProcessorStep(name="beat_match", params=(("grid", 16),)))
+	if beat_quantize:
+		steps.append(subsample.query.ProcessorStep(name="beat_quantize", params=(("grid", 16),)))
 
 	process = subsample.query.ProcessSpec(steps=tuple(steps))
 
@@ -1348,11 +1348,11 @@ class TestUpdatePitchedAssignments:
 
 		transform_manager.enqueue_pitch_range.assert_not_called()
 
-	def test_beat_match_pre_computation (self) -> None:
-		"""update_assignments() calls get_at_bpm() for beat_match assignments."""
+	def test_beat_quantize_pre_computation (self) -> None:
+		"""update_assignments() calls get_at_bpm() for beat_quantize assignments."""
 
 		asgn = _make_assignment(
-			name="Loops", beat_match=True, repitch=False,
+			name="Loops", beat_quantize=True, repitch=False,
 			order_by="newest", one_shot=False,
 		)
 		note_map = _make_note_map(asgn, channel=0, notes=[60])
@@ -1373,6 +1373,7 @@ class TestUpdatePitchedAssignments:
 		mock_record = unittest.mock.MagicMock()
 		mock_record.sample_id = 7
 		mock_record.name = "loop-sample"
+		mock_record.rhythm.tempo_bpm = 120.0
 
 		player._instrument_library.samples.return_value = [mock_record]
 		player._instrument_library.get.return_value = mock_record
@@ -1387,15 +1388,15 @@ class TestUpdatePitchedAssignments:
 		call_args = transform_manager.get_at_bpm.call_args
 		assert call_args[0][0] == 7  # sample_id
 
-	def test_beat_match_with_explicit_bpm (self) -> None:
+	def test_beat_quantize_with_explicit_bpm (self) -> None:
 		"""Per-assignment BPM override is passed to get_at_bpm."""
 
-		# beat_match with explicit bpm=120, grid=8
+		# beat_quantize with explicit bpm=120, grid=8
 		asgn = subsample.query.Assignment(
 			name="Explicit BPM",
 			select=(subsample.query.SelectSpec(order_by="newest"),),
 			process=subsample.query.ProcessSpec(steps=(
-				subsample.query.ProcessorStep(name="beat_match", params=(("bpm", 120), ("grid", 8))),
+				subsample.query.ProcessorStep(name="beat_quantize", params=(("bpm", 120), ("grid", 8))),
 			)),
 			one_shot=False,
 		)
@@ -1416,6 +1417,7 @@ class TestUpdatePitchedAssignments:
 
 		mock_record = unittest.mock.MagicMock()
 		mock_record.sample_id = 7
+		mock_record.rhythm.tempo_bpm = 100.0
 
 		player._instrument_library.samples.return_value = [mock_record]
 		player._instrument_library.get.return_value = mock_record

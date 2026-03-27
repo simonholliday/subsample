@@ -58,6 +58,21 @@ _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 NoteMap = dict[tuple[int, int], tuple[subsample.query.Assignment, int]]
 
 
+def _beat_quantize_params (process: subsample.query.ProcessSpec) -> tuple[typing.Optional[float], int]:
+
+	"""Extract BPM and grid from a beat_quantize processor step.
+
+	Returns (target_bpm, grid) where target_bpm is None when no explicit
+	BPM is declared (falling back to the global transform.target_bpm).
+	"""
+
+	beat_step = next(s for s in process.steps if s.name == "beat_quantize")
+	bpm  = float(beat_step.get("bpm", 0))
+	grid = int(beat_step.get("grid", 16))
+
+	return (bpm if bpm > 0 else None, grid)
+
+
 def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_name: str) -> numpy.ndarray:
 
 	"""Parse pan weights from config and normalise to constant-power channel gains.
@@ -204,7 +219,7 @@ def load_midi_map (
 	Each assignment declares:
 	  select:   Which sample to play — filter predicates, ordering, pick position.
 	            Can be a single spec or a list (fallback chain, tried in order).
-	  process:  How to present it — ordered list of processors (repitch, beat_match, etc.).
+	  process:  How to present it — ordered list of processors (repitch, beat_quantize, etc.).
 	  one_shot: Playback behaviour — true (default) ignores note_off.
 	  gain:     Level offset in dB (default 0.0).
 	  pan:      Stereo weights (default [50, 50] = centre).
@@ -576,8 +591,8 @@ class MidiPlayer:
 			if asgn.process.has_repitch():
 				line += " pitched"
 
-			if asgn.process.has_beat_match():
-				line += " beat-matched"
+			if asgn.process.has_beat_quantize():
+				line += " beat-quantized"
 
 			if asgn.one_shot:
 				line += "  one-shot"
@@ -828,27 +843,34 @@ class MidiPlayer:
 					)
 					return
 
-			# 2. Beat-match: check for a time-stretch variant.
-			if assignment.process.has_beat_match():
-				beat_step = next(s for s in assignment.process.steps if s.name == "beat_match")
-				bpm  = float(beat_step.get("bpm", 0))
-				grid = int(beat_step.get("grid", 16))
+			# 2. Beat-quantize: check for a time-stretch variant.
+			if assignment.process.has_beat_quantize():
 
-				stretched = self._transform_manager.get_at_bpm(
-					sample_id,
-					target_bpm=bpm if bpm > 0 else None,
-					resolution=grid,
-				)
-
-				if stretched is not None:
-					rendered = self._render_float(stretched.audio, stretched.level, msg.velocity, pan_gains)
-					with self._voices_lock:
-						self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
-					_log.debug(
-						"note %d (vel %d) → %r → %r (stretched variant)  (%.2fs)",
-						msg.note, msg.velocity, assignment.name, record.name, stretched.duration,
+				if record.rhythm.tempo_bpm <= 0.0:
+					_log.warning(
+						"beat_quantize %s: sample %r has no detected tempo — "
+						"playing without beat-quantizing",
+						assignment.name, record.name,
 					)
-					return
+
+				else:
+					bpm, grid = _beat_quantize_params(assignment.process)
+
+					stretched = self._transform_manager.get_at_bpm(
+						sample_id,
+						target_bpm=bpm,
+						resolution=grid,
+					)
+
+					if stretched is not None:
+						rendered = self._render_float(stretched.audio, stretched.level, msg.velocity, pan_gains)
+						with self._voices_lock:
+							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
+						_log.debug(
+							"note %d (vel %d) → %r → %r (stretched variant)  (%.2fs)",
+							msg.note, msg.velocity, assignment.name, record.name, stretched.duration,
+						)
+						return
 
 			# 3. Fall back to the base variant (float32, peak-normalised, no DSP).
 			base = self._transform_manager.get_base(sample_id)
@@ -910,7 +932,7 @@ class MidiPlayer:
 		Groups notes by Assignment, resolves each to its current sample via the
 		query engine, and enqueues the appropriate variants:
 		  - repitch: pitch-shift variants for every note in the group
-		  - beat_match: time-stretch variant with per-assignment BPM/grid params
+		  - beat_quantize: time-stretch variant with per-assignment BPM/grid params
 
 		The TransformProcessor deduplicates in-flight and cached keys, so
 		repeated calls are safe and cheap.
@@ -933,7 +955,7 @@ class MidiPlayer:
 
 		for (_ch, note), (asgn, _pick) in self._note_map.items():
 
-			if asgn.process.has_repitch() or asgn.process.has_beat_match():
+			if asgn.process.has_repitch() or asgn.process.has_beat_quantize():
 				group_key = id(asgn)
 
 				if group_key not in groups:
@@ -983,19 +1005,24 @@ class MidiPlayer:
 						asgn.name, len(notes), record.name,
 					)
 
-			# Beat-match: enqueue a time-stretch variant with per-assignment params.
-			if asgn.process.has_beat_match():
-				beat_step = next(s for s in asgn.process.steps if s.name == "beat_match")
-				bpm  = float(beat_step.get("bpm", 0))
-				grid = int(beat_step.get("grid", 16))
+			# Beat-quantize: enqueue a time-stretch variant with per-assignment params.
+			if asgn.process.has_beat_quantize():
 
-				# bpm=0 means "use session target_bpm from config" — passed as None
-				# so get_at_bpm() reads from config.
-				self._transform_manager.get_at_bpm(
-					record.sample_id,
-					target_bpm=bpm if bpm > 0 else None,
-					resolution=grid,
-				)
+				if record.rhythm.tempo_bpm <= 0.0:
+					_log.warning(
+						"beat_quantize %s: best match %r has no detected tempo — "
+						"will not be beat-quantized",
+						asgn.name, record.name,
+					)
+
+				else:
+					bpm, grid = _beat_quantize_params(asgn.process)
+
+					self._transform_manager.get_at_bpm(
+						record.sample_id,
+						target_bpm=bpm,
+						resolution=grid,
+					)
 
 	# Backward-compatible alias — cli.py and tests call this name.
 	update_pitched_assignments = update_assignments

@@ -354,30 +354,30 @@ class TestParseProcess:
 		assert spec.steps[0].name == "repitch"
 		assert spec.steps[0].params == ()
 
-	def test_beat_match_with_params (self) -> None:
+	def test_beat_quantize_with_params (self) -> None:
 
-		raw = [{"beat_match": {"grid": 16, "bpm": 120}}]
+		raw = [{"beat_quantize": {"grid": 16, "bpm": 120}}]
 		spec = subsample.query.parse_process(raw, "test")
-		assert spec.steps[0].name == "beat_match"
+		assert spec.steps[0].name == "beat_quantize"
 		assert spec.steps[0].get("grid") == 16
 		assert spec.steps[0].get("bpm") == 120
 
 	def test_multiple_processors (self) -> None:
 
-		raw = [{"beat_match": {"grid": 16}}, {"repitch": True}]
+		raw = [{"beat_quantize": {"grid": 16}}, {"repitch": True}]
 		spec = subsample.query.parse_process(raw, "test")
 		assert len(spec.steps) == 2
-		assert spec.steps[0].name == "beat_match"
+		assert spec.steps[0].name == "beat_quantize"
 		assert spec.steps[1].name == "repitch"
 
 	def test_has_repitch (self) -> None:
 		spec = subsample.query.parse_process([{"repitch": True}], "test")
 		assert spec.has_repitch()
-		assert not spec.has_beat_match()
+		assert not spec.has_beat_quantize()
 
-	def test_has_beat_match (self) -> None:
-		spec = subsample.query.parse_process([{"beat_match": {"grid": 8}}], "test")
-		assert spec.has_beat_match()
+	def test_has_beat_quantize (self) -> None:
+		spec = subsample.query.parse_process([{"beat_quantize": {"grid": 8}}], "test")
+		assert spec.has_beat_quantize()
 		assert not spec.has_repitch()
 
 	def test_invalid_type_raises (self) -> None:
@@ -400,7 +400,7 @@ class TestProcessSpec:
 	def test_empty_spec (self) -> None:
 		spec = subsample.query.ProcessSpec()
 		assert not spec.has_repitch()
-		assert not spec.has_beat_match()
+		assert not spec.has_beat_quantize()
 
 
 class TestSelectSpec:

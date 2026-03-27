@@ -15,7 +15,7 @@ SelectSpec
 
 ProcessSpec
     Parsed from the ``process:`` list.  Contains an ordered sequence of
-    processor declarations (repitch, beat_match, etc.) that map to
+    processor declarations (repitch, beat_quantize, etc.) that map to
     TransformStep subclasses at execution time.
 
 Assignment
@@ -169,7 +169,7 @@ class ProcessorStep:
 
 	"""A single processor declaration within a process pipeline.
 
-	name:   Processor name (e.g. "repitch", "beat_match").
+	name:   Processor name (e.g. "repitch", "beat_quantize").
 	params: Frozen key-value pairs (e.g. (("grid", 16), ("bpm", 120))).
 	        Empty tuple for parameterless processors (e.g. "repitch: true").
 	        Stored as a tuple of pairs so the frozen dataclass is truly hashable.
@@ -201,9 +201,9 @@ class ProcessSpec:
 		"""True if any step is a repitch processor."""
 		return any(s.name == "repitch" for s in self.steps)
 
-	def has_beat_match (self) -> bool:
-		"""True if any step is a beat_match processor."""
-		return any(s.name == "beat_match" for s in self.steps)
+	def has_beat_quantize (self) -> bool:
+		"""True if any step is a beat_quantize processor."""
+		return any(s.name == "beat_quantize" for s in self.steps)
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +332,6 @@ def _parse_where (raw: typing.Any, assignment_name: str) -> WherePredicate:
 		elif key in ("min_pitch", "max_pitch"):
 			# Accept Hz (float) or note name (string).
 			if isinstance(value, str):
-				import pymididefs.notes
 				hz = _note_name_to_hz(value)
 				kwargs[key + "_hz"] = hz
 			else:
@@ -465,7 +464,7 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 				steps.append(ProcessorStep(name=str(proc_name)))
 
 			elif isinstance(proc_value, dict):
-				# e.g. "beat_match: { grid: 16, bpm: 120 }"
+				# e.g. "beat_quantize: { grid: 16, bpm: 120 }"
 				frozen_params = tuple((str(k), v) for k, v in proc_value.items())
 				steps.append(ProcessorStep(name=str(proc_name), params=frozen_params))
 

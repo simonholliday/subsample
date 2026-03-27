@@ -207,7 +207,7 @@ applied after sample selection. Omit it entirely for unprocessed playback.
 ```yaml
 process:
   - repitch: true                  # pitch-shift to match the MIDI note
-  - beat_match: { grid: 16 }      # time-stretch to the session target BPM
+  - beat_quantize: { grid: 16 }   # time-stretch to the session target BPM
 ```
 
 Available processors:
@@ -216,8 +216,8 @@ Available processors:
 |-----------|-----------|-------------|
 | `repitch: true` | none | Pitch-shift to match the triggering MIDI note |
 | `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
-| `beat_match: { grid: 16 }` | grid subdivision | Time-stretch to session `target_bpm` |
-| `beat_match: { bpm: 120, grid: 8 }` | explicit BPM + grid | Time-stretch to a specific BPM |
+| `beat_quantize: { grid: 16 }` | grid subdivision | Time-stretch to session `target_bpm` |
+| `beat_quantize: { bpm: 120, grid: 8 }` | explicit BPM + grid | Time-stretch to a specific BPM |
 
 When `repitch` is in the process list, all notes in a multi-note assignment
 share pick 1 (same sample, pitched per note). Without `repitch`, each note gets
@@ -249,7 +249,7 @@ buffer, not an on-the-fly calculation. A three-tier fallback guarantees playback
 is never blocked:
 
 1. **Pitch variant** - pre-computed, pitch-corrected (assignments with `repitch`)
-2. **Time-stretch variant** - pre-computed, beat-quantised (assignments with `beat_match`)
+2. **Time-stretch variant** - pre-computed, beat-quantized (assignments with `beat_quantize`)
 3. **Base variant** - pre-normalised, no DSP (all samples)
 4. **On-the-fly render** - last resort on the very first trigger only
 
@@ -309,20 +309,18 @@ in a memory-bounded store with parent-priority FIFO eviction - when a variant
 family would exceed the memory budget, the entire oldest family is evicted
 together, keeping remaining families intact and playable.
 
-Samples with sufficient rhythmic content can be time-stretched to a target tempo
-by setting `transform.target_bpm`. A sample qualifies when it has a detected
-tempo and at least `transform.min_onset_count` transients (default 4 - enough
-to establish a genuine beat pattern). Detected attacks are snapped to a quantised
-beat grid (resolution controlled by `transform.quantize_resolution`) and the
-entire mapping is applied in a single pass using Rubber Band's offline finer
-engine.
+Samples with detected rhythmic content can be time-stretched to a target tempo
+using the `beat_quantize` processor in a MIDI map assignment. Detected attacks are
+snapped to a quantized beat grid and the entire mapping is applied in a single
+pass using Rubber Band's offline finer engine. Time-stretch variants are produced
+on-demand when an assignment requests them — no global startup cost.
 
 ### Attack-accurate onset detection
 
 Standard spectral onset detection (as used by librosa and most audio analysis
 tools) identifies the frame where spectral energy changes most rapidly - the
 peak of the onset strength envelope. For percussive sounds this peak typically
-lags the actual attack by 10-30 ms, which is enough to make beat-quantised
+lags the actual attack by 10-30 ms, which is enough to make beat-quantized
 hits sound noticeably off the grid.
 
 Subsample refines each detected onset to sample-accurate precision using a
@@ -426,9 +424,8 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
 | `transform.max_memory_mb` | `50.0` | Memory budget (MB) for transform variants (pitch-shifted + time-stretched) |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
-| `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantised to the target tempo |
+| `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantized to the target tempo |
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
-| `transform.min_onset_count` | `4` | Minimum detected onsets for a sample to be time-stretched. Filters out single hits and ambient false positives. 0 = no filter |
 
 ## Output
 
@@ -739,7 +736,7 @@ SampleRecord added to library
     → TransformManager.on_sample_added()
         → enqueue base variant (always)             ← float32 peak-normalised copy
         → enqueue pitch variants (tonal only)       ← Rubber Band offline finer engine
-        → enqueue time-stretch (if BPM set + enough onsets) ← beat-quantised timemap_stretch
+        → enqueue time-stretch (if BPM set + enough onsets) ← beat-quantized timemap_stretch
             → TransformProcessor worker pool
                 → TransformCache (parent-priority FIFO eviction, 50 MB default)
 ```
@@ -760,7 +757,7 @@ MIDI note_on
     → query engine: filter → order → pick → sample_id
         (fallback: try each select spec in order)
     → transform_manager.get_pitched()  → pitch variant (repitch assignments)
-    → transform_manager.get_at_bpm()   → time-stretch variant (beat_match assignments)
+    → transform_manager.get_at_bpm()   → time-stretch variant (beat_quantize assignments)
     → transform_manager.get_base()     → base variant (all samples)
     → _render()                        → on-the-fly fallback (first trigger only)
     → _render_float(): apply gain · velocity² · anti-clip ceiling

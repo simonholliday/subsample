@@ -355,20 +355,13 @@ analysis:
 #   # is not installed or you prefer lazy rendering over background pre-computation.
 #
 #   target_bpm: 0.0
-#   # Target BPM for automatic time-stretch variants. 0.0 = disabled.
-#   # When > 0, a beat-quantised time-stretch variant is produced for samples
-#   # that have a detected tempo AND at least min_onset_count transients.
-#   # Onsets are snapped to a grid at the target tempo and processed by
-#   # Rubber Band's offline finer engine for highest quality.
+#   # Default BPM for beat_quantize processors that don't specify an explicit bpm.
+#   # 0.0 = disabled.  When a MIDI map assignment uses beat_quantize: { grid: 16 }
+#   # without an explicit bpm, this value is used.
 #
 #   quantize_resolution: 16
-#   # Grid subdivision for beat-quantised time-stretch. Determines the note
-#   # value that onsets are snapped to at the target BPM.
+#   # Default grid subdivision for beat_quantize processors that don't specify
+#   # an explicit grid.
 #   # 1 = whole notes, 2 = half, 4 = quarter, 8 = eighth, 16 = sixteenth.
 #   # Higher values give finer onset alignment.
-#
-#   min_onset_count: 4
-#   # Minimum detected onsets for a sample to be time-stretched.
-#   # Filters out single hits and ambient sounds that librosa flags as
-#   # rhythmic but have no meaningful beat pattern.  0 = no filter.
 #   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values

@@ -91,8 +91,8 @@
 #
 #   repitch: true           Pitch-shift to match the triggering MIDI note
 #   repitch: { note: C4 }  Pitch-shift to a fixed note
-#   beat_match: { grid: 16 }        Time-stretch to session target_bpm
-#   beat_match: { bpm: 120, grid: 8 }  Time-stretch to specific BPM
+#   beat_quantize: { grid: 16 }        Time-stretch to session target_bpm
+#   beat_quantize: { bpm: 120, grid: 8 }  Time-stretch to specific BPM
 #
 # Omit process entirely for unprocessed playback (base variant).
 #
@@ -252,7 +252,7 @@ assignments:
   #     order_by: newest
   #     pick: 1
   #   process:
-  #     - beat_match: { grid: 16 }
+  #     - beat_quantize: { grid: 16 }
   #   one_shot: false
 
   # --- Highest-pitched sample ---

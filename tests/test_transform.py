@@ -976,7 +976,6 @@ class TestTransformConfig:
 		assert cfg.transform.auto_pitch          is True
 		assert cfg.transform.target_bpm          == 0.0
 		assert cfg.transform.quantize_resolution == 16
-		assert cfg.transform.min_onset_count     == 4
 
 	def test_valid_quantize_resolutions (self) -> None:
 
@@ -1290,55 +1289,21 @@ class TestTimeStretchHandler:
 
 
 # ---------------------------------------------------------------------------
-# TestMinOnsetCountConfig
+# TestOnSampleAdded — no global time-stretch auto-enqueue
 # ---------------------------------------------------------------------------
 
-class TestMinOnsetCountConfig:
+class TestOnSampleAddedNoAutoStretch:
 
-	"""Config validation for transform.min_onset_count."""
+	"""on_sample_added() only enqueues base variant, not time-stretch."""
 
-	_DEFAULT_CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+	def test_no_time_stretch_enqueued (self) -> None:
 
-	def test_negative_raises (self) -> None:
-
-		"""Negative min_onset_count is rejected."""
-
-		import yaml
-		base_raw: dict[str, typing.Any] = yaml.safe_load(
-			self._DEFAULT_CONFIG_PATH.read_text()
-		) or {}
-
-		raw = dict(base_raw)
-		raw["transform"] = {"min_onset_count": -1}
-
-		with pytest.raises(ValueError, match="min_onset_count"):
-			subsample.config._build_config(raw)
-
-	def test_zero_accepted (self) -> None:
-
-		"""Zero disables the filter — all rhythmic samples qualify."""
-
-		cfg = subsample.config.TransformConfig(min_onset_count=0)
-		assert cfg.min_onset_count == 0
-
-
-# ---------------------------------------------------------------------------
-# TestOnsetFilter
-# ---------------------------------------------------------------------------
-
-class TestOnsetFilter:
-
-	"""on_sample_added() respects min_onset_count for time-stretch enqueue."""
-
-	def test_skips_below_threshold (self) -> None:
-
-		"""Record with onset_count < min_onset_count is not time-stretch enqueued."""
+		"""Even a rhythmic sample should not get auto-stretched at startup."""
 
 		enqueued_specs: list[subsample.transform.TransformSpec] = []
 
-		cfg = subsample.config.TransformConfig(target_bpm=120.0, min_onset_count=4)
+		cfg = subsample.config.TransformConfig(target_bpm=120.0)
 
-		# Minimal mock: capture enqueue calls.
 		class _FakeProcessor:
 			def enqueue (self, record: typing.Any, spec: subsample.transform.TransformSpec) -> None:
 				enqueued_specs.append(spec)
@@ -1354,49 +1319,16 @@ class TestOnsetFilter:
 			cfg=cfg,
 		)
 
-		# 2 onsets — below threshold of 4.
-		record = _make_record(tempo_bpm=120.0, onset_times=(0.1, 0.5))
+		record = _make_record(tempo_bpm=120.0, onset_times=(0.0, 0.2, 0.4, 0.6, 0.8))
 		manager.on_sample_added(record)
 
-		# Should only have the base variant, no TimeStretch.
+		# Only the base variant should be enqueued — no TimeStretch.
 		time_stretch_specs = [
 			s for s in enqueued_specs
 			if any(isinstance(step, subsample.transform.TimeStretch) for step in s.steps)
 		]
 		assert len(time_stretch_specs) == 0
-
-	def test_enqueues_above_threshold (self) -> None:
-
-		"""Record with onset_count >= min_onset_count gets time-stretch enqueued."""
-
-		enqueued_specs: list[subsample.transform.TransformSpec] = []
-
-		cfg = subsample.config.TransformConfig(target_bpm=120.0, min_onset_count=4)
-
-		class _FakeProcessor:
-			def enqueue (self, record: typing.Any, spec: subsample.transform.TransformSpec) -> None:
-				enqueued_specs.append(spec)
-
-		class _FakeCache:
-			def put (self, result: typing.Any) -> None:
-				pass
-
-		manager = subsample.transform.TransformManager(
-			cache=_FakeCache(),  # type: ignore[arg-type]
-			processor=_FakeProcessor(),  # type: ignore[arg-type]
-			instrument_library=subsample.library.InstrumentLibrary(max_memory_bytes=100_000_000),
-			cfg=cfg,
-		)
-
-		# 5 onsets — above threshold.
-		record = _make_record(tempo_bpm=120.0, onset_times=(0.0, 0.2, 0.4, 0.6, 0.8))
-		manager.on_sample_added(record)
-
-		time_stretch_specs = [
-			s for s in enqueued_specs
-			if any(isinstance(step, subsample.transform.TimeStretch) for step in s.steps)
-		]
-		assert len(time_stretch_specs) == 1
+		assert len(enqueued_specs) == 1  # just the base variant
 
 
 # ---------------------------------------------------------------------------
@@ -1432,7 +1364,7 @@ class TestGetAtBpm:
 		"""get_at_bpm() finds a cached variant when resolution matches config."""
 
 		cfg = subsample.config.TransformConfig(
-			target_bpm=120.0, quantize_resolution=8, min_onset_count=4,
+			target_bpm=120.0, quantize_resolution=8,
 		)
 		cache = subsample.transform.TransformCache(max_memory_bytes=10_000_000)
 

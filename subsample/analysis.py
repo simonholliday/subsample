@@ -321,14 +321,14 @@ class RhythmResult:
 
 	beat_times: tuple[float, ...]
 	"""Beat positions in seconds, estimated by beat_track using dynamic programming.
-	Values are quantised to a regular grid at tempo_bpm.
+	Values are quantized to a regular grid at tempo_bpm.
 	Empty tuple if no beats were detected."""
 
 	pulse_curve: numpy.ndarray
 	"""Frame-by-frame rhythmic salience from the PLP (Predominant Local Pulse) algorithm.
 	Shape (n_frames,), values >= 0. Peaks mark rhythmically salient moments.
 	Frame timing: frame i corresponds to i * hop_length / sample_rate seconds.
-	Unlike beat_times, this reflects locally varying tempo and is not grid-quantised."""
+	Unlike beat_times, this reflects locally varying tempo and is not grid-quantized."""
 
 	pulse_peak_times: tuple[float, ...]
 	"""Local maxima of the pulse curve, in seconds.
@@ -338,7 +338,7 @@ class RhythmResult:
 	onset_times: tuple[float, ...]
 	"""Transient onset positions in seconds from librosa.onset.onset_detect.
 	Marks the start of each audible event (hit, pluck, attack). Unlike beat_times,
-	these are not quantised to a grid — they reflect the raw signal structure.
+	these are not quantized to a grid — they reflect the raw signal structure.
 	Useful for slicing multi-hit recordings into individual one-shots."""
 
 	attack_times: tuple[float, ...]
@@ -891,7 +891,7 @@ def analyze_rhythm (
 	# --- onset detection: precise transient locations ---
 	# onset_detect finds the start of each audible event (attack) in the signal.
 	# units='time' returns positions in seconds directly.
-	# Unlike beat_times, onsets are not quantised — they mark exact moments
+	# Unlike beat_times, onsets are not quantized — they mark exact moments
 	# where energy rises abruptly, making them useful for slicing multi-hit
 	# recordings into individual one-shots.
 	onset_times_raw: numpy.ndarray = librosa.onset.onset_detect(
