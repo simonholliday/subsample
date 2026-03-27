@@ -1287,6 +1287,35 @@ class TestTimeStretchHandler:
 		result = subsample.transform._apply_time_stretch(audio, sr, record, step)
 		assert result.shape[0] < n_frames
 
+	def test_crop_fade_in_applied (self) -> None:
+
+		"""After cropping to first attack, a short S-curve fade-in is applied."""
+
+		sr = 44100
+		n_frames = int(1.0 * sr)
+
+		# Constant non-zero audio so any fade is visible as a ramp from 0.
+		audio = numpy.full((n_frames, 1), 0.8, dtype=numpy.float32)
+
+		# Place attacks so the crop has a non-trivial start.
+		onset_times = (0.05, 0.3, 0.55, 0.8)
+		record = _make_record(
+			audio=numpy.zeros((n_frames, 1), dtype=numpy.int16),
+			tempo_bpm=120.0,
+			onset_times=onset_times,
+		)
+
+		step = subsample.transform.TimeStretch(target_bpm=120.0, resolution=4)
+		result = subsample.transform._apply_time_stretch(audio, sr, record, step)
+
+		# The first sample should be near zero (faded in from silence).
+		assert result[0, 0] < 0.01, f"First sample not faded: {result[0, 0]}"
+
+		# After the fade-in window (1ms = 44 samples), the audio should be
+		# at full level.
+		fade_len = int(subsample.transform._CROP_FADE_IN_SECONDS * sr)
+		assert result[fade_len, 0] > 0.5, f"Audio not at full level after fade: {result[fade_len, 0]}"
+
 
 # ---------------------------------------------------------------------------
 # TestOnSampleAdded — no global time-stretch auto-enqueue

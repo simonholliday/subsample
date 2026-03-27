@@ -106,7 +106,7 @@ sample targets.
 | `select` | yes | Which sample to play (see Select below) |
 | `process` | no | How to present it (see Process below) |
 | `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
-| `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder. *Planned - parsed but not yet applied to playback* |
+| `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Stereo position as percentage weights e.g. `[50, 50]` = centre (default) |
 
 ### Note syntax
@@ -401,6 +401,7 @@ weights - is optional and rarely needs changing.
 | `player.audio.sample_rate` | auto | Output sample rate; defaults to recorder rate. Do not set higher than source. |
 | `player.audio.bit_depth` | auto | Output bit depth (16, 24, or 32); defaults to recorder bit depth |
 | `player.virtual_midi_port` | `none` | Name for a virtual MIDI input port; overrides `player.midi_device` |
+| `player.watch_midi_map` | `false` | Monitor the `midi_map` file for changes and reload assignments on save (see Live-coding) |
 | `detection.snr_threshold_db` | `12.0` | dB above ambient to trigger recording |
 | `detection.hold_time` | `0.5` | Seconds to hold recording open after signal drops |
 | `detection.warmup_seconds` | `1.0` | Calibration period before detection activates |
@@ -524,6 +525,24 @@ New samples become available for MIDI playback within a second or two of the
 sidecar landing on disk (a short debounce window to accommodate network sync
 tools). If the WAV has not yet arrived, the player retries a few times before
 logging a warning; that sample will be picked up on the next restart.
+
+## Live-coding the MIDI map
+
+You can edit the MIDI routing map while the player is running and have changes
+take effect immediately — no restart required. Set `player.watch_midi_map: true`
+and point `player.midi_map` at your working copy:
+
+```yaml
+player:
+  enabled: true
+  midi_map: "./midi-map.yaml"
+  watch_midi_map: true
+```
+
+When you save the file, Subsample re-parses it and swaps the active note map
+within about half a second. If the YAML has a syntax error, the current map is
+kept and a warning is logged — playback is never interrupted. Rapid saves from
+text editors are debounced into a single reload.
 
 ## Reference sample library
 

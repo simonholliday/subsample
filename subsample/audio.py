@@ -441,10 +441,9 @@ def find_output_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
 		if name_lower in str(device["name"]).lower():
 			return int(device["index"])
 
-	available = "\n  ".join(str(d["name"]) for d in devices) if devices else "(none found)"
+	available = "\n".join(f"  {d['name']}" for d in devices) or "  (none)"
 	raise ValueError(
-		f"No audio output device matching {name!r}.\n"
-		f"Available output devices:\n  {available}"
+		f"No output device matching {name!r} found.\nAvailable devices:\n{available}"
 	)
 
 

@@ -116,6 +116,15 @@ class PlayerConfig:
 	trigger which samples. If omitted, the built-in GM drum mapping is
 	used. See midi-map.yaml.default for the format specification."""
 
+	watch_midi_map: bool = False
+	"""When True, monitor the midi_map file at runtime for changes and
+	reload assignments without restarting.  Enables a live-coding workflow
+	where you edit your MIDI map in a text editor and changes take effect
+	on the next trigger.  Debounced to handle editors that write multiple
+	intermediate saves.
+
+	Requires midi_map to be set (the built-in default is not watched)."""
+
 
 @dataclasses.dataclass(frozen=True)
 class DetectionConfig:
@@ -535,6 +544,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		limiter_threshold_db=player_limiter_threshold_db,
 		limiter_ceiling_db=player_limiter_ceiling_db,
 		midi_map=player_raw.get("midi_map"),
+		watch_midi_map=bool(player_raw.get("watch_midi_map", False)),
 	)
 
 	detection = DetectionConfig(

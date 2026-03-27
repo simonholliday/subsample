@@ -834,7 +834,7 @@ class MidiPlayer:
 				variant = self._transform_manager.get_pitched(sample_id, msg.note)
 
 				if variant is not None:
-					rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains)
+					rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains, assignment.gain_db)
 					with self._voices_lock:
 						self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 					_log.debug(
@@ -863,7 +863,7 @@ class MidiPlayer:
 					)
 
 					if stretched is not None:
-						rendered = self._render_float(stretched.audio, stretched.level, msg.velocity, pan_gains)
+						rendered = self._render_float(stretched.audio, stretched.level, msg.velocity, pan_gains, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 						_log.debug(
@@ -876,7 +876,7 @@ class MidiPlayer:
 			base = self._transform_manager.get_base(sample_id)
 
 			if base is not None:
-				rendered = self._render_float(base.audio, base.level, msg.velocity, pan_gains)
+				rendered = self._render_float(base.audio, base.level, msg.velocity, pan_gains, assignment.gain_db)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 				_log.debug(
@@ -886,7 +886,7 @@ class MidiPlayer:
 				return
 
 		# 4. Last resort: convert from int PCM on this trigger.
-		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity, pan_gains)
+		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity, pan_gains, assignment.gain_db)
 
 		if original is None:
 			return
@@ -904,6 +904,7 @@ class MidiPlayer:
 		record: subsample.library.SampleRecord,
 		velocity: int,
 		pan_gains: numpy.ndarray,
+		gain_db: float = 0.0,
 	) -> typing.Optional[numpy.ndarray]:
 
 		"""Convert a SampleRecord to a gain-adjusted, panned output array.
@@ -923,7 +924,7 @@ class MidiPlayer:
 		# recordings play back in stereo rather than being mixed to mono.
 		float_audio = subsample.transform._pcm_to_float32(record.audio, self._bit_depth)
 
-		return self._render_float(float_audio, record.level, velocity, pan_gains)
+		return self._render_float(float_audio, record.level, velocity, pan_gains, gain_db)
 
 	def update_assignments (self) -> None:
 
@@ -950,10 +951,12 @@ class MidiPlayer:
 			return
 
 		# Group notes by Assignment identity (object id) — all notes in the same
-		# assignment share the same select/process spec.
-		groups: dict[int, tuple[subsample.query.Assignment, list[int]]] = {}
+		# assignment share the same select/process spec.  Collect (note, pick)
+		# pairs so beat_quantize can pre-compute a variant for every pick
+		# position (each note may resolve to a different sample).
+		groups: dict[int, tuple[subsample.query.Assignment, list[tuple[int, int]]]] = {}
 
-		for (_ch, note), (asgn, _pick) in self._note_map.items():
+		for (_ch, note), (asgn, pick) in self._note_map.items():
 
 			if asgn.process.has_repitch() or asgn.process.has_beat_quantize():
 				group_key = id(asgn)
@@ -961,35 +964,35 @@ class MidiPlayer:
 				if group_key not in groups:
 					groups[group_key] = (asgn, [])
 
-				groups[group_key][1].append(note)
+				groups[group_key][1].append((note, pick))
 
 		if not groups:
 			return
 
 		all_samples = self._instrument_library.samples()
 
-		for asgn, notes in groups.values():
+		for asgn, note_picks in groups.values():
 
-			# Resolve the assignment's current best sample via the query engine.
-			sample_id: typing.Optional[int] = None
+			# Resolve the full ranked list via the query engine.
+			ranked: list[subsample.library.SampleRecord] = []
 
 			for select_spec in asgn.select:
 				ranked = subsample.query.query(select_spec, all_samples, self._similarity_matrix)
 
 				if ranked:
-					sample_id = ranked[0].sample_id
 					break
 
-			if sample_id is None:
+			if not ranked:
 				continue
 
-			record = self._instrument_library.get(sample_id)
+			notes = [n for n, _p in note_picks]
 
-			if record is None:
-				continue
-
-			# Repitch: enqueue pitch variants for all notes in the group.
+			# Repitch: all notes share pick=1 (same sample, pitched per note).
 			if asgn.process.has_repitch():
+				record = self._instrument_library.get(ranked[0].sample_id)
+
+				if record is None:
+					continue
 
 				if not subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
 					_log.warning(
@@ -1005,27 +1008,74 @@ class MidiPlayer:
 						asgn.name, len(notes), record.name,
 					)
 
-			# Beat-quantize: enqueue a time-stretch variant with per-assignment params.
+			# Beat-quantize: each note may pick a different sample, so enqueue
+			# a time-stretch variant for every distinct pick position.
 			if asgn.process.has_beat_quantize():
+				bpm, grid = _beat_quantize_params(asgn.process)
+				enqueued = 0
 
-				if record.rhythm.tempo_bpm <= 0.0:
-					_log.warning(
-						"beat_quantize %s: best match %r has no detected tempo — "
-						"will not be beat-quantized",
-						asgn.name, record.name,
-					)
+				# Deduplicate by sample_id — multiple notes with the same pick
+				# only need one variant.
+				seen_ids: set[int] = set()
 
-				else:
-					bpm, grid = _beat_quantize_params(asgn.process)
+				for _note, pick in note_picks:
+					idx = min(pick - 1, len(ranked) - 1)
+					sid = ranked[idx].sample_id
+
+					if sid in seen_ids:
+						continue
+
+					seen_ids.add(sid)
+					record = self._instrument_library.get(sid)
+
+					if record is None:
+						continue
+
+					if record.rhythm.tempo_bpm <= 0.0:
+						_log.warning(
+							"beat_quantize %s: sample %r (pick %d) has no detected tempo — "
+							"will not be beat-quantized",
+							asgn.name, record.name, pick,
+						)
+						continue
 
 					self._transform_manager.get_at_bpm(
-						record.sample_id,
+						sid,
 						target_bpm=bpm,
 						resolution=grid,
+					)
+					enqueued += 1
+
+				if enqueued > 0:
+					_log.info(
+						"beat_quantize %s: queued %d variant(s)",
+						asgn.name, enqueued,
 					)
 
 	# Backward-compatible alias — cli.py and tests call this name.
 	update_pitched_assignments = update_assignments
+
+	def reload_midi_map (self, new_map: NoteMap) -> None:
+
+		"""Replace the active note map and re-compute transform variants.
+
+		Thread-safe: dict assignment is atomic under the GIL.  The old map
+		remains consistent for any in-flight _handle_message() call; the
+		next call sees the new map.
+
+		Args:
+			new_map: Parsed NoteMap from load_midi_map().  Must be a complete
+			         replacement (not a diff).
+		"""
+
+		old_count = len(self._note_map)
+		self._note_map = new_map
+		self.update_assignments()
+
+		_log.info(
+			"MIDI map reloaded: %d note(s) (was %d)",
+			len(new_map), old_count,
+		)
 
 	def _render_float (
 		self,
@@ -1033,6 +1083,7 @@ class MidiPlayer:
 		level: subsample.analysis.LevelResult,
 		velocity: int,
 		pan_gains: numpy.ndarray,
+		gain_db: float = 0.0,
 	) -> numpy.ndarray:
 
 		"""Apply gain normalisation and pan to an output-channel-count float32 array.
@@ -1051,6 +1102,8 @@ class MidiPlayer:
 			pan_gains: float32 array, shape (output_channels,).  Pre-computed
 			           constant-power gains, one per output channel.  See
 			           _parse_pan_gains() in load_midi_map().
+			gain_db:   Per-assignment level offset in dB (from Assignment.gain_db).
+			           Negative = quieter, positive = louder.
 
 		Returns:
 			float32 array, shape (n_frames, output_channels), values in [-1.0, 1.0].
@@ -1066,7 +1119,10 @@ class MidiPlayer:
 		else:
 			norm_gain = 1.0
 
-		raw_gain = norm_gain * vel_scale
+		# Per-assignment level offset from the MIDI map.
+		gain_linear = 10.0 ** (gain_db / 20.0) if gain_db != 0.0 else 1.0
+
+		raw_gain = norm_gain * vel_scale * gain_linear
 
 		# Anti-clip ceiling: ensure gain × peak never exceeds full scale.
 		if level.peak > 0.0:
@@ -1075,8 +1131,8 @@ class MidiPlayer:
 			final_gain = raw_gain
 
 		_log.debug(
-			"gain: norm=%.3f  vel_scale=%.3f  raw=%.3f  final=%.3f  (rms=%.4f peak=%.4f)",
-			norm_gain, vel_scale, raw_gain, final_gain,
+			"gain: norm=%.3f  vel_scale=%.3f  gain_db=%.1f  raw=%.3f  final=%.3f  (rms=%.4f peak=%.4f)",
+			norm_gain, vel_scale, gain_db, raw_gain, final_gain,
 			level.rms, level.peak,
 		)
 

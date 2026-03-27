@@ -54,6 +54,7 @@ class TestLoadDefault:
 		assert cfg.player.max_polyphony == 8
 		assert cfg.player.limiter_threshold_db == -1.5
 		assert cfg.player.limiter_ceiling_db == -0.1
+		assert cfg.player.watch_midi_map is False
 
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)

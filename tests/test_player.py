@@ -28,6 +28,7 @@ def _make_assignment (
 	beat_quantize: bool = False,
 	one_shot: bool = True,
 	pan_gains: typing.Optional[numpy.ndarray] = None,
+	gain_db: float = 0.0,
 ) -> subsample.query.Assignment:
 
 	"""Build an Assignment with common defaults for tests."""
@@ -68,6 +69,7 @@ def _make_assignment (
 		select=select,
 		process=process,
 		one_shot=one_shot,
+		gain_db=gain_db,
 		pan_gains=pan_gains,
 	)
 
@@ -1790,3 +1792,146 @@ class TestFallbackResolution:
 
 		with player._voices_lock:
 			assert len(player._voices) == 0
+
+
+# ---------------------------------------------------------------------------
+# MidiPlayer.reload_midi_map
+# ---------------------------------------------------------------------------
+
+class TestReloadMidiMap:
+
+	def test_replaces_note_map (self) -> None:
+
+		"""reload_midi_map() atomically replaces _note_map with the new map."""
+
+		asgn_a = _make_assignment(name="Kicks", reference="BD0025")
+		old_map = _make_note_map(asgn_a, channel=9, notes=[36])
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=old_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		assert player._note_map is old_map
+
+		asgn_b = _make_assignment(name="Snares", reference="SD0010")
+		new_map = _make_note_map(asgn_b, channel=9, notes=[38])
+
+		player.reload_midi_map(new_map)
+
+		assert player._note_map is new_map
+		assert (9, 38) in player._note_map
+		assert (9, 36) not in player._note_map
+
+	def test_calls_update_assignments (self) -> None:
+
+		"""reload_midi_map() triggers update_assignments() to pre-compute variants."""
+
+		asgn = _make_assignment(name="Kicks", reference="BD0025")
+		note_map = _make_note_map(asgn, channel=9, notes=[36])
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		with unittest.mock.patch.object(player, "update_assignments") as mock_update:
+			player.reload_midi_map(note_map)
+			mock_update.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# MidiPlayer._render_float — gain_db
+# ---------------------------------------------------------------------------
+
+class TestRenderFloatGainDb:
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+
+		"""Return a MidiPlayer for testing _render_float()."""
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _make_audio (self, value: float = 0.5, n_frames: int = 100) -> numpy.ndarray:
+
+		"""Return a constant-value mono float32 audio array."""
+
+		return numpy.full((n_frames, 1), value, dtype=numpy.float32)
+
+	def _make_level (self, peak: float = 0.5, rms: float = 0.3) -> subsample.library.SampleRecord:
+
+		"""Return a LevelResult with given peak and rms."""
+
+		import subsample.analysis
+		return subsample.analysis.LevelResult(peak=peak, rms=rms)
+
+	def test_zero_gain_db_has_no_effect (self) -> None:
+
+		"""gain_db=0.0 produces the same output as the default."""
+
+		player = self._make_player()
+		audio = self._make_audio()
+		level = self._make_level()
+		pan = numpy.array([0.7071068, 0.7071068], dtype=numpy.float32)
+
+		result_default = player._render_float(audio, level, 100, pan)
+		result_zero    = player._render_float(audio, level, 100, pan, gain_db=0.0)
+
+		numpy.testing.assert_array_equal(result_default, result_zero)
+
+	def test_negative_gain_db_reduces_level (self) -> None:
+
+		"""A negative gain_db produces quieter output."""
+
+		player = self._make_player()
+		audio = self._make_audio()
+		level = self._make_level()
+		pan = numpy.array([0.7071068, 0.7071068], dtype=numpy.float32)
+
+		result_normal = player._render_float(audio, level, 100, pan, gain_db=0.0)
+		result_quiet  = player._render_float(audio, level, 100, pan, gain_db=-6.0)
+
+		# -6 dB ≈ half the amplitude.
+		assert numpy.max(numpy.abs(result_quiet)) < numpy.max(numpy.abs(result_normal))
+
+	def test_positive_gain_db_increases_level (self) -> None:
+
+		"""A positive gain_db produces louder output (clamped by anti-clip ceiling)."""
+
+		player = self._make_player()
+		# Use a quiet audio signal so positive gain has room before clipping.
+		audio = self._make_audio(value=0.1)
+		level = self._make_level(peak=0.1, rms=0.05)
+		pan = numpy.array([0.7071068, 0.7071068], dtype=numpy.float32)
+
+		result_normal = player._render_float(audio, level, 100, pan, gain_db=0.0)
+		result_loud   = player._render_float(audio, level, 100, pan, gain_db=6.0)
+
+		assert numpy.max(numpy.abs(result_loud)) > numpy.max(numpy.abs(result_normal))

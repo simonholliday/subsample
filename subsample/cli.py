@@ -31,6 +31,7 @@ import threading
 import typing
 
 import numpy
+import yaml
 
 import subsample.analysis
 import subsample.audio
@@ -648,6 +649,48 @@ def main () -> None:
 		instrument_watcher.start()
 		print(f"  Watcher      : monitoring {cfg.instrument.directory} for new samples")
 
+	# --- MIDI map file watcher ---
+	# Monitors the MIDI map YAML file for changes so assignments can be
+	# reloaded without restarting — enables live-coding of sample routing.
+	midi_map_watcher: typing.Optional[subsample.watcher.MidiMapWatcher] = None
+
+	if (
+		cfg.player.watch_midi_map
+		and cfg.player.midi_map is not None
+		and cfg.player.enabled
+	):
+		_midi_map_watch_path = pathlib.Path(cfg.player.midi_map)
+
+		def _on_midi_map_changed (path: pathlib.Path) -> None:
+
+			"""Reload the MIDI map and deliver it to the active player."""
+
+			player = _player_cell[0]
+
+			if player is None:
+				return
+
+			assert reference_library is not None
+
+			try:
+				new_map = subsample.player.load_midi_map(
+					path, reference_library.names(),
+				)
+			except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+				_log.warning(
+					"MIDI map reload failed — keeping current map: %s", exc,
+				)
+				return
+
+			player.reload_midi_map(new_map)
+
+		midi_map_watcher = subsample.watcher.MidiMapWatcher(
+			path=_midi_map_watch_path,
+			on_changed=_on_midi_map_changed,
+		)
+		midi_map_watcher.start()
+		print(f"  MIDI map     : watching {cfg.player.midi_map} for changes")
+
 	for t in threads:
 		t.start()
 
@@ -666,6 +709,9 @@ def main () -> None:
 
 	if instrument_watcher is not None:
 		instrument_watcher.stop()
+
+	if midi_map_watcher is not None:
+		midi_map_watcher.stop()
 
 	# Drain any in-flight transform workers before exiting.
 	if transform_manager is not None:

@@ -101,6 +101,14 @@ player:
   # samples.  See midi-map.yaml.default for the full format specification.
   # If omitted, the built-in GM drum mapping is used.
 
+  # watch_midi_map: false
+  # When true, monitor the midi_map file at runtime for changes and reload
+  # assignments without restarting.  Enables a "live-coding" workflow where
+  # you edit sample assignments in your text editor and they take effect on
+  # the next MIDI trigger.  Requires midi_map to be set (the built-in
+  # default is not watched).  Debounced: rapid saves from text editors are
+  # coalesced into a single reload.
+
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
   # Case-insensitive substring match — "Launch" matches "Launchpad MK3 MIDI 1".

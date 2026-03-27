@@ -189,7 +189,8 @@ class TimeStretch:
 
 	Uses beat-quantized non-linear stretching: detected onsets are snapped to
 	a grid at target_bpm / resolution, then pyrubberband.timemap_stretch()
-	applies the mapping in a single high-quality offline Rubber Band call.
+	applies the mapping in a single high-quality offline Rubber Band call
+	(--fine --smoothing).
 	Samples with fewer than 2 onsets receive a simple global time-stretch.
 
 	target_bpm: The desired playback tempo in BPM.
@@ -1123,8 +1124,9 @@ def _apply_pitch (
 
 	Computes the semitone shift from the parent sample's detected pitch
 	(record.pitch.dominant_pitch_hz) to the frequency of step.target_midi_note.
-	Uses pyrubberband with --fine for Rubber Band v3's highest quality offline
-	processing.  pyrubberband accepts (n_frames, channels) directly — no
+	Uses pyrubberband with --fine --smoothing for Rubber Band v3's highest
+	quality offline processing with frequency-domain smoothing to reduce
+	phasing artefacts.  pyrubberband accepts (n_frames, channels) directly — no
 	shape transposition is needed.
 
 	Args:
@@ -1137,7 +1139,7 @@ def _apply_pitch (
 		float32, shape (n_frames, channels) — pitch-shifted audio.
 	"""
 
-	if record.pitch.dominant_pitch_hz <= 0.0:
+	if not numpy.isfinite(record.pitch.dominant_pitch_hz) or record.pitch.dominant_pitch_hz <= 0.0:
 		raise ValueError(
 			f"Cannot pitch-shift sample {record.sample_id} ({record.name!r}): "
 			f"dominant_pitch_hz is {record.pitch.dominant_pitch_hz!r} — no stable pitch detected"
@@ -1150,7 +1152,7 @@ def _apply_pitch (
 		audio,
 		sample_rate,
 		n_steps,
-		rbargs={"--fine": ""},
+		rbargs={"--fine": "", "--smoothing": ""},
 	)
 
 
@@ -1162,6 +1164,11 @@ def _apply_pitch (
 # attack is not clipped.  2 ms matches the perceptual attack resolution of
 # the human ear.
 _PRE_ONSET_SECONDS: float = 0.002
+
+# Short S-curve fade-in applied after cropping to the first attack.
+# Prevents clicks from non-zero samples at the crop boundary.  1 ms is
+# well below the perceptual attack-shaping threshold.
+_CROP_FADE_IN_SECONDS: float = 0.001
 
 
 def _build_quantize_grid (target_bpm: float, resolution: int, max_seconds: float, min_points: int = 0) -> list[float]:
@@ -1274,7 +1281,8 @@ def _apply_time_stretch (
 	step:        TimeStretch,
 ) -> numpy.ndarray:
 
-	"""Beat-quantized time-stretch using Rubber Band's offline finer engine.
+	"""Beat-quantized time-stretch using Rubber Band's offline finer engine
+	with frequency-domain smoothing to reduce phasing artefacts.
 
 	Uses sample-accurate attack_times (refined from librosa onsets via
 	amplitude-envelope analysis) for grid alignment, so percussive hits
@@ -1313,7 +1321,7 @@ def _apply_time_stretch (
 	# Single-hit or no-onset samples: simple global stretch.
 	if len(attack_times) < 2:
 		return pyrubberband.time_stretch(  # type: ignore[no-any-return]
-			audio, sample_rate, 1.0 / duration_ratio, rbargs={"--fine": ""},
+			audio, sample_rate, 1.0 / duration_ratio, rbargs={"--fine": "", "--smoothing": ""},
 		)
 
 	# ── Crop to first attack ─────────────────────────────────────────────
@@ -1323,6 +1331,13 @@ def _apply_time_stretch (
 	crop_start_frame = int(crop_start_sec * sample_rate)
 
 	audio = audio[crop_start_frame:]
+
+	# S-curve fade-in over the crop boundary to eliminate clicks.
+	fade_in_len = int(_CROP_FADE_IN_SECONDS * sample_rate)
+
+	if fade_in_len > 1:
+		ramp = (1 - numpy.cos(numpy.linspace(0, numpy.pi, fade_in_len))) / 2
+		audio[:fade_in_len] *= ramp[:, numpy.newaxis]
 
 	# Rebase attack times relative to the crop point.
 	rebased = [t - crop_start_sec for t in attack_times]
@@ -1375,7 +1390,7 @@ def _apply_time_stretch (
 	# ── Apply via Rubber Band's offline finer engine ──────────────────────
 
 	return pyrubberband.timemap_stretch(  # type: ignore[no-any-return]
-		audio, sample_rate, time_map, rbargs={"--fine": ""},
+		audio, sample_rate, time_map, rbargs={"--fine": "", "--smoothing": ""},
 	)
 
 
@@ -1389,5 +1404,6 @@ def _apply_time_stretch (
 TransformProcessor._HANDLERS[PitchShift] = _apply_pitch
 
 # Register the time-stretch handler — beat-quantized non-linear stretching
-# via pyrubberband.timemap_stretch() with Rubber Band's offline finer engine.
+# via pyrubberband.timemap_stretch() with Rubber Band's offline finer engine
+# and frequency-domain smoothing (--fine --smoothing).
 TransformProcessor._HANDLERS[TimeStretch] = _apply_time_stretch

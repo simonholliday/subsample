@@ -249,3 +249,144 @@ class _SidecarHandler (watchdog.events.FileSystemEventHandler):
 
 		if path.name.endswith(_SIDECAR_SUFFIX):
 			self._callback(path)
+
+
+# ---------------------------------------------------------------------------
+# MIDI map file watcher
+# ---------------------------------------------------------------------------
+
+_MIDI_MAP_DEBOUNCE_SECONDS: float = 0.5
+
+
+class MidiMapWatcher:
+
+	"""Watch a MIDI map YAML file for changes and invoke a callback on reload.
+
+	Monitors the parent directory of the target file and filters events to
+	the target filename only.  A short debounce window absorbs the multiple
+	writes that text editors commonly produce during a single save operation.
+
+	The callback receives the path to the changed file.  Parsing, validation,
+	and delivery to the player are the caller's responsibility — this class
+	handles only filesystem watching and debounce.
+	"""
+
+	def __init__ (
+		self,
+		path: pathlib.Path,
+		on_changed: typing.Callable[[pathlib.Path], None],
+	) -> None:
+
+		self._path = path.resolve()
+		self._on_changed = on_changed
+
+		self._timer: typing.Optional[threading.Timer] = None
+		self._lock = threading.Lock()
+
+		handler = _MidiMapFileHandler(self._path.name, self._on_file_event)
+		self._observer: typing.Any = watchdog.observers.Observer()
+		self._observer.schedule(handler, str(self._path.parent), recursive=False)
+
+	def start (self) -> None:
+
+		"""Start the background observer thread."""
+
+		self._observer.start()
+		_log.info("MIDI map watcher started on %s", self._path)
+
+	def stop (self) -> None:
+
+		"""Stop the observer thread and cancel any pending debounce timer."""
+
+		self._observer.stop()
+		self._observer.join()
+
+		with self._lock:
+			if self._timer is not None:
+				self._timer.cancel()
+				self._timer = None
+
+		_log.debug("MIDI map watcher stopped")
+
+	def _on_file_event (self, path: pathlib.Path) -> None:
+
+		"""Schedule (or reschedule) a debounced callback for the changed file.
+
+		Called from the watchdog observer thread.  Multiple rapid events
+		(common during editor save operations) collapse into a single
+		callback after the debounce window.
+		"""
+
+		with self._lock:
+			if self._timer is not None:
+				self._timer.cancel()
+
+			self._timer = threading.Timer(
+				_MIDI_MAP_DEBOUNCE_SECONDS,
+				self._fire,
+			)
+			self._timer.start()
+
+	def _fire (self) -> None:
+
+		"""Invoke the callback after the debounce window has elapsed."""
+
+		with self._lock:
+			self._timer = None
+
+		self._on_changed(self._path)
+
+
+class _MidiMapFileHandler (watchdog.events.FileSystemEventHandler):
+
+	"""Watchdog event handler that filters for a specific filename.
+
+	Handles on_modified, on_created (editors that delete + recreate), and
+	on_moved (editors that write a temp file then rename into place).
+	"""
+
+	def __init__ (
+		self,
+		target_name: str,
+		callback: typing.Callable[[pathlib.Path], None],
+	) -> None:
+
+		super().__init__()
+		self._target_name = target_name
+		self._callback = callback
+
+	def on_modified (self, event: watchdog.events.FileSystemEvent) -> None:
+
+		"""Forward modification events for the target file."""
+
+		self._dispatch_if_target(event)
+
+	def on_created (self, event: watchdog.events.FileSystemEvent) -> None:
+
+		"""Forward creation events (editors that delete + recreate)."""
+
+		self._dispatch_if_target(event)
+
+	def on_moved (self, event: watchdog.events.FileSystemEvent) -> None:
+
+		"""Forward rename-into-place events (editors that write to a temp file)."""
+
+		if event.is_directory:
+			return
+
+		dest = pathlib.Path(str(getattr(event, "dest_path", "")))
+
+		if dest.name == self._target_name:
+			self._callback(dest)
+
+	def _dispatch_if_target (self, event: watchdog.events.FileSystemEvent) -> None:
+
+		"""Call the callback if the event is for the target file."""
+
+		if event.is_directory:
+			return
+
+		path = pathlib.Path(str(event.src_path))
+
+		if path.name == self._target_name:
+			self._callback(path)

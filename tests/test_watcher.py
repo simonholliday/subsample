@@ -275,3 +275,122 @@ class TestInstrumentWatcher:
 
 		assert triggered, f"Only {len(names)}/{expected_count} callbacks received"
 		assert sorted(names) == ["hihat", "kick", "snare"]
+
+
+# ---------------------------------------------------------------------------
+# TestMidiMapWatcher
+# ---------------------------------------------------------------------------
+
+class TestMidiMapWatcher:
+
+	def _make_midi_map_file (self, directory: pathlib.Path, name: str = "midi-map.yaml") -> pathlib.Path:
+
+		"""Write a minimal MIDI map YAML file and return its path."""
+
+		path = directory / name
+		path.write_text("assignments: []\n", encoding="utf-8")
+		return path
+
+	def test_modified_file_triggers_callback (self, tmp_path: pathlib.Path) -> None:
+
+		"""Modifying the watched file calls on_changed with the file path."""
+
+		received: list[pathlib.Path] = []
+		done = threading.Event()
+
+		def on_changed (path: pathlib.Path) -> None:
+			received.append(path)
+			done.set()
+
+		midi_map_path = self._make_midi_map_file(tmp_path)
+		watcher = subsample.watcher.MidiMapWatcher(path=midi_map_path, on_changed=on_changed)
+		watcher.start()
+
+		try:
+			# Wait briefly for the observer thread to be ready.
+			import time
+			time.sleep(0.2)
+
+			midi_map_path.write_text("assignments:\n  - name: test\n", encoding="utf-8")
+			triggered = done.wait(timeout=_TIMEOUT)
+		finally:
+			watcher.stop()
+
+		assert triggered, "Callback not called within timeout"
+		assert len(received) >= 1
+		assert received[0] == midi_map_path.resolve()
+
+	def test_debounce_coalesces_rapid_writes (self, tmp_path: pathlib.Path) -> None:
+
+		"""Multiple rapid writes produce a single callback after the debounce window."""
+
+		call_count = 0
+		lock = threading.Lock()
+		done = threading.Event()
+
+		def on_changed (path: pathlib.Path) -> None:
+			nonlocal call_count
+			with lock:
+				call_count += 1
+			done.set()
+
+		midi_map_path = self._make_midi_map_file(tmp_path)
+		watcher = subsample.watcher.MidiMapWatcher(path=midi_map_path, on_changed=on_changed)
+		watcher.start()
+
+		try:
+			import time
+			time.sleep(0.2)
+
+			# Write 5 times in rapid succession.
+			for i in range(5):
+				midi_map_path.write_text(f"assignments: []  # write {i}\n", encoding="utf-8")
+
+			# Wait long enough for the debounce to fire (but only once).
+			triggered = done.wait(timeout=_TIMEOUT)
+
+			# Brief extra wait to catch any spurious second callback.
+			time.sleep(subsample.watcher._MIDI_MAP_DEBOUNCE_SECONDS + 0.5)
+		finally:
+			watcher.stop()
+
+		assert triggered, "Callback not called within timeout"
+
+		with lock:
+			assert call_count == 1, f"Expected 1 debounced callback, got {call_count}"
+
+	def test_unrelated_file_ignored (self, tmp_path: pathlib.Path) -> None:
+
+		"""Changes to other files in the same directory do not trigger the callback."""
+
+		called = threading.Event()
+		midi_map_path = self._make_midi_map_file(tmp_path)
+		watcher = subsample.watcher.MidiMapWatcher(
+			path=midi_map_path,
+			on_changed=lambda _p: called.set(),
+		)
+		watcher.start()
+
+		try:
+			import time
+			time.sleep(0.2)
+
+			# Write a different file in the same directory.
+			(tmp_path / "other.yaml").write_text("unrelated: true\n", encoding="utf-8")
+			triggered = called.wait(timeout=_TIMEOUT)
+		finally:
+			watcher.stop()
+
+		assert not triggered, "Callback fired for unrelated file"
+
+	def test_stop_is_clean (self, tmp_path: pathlib.Path) -> None:
+
+		"""start() then stop() terminates cleanly without hanging."""
+
+		midi_map_path = self._make_midi_map_file(tmp_path)
+		watcher = subsample.watcher.MidiMapWatcher(
+			path=midi_map_path,
+			on_changed=lambda _p: None,
+		)
+		watcher.start()
+		watcher.stop()
