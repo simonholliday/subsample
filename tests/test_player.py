@@ -927,12 +927,17 @@ assignments:
 	def test_default_map_parses (self) -> None:
 		"""The shipped midi-map.yaml.default parses without error."""
 		default_path = pathlib.Path(__file__).parent.parent / "midi-map.yaml.default"
-		refs = ["BD0025", "SD5075", "CP", "CH", "OH25", "CY5050", "CB"]
+		refs = [
+			"GM36_BassDrum1", "GM38_AcousticSnare", "GM37_SideStick",
+			"GM39_HandClap", "GM48_HiMidTom", "GM42_ClosedHiHat",
+			"GM46_OpenHiHat", "GM49_CrashCymbal1", "GM51_RideCymbal1",
+			"GM56_Cowbell", "GM54_Tambourine", "GM75_Claves",
+		]
 		note_map = subsample.player.load_midi_map(default_path, refs)
 
 		assert len(note_map) > 0
 		assert (9, 36) in note_map
-		assert note_map[(9, 36)][0].select[0].where.reference == "BD0025"
+		assert note_map[(9, 36)][0].select[0].where.reference == "GM36_BassDrum1"
 
 	def test_default_pan_is_centre (self, tmp_path: pathlib.Path) -> None:
 		"""Omitted pan defaults to equal power across all output channels."""
@@ -1351,7 +1356,7 @@ class TestUpdatePitchedAssignments:
 		transform_manager.enqueue_pitch_range.assert_not_called()
 
 	def test_beat_quantize_pre_computation (self) -> None:
-		"""update_assignments() calls get_at_bpm() for beat_quantize assignments."""
+		"""update_assignments() calls get_variant() for beat_quantize assignments."""
 
 		asgn = _make_assignment(
 			name="Loops", beat_quantize=True, repitch=False,
@@ -1385,13 +1390,13 @@ class TestUpdatePitchedAssignments:
 
 		player.update_assignments()
 
-		# get_at_bpm should have been called to pre-compute the time-stretch variant.
-		transform_manager.get_at_bpm.assert_called_once()
-		call_args = transform_manager.get_at_bpm.call_args
+		# get_variant should have been called to pre-compute the time-stretch variant.
+		transform_manager.get_variant.assert_called_once()
+		call_args = transform_manager.get_variant.call_args
 		assert call_args[0][0] == 7  # sample_id
 
 	def test_beat_quantize_with_explicit_bpm (self) -> None:
-		"""Per-assignment BPM override is passed to get_at_bpm."""
+		"""Per-assignment BPM override produces a spec with correct params."""
 
 		# beat_quantize with explicit bpm=120, grid=8
 		asgn = subsample.query.Assignment(
@@ -1429,10 +1434,13 @@ class TestUpdatePitchedAssignments:
 
 		player.update_assignments()
 
-		transform_manager.get_at_bpm.assert_called_once()
-		call_kwargs = transform_manager.get_at_bpm.call_args[1]
-		assert call_kwargs["target_bpm"] == 120.0
-		assert call_kwargs["resolution"] == 8
+		transform_manager.get_variant.assert_called_once()
+		call_args = transform_manager.get_variant.call_args[0]
+		spec = call_args[1]
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].target_bpm == 120.0
+		assert spec.steps[0].resolution == 8
 
 
 # ---------------------------------------------------------------------------

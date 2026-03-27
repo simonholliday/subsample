@@ -11,6 +11,7 @@ import pytest
 import subsample.analysis
 import subsample.config
 import subsample.library
+import subsample.query
 import subsample.transform
 
 import tests.helpers
@@ -161,7 +162,7 @@ def _make_result (
 
 class TestTransformSpec:
 
-	"""TransformSpec sorts steps by PRIORITY regardless of construction order."""
+	"""TransformSpec preserves declaration order — different orders are different specs."""
 
 	def test_empty_spec_is_identity (self) -> None:
 		spec = subsample.transform.TransformSpec(steps=())
@@ -172,27 +173,27 @@ class TestTransformSpec:
 		spec = subsample.transform.TransformSpec(steps=(step,))
 		assert spec.steps == (step,)
 
-	def test_steps_sorted_by_priority (self) -> None:
-		"""Same steps in different order must produce the same spec."""
+	def test_order_preserved (self) -> None:
+		"""Different declaration orders produce different specs."""
 		pitch   = subsample.transform.PitchShift(target_midi_note=60)
 		stretch = subsample.transform.TimeStretch(target_bpm=120.0)
 
 		spec_a = subsample.transform.TransformSpec(steps=(stretch, pitch))
 		spec_b = subsample.transform.TransformSpec(steps=(pitch, stretch))
 
-		assert spec_a == spec_b
-		assert spec_a.steps[0] == pitch
-		assert spec_a.steps[1] == stretch
+		assert spec_a != spec_b
+		assert spec_a.steps == (stretch, pitch)
+		assert spec_b.steps == (pitch, stretch)
 
-	def test_all_three_sorted (self) -> None:
+	def test_declaration_order_is_cache_key (self) -> None:
+		"""Steps stay in declaration order — this is the cache key identity."""
 		pitch    = subsample.transform.PitchShift(target_midi_note=69)
 		envelope = subsample.transform.EnvelopeAdjust(attack_ms=10.0, release_ms=50.0)
 		stretch  = subsample.transform.TimeStretch(target_bpm=90.0)
 
-		# Provide in reverse priority order
 		spec = subsample.transform.TransformSpec(steps=(stretch, envelope, pitch))
 
-		assert spec.steps == (pitch, envelope, stretch)
+		assert spec.steps == (stretch, envelope, pitch)
 
 	def test_spec_is_hashable (self) -> None:
 		spec = subsample.transform.TransformSpec(
@@ -1426,3 +1427,563 @@ class TestGetAtBpm:
 		hit = manager.get_at_bpm(7)
 		assert hit is not None
 		assert hit.key.sample_id == 7
+
+
+# ---------------------------------------------------------------------------
+# TestReverse
+# ---------------------------------------------------------------------------
+
+class TestReverse:
+
+	"""Tests for the _apply_reverse handler."""
+
+	def test_mono_reversed (self) -> None:
+		audio = numpy.array([[1.0], [2.0], [3.0], [4.0]], dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		result = subsample.transform._apply_reverse(audio, 44100, record, subsample.transform.Reverse())
+
+		expected = numpy.array([[4.0], [3.0], [2.0], [1.0]], dtype=numpy.float32)
+		numpy.testing.assert_array_equal(result, expected)
+
+	def test_stereo_reversed (self) -> None:
+		audio = numpy.array(
+			[[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]],
+			dtype=numpy.float32,
+		)
+		record = _make_record(sample_id=1)
+		result = subsample.transform._apply_reverse(audio, 44100, record, subsample.transform.Reverse())
+
+		expected = numpy.array(
+			[[3.0, 30.0], [2.0, 20.0], [1.0, 10.0]],
+			dtype=numpy.float32,
+		)
+		numpy.testing.assert_array_equal(result, expected)
+
+	def test_output_is_contiguous (self) -> None:
+		audio = numpy.arange(20, dtype=numpy.float32).reshape(10, 2)
+		record = _make_record(sample_id=1)
+		result = subsample.transform._apply_reverse(audio, 44100, record, subsample.transform.Reverse())
+
+		assert result.flags["C_CONTIGUOUS"]
+
+
+# ---------------------------------------------------------------------------
+# TestLowPassFilter
+# ---------------------------------------------------------------------------
+
+class TestLowPassFilter:
+
+	"""Tests for the _apply_low_pass handler."""
+
+	def _make_tone (self, freq: float, sr: int = 44100, duration: float = 0.5) -> numpy.ndarray:
+		"""Generate a mono sine wave."""
+		t = numpy.arange(int(sr * duration), dtype=numpy.float32) / sr
+		return numpy.sin(2 * numpy.pi * freq * t).reshape(-1, 1).astype(numpy.float32)
+
+	def test_attenuates_high_frequencies (self) -> None:
+		"""A 5 kHz tone should be significantly attenuated by a 500 Hz low-pass."""
+		sr = 44100
+		audio = self._make_tone(5000.0, sr)
+
+		record = _make_record(sample_id=1)
+		step = subsample.transform.LowPassFilter(freq=500.0, resonance_db=0.0)
+		result = subsample.transform._apply_low_pass(audio, sr, record, step)
+
+		# Discard first 10% to skip filter transient.
+		discard = len(result) // 10
+		rms_before = float(numpy.sqrt(numpy.mean(audio[discard:] ** 2)))
+		rms_after  = float(numpy.sqrt(numpy.mean(result[discard:] ** 2)))
+		attenuation_db = 20.0 * numpy.log10(max(rms_after, 1e-12) / max(rms_before, 1e-12))
+		assert attenuation_db < -20.0
+
+	def test_resonance_changes_response (self) -> None:
+		"""Resonance > 0 uses Chebyshev and produces different output than Butterworth."""
+		sr = 44100
+		audio = self._make_tone(300.0, sr)
+		record = _make_record(sample_id=1)
+
+		flat = subsample.transform._apply_low_pass(
+			audio, sr, record, subsample.transform.LowPassFilter(freq=500.0, resonance_db=0.0),
+		)
+		resonant = subsample.transform._apply_low_pass(
+			audio, sr, record, subsample.transform.LowPassFilter(freq=500.0, resonance_db=12.0),
+		)
+
+		# The resonant version should differ from the flat version.
+		assert not numpy.allclose(flat, resonant, atol=1e-6)
+
+	def test_freq_at_nyquist_no_crash (self) -> None:
+		"""Cutoff at or above Nyquist should not crash."""
+		sr = 44100
+		audio = self._make_tone(440.0, sr)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.LowPassFilter(freq=float(sr), resonance_db=0.0)
+
+		result = subsample.transform._apply_low_pass(audio, sr, record, step)
+		assert result.shape == audio.shape
+
+	def test_output_is_float32 (self) -> None:
+		audio = self._make_tone(440.0).astype(numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.LowPassFilter(freq=1000.0)
+		result = subsample.transform._apply_low_pass(audio, 44100, record, step)
+		assert result.dtype == numpy.float32
+
+
+# ---------------------------------------------------------------------------
+# TestHighPassFilter
+# ---------------------------------------------------------------------------
+
+class TestHighPassFilter:
+
+	"""Tests for the _apply_high_pass handler."""
+
+	def test_attenuates_low_frequencies (self) -> None:
+		sr = 44100
+		t = numpy.arange(int(sr * 0.5), dtype=numpy.float32) / sr
+		audio = numpy.sin(2 * numpy.pi * 100.0 * t).reshape(-1, 1).astype(numpy.float32)
+
+		record = _make_record(sample_id=1)
+		step = subsample.transform.HighPassFilter(freq=2000.0, resonance_db=0.0)
+		result = subsample.transform._apply_high_pass(audio, sr, record, step)
+
+		# Discard first 10% to skip filter transient.
+		discard = len(result) // 10
+		rms_before = float(numpy.sqrt(numpy.mean(audio[discard:] ** 2)))
+		rms_after  = float(numpy.sqrt(numpy.mean(result[discard:] ** 2)))
+		attenuation_db = 20.0 * numpy.log10(max(rms_after, 1e-12) / max(rms_before, 1e-12))
+		assert attenuation_db < -20.0
+
+
+# ---------------------------------------------------------------------------
+# TestBandPassFilter
+# ---------------------------------------------------------------------------
+
+class TestBandPassFilter:
+
+	"""Tests for the _apply_band_pass handler."""
+
+	def test_passes_center_attenuates_edges (self) -> None:
+		sr = 44100
+		t = numpy.arange(int(sr * 0.5), dtype=numpy.float32) / sr
+		low  = numpy.sin(2 * numpy.pi * 100.0 * t).reshape(-1, 1).astype(numpy.float32)
+		mid  = numpy.sin(2 * numpy.pi * 1000.0 * t).reshape(-1, 1).astype(numpy.float32)
+		high = numpy.sin(2 * numpy.pi * 8000.0 * t).reshape(-1, 1).astype(numpy.float32)
+		audio = (low + mid + high).astype(numpy.float32)
+
+		record = _make_record(sample_id=1)
+		step = subsample.transform.BandPassFilter(freq=1000.0, resonance_db=0.0)
+		result = subsample.transform._apply_band_pass(audio, sr, record, step)
+
+		# The center component should dominate; edges attenuated.
+		rms_result = float(numpy.sqrt(numpy.mean(result ** 2)))
+		rms_mid    = float(numpy.sqrt(numpy.mean(mid ** 2)))
+
+		# Result should be similar to the mid component (within 6 dB).
+		ratio_db = 20.0 * numpy.log10(max(rms_result, 1e-12) / max(rms_mid, 1e-12))
+		assert ratio_db > -6.0
+
+
+# ---------------------------------------------------------------------------
+# TestSaturate
+# ---------------------------------------------------------------------------
+
+class TestSaturate:
+
+	"""Tests for the _apply_saturate handler."""
+
+	def test_zero_drive_unchanged (self) -> None:
+		audio = numpy.array([[0.5], [-0.3], [0.8]], dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Saturate(amount_db=0.0)
+		result = subsample.transform._apply_saturate(audio, 44100, record, step)
+		numpy.testing.assert_array_equal(result, audio)
+
+	def test_negative_drive_unchanged (self) -> None:
+		audio = numpy.array([[0.5], [-0.3]], dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Saturate(amount_db=-6.0)
+		result = subsample.transform._apply_saturate(audio, 44100, record, step)
+		numpy.testing.assert_array_equal(result, audio)
+
+	def test_level_compensation (self) -> None:
+		"""Full-scale input should remain near full-scale after saturation."""
+		audio = numpy.array([[1.0]], dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Saturate(amount_db=12.0)
+		result = subsample.transform._apply_saturate(audio, 44100, record, step)
+
+		assert abs(float(result[0, 0]) - 1.0) < 0.01
+
+	def test_no_values_exceed_one (self) -> None:
+		"""Heavy saturation should soft-clip — no output sample exceeds 1.0."""
+		numpy.random.seed(42)
+		audio = numpy.random.uniform(-0.9, 0.9, (1000, 2)).astype(numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Saturate(amount_db=20.0)
+		result = subsample.transform._apply_saturate(audio, 44100, record, step)
+
+		assert numpy.all(numpy.abs(result) <= 1.0)
+
+	def test_silence_stays_silent (self) -> None:
+		audio = numpy.zeros((100, 1), dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Saturate(amount_db=12.0)
+		result = subsample.transform._apply_saturate(audio, 44100, record, step)
+		numpy.testing.assert_array_equal(result, audio)
+
+	def test_output_is_float32 (self) -> None:
+		audio = numpy.array([[0.5], [0.3]], dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Saturate(amount_db=6.0)
+		result = subsample.transform._apply_saturate(audio, 44100, record, step)
+		assert result.dtype == numpy.float32
+
+
+# ---------------------------------------------------------------------------
+# TestSpecFromProcess
+# ---------------------------------------------------------------------------
+
+class TestSpecFromProcess:
+
+	"""Tests for the spec_from_process() chain builder."""
+
+	def test_empty_process (self) -> None:
+		process = subsample.query.ProcessSpec()
+		spec = subsample.transform.spec_from_process(process)
+		assert spec.steps == ()
+
+	def test_repitch_with_note (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="repitch"),
+		))
+		spec = subsample.transform.spec_from_process(process, midi_note=60)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.PitchShift)
+		assert spec.steps[0].target_midi_note == 60
+
+	def test_repitch_without_note_skipped (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="repitch"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert spec.steps == ()
+
+	def test_repitch_fixed_note_name (self) -> None:
+		"""repitch: { note: C4 } should use the fixed note, ignoring midi_note."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="repitch", params=(("note", "C4"),)),
+		))
+		spec = subsample.transform.spec_from_process(process, midi_note=36)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.PitchShift)
+		assert spec.steps[0].target_midi_note == 60  # C4 = MIDI 60
+
+	def test_repitch_fixed_note_int (self) -> None:
+		"""repitch: { note: 72 } should accept an integer directly."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="repitch", params=(("note", 72),)),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		assert spec.steps[0].target_midi_note == 72
+
+	def test_beat_quantize_with_params (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="beat_quantize",
+				params=(("bpm", 120), ("grid", 8)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process, target_bpm=100.0)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].target_bpm == 120.0  # step params override function arg
+		assert spec.steps[0].resolution == 8
+
+	def test_filter_low (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="filter_low",
+				params=(("freq", 800), ("resonance", 6)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.LowPassFilter)
+		assert spec.steps[0].freq == 800.0
+		assert spec.steps[0].resonance_db == 6.0
+
+	def test_filter_high_defaults (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="filter_high", params=(("freq", 4000),)),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert isinstance(spec.steps[0], subsample.transform.HighPassFilter)
+		assert spec.steps[0].resonance_db == 0.0
+
+	def test_filter_band (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="filter_band",
+				params=(("freq", 1000), ("resonance", 3)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert isinstance(spec.steps[0], subsample.transform.BandPassFilter)
+		assert spec.steps[0].freq == 1000.0
+
+	def test_reverse (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="reverse"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.Reverse)
+
+	def test_saturate (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="saturate",
+				params=(("amount", 8),),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert isinstance(spec.steps[0], subsample.transform.Saturate)
+		assert spec.steps[0].amount_db == 8.0
+
+	def test_declaration_order_preserved (self) -> None:
+		"""Steps appear in the spec in the order declared in the process list."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="filter_low", params=(("freq", 800),)),
+			subsample.query.ProcessorStep(name="repitch"),
+			subsample.query.ProcessorStep(name="saturate", params=(("amount", 6),)),
+		))
+		spec = subsample.transform.spec_from_process(process, midi_note=60)
+
+		assert len(spec.steps) == 3
+		assert isinstance(spec.steps[0], subsample.transform.LowPassFilter)
+		assert isinstance(spec.steps[1], subsample.transform.PitchShift)
+		assert isinstance(spec.steps[2], subsample.transform.Saturate)
+
+	def test_unknown_processor_skipped (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="unknown_thing"),
+			subsample.query.ProcessorStep(name="reverse"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.Reverse)
+
+	def test_composite_chain (self) -> None:
+		"""Full chain with multiple processors in user-specified order."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="reverse"),
+			subsample.query.ProcessorStep(name="filter_low", params=(("freq", 500), ("resonance", 6))),
+			subsample.query.ProcessorStep(name="saturate", params=(("amount", 4),)),
+			subsample.query.ProcessorStep(name="repitch"),
+			subsample.query.ProcessorStep(name="beat_quantize", params=(("bpm", 120), ("grid", 16))),
+		))
+		spec = subsample.transform.spec_from_process(process, midi_note=72, target_bpm=100.0)
+
+		assert len(spec.steps) == 5
+		assert isinstance(spec.steps[0], subsample.transform.Reverse)
+		assert isinstance(spec.steps[1], subsample.transform.LowPassFilter)
+		assert isinstance(spec.steps[2], subsample.transform.Saturate)
+		assert isinstance(spec.steps[3], subsample.transform.PitchShift)
+		assert spec.steps[3].target_midi_note == 72
+		assert isinstance(spec.steps[4], subsample.transform.TimeStretch)
+		assert spec.steps[4].target_bpm == 120.0
+
+
+# ---------------------------------------------------------------------------
+# TestVariantCacheKey
+# ---------------------------------------------------------------------------
+
+class TestVariantCacheKey:
+
+	"""Tests for variant_cache_key() determinism and sensitivity."""
+
+	def test_deterministic (self) -> None:
+		"""Same inputs produce same hash."""
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=60),),
+		)
+		a = subsample.transform.variant_cache_key("abc123", spec, 44100)
+		b = subsample.transform.variant_cache_key("abc123", spec, 44100)
+		assert a == b
+
+	def test_different_md5 (self) -> None:
+		"""Different audio produces different hash."""
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=60),),
+		)
+		a = subsample.transform.variant_cache_key("abc123", spec, 44100)
+		b = subsample.transform.variant_cache_key("def456", spec, 44100)
+		assert a != b
+
+	def test_different_sample_rate (self) -> None:
+		"""Different output device produces different hash."""
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=60),),
+		)
+		a = subsample.transform.variant_cache_key("abc123", spec, 44100)
+		b = subsample.transform.variant_cache_key("abc123", spec, 48000)
+		assert a != b
+
+	def test_different_spec (self) -> None:
+		"""Different transform chain produces different hash."""
+		spec_a = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=60),),
+		)
+		spec_b = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=72),),
+		)
+		a = subsample.transform.variant_cache_key("abc123", spec_a, 44100)
+		b = subsample.transform.variant_cache_key("abc123", spec_b, 44100)
+		assert a != b
+
+	def test_order_sensitive (self) -> None:
+		"""Different step ordering produces different hash."""
+		spec_a = subsample.transform.TransformSpec(steps=(
+			subsample.transform.LowPassFilter(freq=500.0),
+			subsample.transform.Saturate(amount_db=6.0),
+		))
+		spec_b = subsample.transform.TransformSpec(steps=(
+			subsample.transform.Saturate(amount_db=6.0),
+			subsample.transform.LowPassFilter(freq=500.0),
+		))
+		a = subsample.transform.variant_cache_key("abc123", spec_a, 44100)
+		b = subsample.transform.variant_cache_key("abc123", spec_b, 44100)
+		assert a != b
+
+
+# ---------------------------------------------------------------------------
+# TestVariantDiskCache
+# ---------------------------------------------------------------------------
+
+class TestVariantDiskCache:
+
+	"""Tests for VariantDiskCache read/write and FIFO eviction."""
+
+	def _make_result (
+		self,
+		sample_id: int = 1,
+		n_frames: int = 4410,
+		channels: int = 2,
+		midi_note: int = 60,
+	) -> subsample.transform.TransformResult:
+
+		audio = numpy.random.RandomState(42).uniform(-0.5, 0.5, (n_frames, channels)).astype(numpy.float32)
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=midi_note),),
+		)
+		key = subsample.transform.TransformKey(sample_id=sample_id, spec=spec)
+		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
+		return subsample.transform.TransformResult(key=key, audio=audio, duration=0.1, level=level)
+
+	def test_roundtrip (self, tmp_path: pathlib.Path) -> None:
+		"""Write then read back produces identical audio and metadata."""
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result()
+		spec = result.key.spec
+
+		cache.put("test_md5", spec, result)
+
+		loaded = cache.get("test_md5", spec, result.key)
+		assert loaded is not None
+		numpy.testing.assert_array_equal(loaded.audio, result.audio)
+		assert loaded.level.peak == pytest.approx(result.level.peak, abs=1e-5)
+		assert loaded.level.rms == pytest.approx(result.level.rms, abs=1e-5)
+		assert loaded.duration == pytest.approx(result.duration, abs=1e-3)
+
+	def test_miss_returns_none (self, tmp_path: pathlib.Path) -> None:
+		"""Non-existent key returns None."""
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=60),),
+		)
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+
+		assert cache.get("nonexistent", spec, key) is None
+
+	def test_disabled_when_zero_budget (self, tmp_path: pathlib.Path) -> None:
+		"""max_bytes=0 disables cache — put/get are no-ops."""
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=0, sample_rate=44100,
+		)
+		assert not cache.enabled
+
+		result = self._make_result()
+		cache.put("test_md5", result.key.spec, result)
+		assert cache.get("test_md5", result.key.spec, result.key) is None
+
+	def test_different_md5_misses (self, tmp_path: pathlib.Path) -> None:
+		"""Same spec but different audio_md5 produces a miss."""
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result()
+		cache.put("md5_a", result.key.spec, result)
+
+		assert cache.get("md5_b", result.key.spec, result.key) is None
+
+	def test_different_sample_rate_misses (self, tmp_path: pathlib.Path) -> None:
+		"""File written at 44100 is not returned by cache at 48000."""
+		cache_44 = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		cache_48 = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=48000,
+		)
+		result = self._make_result()
+		cache_44.put("test_md5", result.key.spec, result)
+
+		# Same directory, different sample rate — file exists but hash differs.
+		assert cache_48.get("test_md5", result.key.spec, result.key) is None
+
+	def test_fifo_eviction (self, tmp_path: pathlib.Path) -> None:
+		"""Writing more than max_bytes triggers deletion of oldest files."""
+		# Each variant is ~35 KB (4410 frames * 2 channels * 4 bytes + header).
+		# Set budget to hold ~2 variants.
+		variant_bytes = 4410 * 2 * 4 + 32
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=variant_bytes * 2 + 100, sample_rate=44100,
+		)
+
+		r1 = self._make_result(midi_note=60)
+		r2 = self._make_result(midi_note=72)
+		r3 = self._make_result(midi_note=84)
+
+		cache.put("md5", r1.key.spec, r1)
+		cache.put("md5", r2.key.spec, r2)
+
+		# Both should be on disk.
+		files_before = list(tmp_path.glob("*.variant"))
+		assert len(files_before) == 2
+
+		# Writing a third should evict the oldest.
+		cache.put("md5", r3.key.spec, r3)
+
+		files_after = list(tmp_path.glob("*.variant"))
+		assert len(files_after) <= 2
+
+	def test_corrupt_file_deleted (self, tmp_path: pathlib.Path) -> None:
+		"""A file with bad magic bytes is deleted on read."""
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result()
+		spec = result.key.spec
+		hex_digest = subsample.transform.variant_cache_key("test_md5", spec, 44100)
+		bad_path = tmp_path / f"{hex_digest}.variant"
+
+		bad_path.write_bytes(b"BAAD" + b"\x00" * 100)
+
+		loaded = cache.get("test_md5", spec, result.key)
+		assert loaded is None
+		assert not bad_path.exists()

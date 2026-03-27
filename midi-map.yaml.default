@@ -81,18 +81,27 @@
 #
 #   select:
 #     - where: { name: my-favourite-kick }
-#     - where: { reference: BD0025 }
+#     - where: { reference: GM36_BassDrum1 }
 #
 # ===================================================================
 # PROCESS — how to present the sample
 # ===================================================================
 #
-# The process block is an optional ordered list of processors:
+# The process block is an optional ordered list of processors.
+# They execute in the order you write them -- order matters!
 #
-#   repitch: true           Pitch-shift to match the triggering MIDI note
-#   repitch: { note: C4 }  Pitch-shift to a fixed note
-#   beat_quantize: { grid: 16 }        Time-stretch to session target_bpm
-#   beat_quantize: { bpm: 120, grid: 8 }  Time-stretch to specific BPM
+#   repitch: true                         Pitch-shift to MIDI note
+#   repitch: { note: C4 }                Pitch-shift to a fixed note
+#   beat_quantize: { grid: 16 }          Time-stretch to session target_bpm
+#   beat_quantize: { bpm: 120, grid: 8 } Time-stretch to specific BPM
+#   filter_low: { freq: 500 }            Low-pass filter (Hz cutoff)
+#   filter_high: { freq: 2000 }          High-pass filter (Hz cutoff)
+#   filter_band: { freq: 1000 }          Band-pass filter (Hz centre, 1-octave)
+#   reverse: true                         Reverse the audio
+#   saturate: { amount: 6 }              Soft-clip saturation (dB drive)
+#
+# Filters accept an optional resonance parameter (dB, default 0):
+#   filter_low: { freq: 800, resonance: 12 }
 #
 # Omit process entirely for unprocessed playback (base variant).
 #
@@ -106,20 +115,22 @@ assignments:
   # GM DRUMS — Channel 10
   # =================================================================
   #
-  # Each maps one or more GM drum notes to a reference sound class
-  # via the similarity engine.  Multi-note assignments distribute
-  # ranks: first note = best match, second = second-best, etc.
+  # Each maps one or more GM drum notes to a GM reference sample
+  # via the similarity engine.  Reference names match the canonical
+  # GM percussion set (GM35-GM81) derived from FluidR3_GM.sf2.
+  # Multi-note assignments distribute ranks: first note = best
+  # match, second = second-best, etc.
 
 
   # --- Kicks ---
-  # GM notes 36 (Bass Drum 1) and 35 (Bass Drum 2).
+  # GM notes 36 (Bass Drum 1) and 35 (Acoustic Bass Drum).
 
   - name: Kicks
     channel: 10
     notes: [36, 35]
     select:
       where:
-        reference: BD0025
+        reference: GM36_BassDrum1
       order_by: similarity
 
 
@@ -131,9 +142,21 @@ assignments:
     notes: [38, 40]
     select:
       where:
-        reference: SD5075
+        reference: GM38_AcousticSnare
       order_by: similarity
     pan: [50, 87]
+
+
+  # --- Side stick ---
+  # GM note 37 (Side Stick / Rim Shot).
+
+  - name: Side stick
+    channel: 10
+    notes: 37
+    select:
+      where:
+        reference: GM37_SideStick
+      order_by: similarity
 
 
   # --- Clap ---
@@ -144,19 +167,32 @@ assignments:
     notes: 39
     select:
       where:
-        reference: CP
+        reference: GM39_HandClap
+      order_by: similarity
+
+
+  # --- Toms ---
+  # GM notes 41 (Low Floor Tom), 43 (High Floor Tom), 45 (Low Tom),
+  # 47 (Low-Mid Tom), 48 (Hi Mid Tom), 50 (High Tom).
+
+  - name: Toms
+    channel: 10
+    notes: [50, 48, 47, 45, 43, 41]
+    select:
+      where:
+        reference: GM48_HiMidTom
       order_by: similarity
 
 
   # --- Closed hi-hat ---
-  # GM note 42 (Closed Hi-Hat).
+  # GM notes 42 (Closed Hi-Hat), 44 (Pedal Hi-Hat).
 
   - name: Closed hi-hat
     channel: 10
-    notes: 42
+    notes: [42, 44]
     select:
       where:
-        reference: CH
+        reference: GM42_ClosedHiHat
       order_by: similarity
     pan: [87, 50]
 
@@ -169,20 +205,34 @@ assignments:
     notes: 46
     select:
       where:
-        reference: OH25
+        reference: GM46_OpenHiHat
       order_by: similarity
+    pan: [87, 50]
 
 
   # --- Crashes and splash ---
-  # GM notes 49 (Crash 1), 57 (Crash 2), 55 (Splash).
+  # GM notes 49 (Crash 1), 57 (Crash 2), 55 (Splash), 52 (Chinese Cymbal).
 
   - name: Crashes
     channel: 10
-    notes: [49, 57, 55]
+    notes: [49, 57, 55, 52]
     select:
       where:
-        reference: CY5050
+        reference: GM49_CrashCymbal1
       order_by: similarity
+
+
+  # --- Ride ---
+  # GM notes 51 (Ride Cymbal 1), 59 (Ride Cymbal 2), 53 (Ride Bell).
+
+  - name: Ride
+    channel: 10
+    notes: [51, 59, 53]
+    select:
+      where:
+        reference: GM51_RideCymbal1
+      order_by: similarity
+    pan: [25, 75]
 
 
   # --- Cowbell ---
@@ -193,9 +243,33 @@ assignments:
     notes: 56
     select:
       where:
-        reference: CB
+        reference: GM56_Cowbell
       order_by: similarity
     gain: -3.0
+
+
+  # --- Tambourine ---
+  # GM note 54 (Tambourine).
+
+  - name: Tambourine
+    channel: 10
+    notes: 54
+    select:
+      where:
+        reference: GM54_Tambourine
+      order_by: similarity
+
+
+  # --- Claves ---
+  # GM note 75 (Claves).
+
+  - name: Claves
+    channel: 10
+    notes: 75
+    select:
+      where:
+        reference: GM75_Claves
+      order_by: similarity
 
 
   # =================================================================
@@ -276,10 +350,35 @@ assignments:
   #     order_by: duration_desc
   #     pick: 3
 
+  # --- Filtered + saturated keyboard ---
+  # - name: Warm keys
+  #   channel: 6
+  #   notes: C2..C6
+  #   select:
+  #     where: { pitched: true }
+  #     order_by: oldest
+  #   process:
+  #     - filter_low: { freq: 2000, resonance: 6 }
+  #     - saturate: { amount: 4 }
+  #     - repitch: true
+  #   one_shot: false
+
+  # --- Reversed pad ---
+  # - name: Reverse pad
+  #   channel: 7
+  #   notes: C3..C5
+  #   select:
+  #     where: { pitched: true, min_duration: 0.5 }
+  #     order_by: oldest
+  #   process:
+  #     - reverse: true
+  #     - repitch: true
+  #   one_shot: false
+
   # --- Fallback chain: try specific sample, then reference ---
   # - name: Kick with fallback
   #   channel: 10
   #   notes: 36
   #   select:
   #     - where: { name: my-favourite-kick }
-  #     - where: { reference: BD0025, order_by: similarity }
+  #     - where: { reference: GM36_BassDrum1, order_by: similarity }

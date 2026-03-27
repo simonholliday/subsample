@@ -12,7 +12,6 @@ midi-map.yaml
 
 # Audio
 samples/
-reference/
 
 # Logs
 *.log
@@ -22,6 +21,16 @@ reference/
 *.flac
 *.mp3
 *.analysis.json
+
+# Reference directory — track analysis JSONs and credits, ignore everything else.
+# These negations must come AFTER the global *.analysis.json rule above.
+!reference/
+reference/*
+!reference/*.analysis.json
+!reference/CREDITS.md
+
+# Local-only extraction script (not distributed; see reference/CREDITS.md for provenance)
+scripts/extract_gm_drums.py
 
 # Documentation build output
 docs/html/

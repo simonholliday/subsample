@@ -165,7 +165,7 @@ that returns a result wins:
 ```yaml
 select:
   - where: { name: my-favourite-kick }     # try specific sample first
-  - where: { reference: BD0025 }           # fall back to similarity match
+  - where: { reference: GM36_BassDrum1 }           # fall back to similarity match
 ```
 
 #### Examples
@@ -174,7 +174,7 @@ select:
 # GM kicks - ranked by similarity to a kick reference
 select:
   where:
-    reference: BD0025
+    reference: GM36_BassDrum1
   order_by: similarity
 
 # Pitched keyboard - oldest tonal sample, repitched per note
@@ -206,9 +206,13 @@ applied after sample selection. Omit it entirely for unprocessed playback.
 
 ```yaml
 process:
-  - repitch: true                  # pitch-shift to match the MIDI note
-  - beat_quantize: { grid: 16 }   # time-stretch to the session target BPM
+  - filter_low: { freq: 800, resonance: 6 }   # low-pass, then
+  - repitch: true                               # pitch-shift, then
+  - saturate: { amount: 4 }                     # saturation
 ```
+
+Processors execute in the order you declare them - different orderings
+produce different results. The full chain is pre-computed and cached.
 
 Available processors:
 
@@ -218,6 +222,14 @@ Available processors:
 | `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
 | `beat_quantize: { grid: 16 }` | grid subdivision | Time-stretch to session `target_bpm` |
 | `beat_quantize: { bpm: 120, grid: 8 }` | explicit BPM + grid | Time-stretch to a specific BPM |
+| `filter_low: { freq: 500 }` | freq (Hz), resonance (dB, default 0) | Low-pass filter |
+| `filter_high: { freq: 2000 }` | freq (Hz), resonance (dB, default 0) | High-pass filter |
+| `filter_band: { freq: 1000, resonance: 6 }` | freq (Hz), resonance (dB, default 0) | Band-pass (1-octave width) |
+| `reverse: true` | none | Reverse the audio |
+| `saturate: { amount: 6 }` | amount (dB of drive) | Soft-clip saturation with level compensation |
+
+Filter resonance: 0 dB = flat Butterworth, higher values create a resonant
+peak at the cutoff (Chebyshev Type I, max 24 dB).
 
 When `repitch` is in the process list, all notes in a multi-note assignment
 share pick 1 (same sample, pitched per note). Without `repitch`, each note gets
@@ -248,10 +260,9 @@ note fires, the work is already done - playback is a memory copy into the mix
 buffer, not an on-the-fly calculation. A three-tier fallback guarantees playback
 is never blocked:
 
-1. **Pitch variant** - pre-computed, pitch-corrected (assignments with `repitch`)
-2. **Time-stretch variant** - pre-computed, beat-quantized (assignments with `beat_quantize`)
-3. **Base variant** - pre-normalised, no DSP (all samples)
-4. **On-the-fly render** - last resort on the very first trigger only
+1. **Process variant** - pre-computed with the full declared chain (pitch, filter, saturate, reverse, time-stretch, etc.)
+2. **Base variant** - pre-normalised, no DSP (all samples)
+3. **On-the-fly render** - last resort on the very first trigger only
 
 ### End-to-end 32-bit float
 
@@ -308,6 +319,13 @@ assignment). Variants are produced in the background by a worker pool and cached
 in a memory-bounded store with parent-priority FIFO eviction - when a variant
 family would exceed the memory budget, the entire oldest family is evicted
 together, keeping remaining families intact and playable.
+
+Variants are also persisted to a disk cache (`samples/variants/` by default) so
+they survive restarts. Each variant is stored as a single binary file named by a
+SHA-256 hash of the source audio, transform chain, output sample rate, and
+analysis version - any change to any of these produces a different key, so stale
+cache hits are impossible. Recently-used files are kept warm (LRU by modification
+time); oldest files are evicted when the disk budget is exceeded.
 
 Samples with detected rhythmic content can be time-stretched to a target tempo
 using the `beat_quantize` processor in a MIDI map assignment. Detected attacks are
@@ -427,6 +445,8 @@ weights - is optional and rarely needs changing.
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
 | `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantized to the target tempo |
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
+| `transform.variant_cache_dir` | `samples/variants` | Directory for persistent disk cache of transform variants. Empty string or null disables |
+| `transform.max_disk_mb` | `500.0` | Max disk space (MB) for cached variant files; 0 disables. Oldest by mtime evicted when exceeded |
 
 ## Output
 
@@ -560,9 +580,9 @@ from the audio filename stem:
 
 ```
 reference/
-  BD0025.wav.analysis.json   →  "BD0025"
-  SD5075.wav.analysis.json   →  "SD5075"
-  CH.wav.analysis.json       →  "CH"
+  GM36_BassDrum1.wav.analysis.json    →  "GM36_BassDrum1"
+  GM38_AcousticSnare.wav.analysis.json →  "GM38_AcousticSnare"
+  GM42_ClosedHiHat.wav.analysis.json   →  "GM42_ClosedHiHat"
 ```
 
 At startup, reference samples are loaded before instrument samples. For every
@@ -575,10 +595,10 @@ Query the ranked lists programmatically:
 
 ```python
 # Most kick-like instrument in memory
-sample_id = similarity_matrix.get_match("BD0025", rank=0)
+sample_id = similarity_matrix.get_match("GM36_BassDrum1", rank=0)
 
 # Second-most kick-like (for a separate kick_2 mapping)
-sample_id = similarity_matrix.get_match("BD0025", rank=1)
+sample_id = similarity_matrix.get_match("GM36_BassDrum1", rank=1)
 ```
 
 Lookup is case-insensitive.
@@ -652,8 +672,8 @@ python scripts/similarity_report.py --top 10  # top 10 per reference
 
 Example output:
 ```
-Reference: BD0025
-  1.  #5     0.9412  BD0025          ./samples/BD0025.wav
+Reference: GM36_BassDrum1
+  1.  #5     0.9412  GM36_BassDrum1  ./samples/kick_deep.wav
   2.  #7     0.8134  kick_hard       ./samples/kick_hard.wav
   3.  #8     0.7601  kick_soft       ./samples/kick_soft.wav
 ```

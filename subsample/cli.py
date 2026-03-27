@@ -548,18 +548,34 @@ def main () -> None:
 			else cfg.recorder.audio.sample_rate
 		)
 
+		# Disk cache for persistent variant storage across restarts.
+		_variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None
+
+		if cfg.transform.variant_cache_dir and cfg.transform.max_disk_mb > 0:
+			_variant_disk_cache = subsample.transform.VariantDiskCache(
+				directory=pathlib.Path(cfg.transform.variant_cache_dir),
+				max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
+				sample_rate=output_sample_rate,
+			)
+			_log.info(
+				"Variant disk cache: %s (max %.0f MB)",
+				cfg.transform.variant_cache_dir, cfg.transform.max_disk_mb,
+			)
+
 		_transform_processor = subsample.transform.TransformProcessor(
 			sample_rate=cfg.recorder.audio.sample_rate,
 			output_sample_rate=output_sample_rate,
 			bit_depth=cfg.recorder.audio.bit_depth,
 			on_complete=_on_transform_complete,
 			on_idle=_on_transform_idle,
+			disk_cache=_variant_disk_cache,
 		)
 		transform_manager = subsample.transform.TransformManager(
 			cache=_transform_cache,
 			processor=_transform_processor,
 			instrument_library=instrument_library,
 			cfg=cfg.transform,
+			disk_cache=_variant_disk_cache,
 		)
 
 		# Auto-enqueue pitch variants for all pre-loaded instrument samples.

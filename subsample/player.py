@@ -829,50 +829,54 @@ class MidiPlayer:
 
 		if self._transform_manager is not None:
 
-			# 1. Repitch: check for a pitch variant if the process declares repitch.
-			if assignment.process.has_repitch():
-				variant = self._transform_manager.get_pitched(sample_id, msg.note)
+			# Build the full ordered transform chain from the process spec.
+			# Dynamic parameters (MIDI note, BPM) are substituted at the
+			# position the user declared them in the process: list.
+			if assignment.process.steps:
 
-				if variant is not None:
-					rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains, assignment.gain_db)
-					with self._voices_lock:
-						self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
-					_log.debug(
-						"note %d (vel %d) → %r → %r (pitched variant)  (%.2fs)",
-						msg.note, msg.velocity, assignment.name, record.name, variant.duration,
-					)
-					return
+				# Validation: skip repitch for unpitched samples.
+				midi_note_for_spec: typing.Optional[int] = None
 
-			# 2. Beat-quantize: check for a time-stretch variant.
-			if assignment.process.has_beat_quantize():
+				if assignment.process.has_repitch():
+					if subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
+						midi_note_for_spec = msg.note
 
-				if record.rhythm.tempo_bpm <= 0.0:
-					_log.warning(
-						"beat_quantize %s: sample %r has no detected tempo — "
-						"playing without beat-quantizing",
-						assignment.name, record.name,
-					)
+				# Validation: skip beat_quantize for samples with no tempo.
+				bpm_for_spec: typing.Optional[float] = None
+				grid_for_spec = 16
 
-				else:
-					bpm, grid = _beat_quantize_params(assignment.process)
+				if assignment.process.has_beat_quantize():
+					if record.rhythm.tempo_bpm > 0.0:
+						bpm_for_spec, grid_for_spec = _beat_quantize_params(assignment.process)
+					else:
+						_log.warning(
+							"beat_quantize %s: sample %r has no detected tempo — "
+							"playing without beat-quantizing",
+							assignment.name, record.name,
+						)
 
-					stretched = self._transform_manager.get_at_bpm(
-						sample_id,
-						target_bpm=bpm,
-						resolution=grid,
-					)
+				spec = subsample.transform.spec_from_process(
+					assignment.process,
+					midi_note=midi_note_for_spec,
+					target_bpm=bpm_for_spec,
+					resolution=grid_for_spec,
+				)
 
-					if stretched is not None:
-						rendered = self._render_float(stretched.audio, stretched.level, msg.velocity, pan_gains, assignment.gain_db)
+				if spec.steps:
+					variant = self._transform_manager.get_variant(sample_id, spec)
+
+					if variant is not None:
+						rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 						_log.debug(
-							"note %d (vel %d) → %r → %r (stretched variant)  (%.2fs)",
-							msg.note, msg.velocity, assignment.name, record.name, stretched.duration,
+							"note %d (vel %d) → %r → %r (variant, %d step(s))  (%.2fs)",
+							msg.note, msg.velocity, assignment.name, record.name,
+							len(spec.steps), variant.duration,
 						)
 						return
 
-			# 3. Fall back to the base variant (float32, peak-normalised, no DSP).
+			# Fall back to the base variant (float32, peak-normalised, no DSP).
 			base = self._transform_manager.get_base(sample_id)
 
 			if base is not None:
@@ -931,9 +935,9 @@ class MidiPlayer:
 		"""Pre-compute transform variants for all assignments that declare processors.
 
 		Groups notes by Assignment, resolves each to its current sample via the
-		query engine, and enqueues the appropriate variants:
-		  - repitch: pitch-shift variants for every note in the group
-		  - beat_quantize: time-stretch variant with per-assignment BPM/grid params
+		query engine, and enqueues the appropriate variants.  The full ordered
+		process chain (filters, saturate, reverse, etc.) is included alongside
+		repitch / beat_quantize via spec_from_process().
 
 		The TransformProcessor deduplicates in-flight and cached keys, so
 		repeated calls are safe and cheap.
@@ -958,7 +962,7 @@ class MidiPlayer:
 
 		for (_ch, note), (asgn, pick) in self._note_map.items():
 
-			if asgn.process.has_repitch() or asgn.process.has_beat_quantize():
+			if asgn.process.steps:
 				group_key = id(asgn)
 
 				if group_key not in groups:
@@ -988,6 +992,7 @@ class MidiPlayer:
 			notes = [n for n, _p in note_picks]
 
 			# Repitch: all notes share pick=1 (same sample, pitched per note).
+			# The full process chain is passed so variants include filters, etc.
 			if asgn.process.has_repitch():
 				record = self._instrument_library.get(ranked[0].sample_id)
 
@@ -1001,7 +1006,7 @@ class MidiPlayer:
 					)
 
 				else:
-					self._transform_manager.enqueue_pitch_range(record, notes)
+					self._transform_manager.enqueue_pitch_range(record, notes, process=asgn.process)
 
 					_log.info(
 						"Pitched %s: queued %d variant(s) for %r",
@@ -1009,8 +1014,9 @@ class MidiPlayer:
 					)
 
 			# Beat-quantize: each note may pick a different sample, so enqueue
-			# a time-stretch variant for every distinct pick position.
-			if asgn.process.has_beat_quantize():
+			# a variant for every distinct pick position.  The full process
+			# chain is included via spec_from_process().
+			elif asgn.process.has_beat_quantize():
 				bpm, grid = _beat_quantize_params(asgn.process)
 				enqueued = 0
 
@@ -1039,17 +1045,41 @@ class MidiPlayer:
 						)
 						continue
 
-					self._transform_manager.get_at_bpm(
-						sid,
+					spec = subsample.transform.spec_from_process(
+						asgn.process,
 						target_bpm=bpm,
 						resolution=grid,
 					)
+					self._transform_manager.get_variant(sid, spec)
 					enqueued += 1
 
 				if enqueued > 0:
 					_log.info(
 						"beat_quantize %s: queued %d variant(s)",
 						asgn.name, enqueued,
+					)
+
+			# Process-only (no repitch, no beat_quantize): pre-compute the
+			# static chain (filters, saturate, reverse, etc.) once per sample.
+			else:
+				spec = subsample.transform.spec_from_process(asgn.process)
+
+				if spec.steps:
+					seen_ids_static: set[int] = set()
+
+					for _note, pick in note_picks:
+						idx = min(pick - 1, len(ranked) - 1)
+						sid = ranked[idx].sample_id
+
+						if sid in seen_ids_static:
+							continue
+
+						seen_ids_static.add(sid)
+						self._transform_manager.get_variant(sid, spec)
+
+					_log.info(
+						"Process %s: queued %d variant(s) (%d step(s))",
+						asgn.name, len(seen_ids_static), len(spec.steps),
 					)
 
 	# Backward-compatible alias — cli.py and tests call this name.

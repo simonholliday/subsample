@@ -373,3 +373,14 @@ analysis:
 #   # 1 = whole notes, 2 = half, 4 = quarter, 8 = eighth, 16 = sixteenth.
 #   # Higher values give finer onset alignment.
 #   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
+#
+#   variant_cache_dir: samples/variants
+#   # Directory for persistent disk cache of transform variants.
+#   # Variants are stored as binary files keyed by SHA-256 hash of the parent
+#   # audio, transform spec, output sample rate, and analysis version.
+#   # Empty string or null disables disk caching.
+#
+#   max_disk_mb: 500.0
+#   # Maximum disk space (MB) for cached variant files.  0 = disabled.
+#   # Oldest files (by modification time) are evicted when the budget is
+#   # exceeded.  At 44100 Hz float32 stereo, 500 MB ≈ 1500 seconds.

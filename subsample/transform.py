@@ -1,8 +1,9 @@
 """Sample transform pipeline — derivative audio production and caching.
 
-Produces *derivative* versions of existing samples (pitch-shifted, envelope-
-adjusted, time-stretched) without modifying the originals. Derivatives are
-purely in-memory and regenerated on demand — they are never written to disk.
+Produces *derivative* versions of existing samples (pitch-shifted, filtered,
+reversed, saturated, time-stretched, etc.) without modifying the originals.
+Derivatives are purely in-memory and regenerated on demand — they are never
+written to disk.
 
 Architecture overview
 ---------------------
@@ -10,7 +11,8 @@ Architecture overview
 TransformSpec / TransformKey
     An immutable, hashable description of what transforms to apply to which
     sample.  The composite (sample_id, spec) is the unique identity of one
-    derivative.
+    derivative.  Steps are stored in *declaration order* — the user controls
+    the signal chain via the ``process:`` list in the MIDI map.
 
 TransformResult
     The completed output: float32 audio at the original channel count plus a
@@ -27,10 +29,10 @@ TransformCache
 TransformProcessor
     ThreadPoolExecutor worker pool.  Mirrors the SampleProcessor pattern:
     enqueue() submits a job and returns immediately; workers convert the
-    source PCM to float32, apply the registered transform chain in priority
-    order, compute a LevelResult, and call on_complete.  New transform types
-    are registered in TransformProcessor._HANDLERS — no other code changes
-    are needed.
+    source PCM to float32, apply the registered transform chain in
+    declaration order, compute a LevelResult, and call on_complete.  New
+    transform types are registered in TransformProcessor._HANDLERS — no
+    other code changes are needed.
 
 TransformManager
     Single coordination point for the player and cli.py.  Handles:
@@ -39,6 +41,7 @@ TransformManager
       - on_bpm_change()     : invalidate and re-enqueue all time-stretch variants
       - get_pitched()       : player look-up; enqueues on miss, returns None
       - get_at_bpm()        : player look-up for time-stretch variants
+      - get_variant()       : generic look-up by arbitrary TransformSpec
 
 Data flow
 ---------
@@ -51,12 +54,10 @@ Data flow
                       → on_complete callback
 
   MIDI note trigger
-      → TransformManager.get_pitched(sample_id, midi_note)
-          → hit:  return TransformResult  (player applies gain + pan, no conversion)
-          → miss: try next tier
-      → TransformManager.get_at_bpm(sample_id)
-          → hit:  return TransformResult  (beat-quantized variant)
-          → miss/skip: enqueue if qualifying, return None  (player falls back)
+      → player builds spec via spec_from_process(assignment.process, ...)
+      → TransformManager.get_variant(sample_id, spec)
+          → hit:  return TransformResult  (player applies gain + pan)
+          → miss: enqueue, return None  (player falls back)
       → TransformManager.get_base(sample_id)
           → hit:  return TransformResult  (float32 copy, no DSP)
           → miss: player converts from int PCM on this trigger
@@ -78,11 +79,7 @@ How to add a new transform type
 
         @dataclasses.dataclass(frozen=True)
         class MyTransform:
-            PRIORITY: typing.ClassVar[int] = MY_PRIORITY
             my_param: float
-
-    Choose a PRIORITY integer that places the transform at the correct point
-    in the signal chain (lower = earlier; see the PRIORITY constants below).
 
 2.  Write an apply function matching _ApplyFn:
 
@@ -101,8 +98,8 @@ How to add a new transform type
 
         TransformProcessor._HANDLERS[MyTransform] = _apply_my_transform
 
-4.  Add any convenience look-up methods to TransformManager if needed
-    (e.g. get_at_bpm() pattern).
+4.  Add the new type to the TransformStep union and to the name mapping
+    in spec_from_process() so it can be used in MIDI map process: lists.
 
 5.  Add config fields to TransformConfig in config.py if tuning is needed.
 
@@ -116,35 +113,25 @@ How to add a new transform type
 import collections
 import concurrent.futures
 import dataclasses
+import hashlib
 import logging
 import os
+import pathlib
+import struct
+import tempfile
 import threading
 import typing
 
 import librosa
 import numpy
 import pyrubberband
+import scipy.signal
 
 import subsample.analysis
 import subsample.library
+import subsample.query
 
 _log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Priority constants
-# ---------------------------------------------------------------------------
-
-# Transform application order is determined by these integer priorities.
-# Lower values execute first.  The rationale for the ordering:
-#   Pitch (0)       — changes spectral content; must precede envelope shaping
-#   Envelope (1)    — shapes the already-pitched signal
-#   TimeStretch (2) — last so it preserves the final pitch and envelope
-# New transform types should be assigned a priority that puts them at the
-# correct point in the signal chain.
-
-PITCH_PRIORITY:         typing.Final[int] = 0
-ENVELOPE_PRIORITY:      typing.Final[int] = 1
-TIME_STRETCH_PRIORITY:  typing.Final[int] = 2
 
 # ---------------------------------------------------------------------------
 # Transform step dataclasses
@@ -161,8 +148,6 @@ class PitchShift:
 	Processed by _apply_pitch() using Rubber Band (pyrubberband, offline mode).
 	"""
 
-	PRIORITY: typing.ClassVar[int] = PITCH_PRIORITY
-
 	target_midi_note: int
 
 
@@ -175,8 +160,6 @@ class EnvelopeAdjust:
 	release_ms: Target release duration in milliseconds.  0.0 = unchanged.
 	Unimplemented — handler not yet registered in TransformProcessor._HANDLERS.
 	"""
-
-	PRIORITY: typing.ClassVar[int] = ENVELOPE_PRIORITY
 
 	attack_ms:  float
 	release_ms: float
@@ -198,16 +181,87 @@ class TimeStretch:
 	            16=sixteenth).  Higher values give finer onset alignment.
 	"""
 
-	PRIORITY: typing.ClassVar[int] = TIME_STRETCH_PRIORITY
-
 	target_bpm:  float
 	resolution:  int = 16
+
+
+@dataclasses.dataclass(frozen=True)
+class Reverse:
+
+	"""Reverse the audio along the time axis.
+
+	No parameters.  Produces a contiguous copy (negative-stride views from
+	numpy slicing can break downstream C-based DSP like pyrubberband).
+	"""
+
+
+@dataclasses.dataclass(frozen=True)
+class LowPassFilter:
+
+	"""Low-pass filter — attenuates frequencies above the cutoff.
+
+	freq:          Cutoff frequency in Hz.
+	resonance_db:  Peak boost at the cutoff in dB.  0 = flat Butterworth.
+	               Higher values create a resonant peak (Chebyshev Type I).
+	               Clamped to [0, 24] for stability.
+	"""
+
+	freq:          float
+	resonance_db:  float = 0.0
+
+
+@dataclasses.dataclass(frozen=True)
+class HighPassFilter:
+
+	"""High-pass filter — attenuates frequencies below the cutoff.
+
+	freq:          Cutoff frequency in Hz.
+	resonance_db:  Peak boost at the cutoff in dB.  0 = flat Butterworth.
+	"""
+
+	freq:          float
+	resonance_db:  float = 0.0
+
+
+@dataclasses.dataclass(frozen=True)
+class BandPassFilter:
+
+	"""Band-pass filter — passes a 1-octave band centred on freq.
+
+	freq:          Centre frequency in Hz.
+	resonance_db:  Peak boost at the centre in dB.  0 = flat Butterworth.
+	"""
+
+	freq:          float
+	resonance_db:  float = 0.0
+
+
+@dataclasses.dataclass(frozen=True)
+class Saturate:
+
+	"""Soft-clip saturation via tanh with level compensation.
+
+	amount_db:  Drive level in dB.  0 = no effect.  6 = moderate warmth.
+	            12+ = heavy distortion.  The output is level-compensated so
+	            peak amplitude is preserved.
+	"""
+
+	amount_db: float
 
 
 # Union of all known transform step types.
 # Extend this when adding new transforms (see "How to add a new transform type"
 # in the module docstring).
-TransformStep = typing.Union[PitchShift, EnvelopeAdjust, TimeStretch]
+TransformStep = typing.Union[
+	PitchShift,
+	Reverse,
+	LowPassFilter,
+	HighPassFilter,
+	BandPassFilter,
+	Saturate,
+	EnvelopeAdjust,
+	TimeStretch,
+]
 
 # ---------------------------------------------------------------------------
 # TransformSpec
@@ -216,28 +270,16 @@ TransformStep = typing.Union[PitchShift, EnvelopeAdjust, TimeStretch]
 @dataclasses.dataclass(frozen=True)
 class TransformSpec:
 
-	"""An ordered, hashable set of transforms to apply to a sample.
+	"""An ordered, hashable sequence of transforms to apply to a sample.
 
-	steps is always sorted by each step's PRIORITY so that the same set of
-	transforms produces an identical spec regardless of construction order.
-	This makes TransformSpec safe to use as a dict key and for deduplication.
+	Steps are stored in *declaration order* — the user controls the signal
+	chain via the ``process:`` list in the MIDI map.  Different orderings
+	produce different audio and different cache keys.
 
 	An empty steps tuple is the identity spec (no transform applied).
 	"""
 
 	steps: tuple[TransformStep, ...]
-
-	def __post_init__ (self) -> None:
-
-		# Sort by class-level PRIORITY so (PitchShift, TimeStretch) and
-		# (TimeStretch, PitchShift) produce the same spec and the same cache key.
-		sorted_steps = tuple(
-			sorted(self.steps, key=lambda s: type(s).PRIORITY)
-		)
-
-		# Frozen dataclasses disallow normal attribute assignment; this is the
-		# documented pattern for setting computed fields in __post_init__.
-		object.__setattr__(self, "steps", sorted_steps)
 
 # The identity spec: no transform steps.  Used for the base variant — a
 # float32, peak-normalised copy of the original at the recorder's sample rate,
@@ -552,6 +594,242 @@ class TransformCache:
 					pass
 
 # ---------------------------------------------------------------------------
+# VariantDiskCache
+# ---------------------------------------------------------------------------
+
+# Binary file format for cached variants:
+#   Magic  (4 bytes): b"SSV1"
+#   Channels (2 bytes, uint16, little-endian)
+#   Sample rate (4 bytes, uint32, little-endian)
+#   Frame count (4 bytes, uint32, little-endian)
+#   Peak (4 bytes, float32, little-endian)
+#   RMS (4 bytes, float32, little-endian)
+#   Reserved (10 bytes, zero)
+#   Body: n_frames * channels * 4 bytes of float32, little-endian
+
+_VARIANT_MAGIC = b"SSV1"
+_VARIANT_HEADER_FORMAT = "<4sHIIff10x"
+_VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
+
+
+def variant_cache_key (
+	audio_md5:          str,
+	spec:               "TransformSpec",
+	output_sample_rate: int,
+) -> str:
+
+	"""Compute a deterministic SHA-256 hex digest for a transform variant.
+
+	Includes everything that affects the variant's audio: the parent sample
+	content (MD5), the ordered transform chain (spec), the output device
+	sample rate, and the analysis algorithm version.  Any change to any of
+	these produces a different key — no stale hits.
+	"""
+
+	h = hashlib.sha256()
+	h.update(audio_md5.encode())
+	h.update(subsample.analysis.ANALYSIS_VERSION.encode())
+	h.update(str(output_sample_rate).encode())
+
+	for step in spec.steps:
+		h.update(repr(step).encode())
+
+	return h.hexdigest()
+
+
+class VariantDiskCache:
+
+	"""Persistent file-based cache for transform variants.
+
+	Each variant is stored as a single binary file named by its SHA-256 hash
+	(no sidecar).  FIFO eviction by modification time keeps total disk usage
+	within the configured budget.
+
+	Thread-safe: writes use atomic temp-file + rename; eviction scans are
+	independent of reads.  Reads that encounter corrupt files delete them
+	and return None.
+	"""
+
+	def __init__ (
+		self,
+		directory:      pathlib.Path,
+		max_bytes:      int,
+		sample_rate:    int,
+	) -> None:
+
+		self._directory   = directory
+		self._max_bytes   = max_bytes
+		self._sample_rate = sample_rate
+
+		if max_bytes > 0:
+			self._directory.mkdir(parents=True, exist_ok=True)
+
+	@property
+	def enabled (self) -> bool:
+		return self._max_bytes > 0
+
+	def get (
+		self,
+		audio_md5: str,
+		spec:      "TransformSpec",
+		key:       "TransformKey",
+	) -> typing.Optional["TransformResult"]:
+
+		"""Look up a cached variant on disk.  Returns None on miss or error."""
+
+		if not self.enabled:
+			return None
+
+		hex_digest = variant_cache_key(audio_md5, spec, self._sample_rate)
+		path = self._directory / f"{hex_digest}.variant"
+
+		if not path.exists():
+			return None
+
+		try:
+			with open(path, "rb") as f:
+				header = f.read(_VARIANT_HEADER_SIZE)
+
+				if len(header) < _VARIANT_HEADER_SIZE:
+					_log.warning("Variant cache: corrupt header in %s — deleting", path.name)
+					path.unlink(missing_ok=True)
+					return None
+
+				magic, channels, sample_rate, n_frames, peak, rms = struct.unpack(
+					_VARIANT_HEADER_FORMAT, header,
+				)
+
+				if magic != _VARIANT_MAGIC:
+					_log.warning("Variant cache: bad magic in %s — deleting", path.name)
+					path.unlink(missing_ok=True)
+					return None
+
+				if sample_rate != self._sample_rate:
+					_log.debug("Variant cache: sample rate mismatch in %s — ignoring", path.name)
+					return None
+
+				expected_bytes = n_frames * channels * 4
+				body = f.read(expected_bytes)
+
+				if len(body) < expected_bytes:
+					_log.warning("Variant cache: truncated body in %s — deleting", path.name)
+					path.unlink(missing_ok=True)
+					return None
+
+			audio = numpy.frombuffer(body, dtype=numpy.float32).reshape(n_frames, channels)
+
+			# Touch mtime so recently-used files survive FIFO eviction.
+			os.utime(path, None)
+
+			level    = subsample.analysis.LevelResult(peak=peak, rms=rms)
+			duration = n_frames / sample_rate
+
+			return TransformResult(key=key, audio=audio, duration=duration, level=level)
+
+		except OSError as exc:
+			_log.warning("Variant cache: read error for %s: %s", path.name, exc)
+			return None
+
+	def put (
+		self,
+		audio_md5: str,
+		spec:      "TransformSpec",
+		result:    "TransformResult",
+	) -> None:
+
+		"""Write a variant to disk.  Runs FIFO eviction if over budget."""
+
+		if not self.enabled:
+			return
+
+		hex_digest = variant_cache_key(audio_md5, spec, self._sample_rate)
+		path = self._directory / f"{hex_digest}.variant"
+
+		if path.exists():
+			return
+
+		audio = result.audio
+		n_frames, channels = audio.shape
+
+		header = struct.pack(
+			_VARIANT_HEADER_FORMAT,
+			_VARIANT_MAGIC,
+			channels,
+			self._sample_rate,
+			n_frames,
+			result.level.peak,
+			result.level.rms,
+		)
+
+		try:
+			fd, tmp_path = tempfile.mkstemp(
+				dir=str(self._directory), suffix=".tmp",
+			)
+
+			try:
+				with os.fdopen(fd, "wb") as f:
+					f.write(header)
+					f.write(audio.tobytes())
+				os.replace(tmp_path, str(path))
+			except BaseException:
+				try:
+					os.unlink(tmp_path)
+				except OSError:
+					pass
+				raise
+
+		except OSError as exc:
+			_log.warning("Variant cache: write error for %s: %s", path.name, exc)
+			return
+
+		self._evict_if_needed()
+
+	def _evict_if_needed (self) -> None:
+
+		"""Delete oldest variant files until total size is within budget."""
+
+		try:
+			entries = []
+
+			for entry in os.scandir(self._directory):
+				if entry.name.endswith(".variant") and entry.is_file():
+					stat = entry.stat()
+					entries.append((stat.st_mtime, stat.st_size, entry.path))
+
+			total = sum(size for _, size, _ in entries)
+
+			if total <= self._max_bytes:
+				return
+
+			# Sort oldest first.
+			entries.sort()
+
+			for _mtime, size, filepath in entries:
+				if total <= self._max_bytes:
+					break
+
+				try:
+					os.unlink(filepath)
+					total -= size
+				except OSError:
+					pass
+
+			evicted = sum(1 for _ in entries) - sum(
+				1 for e in os.scandir(self._directory)
+				if e.name.endswith(".variant") and e.is_file()
+			)
+
+			if evicted > 0:
+				_log.info(
+					"Variant disk cache: evicted %d file(s), %.1f MB remaining",
+					evicted, total / (1024 * 1024),
+				)
+
+		except OSError as exc:
+			_log.warning("Variant disk cache eviction error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # TransformProcessor
 # ---------------------------------------------------------------------------
 
@@ -582,17 +860,16 @@ class TransformProcessor:
 
 	Adding a new transform type
 	----------------------------
-	1. Define a frozen dataclass with PRIORITY: ClassVar[int].
+	1. Define a frozen dataclass for the step parameters.
 	2. Write an apply function matching _ApplyFn.
 	3. Register it in TransformProcessor._HANDLERS:
 	       TransformProcessor._HANDLERS[MyTransform] = _apply_my_transform
 	   The _execute() loop picks it up automatically — no other changes needed.
+	4. Add the type to the TransformStep union and to spec_from_process().
 	"""
 
 	# Dispatch table: step type → apply function.
-	# PitchShift and TimeStretch are registered at module load.
-	# Populate here as further transforms are implemented:
-	#   _HANDLERS[EnvelopeAdjust] = _apply_envelope
+	# Populated at module load for all implemented transforms.
 	_HANDLERS: typing.ClassVar[dict[type, _ApplyFn]] = {}
 
 	def __init__ (
@@ -602,6 +879,7 @@ class TransformProcessor:
 		output_sample_rate: typing.Optional[int] = None,
 		on_complete:        typing.Optional[_OnTransformComplete] = None,
 		on_idle:            typing.Optional[typing.Callable[[int], None]] = None,
+		disk_cache:         typing.Optional[VariantDiskCache] = None,
 	) -> None:
 
 		self._sample_rate        = sample_rate
@@ -614,6 +892,7 @@ class TransformProcessor:
 		# Called with completed-count when the in-flight set empties.  Used by
 		# TransformManager to log cache memory status at queue-idle boundaries.
 		self._on_idle            = on_idle
+		self._disk_cache         = disk_cache
 
 		n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
 		_log.info("TransformProcessor: %d worker(s) (cpu_count=%d)", n_workers, os.cpu_count() or 1)
@@ -676,15 +955,23 @@ class TransformProcessor:
 		self,
 		record:     "subsample.library.SampleRecord",
 		midi_notes: list[int],
+		process:    typing.Optional[subsample.query.ProcessSpec] = None,
 	) -> None:
 
-		"""Submit one pitch-shift job per MIDI note in the list."""
+		"""Submit one pitch-shift job per MIDI note in the list.
+
+		When *process* is provided, builds the full ordered chain via
+		spec_from_process() so pre-computed variants include all processors
+		(filters, saturate, etc.) alongside the pitch shift.
+		"""
 
 		for note in midi_notes:
-			self.enqueue(
-				record,
-				TransformSpec(steps=(PitchShift(target_midi_note=note),)),
-			)
+			if process is not None:
+				spec = spec_from_process(process, midi_note=note)
+			else:
+				spec = TransformSpec(steps=(PitchShift(target_midi_note=note),))
+
+			self.enqueue(record, spec)
 
 	def enqueue_bpm_change (
 		self,
@@ -731,6 +1018,18 @@ class TransformProcessor:
 			# enqueue() guards against None audio, but the type system can't see that.
 			if record.audio is None:
 				return
+
+			# Check disk cache before doing expensive DSP.  This covers the
+			# startup pre-computation path (update_assignments → enqueue_pitch_range)
+			# which bypasses TransformManager.get_variant().
+			if self._disk_cache is not None and spec.steps:
+				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+				disk_hit = self._disk_cache.get(audio_md5, spec, key)
+
+				if disk_hit is not None:
+					if self._on_complete is not None:
+						self._on_complete(disk_hit)
+					return
 
 			# Convert integer PCM to float32 preserving all channels.
 			audio = _pcm_to_float32(record.audio, self._bit_depth)
@@ -782,6 +1081,15 @@ class TransformProcessor:
 			duration = audio.shape[0] / self._output_sample_rate
 
 			result = TransformResult(key=key, audio=audio, duration=duration, level=level)
+
+			# Write to disk cache (skip base variants — they're cheap to recompute).
+			if (
+				self._disk_cache is not None
+				and spec.steps
+				and record.audio is not None
+			):
+				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+				self._disk_cache.put(audio_md5, spec, result)
 
 			if self._on_complete is not None:
 				self._on_complete(result)
@@ -846,12 +1154,14 @@ class TransformManager:
 		processor:          TransformProcessor,
 		instrument_library: "subsample.library.InstrumentLibrary",
 		cfg:                "subsample.config.TransformConfig",
+		disk_cache:         typing.Optional[VariantDiskCache] = None,
 	) -> None:
 
 		self._cache              = cache
 		self._processor          = processor
 		self._instrument_library = instrument_library
 		self._cfg                = cfg
+		self._disk_cache         = disk_cache
 
 	def get_pitched (
 		self,
@@ -930,6 +1240,54 @@ class TransformManager:
 
 		return result
 
+	def get_variant (
+		self,
+		sample_id: int,
+		spec:      TransformSpec,
+	) -> typing.Optional[TransformResult]:
+
+		"""Return a cached variant for an arbitrary spec, or None.
+
+		Generic look-up that works with any TransformSpec — composite chains,
+		single-step transforms, or anything built by spec_from_process().
+
+		Look-up order: memory cache → disk cache → enqueue for computation.
+		Disk hits are promoted into the memory cache for subsequent look-ups.
+		"""
+
+		if not spec.steps:
+			return self.get_base(sample_id)
+
+		key    = TransformKey(sample_id=sample_id, spec=spec)
+		result = self._cache.get(key)
+
+		if result is not None:
+			return result
+
+		# Check disk cache before enqueuing a (possibly expensive) recompute.
+		if self._disk_cache is not None:
+			record = self._instrument_library.get(sample_id)
+
+			if record is not None and record.audio is not None:
+				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+				disk_hit = self._disk_cache.get(audio_md5, spec, key)
+
+				if disk_hit is not None:
+					self._cache.put(disk_hit)
+					_log.debug(
+						"Disk cache hit for sample %d (%d step(s))",
+						sample_id, len(spec.steps),
+					)
+					return disk_hit
+
+		# Miss — enqueue for background computation.
+		if result is None:
+			record = self._instrument_library.get(sample_id)
+			if record is not None:
+				self._processor.enqueue(record, spec)
+
+		return None
+
 	def get_base (self, sample_id: int) -> typing.Optional[TransformResult]:
 
 		"""Return the cached base variant for a sample, or None if not ready.
@@ -957,6 +1315,7 @@ class TransformManager:
 		self,
 		record:     "subsample.library.SampleRecord",
 		midi_notes: list[int],
+		process:    typing.Optional[subsample.query.ProcessSpec] = None,
 	) -> None:
 
 		"""Enqueue pitch-shift variants for a set of MIDI notes.
@@ -964,22 +1323,17 @@ class TransformManager:
 		Delegates to the underlying TransformProcessor, which deduplicates
 		in-flight and already-cached keys — safe to call repeatedly.
 
-		Called by MidiPlayer.update_pitched_assignments() when a pitched
-		keyboard assignment's best match changes and the new set of variants
-		must be pre-computed before the next trigger.
+		When *process* is provided, each variant is built via
+		spec_from_process() so it includes the full ordered chain (filters,
+		saturate, etc.) alongside the pitch shift.
 
-		No-ops when auto_pitch is disabled — consistent with the player's
-		overall pitch-variant production policy.
-
-		Args:
-			record:     SampleRecord to produce pitch-shifted variants from.
-			midi_notes: MIDI note numbers to pre-compute.
+		No-ops when auto_pitch is disabled.
 		"""
 
 		if not self._cfg.auto_pitch:
 			return
 
-		self._processor.enqueue_pitch_range(record, midi_notes)
+		self._processor.enqueue_pitch_range(record, midi_notes, process=process)
 
 	def on_sample_added (self, record: "subsample.library.SampleRecord") -> None:
 
@@ -1124,9 +1478,11 @@ def _apply_pitch (
 
 	Computes the semitone shift from the parent sample's detected pitch
 	(record.pitch.dominant_pitch_hz) to the frequency of step.target_midi_note.
-	Uses pyrubberband with --fine --smoothing for Rubber Band v3's highest
-	quality offline processing with frequency-domain smoothing to reduce
-	phasing artefacts.  pyrubberband accepts (n_frames, channels) directly — no
+	Uses pyrubberband with --fine --smoothing --formant for Rubber Band v3's
+	highest quality offline processing with frequency-domain smoothing and
+	formant preservation.  --formant keeps the spectral envelope intact so
+	pitched-up vocals/instruments retain their natural timbre rather than
+	going chipmunk.  pyrubberband accepts (n_frames, channels) directly — no
 	shape transposition is needed.
 
 	Args:
@@ -1152,7 +1508,7 @@ def _apply_pitch (
 		audio,
 		sample_rate,
 		n_steps,
-		rbargs={"--fine": "", "--smoothing": ""},
+		rbargs={"--fine": "", "--smoothing": "", "--formant": ""},
 	)
 
 
@@ -1395,15 +1751,242 @@ def _apply_time_stretch (
 
 
 # ---------------------------------------------------------------------------
+# Reverse handler
+# ---------------------------------------------------------------------------
+
+def _apply_reverse (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Reverse,
+) -> numpy.ndarray:
+
+	"""Reverse the audio along the time axis.
+
+	Returns a contiguous copy — the negative-stride view from [::-1] can
+	break downstream C-based DSP (pyrubberband, soundfile, etc.).
+	"""
+
+	return audio[::-1].copy()
+
+
+# ---------------------------------------------------------------------------
+# Filter handlers
+# ---------------------------------------------------------------------------
+
+_MAX_RESONANCE_DB: float = 24.0
+
+
+def _apply_filter (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	freq:        float,
+	resonance_db: float,
+	btype:       str,
+) -> numpy.ndarray:
+
+	"""Shared implementation for low-pass, high-pass, and band-pass filters.
+
+	Uses a 2nd-order Butterworth (resonance_db == 0) or Chebyshev Type I
+	(resonance_db > 0) filter applied via second-order sections for numerical
+	stability.  Band-pass uses a fixed 1-octave bandwidth centred on freq.
+	"""
+
+	nyquist = sample_rate / 2.0
+
+	# Clamp resonance to a safe range.
+	resonance_db = max(0.0, min(resonance_db, _MAX_RESONANCE_DB))
+
+	# Build the Wn parameter.
+
+	if btype == "bandpass":
+		low  = max(1.0, freq / 1.4142135623730951)
+		high = min(nyquist - 1.0, freq * 1.4142135623730951)
+
+		if low >= high:
+			return audio
+
+		wn: typing.Any = [low, high]
+
+	else:
+		clamped = max(1.0, min(freq, nyquist - 1.0))
+
+		if clamped <= 1.0:
+			return audio
+
+		wn = clamped
+
+	# Design the filter.
+
+	if resonance_db <= 0.0:
+		sos = scipy.signal.butter(2, wn, btype=btype, fs=sample_rate, output="sos")  # type: ignore[call-overload]
+	else:
+		sos = scipy.signal.iirfilter(  # type: ignore[call-overload]
+			2, wn,
+			rp=resonance_db,
+			btype=btype,
+			ftype="cheby1",
+			fs=sample_rate,
+			output="sos",
+		)
+
+	return scipy.signal.sosfilt(sos, audio, axis=0).astype(numpy.float32)
+
+
+def _apply_low_pass (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        LowPassFilter,
+) -> numpy.ndarray:
+
+	"""Low-pass filter — attenuates frequencies above the cutoff."""
+
+	return _apply_filter(audio, sample_rate, step.freq, step.resonance_db, "lowpass")
+
+
+def _apply_high_pass (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        HighPassFilter,
+) -> numpy.ndarray:
+
+	"""High-pass filter — attenuates frequencies below the cutoff."""
+
+	return _apply_filter(audio, sample_rate, step.freq, step.resonance_db, "highpass")
+
+
+def _apply_band_pass (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        BandPassFilter,
+) -> numpy.ndarray:
+
+	"""Band-pass filter — passes a 1-octave band centred on the frequency."""
+
+	return _apply_filter(audio, sample_rate, step.freq, step.resonance_db, "bandpass")
+
+
+# ---------------------------------------------------------------------------
+# Saturate handler
+# ---------------------------------------------------------------------------
+
+def _apply_saturate (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Saturate,
+) -> numpy.ndarray:
+
+	"""Soft-clip saturation via tanh with level compensation.
+
+	Drive is computed from amount_db.  The output is divided by tanh(drive)
+	so that a full-scale input maps back to full-scale, preventing volume
+	loss at high drive settings.
+	"""
+
+	if step.amount_db <= 0.0:
+		return audio
+
+	drive = 10.0 ** (step.amount_db / 20.0)
+
+	saturated = numpy.tanh(audio * drive)
+	saturated /= numpy.tanh(numpy.float32(drive))
+
+	result: numpy.ndarray = saturated.astype(numpy.float32)
+	return result
+
+
+# ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------
 
-# Register the pitch-shift handler so TransformProcessor can dispatch to it.
-# All enqueue() calls for PitchShift specs are now live; previously they were
-# silently dropped because _HANDLERS was empty (Phase 1 scaffold).
-TransformProcessor._HANDLERS[PitchShift] = _apply_pitch
+TransformProcessor._HANDLERS[PitchShift]     = _apply_pitch
+TransformProcessor._HANDLERS[TimeStretch]    = _apply_time_stretch
+TransformProcessor._HANDLERS[Reverse]        = _apply_reverse
+TransformProcessor._HANDLERS[LowPassFilter]  = _apply_low_pass
+TransformProcessor._HANDLERS[HighPassFilter]  = _apply_high_pass
+TransformProcessor._HANDLERS[BandPassFilter] = _apply_band_pass
+TransformProcessor._HANDLERS[Saturate]       = _apply_saturate
 
-# Register the time-stretch handler — beat-quantized non-linear stretching
-# via pyrubberband.timemap_stretch() with Rubber Band's offline finer engine
-# and frequency-domain smoothing (--fine --smoothing).
-TransformProcessor._HANDLERS[TimeStretch] = _apply_time_stretch
+
+# ---------------------------------------------------------------------------
+# Process spec → TransformSpec conversion
+# ---------------------------------------------------------------------------
+
+def spec_from_process (
+	process:    subsample.query.ProcessSpec,
+	midi_note:  typing.Optional[int]   = None,
+	target_bpm: typing.Optional[float] = None,
+	resolution: int                    = 16,
+) -> TransformSpec:
+
+	"""Build an ordered TransformSpec from a MIDI map process pipeline.
+
+	Iterates the process steps in *declaration order*, converting each
+	ProcessorStep into the corresponding TransformStep dataclass.  Dynamic
+	parameters (midi_note for repitch, target_bpm/resolution for
+	beat_quantize) are substituted at the position the user declared them.
+
+	Steps with unresolvable dynamic parameters (e.g. repitch when midi_note
+	is None) are silently skipped.  Unknown processor names log a warning
+	and are skipped.
+	"""
+
+	steps: list[TransformStep] = []
+
+	for proc in process.steps:
+
+		if proc.name == "repitch":
+			fixed_note = proc.get("note")
+
+			if fixed_note is not None:
+				# Fixed target note — accept int or note name (e.g. "C4").
+				if isinstance(fixed_note, int):
+					steps.append(PitchShift(target_midi_note=fixed_note))
+				else:
+					import pymididefs.notes
+					steps.append(PitchShift(target_midi_note=pymididefs.notes.name_to_note(str(fixed_note))))
+
+			elif midi_note is not None:
+				steps.append(PitchShift(target_midi_note=midi_note))
+
+		elif proc.name == "beat_quantize":
+			bpm = float(proc.get("bpm", target_bpm or 0.0))
+			grid = int(proc.get("grid", resolution))
+
+			if bpm > 0.0:
+				steps.append(TimeStretch(target_bpm=bpm, resolution=grid))
+
+		elif proc.name == "filter_low":
+			steps.append(LowPassFilter(
+				freq=float(proc.get("freq", 1000.0)),
+				resonance_db=float(proc.get("resonance", 0.0)),
+			))
+
+		elif proc.name == "filter_high":
+			steps.append(HighPassFilter(
+				freq=float(proc.get("freq", 1000.0)),
+				resonance_db=float(proc.get("resonance", 0.0)),
+			))
+
+		elif proc.name == "filter_band":
+			steps.append(BandPassFilter(
+				freq=float(proc.get("freq", 1000.0)),
+				resonance_db=float(proc.get("resonance", 0.0)),
+			))
+
+		elif proc.name == "reverse":
+			steps.append(Reverse())
+
+		elif proc.name == "saturate":
+			steps.append(Saturate(
+				amount_db=float(proc.get("amount", 6.0)),
+			))
+
+		else:
+			_log.warning("Unknown processor %r — skipped", proc.name)
+
+	return TransformSpec(steps=tuple(steps))
