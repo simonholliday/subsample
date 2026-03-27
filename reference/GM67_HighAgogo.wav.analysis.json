@@ -1,5 +1,5 @@
 {
-  "analysis_version": "10",
+  "analysis_version": "11",
   "audio_md5": "20b8cee9022d76cd8308824d2c8fb5d3",
   "sample_rate": 44100,
   "bit_depth": 16,
@@ -20,7 +20,7 @@
     "zcr": 0.4123480902777778,
     "harmonic_ratio": 0.6092469647151169,
     "spectral_contrast": 0.4914880978680413,
-    "voiced_fraction": 0.7777777777777778,
+    "voiced_fraction": 0.8666666666666667,
     "log_attack_time": 0.0,
     "spectral_flux": 0.0
   },
@@ -81,7 +81,6 @@
       0.17414965986394557
     ],
     "onset_times": [
-      0.034829931972789115,
       0.08126984126984127,
       0.11609977324263039,
       0.18575963718820862,
@@ -90,19 +89,18 @@
       0.3831292517006803
     ],
     "attack_times": [
-      0.0037188208616780044,
-      0.06333333333333334,
+      0.0637641723356009,
       0.11170068027210885,
       0.17780045351473922,
       0.26700680272108845,
       0.29018140589569164,
       0.35811791383219954
     ],
-    "onset_count": 7
+    "onset_count": 6
   },
   "pitch": {
-    "dominant_pitch_hz": 1487.8717697326686,
-    "pitch_confidence": 0.44248918915328167,
+    "dominant_pitch_hz": 1496.4909232112532,
+    "pitch_confidence": 0.43679819397834546,
     "chroma_profile": [
       0.28087809681892395,
       0.27621227502822876,
@@ -118,8 +116,8 @@
       0.12738993763923645
     ],
     "dominant_pitch_class": 6,
-    "pitch_stability": 6.491668758131929,
-    "voiced_frame_count": 35
+    "pitch_stability": 6.379244986745725,
+    "voiced_frame_count": 39
   },
   "timbre": {
     "mfcc": [

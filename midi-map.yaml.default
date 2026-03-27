@@ -103,6 +103,10 @@
 # Filters accept an optional resonance parameter (dB, default 0):
 #   filter_low: { freq: 800, resonance: 12 }
 #
+# HPSS separates harmonic (tonal) from percussive (transient) content:
+#   hpss_harmonic: true       Keep tonal content, remove percussion
+#   hpss_percussive: true     Keep percussion, remove tonal content
+#
 # Omit process entirely for unprocessed playback (base variant).
 #
 # ===================================================================

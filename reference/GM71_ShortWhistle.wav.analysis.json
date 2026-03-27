@@ -1,5 +1,5 @@
 {
-  "analysis_version": "10",
+  "analysis_version": "11",
   "audio_md5": "c181086cf7525962793466282b59bd9c",
   "sample_rate": 44100,
   "bit_depth": 16,
@@ -90,16 +90,18 @@
     ],
     "pulse_peak_times": [],
     "onset_times": [
-      0.034829931972789115
+      0.034829931972789115,
+      0.19736961451247165
     ],
     "attack_times": [
-      0.003038548752834467
+      0.003038548752834467,
+      0.1680045351473923
     ],
-    "onset_count": 1
+    "onset_count": 2
   },
   "pitch": {
-    "dominant_pitch_hz": 1540.3414543780266,
-    "pitch_confidence": 0.26240097393492007,
+    "dominant_pitch_hz": 1549.2645616476107,
+    "pitch_confidence": 0.4039906577027008,
     "chroma_profile": [
       0.048833560198545456,
       0.07541780918836594,
@@ -115,7 +117,7 @@
       0.038951802998781204
     ],
     "dominant_pitch_class": 7,
-    "pitch_stability": 0.13807363066632014,
+    "pitch_stability": 0.10933639614654606,
     "voiced_frame_count": 57
   },
   "timbre": {

@@ -249,6 +249,28 @@ class Saturate:
 	amount_db: float
 
 
+@dataclasses.dataclass(frozen=True)
+class HpssHarmonic:
+
+	"""Keep only the harmonic (tonal/sustained) component via HPSS.
+
+	Removes percussive transients, preserving pitched and sustained content.
+	Useful as a pre-filter before repitch to avoid pitch-shifting drum bleed,
+	or as a creative effect to extract the "body" of a sound.
+	"""
+
+
+@dataclasses.dataclass(frozen=True)
+class HpssPercussive:
+
+	"""Keep only the percussive (transient) component via HPSS.
+
+	Removes harmonic/tonal content, preserving clicks, hits, and transients.
+	Useful as a pre-filter before beat_quantize for cleaner grid alignment,
+	or as a creative effect to extract the rhythmic skeleton of a sound.
+	"""
+
+
 # Union of all known transform step types.
 # Extend this when adding new transforms (see "How to add a new transform type"
 # in the module docstring).
@@ -259,6 +281,8 @@ TransformStep = typing.Union[
 	HighPassFilter,
 	BandPassFilter,
 	Saturate,
+	HpssHarmonic,
+	HpssPercussive,
 	EnvelopeAdjust,
 	TimeStretch,
 ]
@@ -1907,16 +1931,72 @@ def _apply_saturate (
 
 
 # ---------------------------------------------------------------------------
+# HPSS handlers
+# ---------------------------------------------------------------------------
+
+def _apply_hpss (
+	audio:     numpy.ndarray,
+	keep:      str,
+) -> numpy.ndarray:
+
+	"""Shared HPSS implementation for harmonic and percussive processors.
+
+	Processes each channel independently via librosa.decompose.hpss on the
+	per-channel STFT, then reconstructs the selected component via istft.
+	"""
+
+	n_frames, channels = audio.shape
+	result = numpy.empty_like(audio)
+
+	for ch in range(channels):
+		D = librosa.stft(audio[:, ch])
+		harmonic_D, percussive_D = librosa.decompose.hpss(D)
+
+		if keep == "harmonic":
+			result[:, ch] = librosa.istft(harmonic_D, length=n_frames)
+		else:
+			result[:, ch] = librosa.istft(percussive_D, length=n_frames)
+
+	return result.astype(numpy.float32)
+
+
+def _apply_hpss_harmonic (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        HpssHarmonic,
+) -> numpy.ndarray:
+
+	"""Keep only the harmonic (tonal/sustained) component."""
+
+	return _apply_hpss(audio, "harmonic")
+
+
+def _apply_hpss_percussive (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        HpssPercussive,
+) -> numpy.ndarray:
+
+	"""Keep only the percussive (transient) component."""
+
+	return _apply_hpss(audio, "percussive")
+
+
+# ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------
 
-TransformProcessor._HANDLERS[PitchShift]     = _apply_pitch
-TransformProcessor._HANDLERS[TimeStretch]    = _apply_time_stretch
-TransformProcessor._HANDLERS[Reverse]        = _apply_reverse
-TransformProcessor._HANDLERS[LowPassFilter]  = _apply_low_pass
-TransformProcessor._HANDLERS[HighPassFilter]  = _apply_high_pass
-TransformProcessor._HANDLERS[BandPassFilter] = _apply_band_pass
-TransformProcessor._HANDLERS[Saturate]       = _apply_saturate
+TransformProcessor._HANDLERS[PitchShift]      = _apply_pitch
+TransformProcessor._HANDLERS[TimeStretch]     = _apply_time_stretch
+TransformProcessor._HANDLERS[Reverse]         = _apply_reverse
+TransformProcessor._HANDLERS[LowPassFilter]   = _apply_low_pass
+TransformProcessor._HANDLERS[HighPassFilter]   = _apply_high_pass
+TransformProcessor._HANDLERS[BandPassFilter]  = _apply_band_pass
+TransformProcessor._HANDLERS[Saturate]        = _apply_saturate
+TransformProcessor._HANDLERS[HpssHarmonic]    = _apply_hpss_harmonic
+TransformProcessor._HANDLERS[HpssPercussive]  = _apply_hpss_percussive
 
 
 # ---------------------------------------------------------------------------
@@ -1992,6 +2072,12 @@ def spec_from_process (
 			steps.append(Saturate(
 				amount_db=float(proc.get("amount", 6.0)),
 			))
+
+		elif proc.name == "hpss_harmonic":
+			steps.append(HpssHarmonic())
+
+		elif proc.name == "hpss_percussive":
+			steps.append(HpssPercussive())
 
 		else:
 			_log.warning("Unknown processor %r — skipped", proc.name)

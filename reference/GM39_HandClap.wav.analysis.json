@@ -1,5 +1,5 @@
 {
-  "analysis_version": "10",
+  "analysis_version": "11",
   "audio_md5": "2fecd389bd64d7c143b26e4b4715014a",
   "sample_rate": 44100,
   "bit_depth": 16,
@@ -91,13 +91,15 @@
     "pulse_peak_times": [],
     "onset_times": [
       0.034829931972789115,
-      0.19736961451247165
+      0.19736961451247165,
+      0.301859410430839
     ],
     "attack_times": [
       0.003582766439909297,
-      0.16444444444444445
+      0.16444444444444445,
+      0.27365079365079364
     ],
-    "onset_count": 2
+    "onset_count": 3
   },
   "pitch": {
     "dominant_pitch_hz": 0.0,

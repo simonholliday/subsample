@@ -227,9 +227,15 @@ Available processors:
 | `filter_band: { freq: 1000, resonance: 6 }` | freq (Hz), resonance (dB, default 0) | Band-pass (1-octave width) |
 | `reverse: true` | none | Reverse the audio |
 | `saturate: { amount: 6 }` | amount (dB of drive) | Soft-clip saturation with level compensation |
+| `hpss_harmonic: true` | none | Keep only harmonic/tonal content (remove percussion) |
+| `hpss_percussive: true` | none | Keep only percussive/transient content (remove harmonics) |
 
 Filter resonance: 0 dB = flat Butterworth, higher values create a resonant
 peak at the cutoff (Chebyshev Type I, max 24 dB).
+
+HPSS (Harmonic/Percussive Source Separation) decomposes audio into sustained
+tonal content and transient clicks/hits. Useful as a pre-filter before repitch
+(avoids pitch-shifting drum bleed) or beat_quantize (cleaner grid alignment).
 
 When `repitch` is in the process list, all notes in a multi-note assignment
 share pick 1 (same sample, pitched per note). Without `repitch`, each note gets

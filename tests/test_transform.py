@@ -1987,3 +1987,90 @@ class TestVariantDiskCache:
 		loaded = cache.get("test_md5", spec, result.key)
 		assert loaded is None
 		assert not bad_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# TestHpssHarmonic / TestHpssPercussive
+# ---------------------------------------------------------------------------
+
+class TestHpssProcessors:
+
+	"""Tests for the HPSS harmonic and percussive transform handlers."""
+
+	def _make_mixed_signal (self, sr: int = 44100, duration: float = 0.5) -> numpy.ndarray:
+		"""Create a stereo signal with a clear sine (harmonic) + click (percussive)."""
+		t = numpy.arange(int(sr * duration), dtype=numpy.float32) / sr
+
+		# Harmonic: sustained sine wave
+		harmonic = 0.5 * numpy.sin(2 * numpy.pi * 440.0 * t)
+
+		# Percussive: sharp click at 10% of the way through
+		percussive = numpy.zeros_like(t)
+		click_pos = int(0.1 * len(t))
+		percussive[click_pos:click_pos + 50] = 0.8
+
+		mono = (harmonic + percussive).astype(numpy.float32)
+		return numpy.column_stack([mono, mono])  # stereo
+
+	def test_harmonic_preserves_shape (self) -> None:
+		audio = self._make_mixed_signal()
+		record = _make_record(sample_id=1)
+		result = subsample.transform._apply_hpss_harmonic(
+			audio, 44100, record, subsample.transform.HpssHarmonic(),
+		)
+		assert result.shape == audio.shape
+		assert result.dtype == numpy.float32
+
+	def test_percussive_preserves_shape (self) -> None:
+		audio = self._make_mixed_signal()
+		record = _make_record(sample_id=1)
+		result = subsample.transform._apply_hpss_percussive(
+			audio, 44100, record, subsample.transform.HpssPercussive(),
+		)
+		assert result.shape == audio.shape
+		assert result.dtype == numpy.float32
+
+	def test_harmonic_has_less_transient_energy (self) -> None:
+		"""Harmonic component should have less energy in the click region."""
+		audio = self._make_mixed_signal()
+		record = _make_record(sample_id=1)
+		harmonic = subsample.transform._apply_hpss_harmonic(
+			audio, 44100, record, subsample.transform.HpssHarmonic(),
+		)
+
+		# Check the click region (around 10% of the signal)
+		click_start = int(0.1 * audio.shape[0])
+		click_end = click_start + 50
+
+		original_click_energy = float(numpy.sum(audio[click_start:click_end, 0] ** 2))
+		harmonic_click_energy = float(numpy.sum(harmonic[click_start:click_end, 0] ** 2))
+
+		# Harmonic should have significantly less click energy.
+		assert harmonic_click_energy < original_click_energy * 0.8
+
+	def test_percussive_has_less_sustained_energy (self) -> None:
+		"""Percussive component should have less energy in the sustained region."""
+		audio = self._make_mixed_signal()
+		record = _make_record(sample_id=1)
+		percussive = subsample.transform._apply_hpss_percussive(
+			audio, 44100, record, subsample.transform.HpssPercussive(),
+		)
+
+		# Check a sustained region (last 30% of signal, well after the click)
+		sustained_start = int(0.7 * audio.shape[0])
+		original_sustained = float(numpy.sum(audio[sustained_start:, 0] ** 2))
+		percussive_sustained = float(numpy.sum(percussive[sustained_start:, 0] ** 2))
+
+		# Percussive should have significantly less sustained energy.
+		assert percussive_sustained < original_sustained * 0.5
+
+	def test_spec_from_process_hpss (self) -> None:
+		"""hpss_harmonic and hpss_percussive are recognised by spec_from_process."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="hpss_harmonic"),
+			subsample.query.ProcessorStep(name="repitch"),
+		))
+		spec = subsample.transform.spec_from_process(process, midi_note=60)
+		assert len(spec.steps) == 2
+		assert isinstance(spec.steps[0], subsample.transform.HpssHarmonic)
+		assert isinstance(spec.steps[1], subsample.transform.PitchShift)
