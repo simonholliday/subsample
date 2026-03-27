@@ -1744,6 +1744,13 @@ def _apply_time_stretch (
 	)
 
 	# ── Apply via Rubber Band's offline finer engine ──────────────────────
+	#
+	# We provide an explicit time_map so Rubber Band's internal transient
+	# detection is bypassed entirely — our two-stage onset pipeline
+	# (librosa spectral flux → sample-accurate amplitude-envelope refinement
+	# in analysis._refine_onsets_to_attacks) gives ~0.7 ms precision, far
+	# tighter than any frame-level detector.  Rubber Band's --detector-perc
+	# flag is R2-only and irrelevant here (we use R3 via --fine).
 
 	return pyrubberband.timemap_stretch(  # type: ignore[no-any-return]
 		audio, sample_rate, time_map, rbargs={"--fine": "", "--smoothing": ""},
