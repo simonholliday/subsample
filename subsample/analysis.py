@@ -1497,9 +1497,15 @@ def analyze_all (
 	# Run pyin on the harmonic component for cleaner pitch detection.
 	# Percussive energy in the full mix degrades pyin's confidence and can
 	# pull the detected F0 away from the true fundamental.
-	pyin = _run_pyin(harmonic_audio, params)
+	# Guard: istft can produce NaN for very short signals — fall back to
+	# the full mono mix if the harmonic audio is not finite.
+	if numpy.all(numpy.isfinite(harmonic_audio)):
+		pyin = _run_pyin(harmonic_audio, params)
+	else:
+		pyin = _run_pyin(mono, params)
 
-	rhythm      = analyze_rhythm(mono, params, rhythm_cfg, _percussive=percussive_audio)
+	safe_percussive = percussive_audio if numpy.all(numpy.isfinite(percussive_audio)) else None
+	rhythm      = analyze_rhythm(mono, params, rhythm_cfg, _percussive=safe_percussive)
 	spectral    = analyze_mono(mono, params, _pyin_voiced_flag=pyin[1] if pyin is not None else None, _hpss_ratio=harmonic_ratio)
 	pitch, timbre = analyze_pitch(mono, params, _pyin_result=pyin)
 	level       = compute_level(mono)

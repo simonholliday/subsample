@@ -67,7 +67,7 @@ class TestLoadDefault:
 	def test_default_output_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.output.directory == "./samples"
+		assert cfg.output.directory == "./samples/captures"
 		assert cfg.output.filename_format == "%Y-%m-%d_%H-%M-%S"
 
 	def test_default_analysis_values (self) -> None:
@@ -655,7 +655,7 @@ class TestConfigCascade:
 		assert cfg.recorder.audio.sample_rate == 44100
 		assert cfg.recorder.audio.bit_depth == 16
 		assert cfg.detection.snr_threshold_db == 12.0
-		assert cfg.output.directory == "./samples"
+		assert cfg.output.directory == "./samples/captures"
 
 	def test_partial_section_inherits_sibling_keys (self, tmp_path: pathlib.Path) -> None:
 		"""Overriding one key in a section leaves sibling keys at their defaults."""

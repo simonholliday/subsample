@@ -10,26 +10,16 @@ build/
 config.yaml
 midi-map.yaml
 
-# Audio
-samples/
-
 # Logs
 *.log
 
-# Generated audio recordings
-*.wav
-*.flac
-*.mp3
-*.analysis.json
+# samples/ — subdirectory-specific rules live in their own .gitignore files.
+# The top-level directory is tracked so its structure (subdirs, .gitkeep,
+# per-directory .gitignore) is committed.  Audio and variant content is
+# excluded by the .gitignore in each subdirectory.
+!samples/
 
-# Reference directory — track analysis JSONs and credits, ignore everything else.
-# These negations must come AFTER the global *.analysis.json rule above.
-!reference/
-reference/*
-!reference/*.analysis.json
-!reference/CREDITS.md
-
-# Local-only extraction script (not distributed; see reference/CREDITS.md for provenance)
+# Local-only extraction script (not distributed; see samples/reference/CREDITS.md)
 scripts/extract_gm_drums.py
 
 # Documentation build output
@@ -42,4 +32,3 @@ README-AGENTS.md
 AGENT-INSTRUCTIONS.md
 .vscode/
 .claude/
-

@@ -1,0 +1,4 @@
+# Recordings are local-only
+*
+!.gitignore
+!.gitkeep

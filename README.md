@@ -432,7 +432,7 @@ weights - is optional and rarely needs changing.
 | `detection.ema_alpha` | `0.1` | Ambient noise adaptation speed (lower = slower) |
 | `detection.trim_pre_samples` | `15` | Samples to keep before signal onset (S-curve fade applied) |
 | `detection.trim_post_samples` | `85` | Samples to keep after signal end (S-curve fade applied) |
-| `output.directory` | `./samples` | Where WAV files are saved |
+| `output.directory` | `./samples/captures` | Where WAV files are saved |
 | `output.filename_format` | `%Y-%m-%d_%H-%M-%S` | strftime format for filenames |
 | `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
@@ -490,16 +490,16 @@ exceed the limit. WAV files on disk are never deleted.
 
 ```yaml
 output:
-  directory: "./samples"
+  directory: "./samples/captures"
 
 instrument:
-  directory: "./samples"
+  directory: "./samples/captures"
 ```
 
-On startup, Subsample pre-loads all existing WAV files from `./samples`. As new
-recordings arrive they are written to disk and added to memory in one step. The
-memory cap keeps only the most recent window of captures in RAM; the full archive
-on disk is unaffected.
+On startup, Subsample pre-loads all existing WAV files from `./samples/captures`.
+As new recordings arrive they are written to disk and added to memory in one step.
+The memory cap keeps only the most recent window of captures in RAM; the full
+archive on disk is unaffected.
 
 ### Multi-machine setup (remote recorder + player)
 
@@ -578,14 +578,14 @@ kick drum, snare, hi-hat, etc. Each reference is represented by its
 
 ```yaml
 reference:
-  directory: "./reference"
+  directory: "./samples/reference"
 ```
 
 Place one sidecar per sound class in the reference directory. The name is taken
 from the audio filename stem:
 
 ```
-reference/
+samples/reference/
   GM36_BassDrum1.wav.analysis.json    →  "GM36_BassDrum1"
   GM38_AcousticSnare.wav.analysis.json →  "GM38_AcousticSnare"
   GM42_ClosedHiHat.wav.analysis.json   →  "GM42_ClosedHiHat"

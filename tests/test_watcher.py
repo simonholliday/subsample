@@ -6,7 +6,6 @@ asynchronously. The 1-second debounce window means each test that
 expects a callback must wait up to ~3 seconds for it to fire.
 """
 
-import json
 import pathlib
 import threading
 import typing
@@ -28,83 +27,7 @@ def _write_sidecar (
 	audio_stem: str,
 	audio_ext: str = ".wav",
 ) -> pathlib.Path:
-
-	"""Write a valid .analysis.json sidecar to directory.
-
-	Does NOT create the audio file — only the sidecar. Returns the sidecar path.
-
-	NOTE: the JSON payload below mirrors the format in subsample/cache.py. If
-	the sidecar schema changes (new fields, renamed keys), this helper must be
-	updated to match, otherwise watcher tests will silently use stale sidecars.
-	"""
-
-	audio_path   = directory / (audio_stem + audio_ext)
-	sidecar_path = subsample.cache.cache_path(audio_path)
-	spectral     = tests.helpers._make_spectral()
-	rhythm       = tests.helpers._make_rhythm()
-	pitch        = tests.helpers._make_pitch()
-	timbre       = tests.helpers._make_timbre()
-	level        = tests.helpers._make_level()
-	band_energy  = tests.helpers._make_band_energy()
-	params       = tests.helpers._make_params()
-
-	payload: dict[str, typing.Any] = {
-		"analysis_version": subsample.analysis.ANALYSIS_VERSION,
-		"audio_md5":        "deadbeef00000000deadbeef00000000",
-		"sample_rate":      params.sample_rate,
-		"duration":         1.0,
-		"params": {
-			"n_fft":        params.n_fft,
-			"hop_length":   params.hop_length,
-			"sample_rate":  params.sample_rate,
-		},
-		"spectral": {
-			"spectral_flatness":  spectral.spectral_flatness,
-			"attack":             spectral.attack,
-			"release":            spectral.release,
-			"spectral_centroid":  spectral.spectral_centroid,
-			"spectral_bandwidth": spectral.spectral_bandwidth,
-			"zcr":                spectral.zcr,
-			"harmonic_ratio":     spectral.harmonic_ratio,
-			"spectral_contrast":  spectral.spectral_contrast,
-			"voiced_fraction":    spectral.voiced_fraction,
-			"log_attack_time":    spectral.log_attack_time,
-			"spectral_flux":      spectral.spectral_flux,
-		},
-		"rhythm": {
-			"tempo_bpm":        rhythm.tempo_bpm,
-			"beat_times":       list(rhythm.beat_times),
-			"pulse_curve":      rhythm.pulse_curve.tolist(),
-			"pulse_peak_times": list(rhythm.pulse_peak_times),
-			"onset_times":      list(rhythm.onset_times),
-			"attack_times":     list(rhythm.attack_times),
-			"onset_count":      rhythm.onset_count,
-		},
-		"pitch": {
-			"dominant_pitch_hz":    pitch.dominant_pitch_hz,
-			"pitch_confidence":     pitch.pitch_confidence,
-			"chroma_profile":       list(pitch.chroma_profile),
-			"dominant_pitch_class": pitch.dominant_pitch_class,
-			"pitch_stability":      pitch.pitch_stability,
-			"voiced_frame_count":   pitch.voiced_frame_count,
-		},
-		"timbre": {
-			"mfcc":       list(timbre.mfcc),
-			"mfcc_delta": list(timbre.mfcc_delta),
-			"mfcc_onset": list(timbre.mfcc_onset),
-		},
-		"level": {
-			"peak": level.peak,
-			"rms":  level.rms,
-		},
-		"band_energy": {
-			"energy_fractions": list(band_energy.energy_fractions),
-			"decay_rates":      list(band_energy.decay_rates),
-		},
-	}
-
-	sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
-	return sidecar_path
+	return tests.helpers._write_sidecar(directory, audio_stem, audio_ext)
 
 
 def _write_wav_and_sidecar (
@@ -112,13 +35,7 @@ def _write_wav_and_sidecar (
 	audio_stem: str,
 	n_frames: int = 2048,
 ) -> tuple[pathlib.Path, pathlib.Path]:
-
-	"""Write a WAV file and its sidecar. Returns (wav_path, sidecar_path)."""
-
-	wav_path     = directory / (audio_stem + ".wav")
-	tests.helpers._make_wav(wav_path, n_frames=n_frames)
-	sidecar_path = _write_sidecar(directory, audio_stem)
-	return wav_path, sidecar_path
+	return tests.helpers._write_wav_and_sidecar(directory, audio_stem, n_frames)
 
 
 # Generous timeout for debounce window plus filesystem event latency.

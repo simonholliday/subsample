@@ -1,0 +1,6 @@
+# Ignore everything, then whitelist only what should be committed.
+*
+!*.analysis.json
+!CREDITS.md
+!.gitignore
+!.gitkeep

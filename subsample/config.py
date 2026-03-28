@@ -66,10 +66,10 @@ class PlayerAudioConfig:
 	different format."""
 	sample_rate: typing.Optional[int] = None
 	"""Output sample rate in Hz.
-	None (the default) means use the recorder's sample rate.  Never set
-	this higher than the recording sample rate — upsampling adds no
-	quality and wastes CPU.  Useful when the output device runs at a lower
-	rate than the recorder (e.g. recorder at 96 kHz, output at 48 kHz)."""
+	None (the default) means use the recorder's sample rate.  Set this to
+	match the output device's native rate when it differs from the
+	recorder (e.g. recorder at 22050 Hz, output at 44100 Hz).  Variants
+	are resampled once at production time, not at trigger time."""
 
 
 @dataclasses.dataclass(frozen=True)

@@ -4,12 +4,15 @@ Plain helper functions used by multiple test modules. Not pytest fixtures —
 imported directly by the test files that need them.
 """
 
+import json
 import pathlib
+import typing
 import wave
 
 import numpy
 
 import subsample.analysis
+import subsample.cache
 
 
 def _make_wav (path: pathlib.Path, n_frames: int = 2048, sample_rate: int = 44100) -> None:
@@ -63,21 +66,21 @@ def _make_pitch (
 	pitch_confidence:     float = 0.92,
 	pitch_stability:      float = 0.1,
 	voiced_frame_count:   int   = 8,
+	dominant_pitch_class: int   = 9,
 ) -> subsample.analysis.PitchResult:
 
 	"""Return a representative PitchResult with typical field values.
 
-	The `pitch_stability` and `voiced_frame_count` fields are exposed as
-	keyword arguments because they are the two fields evaluated by
-	`has_stable_pitch()`.  Tests that need to exercise stability thresholds
-	can override them without constructing PitchResult manually.
+	All fields evaluated by `has_stable_pitch()` are exposed as keyword
+	arguments so tests can exercise boundary conditions without constructing
+	PitchResult manually.
 	"""
 
 	return subsample.analysis.PitchResult(
 		dominant_pitch_hz    = dominant_pitch_hz,
 		pitch_confidence     = pitch_confidence,
 		chroma_profile       = tuple(float(i) / 12.0 for i in range(12)),
-		dominant_pitch_class = 9,
+		dominant_pitch_class = dominant_pitch_class,
 		pitch_stability      = pitch_stability,
 		voiced_frame_count   = voiced_frame_count,
 	)
@@ -116,3 +119,101 @@ def _make_params (sample_rate: int = 44100) -> subsample.analysis.AnalysisParams
 	"""Return AnalysisParams computed for the given sample rate."""
 
 	return subsample.analysis.compute_params(sample_rate)
+
+
+def _write_sidecar (
+	directory: pathlib.Path,
+	audio_stem: str,
+	audio_ext: str = ".wav",
+) -> pathlib.Path:
+
+	"""Write a valid .analysis.json sidecar to directory.
+
+	Does NOT create the audio file — only the sidecar.  Returns the sidecar
+	path.  Used by both library and watcher tests.
+
+	The JSON payload mirrors the format in subsample/cache.py.  If the sidecar
+	schema changes (new fields, renamed keys), update this helper to match.
+	"""
+
+	audio_path   = directory / (audio_stem + audio_ext)
+	sidecar_path = subsample.cache.cache_path(audio_path)
+	spectral     = _make_spectral()
+	rhythm       = _make_rhythm()
+	pitch        = _make_pitch()
+	timbre       = _make_timbre()
+	level        = _make_level()
+	band_energy  = _make_band_energy()
+	params       = _make_params()
+
+	payload: dict[str, typing.Any] = {
+		"analysis_version": subsample.analysis.ANALYSIS_VERSION,
+		"audio_md5":        "deadbeef00000000deadbeef00000000",
+		"sample_rate":      params.sample_rate,
+		"duration":         1.0,
+		"params": {
+			"n_fft":        params.n_fft,
+			"hop_length":   params.hop_length,
+			"sample_rate":  params.sample_rate,
+		},
+		"spectral": {
+			"spectral_flatness":  spectral.spectral_flatness,
+			"attack":             spectral.attack,
+			"release":            spectral.release,
+			"spectral_centroid":  spectral.spectral_centroid,
+			"spectral_bandwidth": spectral.spectral_bandwidth,
+			"zcr":                spectral.zcr,
+			"harmonic_ratio":     spectral.harmonic_ratio,
+			"spectral_contrast":  spectral.spectral_contrast,
+			"voiced_fraction":    spectral.voiced_fraction,
+			"log_attack_time":    spectral.log_attack_time,
+			"spectral_flux":      spectral.spectral_flux,
+		},
+		"rhythm": {
+			"tempo_bpm":        rhythm.tempo_bpm,
+			"beat_times":       list(rhythm.beat_times),
+			"pulse_curve":      rhythm.pulse_curve.tolist(),
+			"pulse_peak_times": list(rhythm.pulse_peak_times),
+			"onset_times":      list(rhythm.onset_times),
+			"attack_times":     list(rhythm.attack_times),
+			"onset_count":      rhythm.onset_count,
+		},
+		"pitch": {
+			"dominant_pitch_hz":    pitch.dominant_pitch_hz,
+			"pitch_confidence":     pitch.pitch_confidence,
+			"chroma_profile":       list(pitch.chroma_profile),
+			"dominant_pitch_class": pitch.dominant_pitch_class,
+			"pitch_stability":      pitch.pitch_stability,
+			"voiced_frame_count":   pitch.voiced_frame_count,
+		},
+		"timbre": {
+			"mfcc":       list(timbre.mfcc),
+			"mfcc_delta": list(timbre.mfcc_delta),
+			"mfcc_onset": list(timbre.mfcc_onset),
+		},
+		"level": {
+			"peak": level.peak,
+			"rms":  level.rms,
+		},
+		"band_energy": {
+			"energy_fractions": list(band_energy.energy_fractions),
+			"decay_rates":      list(band_energy.decay_rates),
+		},
+	}
+
+	sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
+	return sidecar_path
+
+
+def _write_wav_and_sidecar (
+	directory: pathlib.Path,
+	audio_stem: str,
+	n_frames: int = 2048,
+) -> tuple[pathlib.Path, pathlib.Path]:
+
+	"""Write a WAV file and its sidecar.  Returns (wav_path, sidecar_path)."""
+
+	wav_path     = directory / (audio_stem + ".wav")
+	_make_wav(wav_path, n_frames=n_frames)
+	sidecar_path = _write_sidecar(directory, audio_stem)
+	return wav_path, sidecar_path

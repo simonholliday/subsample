@@ -196,10 +196,10 @@ detection:
 # ---------------------------------------------------------------------------
 
 output:
-  directory: "./samples"
+  directory: "./samples/captures"
   # Directory where WAV files are saved. May be absolute or relative to cwd.
-  # Example: "/tmp/recordings", "~/audio_capture", "./samples".
-  # Directory must exist or the program will fail on the first recording.
+  # Example: "/tmp/recordings", "~/audio_capture", "./samples/captures".
+  # Directory is created automatically if it does not exist.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values
 
   filename_format: "%Y-%m-%d_%H-%M-%S"
@@ -279,14 +279,14 @@ analysis:
 #   # Range: 0.0-2.0. Set to 0.0 to disable.
 
 # reference:
-#   directory: "./reference"
+#   directory: "./samples/reference"
 #   Path to a directory containing pre-analyzed reference sounds. Each
 #   .analysis.json sidecar file found at the top level defines one canonical
 #   sample used for similarity classification (e.g. "kick", "snare", "hat").
 #   The audio file does not need to be present — only the sidecar is required.
 #   The sample name is derived from the audio filename stem:
-#     BD0025.WAV.analysis.json  →  "BD0025"
-#     kick.wav.analysis.json    →  "kick"
+#     GM36_BassDrum1.wav.analysis.json  →  "GM36_BassDrum1"
+#     kick.wav.analysis.json            →  "kick"
 #   Lookup is case-insensitive. If this section is omitted, reference
 #   classification is disabled and no library is loaded at startup.
 
@@ -300,11 +300,12 @@ analysis:
 #   # only controls how much audio is held in memory at once.
 #   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_instrument_values
 #
-#   directory: "./samples"
+#   directory: "./samples/captures"
 #   # Optional: pre-load instrument samples from this directory at startup.
 #   # Each sample requires both a WAV file and an .analysis.json sidecar.
 #   # If omitted, the instrument library starts empty and is populated as
-#   # recordings are captured.
+#   # recordings are captured.  Set to output.directory to load previous
+#   # recordings on restart.
 #
 #   clean_orphaned_sidecars: false
 #   # When true, .analysis.json sidecar files whose corresponding audio file
@@ -324,12 +325,12 @@ analysis:
 #   # Persistent library pattern — set this to the same path as output.directory:
 #   #
 #   #   output:
-#   #     directory: "./samples"
+#   #     directory: "./samples/captures"
 #   #   instrument:
-#   #     directory: "./samples"
+#   #     directory: "./samples/captures"
 #   #
-#   # On startup, all existing WAV files in ./samples are loaded into memory.
-#   # As new recordings arrive they are written to ./samples (persisting to disk)
+#   # On startup, all existing WAV files are loaded into memory.
+#   # As new recordings arrive they are written to disk (persisting)
 #   # AND added to the in-memory library in one step. The memory limit keeps only
 #   # the most recent samples in RAM; the full archive on disk is never affected.
 #   # Across sessions the library grows on disk; in memory it always holds the

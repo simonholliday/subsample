@@ -1,0 +1,3 @@
+# Variant cache is local-only
+*
+!.gitignore
