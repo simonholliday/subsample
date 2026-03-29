@@ -816,6 +816,26 @@ Three MFCC timbre fingerprints are stored in the sidecar (used for similarity,
 not shown in script output): `mfcc` (mean, average timbre), `mfcc_delta`
 (first-order trajectory), and `mfcc_onset` (onset-weighted, attack emphasis).
 
+### Importing pre-trimmed samples
+
+Import audio files from any source (SDR captures, commercial sample packs, field
+recordings) directly into the capture library, bypassing the detection pipeline.
+Files are silence-trimmed, safety-faded, re-encoded as standard PCM WAV, fully
+analyzed, and saved with sidecar JSON.
+
+```bash
+python scripts/import_samples.py /path/to/samples/*.wav
+python scripts/import_samples.py --to samples/captures /path/to/sample-pack/*.wav
+python scripts/import_samples.py --force "/mnt/sdr/audio/2026-01-15/*.wav"
+```
+
+- `--to DIR` - target directory (default: `output.directory` from config.yaml)
+- `--force` - overwrite existing files in target directory
+
+Handles WAV, BWF (Broadcast Wave Format), FLAC, AIFF, OGG, and any other format
+supported by libsndfile. BWF and non-WAV sources are re-encoded as standard PCM WAV
+so the rest of the pipeline can load them reliably.
+
 ### Similarity report
 
 ```bash
@@ -830,6 +850,19 @@ Reference: GM36_BassDrum1
   2.  #7     0.8134  kick_hard       ./samples/kick_hard.wav
   3.  #8     0.7601  kick_soft       ./samples/kick_soft.wav
 ```
+
+### Extracting GM percussion references
+
+Render all 47 General MIDI percussion instruments from a SoundFont file into the
+reference sample directory. Requires `fluidsynth` CLI tool and a GM SoundFont.
+
+```bash
+python scripts/extract_gm_drums.py /path/to/FluidR3_GM.sf2
+python scripts/extract_gm_drums.py /path/to/FluidR3_GM.sf2 --output samples/reference/
+```
+
+Produces WAV files + analysis sidecars. Only the sidecars are committed to the
+repository; audio files are local-only and .gitignored.
 
 ## Roadmap
 
