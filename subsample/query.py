@@ -216,6 +216,10 @@ class ProcessSpec:
 		"""True if any step is a beat_quantize processor."""
 		return any(s.name == "beat_quantize" for s in self.steps)
 
+	def has_pad_quantize (self) -> bool:
+		"""True if any step is a pad_quantize processor."""
+		return any(s.name == "pad_quantize" for s in self.steps)
+
 
 # ---------------------------------------------------------------------------
 # Assignment

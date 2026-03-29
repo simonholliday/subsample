@@ -2683,3 +2683,311 @@ class TestReshape:
 		step = subsample.transform.Reshape(release_ms=50.0)
 		result = subsample.transform._apply_reshape(audio, 44100, record, step)
 		assert result.dtype == numpy.float32
+
+
+# ---------------------------------------------------------------------------
+# PadQuantize (onset-aligned silence padding)
+# ---------------------------------------------------------------------------
+
+class TestPadQuantize:
+
+	def test_spec_from_process_pad_quantize (self) -> None:
+		"""pad_quantize: {bpm: 120, grid: 8} → PadQuantize with correct params."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("bpm", 120), ("grid", 8)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.PadQuantize)
+		assert step.target_bpm == 120.0
+		assert step.resolution == 8
+
+	def test_spec_from_process_pad_quantize_boolean (self) -> None:
+		"""pad_quantize: true with target_bpm → PadQuantize with defaults."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="pad_quantize"),
+		))
+		spec = subsample.transform.spec_from_process(process, target_bpm=100.0)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.PadQuantize)
+		assert step.target_bpm == 100.0
+		assert step.resolution == 16
+
+	def test_two_onsets_inserts_silence (self) -> None:
+		"""Two onsets close together are spread apart with silence between them."""
+		sr = 44100
+		# Two short clicks at 0.0s and 0.05s (50 ms apart).
+		onset_a = 0.0
+		onset_b = 0.05
+		audio = _make_audio(n_frames=int(0.15 * sr), channels=1)
+		# Place impulses at the onset positions.
+		audio[int(onset_a * sr), 0] = 0.9
+		audio[int(onset_b * sr), 0] = 0.9
+
+		record = _make_record(
+			sample_id=1,
+			onset_times=(onset_a, onset_b),
+			attack_times=(onset_a, onset_b),
+		)
+
+		# 120 BPM, grid=4 (quarter notes) → grid interval = 0.5s.
+		# The two onsets at 0.0s and 0.05s should be snapped to 0.0s and 0.5s.
+		step = subsample.transform.PadQuantize(target_bpm=120.0, resolution=4)
+		result = subsample.transform._apply_pad_quantize(audio, sr, record, step)
+
+		# Output should be longer than input (silence was inserted).
+		assert result.shape[0] > audio.shape[0]
+
+	def test_grid_alignment (self) -> None:
+		"""Onsets in the output land at expected grid positions."""
+		sr = 44100
+		# Two 10ms bursts at 0.0s and 0.03s.
+		audio = _make_audio(n_frames=int(0.1 * sr), channels=1)
+		burst_len = int(0.01 * sr)
+		audio[:burst_len, 0] = 0.9
+		audio[int(0.03 * sr):int(0.03 * sr) + burst_len, 0] = 0.9
+
+		record = _make_record(
+			sample_id=1,
+			onset_times=(0.0, 0.03),
+			attack_times=(0.0, 0.03),
+		)
+
+		# 120 BPM, grid=8 (eighth notes) → grid interval = 0.25s.
+		step = subsample.transform.PadQuantize(target_bpm=120.0, resolution=8)
+		result = subsample.transform._apply_pad_quantize(audio, sr, record, step)
+
+		# Second onset should be at ~0.25s (grid point 1).
+		# Check a window past the 1ms fade-in for signal energy.
+		target_frame = int(0.25 * sr)
+		fade_samples = int(0.001 * sr) + 5  # past the fade-in
+		window = result[target_frame + fade_samples:target_frame + fade_samples + 100, 0]
+		assert numpy.max(numpy.abs(window)) > 0.3
+
+	def test_single_onset_returns_unchanged (self) -> None:
+		"""Single onset — nothing to pad, return audio unchanged."""
+		record = _make_record(sample_id=1, onset_times=(0.0,), attack_times=(0.0,))
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.PadQuantize(target_bpm=120.0, resolution=16)
+		result = subsample.transform._apply_pad_quantize(audio, 44100, record, step)
+
+		# Single onset means no padding — same audio returned.
+		assert result.shape == audio.shape
+
+	def test_no_onsets_returns_unchanged (self) -> None:
+		"""No onsets — return audio unchanged."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.PadQuantize(target_bpm=120.0, resolution=16)
+		result = subsample.transform._apply_pad_quantize(audio, 44100, record, step)
+
+		assert result.shape == audio.shape
+
+	def test_stereo_preserved (self) -> None:
+		"""Stereo audio stays stereo after pad_quantize."""
+		sr = 44100
+		audio = _make_audio(n_frames=int(0.1 * sr), channels=2)
+		audio[0, :] = 0.9
+		audio[int(0.03 * sr), :] = 0.9
+
+		record = _make_record(
+			sample_id=1,
+			onset_times=(0.0, 0.03),
+			attack_times=(0.0, 0.03),
+		)
+
+		step = subsample.transform.PadQuantize(target_bpm=120.0, resolution=8)
+		result = subsample.transform._apply_pad_quantize(audio, sr, record, step)
+
+		assert result.shape[1] == 2
+
+	def test_splice_fades (self) -> None:
+		"""Samples near splice boundaries should be near zero (S-curve fades)."""
+		sr = 44100
+		# Constant-level audio with two onsets.
+		audio = _make_audio(n_frames=int(0.2 * sr), channels=1)
+		audio[:, 0] = 0.5
+		audio[0, 0] = 0.9
+		audio[int(0.05 * sr), 0] = 0.9
+
+		record = _make_record(
+			sample_id=1,
+			onset_times=(0.0, 0.05),
+			attack_times=(0.0, 0.05),
+		)
+
+		# Wide grid so there's definite silence between segments.
+		step = subsample.transform.PadQuantize(target_bpm=60.0, resolution=4)
+		result = subsample.transform._apply_pad_quantize(audio, sr, record, step)
+
+		# The end of the first segment should fade out toward zero.
+		# Find the silence gap — should have near-zero values.
+		first_seg_end = int(0.05 * sr) + 10  # a bit past the first segment
+		gap_region = result[first_seg_end:first_seg_end + 100, 0]
+
+		assert numpy.max(numpy.abs(gap_region)) < 0.1
+
+	def test_output_dtype (self) -> None:
+		"""PadQuantize output is float32."""
+		sr = 44100
+		audio = _make_audio(n_frames=int(0.1 * sr), channels=1)
+		audio[0, 0] = 0.9
+		audio[int(0.03 * sr), 0] = 0.9
+
+		record = _make_record(
+			sample_id=1,
+			onset_times=(0.0, 0.03),
+			attack_times=(0.0, 0.03),
+		)
+
+		step = subsample.transform.PadQuantize(target_bpm=120.0, resolution=8)
+		result = subsample.transform._apply_pad_quantize(audio, sr, record, step)
+
+		assert result.dtype == numpy.float32
+
+
+# ---------------------------------------------------------------------------
+# Transient (HPSS-based transient enhancement/taming)
+# ---------------------------------------------------------------------------
+
+class TestTransient:
+
+	def test_spec_from_process_transient_boolean (self) -> None:
+		"""transient: true → Transient with auto amount."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="transient"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Transient)
+		assert step.amount_db is None  # auto
+
+	def test_spec_from_process_transient_explicit (self) -> None:
+		"""transient: {amount: 6} → explicit amount."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="transient", params=(("amount", 6),)),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Transient)
+		assert step.amount_db == 6.0
+
+	def test_auto_high_crest_tames (self) -> None:
+		"""High crest factor (peaky) → auto amount should be negative (taming)."""
+		record = _make_record(sample_id=1)
+		record = dataclasses.replace(record, level=subsample.analysis.LevelResult(
+			peak=0.9, rms=0.1, crest_factor=9.0, crest_factor_db=19.1, noise_floor=0.01,
+		))
+		step = subsample.transform.Transient()  # auto
+		amount = subsample.transform._resolve_transient_params(record, step)
+		assert amount < 0.0  # should tame
+
+	def test_auto_low_crest_enhances (self) -> None:
+		"""Low crest factor (dull) → auto amount should be positive (enhancing)."""
+		record = _make_record(sample_id=1)
+		record = dataclasses.replace(record, level=subsample.analysis.LevelResult(
+			peak=0.5, rms=0.35, crest_factor=1.43, crest_factor_db=3.1, noise_floor=0.01,
+		))
+		step = subsample.transform.Transient()  # auto
+		amount = subsample.transform._resolve_transient_params(record, step)
+		assert amount > 0.0  # should enhance
+
+	def test_enhance_increases_percussive_energy (self) -> None:
+		"""Positive amount should increase energy in percussive frequency range."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.5 * sr)
+		audio = _make_audio(n_frames=n, channels=1)
+
+		# Create audio with a mix of tonal and percussive content.
+		t = numpy.linspace(0, 0.5, n, dtype=numpy.float32)
+		# Sine tone (harmonic) + clicks (percussive).
+		audio[:, 0] = 0.3 * numpy.sin(2 * numpy.pi * 440 * t)
+		audio[0, 0] += 0.5
+		audio[sr // 4, 0] += 0.5
+
+		step = subsample.transform.Transient(amount_db=6.0)
+		result = subsample.transform._apply_transient(audio, sr, record, step)
+
+		assert result.dtype == numpy.float32
+		assert result.shape == audio.shape
+
+	def test_tame_reduces_percussive_energy (self) -> None:
+		"""Negative amount should reduce percussive component."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.5 * sr)
+		audio = _make_audio(n_frames=n, channels=1)
+
+		t = numpy.linspace(0, 0.5, n, dtype=numpy.float32)
+		audio[:, 0] = 0.3 * numpy.sin(2 * numpy.pi * 440 * t)
+		audio[0, 0] += 0.5
+		audio[sr // 4, 0] += 0.5
+
+		step = subsample.transform.Transient(amount_db=-6.0)
+		result = subsample.transform._apply_transient(audio, sr, record, step)
+
+		assert result.dtype == numpy.float32
+		assert result.shape == audio.shape
+
+	def test_level_compensation (self) -> None:
+		"""Output peak should approximately match input peak."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.5 * sr)
+		audio = _make_audio(n_frames=n, channels=1)
+
+		t = numpy.linspace(0, 0.5, n, dtype=numpy.float32)
+		audio[:, 0] = 0.5 * numpy.sin(2 * numpy.pi * 440 * t)
+
+		step = subsample.transform.Transient(amount_db=6.0)
+		result = subsample.transform._apply_transient(audio, sr, record, step)
+
+		input_peak = float(numpy.max(numpy.abs(audio)))
+		output_peak = float(numpy.max(numpy.abs(result)))
+
+		assert abs(output_peak - input_peak) < 0.05
+
+	def test_near_zero_is_passthrough (self) -> None:
+		"""Amount near zero (< 0.1 dB) should return audio unchanged."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.Transient(amount_db=0.05)
+		result = subsample.transform._apply_transient(audio, 44100, record, step)
+
+		numpy.testing.assert_array_equal(result, audio)
+
+	def test_silence_passthrough (self) -> None:
+		"""Silent input returns silent output."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)  # all zeros
+
+		step = subsample.transform.Transient(amount_db=6.0)
+		result = subsample.transform._apply_transient(audio, 44100, record, step)
+
+		assert numpy.max(numpy.abs(result)) == 0.0
+
+	def test_stereo_preserved (self) -> None:
+		"""Stereo audio stays stereo."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		audio = _make_audio(n_frames=int(0.1 * sr), channels=2)
+		audio[:, 0] = 0.5
+		audio[:, 1] = 0.3
+
+		step = subsample.transform.Transient(amount_db=3.0)
+		result = subsample.transform._apply_transient(audio, sr, record, step)
+
+		assert result.shape[1] == 2

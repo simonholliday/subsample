@@ -170,10 +170,11 @@ class ReferenceConfig:
 class SimilarityConfig:
 
 	weight_spectral: float = 1.0
-	"""Weight applied to the spectral feature group (11 normalised [0, 1] values:
+	"""Weight applied to the spectral feature group (14 normalised [0, 1] values:
 	flatness, attack, release, centroid, bandwidth, ZCR, harmonic ratio, contrast,
-	voiced fraction, log-attack time, spectral flux). Higher weight = spectral shape
-	dominates the comparison. Range: 0.0–2.0. Set to 0.0 to disable entirely."""
+	voiced fraction, log-attack time, spectral flux, spectral rolloff, spectral slope,
+	and crest factor). Higher weight = spectral shape dominates the comparison.
+	Range: 0.0–2.0. Set to 0.0 to disable entirely."""
 
 	weight_timbre: float = 1.0
 	"""Weight applied to the sustained-timbre MFCC group (12 mel-frequency cepstral

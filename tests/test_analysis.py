@@ -1270,12 +1270,13 @@ class TestFormatLevelResult:
 	"""Tests for format_level_result()."""
 
 	def test_contains_peak_and_rms_labels (self) -> None:
-		"""Output should contain 'peak=' and 'rms=' labels."""
+		"""Output should contain 'peak' and 'rms' labels with dBFS values."""
 		result = subsample.analysis.LevelResult(peak=0.5, rms=0.25)
 		s = subsample.analysis.format_level_result(result)
 
-		assert "peak=" in s
-		assert "rms=" in s
+		assert "peak " in s
+		assert "rms " in s
+		assert "dBFS" in s
 
 	def test_contains_dbfs (self) -> None:
 		"""Output should contain dBFS values in parentheses."""

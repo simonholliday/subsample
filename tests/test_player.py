@@ -927,17 +927,16 @@ assignments:
 	def test_default_map_parses (self) -> None:
 		"""The shipped midi-map.yaml.default parses without error."""
 		default_path = pathlib.Path(__file__).parent.parent / "midi-map.yaml.default"
-		refs = [
-			"GM36_BassDrum1", "GM38_AcousticSnare", "GM37_SideStick",
-			"GM39_HandClap", "GM48_HiMidTom", "GM42_ClosedHiHat",
-			"GM46_OpenHiHat", "GM49_CrashCymbal1", "GM51_RideCymbal1",
-			"GM56_Cowbell", "GM54_Tambourine", "GM75_Claves",
-		]
-		note_map = subsample.player.load_midi_map(default_path, refs).note_map
+		note_map = subsample.player.load_midi_map(default_path, []).note_map
 
 		assert len(note_map) > 0
 		assert (9, 36) in note_map
-		assert note_map[(9, 36)][0].select[0].where.reference == "GM36_BassDrum1"
+
+		# Path-based reference: resolved to absolute path at parse time.
+		ref = note_map[(9, 36)][0].select[0].where.reference
+		assert ref is not None
+		assert "GM36_BassDrum1" in ref
+		assert "/" in ref  # path-based, not bare name
 
 	def test_default_pan_is_centre (self, tmp_path: pathlib.Path) -> None:
 		"""Omitted pan defaults to equal power across all output channels."""

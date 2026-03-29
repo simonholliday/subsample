@@ -111,7 +111,7 @@
 #
 #   select:
 #     - where: { name: my-favourite-kick }
-#     - where: { reference: GM36_BassDrum1 }
+#     - where: { reference: samples/reference/GM36_BassDrum1.wav }
 #
 # ===================================================================
 # PROCESS — how to present the sample
@@ -124,6 +124,8 @@
 #   repitch: { note: C4 }                Pitch-shift to a fixed note
 #   beat_quantize: { grid: 16 }          Time-stretch to session target_bpm
 #   beat_quantize: { bpm: 120, grid: 8 } Time-stretch to specific BPM
+#   - pad_quantize: { grid: 16 }              # Silence-pad onsets to session target_bpm
+#   - pad_quantize: { bpm: 120, grid: 8 }     # Silence-pad to specific BPM and grid
 #   filter_low: { freq: 500 }            Low-pass filter (default 16 kHz)
 #   filter_high: { freq: 200 }           High-pass filter (default 80 Hz)
 #   filter_band: { freq: 800, q: 1.4 }  Band-pass filter (default 1 kHz, Q 0.7)
@@ -155,6 +157,10 @@
 #   - reshape: { release: 50 }              # Explicit 50 ms release fade
 #   - reshape: { attack: 5, sustain: 0.5, release: 100 }  # Fast attack, half sustain
 #
+#   - transient: true                        # Auto transient shaping (adapts to crest factor)
+#   - transient: { amount: 6 }              # Enhance transients by 6 dB
+#   - transient: { amount: -3 }             # Tame transients by 3 dB
+#
 # Omit process entirely for unprocessed playback (base variant).
 #
 # ===================================================================
@@ -182,7 +188,7 @@ assignments:
     notes: [36, 35]
     select:
       where:
-        reference: GM36_BassDrum1
+        reference: samples/reference/GM36_BassDrum1.wav
       order_by: similarity
 
 
@@ -194,7 +200,7 @@ assignments:
     notes: [38, 40]
     select:
       where:
-        reference: GM38_AcousticSnare
+        reference: samples/reference/GM38_AcousticSnare.wav
       order_by: similarity
     pan: [50, 87]
 
@@ -207,7 +213,7 @@ assignments:
     notes: 37
     select:
       where:
-        reference: GM37_SideStick
+        reference: samples/reference/GM37_SideStick.wav
       order_by: similarity
 
 
@@ -219,7 +225,7 @@ assignments:
     notes: 39
     select:
       where:
-        reference: GM39_HandClap
+        reference: samples/reference/GM39_HandClap.wav
       order_by: similarity
 
 
@@ -232,7 +238,7 @@ assignments:
     notes: [50, 48, 47, 45, 43, 41]
     select:
       where:
-        reference: GM48_HiMidTom
+        reference: samples/reference/GM48_HiMidTom.wav
       order_by: similarity
 
 
@@ -244,7 +250,7 @@ assignments:
     notes: [42, 44]
     select:
       where:
-        reference: GM42_ClosedHiHat
+        reference: samples/reference/GM42_ClosedHiHat.wav
       order_by: similarity
     pan: [87, 50]
 
@@ -257,7 +263,7 @@ assignments:
     notes: 46
     select:
       where:
-        reference: GM46_OpenHiHat
+        reference: samples/reference/GM46_OpenHiHat.wav
       order_by: similarity
     pan: [87, 50]
 
@@ -270,7 +276,7 @@ assignments:
     notes: [49, 57, 55, 52]
     select:
       where:
-        reference: GM49_CrashCymbal1
+        reference: samples/reference/GM49_CrashCymbal1.wav
       order_by: similarity
 
 
@@ -282,7 +288,7 @@ assignments:
     notes: [51, 59, 53]
     select:
       where:
-        reference: GM51_RideCymbal1
+        reference: samples/reference/GM51_RideCymbal1.wav
       order_by: similarity
     pan: [25, 75]
 
@@ -295,7 +301,7 @@ assignments:
     notes: 56
     select:
       where:
-        reference: GM56_Cowbell
+        reference: samples/reference/GM56_Cowbell.wav
       order_by: similarity
     gain: -3.0
 
@@ -308,7 +314,7 @@ assignments:
     notes: 54
     select:
       where:
-        reference: GM54_Tambourine
+        reference: samples/reference/GM54_Tambourine.wav
       order_by: similarity
 
 
@@ -320,7 +326,7 @@ assignments:
     notes: 75
     select:
       where:
-        reference: GM75_Claves
+        reference: samples/reference/GM75_Claves.wav
       order_by: similarity
 
 
@@ -433,4 +439,4 @@ assignments:
   #   notes: 36
   #   select:
   #     - where: { name: my-favourite-kick }
-  #     - where: { reference: GM36_BassDrum1, order_by: similarity }
+  #     - where: { reference: samples/reference/GM36_BassDrum1.wav, order_by: similarity }

@@ -3,7 +3,7 @@
 Compares recordings against reference samples using cosine similarity on a
 composite feature vector built from five independently-weighted groups:
 
-  Spectral (11)           — all AnalysisResult fields, already normalised [0, 1]
+  Spectral (14)           — 13 AnalysisResult fields + crest factor from LevelResult
   Timbre / sustained (12) — MFCC coefficients 1–12 (mean across duration)
   Timbre / delta (12)     — delta-MFCC coefficients 1–12 (timbre trajectory)
   Timbre / onset (12)     — onset-weighted MFCC coefficients 1–12 (attack)

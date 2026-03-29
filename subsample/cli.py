@@ -1049,7 +1049,7 @@ def _make_on_complete (
 	) -> None:
 
 		_log.info(
-			"Recorded %s  (%.2fs)  %s",
+			"Recorded %s: duration %.2fs, %s",
 			filepath.name, duration,
 			subsample.analysis.format_level_result(level),
 		)

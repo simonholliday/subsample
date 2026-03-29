@@ -45,6 +45,8 @@ def _make_record (
 		voiced_fraction    = voiced_fraction,
 		log_attack_time    = 0.5,
 		spectral_flux      = 0.5,
+		spectral_rolloff   = 0.5,
+		spectral_slope     = 0.5,
 	)
 
 	rhythm = subsample.analysis.RhythmResult(

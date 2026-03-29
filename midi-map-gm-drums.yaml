@@ -40,7 +40,7 @@ assignments:
     notes: 35
     select:
       where:
-        reference: GM35_AcousticBassDrum
+        reference: samples/reference/GM35_AcousticBassDrum.wav
       order_by: similarity
     process:
       - filter_high: { freq: 30 }
@@ -52,7 +52,7 @@ assignments:
     notes: 36
     select:
       where:
-        reference: GM36_BassDrum1
+        reference: samples/reference/GM36_BassDrum1.wav
       order_by: similarity
     process:
       - filter_high: { freq: 30 }
@@ -69,7 +69,7 @@ assignments:
     notes: 37
     select:
       where:
-        reference: GM37_SideStick
+        reference: samples/reference/GM37_SideStick.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -82,7 +82,7 @@ assignments:
     notes: 38
     select:
       where:
-        reference: GM38_AcousticSnare
+        reference: samples/reference/GM38_AcousticSnare.wav
       order_by: similarity
     process:
       - filter_high: { freq: 80 }
@@ -94,7 +94,7 @@ assignments:
     notes: 39
     select:
       where:
-        reference: GM39_HandClap
+        reference: samples/reference/GM39_HandClap.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -105,7 +105,7 @@ assignments:
     notes: 40
     select:
       where:
-        reference: GM40_ElectricSnare
+        reference: samples/reference/GM40_ElectricSnare.wav
       order_by: similarity
     process:
       - filter_high: { freq: 100 }
@@ -122,7 +122,7 @@ assignments:
     notes: 41
     select:
       where:
-        reference: GM41_LowFloorTom
+        reference: samples/reference/GM41_LowFloorTom.wav
       order_by: similarity
     process:
       - filter_high: { freq: 50 }
@@ -135,7 +135,7 @@ assignments:
     notes: 43
     select:
       where:
-        reference: GM43_HighFloorTom
+        reference: samples/reference/GM43_HighFloorTom.wav
       order_by: similarity
     process:
       - filter_high: { freq: 60 }
@@ -148,7 +148,7 @@ assignments:
     notes: 45
     select:
       where:
-        reference: GM45_LowTom
+        reference: samples/reference/GM45_LowTom.wav
       order_by: similarity
     process:
       - filter_high: { freq: 70 }
@@ -161,7 +161,7 @@ assignments:
     notes: 47
     select:
       where:
-        reference: GM47_LowMidTom
+        reference: samples/reference/GM47_LowMidTom.wav
       order_by: similarity
     process:
       - filter_high: { freq: 80 }
@@ -174,7 +174,7 @@ assignments:
     notes: 48
     select:
       where:
-        reference: GM48_HiMidTom
+        reference: samples/reference/GM48_HiMidTom.wav
       order_by: similarity
     process:
       - filter_high: { freq: 90 }
@@ -187,7 +187,7 @@ assignments:
     notes: 50
     select:
       where:
-        reference: GM50_HighTom
+        reference: samples/reference/GM50_HighTom.wav
       order_by: similarity
     process:
       - filter_high: { freq: 100 }
@@ -205,7 +205,7 @@ assignments:
     notes: 42
     select:
       where:
-        reference: GM42_ClosedHiHat
+        reference: samples/reference/GM42_ClosedHiHat.wav
       order_by: similarity
     process:
       - filter_high: { freq: 300 }
@@ -218,7 +218,7 @@ assignments:
     notes: 44
     select:
       where:
-        reference: GM44_PedalHiHat
+        reference: samples/reference/GM44_PedalHiHat.wav
       order_by: similarity
     process:
       - filter_high: { freq: 300 }
@@ -231,7 +231,7 @@ assignments:
     notes: 46
     select:
       where:
-        reference: GM46_OpenHiHat
+        reference: samples/reference/GM46_OpenHiHat.wav
       order_by: similarity
     process:
       - filter_high: { freq: 300 }
@@ -249,7 +249,7 @@ assignments:
     notes: 49
     select:
       where:
-        reference: GM49_CrashCymbal1
+        reference: samples/reference/GM49_CrashCymbal1.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -261,7 +261,7 @@ assignments:
     notes: 55
     select:
       where:
-        reference: GM55_SplashCymbal
+        reference: samples/reference/GM55_SplashCymbal.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -273,7 +273,7 @@ assignments:
     notes: 57
     select:
       where:
-        reference: GM57_CrashCymbal2
+        reference: samples/reference/GM57_CrashCymbal2.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -285,7 +285,7 @@ assignments:
     notes: 52
     select:
       where:
-        reference: GM52_ChineseCymbal
+        reference: samples/reference/GM52_ChineseCymbal.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -302,7 +302,7 @@ assignments:
     notes: 51
     select:
       where:
-        reference: GM51_RideCymbal1
+        reference: samples/reference/GM51_RideCymbal1.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -314,7 +314,7 @@ assignments:
     notes: 53
     select:
       where:
-        reference: GM53_RideBell
+        reference: samples/reference/GM53_RideBell.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -326,7 +326,7 @@ assignments:
     notes: 59
     select:
       where:
-        reference: GM59_RideCymbal2
+        reference: samples/reference/GM59_RideCymbal2.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -343,7 +343,7 @@ assignments:
     notes: 54
     select:
       where:
-        reference: GM54_Tambourine
+        reference: samples/reference/GM54_Tambourine.wav
       order_by: similarity
     process:
       - filter_high: { freq: 400 }
@@ -355,7 +355,7 @@ assignments:
     notes: 56
     select:
       where:
-        reference: GM56_Cowbell
+        reference: samples/reference/GM56_Cowbell.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -369,7 +369,7 @@ assignments:
     notes: 58
     select:
       where:
-        reference: GM58_Vibraslap
+        reference: samples/reference/GM58_Vibraslap.wav
       order_by: similarity
     process:
       - filter_high: { freq: 150 }
@@ -386,7 +386,7 @@ assignments:
     notes: 60
     select:
       where:
-        reference: GM60_HiBongo
+        reference: samples/reference/GM60_HiBongo.wav
       order_by: similarity
     process:
       - filter_high: { freq: 150 }
@@ -400,7 +400,7 @@ assignments:
     notes: 61
     select:
       where:
-        reference: GM61_LowBongo
+        reference: samples/reference/GM61_LowBongo.wav
       order_by: similarity
     process:
       - filter_high: { freq: 100 }
@@ -419,7 +419,7 @@ assignments:
     notes: 62
     select:
       where:
-        reference: GM62_MuteHiConga
+        reference: samples/reference/GM62_MuteHiConga.wav
       order_by: similarity
     process:
       - filter_high: { freq: 150 }
@@ -433,7 +433,7 @@ assignments:
     notes: 63
     select:
       where:
-        reference: GM63_OpenHiConga
+        reference: samples/reference/GM63_OpenHiConga.wav
       order_by: similarity
     process:
       - filter_high: { freq: 100 }
@@ -447,7 +447,7 @@ assignments:
     notes: 64
     select:
       where:
-        reference: GM64_LowConga
+        reference: samples/reference/GM64_LowConga.wav
       order_by: similarity
     process:
       - filter_high: { freq: 80 }
@@ -466,7 +466,7 @@ assignments:
     notes: 65
     select:
       where:
-        reference: GM65_HighTimbale
+        reference: samples/reference/GM65_HighTimbale.wav
       order_by: similarity
     process:
       - filter_high: { freq: 150 }
@@ -480,7 +480,7 @@ assignments:
     notes: 66
     select:
       where:
-        reference: GM66_LowTimbale
+        reference: samples/reference/GM66_LowTimbale.wav
       order_by: similarity
     process:
       - filter_high: { freq: 100 }
@@ -499,7 +499,7 @@ assignments:
     notes: 67
     select:
       where:
-        reference: GM67_HighAgogo
+        reference: samples/reference/GM67_HighAgogo.wav
       order_by: similarity
     process:
       - filter_high: { freq: 300 }
@@ -513,7 +513,7 @@ assignments:
     notes: 68
     select:
       where:
-        reference: GM68_LowAgogo
+        reference: samples/reference/GM68_LowAgogo.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -532,7 +532,7 @@ assignments:
     notes: 69
     select:
       where:
-        reference: GM69_Cabasa
+        reference: samples/reference/GM69_Cabasa.wav
       order_by: similarity
     process:
       - filter_high: { freq: 500 }
@@ -544,7 +544,7 @@ assignments:
     notes: 70
     select:
       where:
-        reference: GM70_Maracas
+        reference: samples/reference/GM70_Maracas.wav
       order_by: similarity
     process:
       - filter_high: { freq: 500 }
@@ -561,7 +561,7 @@ assignments:
     notes: 71
     select:
       where:
-        reference: GM71_ShortWhistle
+        reference: samples/reference/GM71_ShortWhistle.wav
       order_by: similarity
     process:
       - filter_high: { freq: 500 }
@@ -573,7 +573,7 @@ assignments:
     notes: 72
     select:
       where:
-        reference: GM72_LongWhistle
+        reference: samples/reference/GM72_LongWhistle.wav
       order_by: similarity
     process:
       - filter_high: { freq: 500 }
@@ -590,7 +590,7 @@ assignments:
     notes: 73
     select:
       where:
-        reference: GM73_ShortGuiro
+        reference: samples/reference/GM73_ShortGuiro.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -603,7 +603,7 @@ assignments:
     notes: 74
     select:
       where:
-        reference: GM74_LongGuiro
+        reference: samples/reference/GM74_LongGuiro.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -621,7 +621,7 @@ assignments:
     notes: 75
     select:
       where:
-        reference: GM75_Claves
+        reference: samples/reference/GM75_Claves.wav
       order_by: similarity
     process:
       - filter_high: { freq: 500 }
@@ -639,7 +639,7 @@ assignments:
     notes: 76
     select:
       where:
-        reference: GM76_HiWoodBlock
+        reference: samples/reference/GM76_HiWoodBlock.wav
       order_by: similarity
     process:
       - filter_high: { freq: 300 }
@@ -653,7 +653,7 @@ assignments:
     notes: 77
     select:
       where:
-        reference: GM77_LowWoodBlock
+        reference: samples/reference/GM77_LowWoodBlock.wav
       order_by: similarity
     process:
       - filter_high: { freq: 200 }
@@ -672,7 +672,7 @@ assignments:
     notes: 78
     select:
       where:
-        reference: GM78_MuteCuica
+        reference: samples/reference/GM78_MuteCuica.wav
       order_by: similarity
     process:
       - filter_high: { freq: 150 }
@@ -685,7 +685,7 @@ assignments:
     notes: 79
     select:
       where:
-        reference: GM79_OpenCuica
+        reference: samples/reference/GM79_OpenCuica.wav
       order_by: similarity
     process:
       - filter_high: { freq: 150 }
@@ -703,7 +703,7 @@ assignments:
     notes: 80
     select:
       where:
-        reference: GM80_MuteTriangle
+        reference: samples/reference/GM80_MuteTriangle.wav
       order_by: similarity
     process:
       - filter_high: { freq: 1000 }
@@ -715,7 +715,7 @@ assignments:
     notes: 81
     select:
       where:
-        reference: GM81_OpenTriangle
+        reference: samples/reference/GM81_OpenTriangle.wav
       order_by: similarity
     process:
       - filter_high: { freq: 1000 }

@@ -425,6 +425,58 @@ class Reshape:
 	release_ms:  typing.Optional[float] = None
 
 
+@dataclasses.dataclass(frozen=True)
+class Transient:
+
+	"""Transient enhancement/taming via HPSS rebalancing.
+
+	Splits the signal into harmonic (sustained) and percussive (transient)
+	components using HPSS, then recombines with an adjustable gain on the
+	percussive component.  Positive values enhance transients (more punch),
+	negative values tame them (smoother attack).  Level compensation
+	preserves the original peak.
+
+	When used without parameters (``transient: true``), the amount auto-adapts
+	from the sample's crest factor to produce normalised punch — peaky samples
+	are tamed, dull samples are enhanced, converging toward a consistent
+	transient character.
+
+	amount_db:  Percussive component gain in dB.
+	            Positive = enhance transients, negative = tame.
+	            None = auto (adapts to crest factor).
+	"""
+
+	amount_db: typing.Optional[float] = None
+
+
+@dataclasses.dataclass(frozen=True)
+class PadQuantize:
+
+	"""Quantize onsets to a beat grid by inserting silence between segments.
+
+	Unlike beat_quantize (TimeStretch), which time-stretches audio to align
+	onsets to the grid, pad_quantize inserts silence so each segment plays
+	at its original speed — no pitch or tempo artefacts.  Ideal for speech
+	samples where natural timbre must be preserved.
+
+	Each detected onset is snapped to the nearest grid point.  The audio
+	between consecutive onsets forms a segment that is placed at the snapped
+	position, with any gap filled by silence.  S-curve fades at every splice
+	point prevent clicks.
+
+	If a segment is longer than the grid interval (onset overlap), the next
+	segment is pushed to the first grid point after the previous segment ends.
+	No audio is ever truncated.
+
+	target_bpm: The desired playback tempo in BPM.
+	resolution: Grid subdivision (1=whole, 2=half, 4=quarter, 8=eighth,
+	            16=sixteenth).  Higher values give finer onset alignment.
+	"""
+
+	target_bpm:  float
+	resolution:  int = 16
+
+
 # Union of all known transform step types.
 # Extend this when adding new transforms (see "How to add a new transform type"
 # in the module docstring).
@@ -443,6 +495,8 @@ TransformStep = typing.Union[
 	Gate,
 	Distort,
 	Reshape,
+	Transient,
+	PadQuantize,
 ]
 
 # ---------------------------------------------------------------------------
@@ -1562,9 +1616,10 @@ class TransformManager:
 		"""
 
 		invalidated = self._cache.remove_by_step_type(TimeStretch)
+		invalidated += self._cache.remove_by_step_type(PadQuantize)
 
 		_log.info(
-			"Target BPM changed to %.1f — invalidated %d time-stretch variant(s)",
+			"Target BPM changed to %.1f — invalidated %d time-aligned variant(s)",
 			new_bpm, len(invalidated),
 		)
 
@@ -2746,6 +2801,242 @@ def _apply_reshape (
 
 
 # ---------------------------------------------------------------------------
+# Transient enhancement/taming
+# ---------------------------------------------------------------------------
+
+def _resolve_transient_params (
+	record: "subsample.library.SampleRecord",
+	step:   Transient,
+) -> float:
+
+	"""Resolve adaptive transient amount from sample analysis data.
+
+	Auto-adaptive: maps crest_factor_db [3, 20] → amount_db [+4, -4].
+	High crest (already peaky) → mild taming.  Low crest (dull) → enhancement.
+	Mid crest (~10 dB) → near zero (no change).
+
+	Returns:
+		Resolved amount_db as a float.
+	"""
+
+	if step.amount_db is not None:
+		return step.amount_db
+
+	# Inverse linear map: peaky sounds get tamed, dull sounds get enhanced.
+	cf_db = record.level.crest_factor_db
+	t = max(0.0, min(1.0, (cf_db - 3.0) / 17.0))   # 0 = low crest, 1 = high crest
+	return 4.0 - 8.0 * t                              # +4 dB at low crest, -4 dB at high
+
+
+def _apply_transient (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Transient,
+) -> numpy.ndarray:
+
+	"""Transient enhancement/taming via HPSS rebalancing.
+
+	Splits into harmonic + percussive via HPSS, scales the percussive
+	component by the gain, recombines, and level-compensates.
+	"""
+
+	amount_db = _resolve_transient_params(record, step)
+
+	# Near-zero = no change.
+	if abs(amount_db) < 0.1:
+		return audio
+
+	gain = 10.0 ** (amount_db / 20.0)
+
+	n_frames, n_channels = audio.shape
+	pre_peak = float(numpy.max(numpy.abs(audio)))
+
+	if pre_peak < 1e-10:
+		return audio   # silence → silence
+
+	result = numpy.empty_like(audio)
+
+	for ch in range(n_channels):
+		D = librosa.stft(audio[:, ch])
+		harmonic_D, percussive_D = librosa.decompose.hpss(D)
+
+		harmonic   = librosa.istft(harmonic_D,   length=n_frames)
+		percussive = librosa.istft(percussive_D, length=n_frames)
+
+		# Guard against NaN from istft on very short signals.
+		if not numpy.all(numpy.isfinite(harmonic)) or not numpy.all(numpy.isfinite(percussive)):
+			result[:, ch] = audio[:, ch]
+			continue
+
+		result[:, ch] = harmonic + percussive * gain
+
+	# Level compensation: restore original peak.
+	post_peak = float(numpy.max(numpy.abs(result)))
+
+	if post_peak > 1e-10:
+		result = result * numpy.float32(pre_peak / post_peak)
+
+	return result.astype(numpy.float32)
+
+
+# ---------------------------------------------------------------------------
+# Pad-quantize (onset-aligned silence padding)
+# ---------------------------------------------------------------------------
+
+def _apply_pad_quantize (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        PadQuantize,
+) -> numpy.ndarray:
+
+	"""Quantize onsets to a beat grid by inserting silence between segments.
+
+	Each detected onset is snapped to the nearest grid point.  The audio
+	between consecutive onsets forms a segment that is placed at the snapped
+	position in a zero-filled output buffer (zeros = silence in the gaps).
+	S-curve fades at every splice point prevent clicks.
+
+	If a segment is longer than the grid interval, the next segment is pushed
+	to the first grid point after the previous segment ends — no audio is
+	ever truncated.
+
+	Args:
+		audio:       float32, shape (n_frames, channels).
+		sample_rate: Hz (e.g. 44100).
+		record:      Parent SampleRecord — provides rhythm analysis.
+		step:        PadQuantize with target_bpm and resolution.
+
+	Returns:
+		float32, shape (n_frames_out, channels) — pad-quantized audio.
+	"""
+
+	# Prefer sample-accurate attack times, same as beat_quantize.
+	attack_times = record.rhythm.attack_times
+
+	if not attack_times:
+		attack_times = record.rhythm.onset_times
+
+	# Fewer than 2 attacks: nothing to quantize.
+	if len(attack_times) < 2:
+		return audio
+
+	n_channels = audio.shape[1]
+	fade_len   = int(_CROP_FADE_IN_SECONDS * sample_rate)
+
+	# ── Crop to first attack ─────────────────────────────────────────────
+
+	first_attack_sec = attack_times[0]
+	crop_start_sec   = max(0.0, first_attack_sec - _PRE_ONSET_SECONDS)
+	crop_start_frame = int(crop_start_sec * sample_rate)
+
+	audio = audio[crop_start_frame:]
+
+	# S-curve fade-in over the crop boundary.
+	if fade_len > 1 and audio.shape[0] > fade_len:
+		ramp = (1.0 - numpy.cos(numpy.linspace(0, numpy.pi, fade_len))) / 2.0
+		audio = audio.copy()
+		audio[:fade_len] *= ramp[:, numpy.newaxis].astype(numpy.float32)
+
+	# Rebase attack times relative to the crop point.
+	rebased = [t - crop_start_sec for t in attack_times]
+
+	# ── Build target grid and snap onsets ─────────────────────────────────
+
+	audio_duration_sec = audio.shape[0] / sample_rate
+	max_grid_sec = max(rebased[-1], audio_duration_sec) * 3.0
+
+	grid    = _build_quantize_grid(
+		step.target_bpm, step.resolution, max_grid_sec,
+		min_points=len(rebased) + 4,
+	)
+	snapped = _snap_onsets_to_grid(tuple(rebased), grid)
+
+	# ── Segment extraction and placement ──────────────────────────────────
+
+	# Build segment boundaries: each segment runs from one attack to the next.
+	# The final segment runs from the last attack to the end of the audio.
+	seg_starts = [int(t * sample_rate) for t in rebased]
+	seg_ends   = seg_starts[1:] + [audio.shape[0]]
+	target_starts = [int(t * sample_rate) for t in snapped]
+
+	# Compute output length: the last segment placed at its target position.
+	last_seg_idx    = len(seg_starts) - 1
+	last_seg_len    = seg_ends[last_seg_idx] - seg_starts[last_seg_idx]
+	output_length   = target_starts[last_seg_idx] + last_seg_len
+
+	# Handle overlap: push segments forward if they collide with the
+	# previous segment's audio.  Walk forward, adjusting target positions.
+	grid_interval = 60.0 / step.target_bpm / (step.resolution / 4.0)
+	grid_interval_frames = int(grid_interval * sample_rate)
+
+	adjusted_targets = list(target_starts)
+
+	for i in range(1, len(seg_starts)):
+		prev_end = adjusted_targets[i - 1] + (seg_ends[i - 1] - seg_starts[i - 1])
+
+		if adjusted_targets[i] < prev_end:
+			# Push to the next grid point after prev_end.
+			grid_point = prev_end
+
+			if grid_interval_frames > 0:
+				grid_point = (
+					((prev_end + grid_interval_frames - 1) // grid_interval_frames)
+					* grid_interval_frames
+				)
+
+			adjusted_targets[i] = grid_point
+
+	# Recompute output length after adjustments.
+	last_seg_len  = seg_ends[last_seg_idx] - seg_starts[last_seg_idx]
+	output_length = adjusted_targets[last_seg_idx] + last_seg_len
+
+	# Pre-allocate zero-filled output (zeros = silence in the gaps).
+	output = numpy.zeros((output_length, n_channels), dtype=numpy.float32)
+
+	for i in range(len(seg_starts)):
+		src_start = seg_starts[i]
+		src_end   = seg_ends[i]
+		segment   = audio[src_start:src_end].copy()
+		seg_len   = segment.shape[0]
+
+		if seg_len == 0:
+			continue
+
+		# S-curve fade-in at the start of each segment (except the first,
+		# which already has the crop fade-in).
+		if i > 0:
+			f = min(fade_len, seg_len // 2) if seg_len > 1 else 0
+
+			if f > 1:
+				ramp_in = (1.0 - numpy.cos(numpy.linspace(0, numpy.pi, f))) / 2.0
+				segment[:f] *= ramp_in[:, numpy.newaxis].astype(numpy.float32)
+
+		# S-curve fade-out at the end of each segment (except the last,
+		# which should decay naturally).
+		if i < len(seg_starts) - 1:
+			f = min(fade_len, seg_len // 2) if seg_len > 1 else 0
+
+			if f > 1:
+				ramp_out = (1.0 + numpy.cos(numpy.linspace(0, numpy.pi, f))) / 2.0
+				segment[-f:] *= ramp_out[:, numpy.newaxis].astype(numpy.float32)
+
+		# Place segment in the output buffer.
+		tgt = adjusted_targets[i]
+		end = tgt + seg_len
+
+		if end > output_length:
+			# Safety: clip to output bounds.
+			segment = segment[:output_length - tgt]
+			end = output_length
+
+		output[tgt:end] = segment
+
+	return output
+
+
+# ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------
 
@@ -2763,6 +3054,8 @@ TransformProcessor._HANDLERS[HpssPercussive]  = _apply_hpss_percussive
 TransformProcessor._HANDLERS[Gate]            = _apply_gate
 TransformProcessor._HANDLERS[Distort]         = _apply_distort
 TransformProcessor._HANDLERS[Reshape]         = _apply_reshape
+TransformProcessor._HANDLERS[Transient]       = _apply_transient
+TransformProcessor._HANDLERS[PadQuantize]     = _apply_pad_quantize
 
 
 # ---------------------------------------------------------------------------
@@ -2906,6 +3199,19 @@ def spec_from_process (
 				sustain=float(proc.get("sustain", 1.0)),
 				release_ms=float(_release_raw) if _release_raw is not None else None,
 			))
+
+		elif proc.name == "transient":
+			_amount_raw = proc.get("amount")
+			steps.append(Transient(
+				amount_db=float(_amount_raw) if _amount_raw is not None else None,
+			))
+
+		elif proc.name == "pad_quantize":
+			bpm = float(proc.get("bpm", target_bpm or 0.0))
+			grid = int(proc.get("grid", resolution))
+
+			if bpm > 0.0:
+				steps.append(PadQuantize(target_bpm=bpm, resolution=grid))
 
 		else:
 			_log.warning("Unknown processor %r — skipped", proc.name)

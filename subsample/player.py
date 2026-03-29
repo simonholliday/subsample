@@ -92,6 +92,21 @@ def _beat_quantize_params (process: subsample.query.ProcessSpec) -> tuple[typing
 	return (bpm if bpm > 0 else None, grid)
 
 
+def _pad_quantize_params (process: subsample.query.ProcessSpec) -> tuple[typing.Optional[float], int]:
+
+	"""Extract BPM and grid from a pad_quantize processor step.
+
+	Returns (target_bpm, grid) where target_bpm is None when no explicit
+	BPM is declared (falling back to the global transform.target_bpm).
+	"""
+
+	pad_step = next(s for s in process.steps if s.name == "pad_quantize")
+	bpm  = float(pad_step.get("bpm", 0))
+	grid = int(pad_step.get("grid", 16))
+
+	return (bpm if bpm > 0 else None, grid)
+
+
 def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_name: str) -> numpy.ndarray:
 
 	"""Parse pan weights from config and normalise to constant-power channel gains.
@@ -845,6 +860,9 @@ class MidiPlayer:
 			if asgn.process.has_beat_quantize():
 				line += " beat-quantized"
 
+			if asgn.process.has_pad_quantize():
+				line += " pad-quantized"
+
 			if asgn.one_shot:
 				line += "  one-shot"
 
@@ -1130,6 +1148,7 @@ class MidiPlayer:
 						midi_note_for_spec = msg.note
 
 				# Validation: skip beat_quantize for samples with no tempo.
+				# pad_quantize does NOT need source tempo — only target BPM.
 				bpm_for_spec: typing.Optional[float] = None
 				grid_for_spec = 16
 
@@ -1142,6 +1161,9 @@ class MidiPlayer:
 							"playing without beat-quantizing",
 							assignment.name, record.name,
 						)
+
+				if assignment.process.has_pad_quantize():
+					bpm_for_spec, grid_for_spec = _pad_quantize_params(assignment.process)
 
 				spec = subsample.transform.spec_from_process(
 					assignment.process,
@@ -1359,7 +1381,44 @@ class MidiPlayer:
 						asgn.name, enqueued,
 					)
 
-			# Process-only (no repitch, no beat_quantize): pre-compute the
+			# Pad-quantize: same dedup pattern as beat_quantize but no
+			# tempo check — pad_quantize only needs onsets, not source tempo.
+			elif asgn.process.has_pad_quantize():
+				bpm, grid = _pad_quantize_params(asgn.process)
+				enqueued = 0
+				seen_ids_pad: set[int] = set()
+
+				for _note, pick in note_picks:
+					idx = min(pick - 1, len(ranked) - 1)
+					sid = ranked[idx].sample_id
+
+					if sid in seen_ids_pad:
+						continue
+
+					seen_ids_pad.add(sid)
+					record = eff_library.get(sid)
+
+					if record is None:
+						continue
+
+					spec = subsample.transform.spec_from_process(
+						asgn.process,
+						target_bpm=bpm,
+						resolution=grid,
+					)
+					eff_transform.get_variant(sid, spec)
+					enqueued += 1
+
+				if enqueued > 0:
+					_total_assignments += 1
+					_total_variants += enqueued
+
+					_log.debug(
+						"pad_quantize %s: queued %d variant(s)",
+						asgn.name, enqueued,
+					)
+
+			# Process-only (no repitch, no beat/pad_quantize): pre-compute the
 			# static chain (filters, saturate, reverse, etc.) once per sample.
 			else:
 				spec = subsample.transform.spec_from_process(asgn.process)

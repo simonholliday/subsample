@@ -20,6 +20,8 @@ Spectral metrics (AnalysisResult) — normalised to [0.0, 1.0]:
   voiced_fraction    — 0 = unpitched/noise, 1 = clearly pitched throughout (pyin)
   log_attack_time    — 0 = instant spectral onset, 1 = very slow onset (flux-based)
   spectral_flux      — 0 = static spectrum (tone/drone), 1 = rapidly changing spectrum
+  spectral_rolloff   — 0 = all energy at lowest frequencies, 1 = energy extends to Nyquist
+  spectral_slope     — 0 = bass-dominated tilt, 0.5 = flat, 1 = bright/treble-dominated
 
 Rhythm metrics (RhythmResult) — raw values, NOT normalised:
 
@@ -1203,32 +1205,30 @@ def format_level_result (result: LevelResult) -> str:
 
 	"""Return a single-line human-readable summary of the level analysis.
 
-	Shows peak and RMS both as linear [0, 1] values and as dBFS equivalents,
-	so the log output is useful to both engineers (dBFS) and code (linear).
+	All values in dB — the format a producer reads.  Linear values are
+	available in the LevelResult fields for code that needs them.
 
 	Args:
 		result: Computed level metrics.
 
 	Returns:
 		String of the form:
-		"peak=0.9512 (-0.4dBFS)  rms=0.2345 (-12.6dBFS)"
-		or "peak=0.0000 (-infdBFS)  rms=0.0000 (-infdBFS)" for silence.
+		"peak -13.5dBFS, rms -16.8dBFS, crest 3.3dB, floor -23.2dBFS"
 	"""
 
 	def _dbfs (v: float) -> str:
 		if v <= 0.0:
-			return "-inf"
-		db = 20.0 * math.log10(v)
-		return f"{db:.1f}"
+			return "-infdBFS"
+		return f"{20.0 * math.log10(v):.1f}dBFS"
 
 	parts = [
-		f"peak={result.peak:.4f} ({_dbfs(result.peak)}dBFS)",
-		f"rms={result.rms:.4f} ({_dbfs(result.rms)}dBFS)",
-		f"crest={result.crest_factor:.2f} ({result.crest_factor_db:.1f}dB)",
+		f"peak {_dbfs(result.peak)}",
+		f"rms {_dbfs(result.rms)}",
+		f"crest {result.crest_factor_db:.1f}dB",
 	]
 
 	if result.noise_floor > 0.0:
-		parts.append(f"floor={result.noise_floor:.4f} ({_dbfs(result.noise_floor)}dBFS)")
+		parts.append(f"floor {_dbfs(result.noise_floor)}")
 
 	return "  ".join(parts)
 

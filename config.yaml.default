@@ -246,11 +246,12 @@ analysis:
 # similarity:
 #   weight_spectral: 1.0
 #   # Influence of the spectral feature group on similarity scoring.
-#   # This group covers 11 normalised [0, 1] values: spectral flatness, attack time,
+#   # This group covers 14 normalised [0, 1] values: spectral flatness, attack time,
 #   # release time, spectral centroid, spectral bandwidth, zero-crossing rate,
-#   # harmonic ratio, spectral contrast, voiced fraction, log-attack time, and
-#   # spectral flux. It captures the overall character of the sound (bright/dark,
-#   # sharp/soft, tonal/noisy). This is the proven baseline fingerprint.
+#   # harmonic ratio, spectral contrast, voiced fraction, log-attack time, spectral
+#   # flux, spectral rolloff, spectral slope, and crest factor. It captures the
+#   # overall character of the sound (bright/dark, sharp/soft, tonal/noisy, peaky/
+#   # sustained). This is the proven baseline fingerprint.
 #   # Range: 0.0–2.0. Set to 0.0 to disable spectral features entirely.
 #
 #   weight_timbre: 1.0

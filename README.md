@@ -279,6 +279,7 @@ Available processors:
 | `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
 | `beat_quantize: { grid: 16 }` | grid subdivision | Time-stretch to session `target_bpm` |
 | `beat_quantize: { bpm: 120, grid: 8 }` | explicit BPM + grid | Time-stretch to a specific BPM |
+| `pad_quantize: { grid: 16 }` | bpm (config), grid (16) | Onset-aligned silence padding - snaps onsets to the beat grid by inserting silence between segments rather than time-stretching. No pitch/speed change. Ideal for speech. |
 | `filter_low: true` | freq (Hz, default 16000), resonance (dB, default 0) | Low-pass filter (console-style default) |
 | `filter_high: true` | freq (Hz, default 80), resonance (dB, default 0) | High-pass filter (console-style default) |
 | `filter_band: true` | freq (Hz, default 1000), q (default 0.7), resonance (dB, default 0) | Band-pass filter (Q sets width) |
@@ -291,6 +292,7 @@ Available processors:
 | `gate: true` | threshold (auto), attack (auto), release (auto), hold (auto), lookahead (auto) | Noise gate - silences audio below the noise floor. All parameters auto-adapt: threshold from noise floor, attack/release/hold from onset and decay character. |
 | `distort: true` | mode (hard_clip), drive (auto), mix (1.0), tone (auto), bit_depth (8), downsample_factor (4) | Waveshaping distortion with four modes: hard_clip, fold, bit_crush, downsample. Drive adapts to crest factor; tone adapts to spectral rolloff. |
 | `reshape: true` | attack (preserve), hold (0), decay (preserve), sustain (1.0), release (auto) | ADSR envelope reshaping. Default auto-tightens the tail. Set attack, decay, sustain, release to reshape specific phases. |
+| `transient: true` | amount (auto) | Transient enhancement/taming via HPSS rebalancing. Auto-adapts from crest factor: peaky samples are tamed, dull samples enhanced. |
 
 All three filters can be used without parameters — they default to classic
 console channel-strip values:
@@ -341,6 +343,10 @@ process:
   - reshape: true                            # auto tail-tightening
   - reshape: { attack: 5, release: 100 }     # fast attack, controlled release
   - reshape: { sustain: 0.5, release: 50 }   # half sustain, tight tail
+  - transient: true                          # auto: normalises punch from crest factor
+  - transient: { amount: 6 }                # enhance transients by 6 dB
+  - transient: { amount: -3 }               # tame transients by 3 dB
+  - pad_quantize: { bpm: 120, grid: 8 }     # silence-pad onsets to eighth-note grid
 ```
 
 For the opposite of snappy drums (bring up room ambience and reverb tails), use
@@ -583,7 +589,7 @@ weights - is optional and rarely needs changing.
 | `instrument.clean_orphaned_sidecars` | `false` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
 | `instrument.watch` | `false` | Monitor `instrument.directory` at runtime for new samples arriving from a remote recorder instance (see Multi-machine setup) |
 | `reference.directory` | `none` | Optional directory of reference sounds for similarity classification |
-| `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (11 metrics) |
+| `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
 | `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack character |
