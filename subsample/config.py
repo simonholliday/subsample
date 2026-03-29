@@ -270,7 +270,7 @@ class TransformConfig:
 	1 = whole notes, 2 = half, 4 = quarter, 8 = eighth, 16 = sixteenth.
 	Higher values give finer onset alignment but stretch more segments."""
 
-	variant_cache_dir: str = "samples/variants"
+	variant_cache_dir: str = "samples/variant-cache"
 	"""Directory for persistent disk cache of transform variants.
 	Variants are stored as binary files keyed by a SHA-256 hash of the
 	parent audio, transform spec, output sample rate, and analysis version.
@@ -650,7 +650,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		auto_pitch          = bool(transform_raw.get("auto_pitch",     True)),
 		target_bpm          = float(transform_raw.get("target_bpm",    0.0)),
 		quantize_resolution = quantize_resolution,
-		variant_cache_dir   = str(transform_raw.get("variant_cache_dir", "samples/variants") or ""),
+		variant_cache_dir   = str(transform_raw.get("variant_cache_dir", "samples/variant-cache") or ""),
 		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),
 	)
 

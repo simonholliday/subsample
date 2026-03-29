@@ -473,7 +473,7 @@ in a memory-bounded store with parent-priority FIFO eviction - when a variant
 family would exceed the memory budget, the entire oldest family is evicted
 together, keeping remaining families intact and playable.
 
-Variants are also persisted to a disk cache (`samples/variants/` by default) so
+Variants are also persisted to a disk cache (`samples/variant-cache/` by default) so
 they survive restarts. Each variant is stored as a single binary file named by a
 SHA-256 hash of the source audio, transform chain, output sample rate, and
 analysis version - any change to any of these produces a different key, so stale
@@ -598,7 +598,7 @@ weights - is optional and rarely needs changing.
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
 | `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantized to the target tempo |
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
-| `transform.variant_cache_dir` | `samples/variants` | Directory for persistent disk cache of transform variants. Empty string or null disables |
+| `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |
 | `transform.max_disk_mb` | `500.0` | Max disk space (MB) for cached variant files; 0 disables. Oldest by mtime evicted when exceeded |
 
 ## Output

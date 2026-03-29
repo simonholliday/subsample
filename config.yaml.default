@@ -384,7 +384,7 @@ analysis:
 #   # Higher values give finer onset alignment.
 #   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
 #
-#   variant_cache_dir: samples/variants
+#   variant_cache_dir: samples/variant-cache
 #   # Directory for persistent disk cache of transform variants.
 #   # Variants are stored as binary files keyed by SHA-256 hash of the parent
 #   # audio, transform spec, output sample rate, and analysis version.
