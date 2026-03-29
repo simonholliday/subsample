@@ -50,7 +50,7 @@ you lifting a finger.
 - **Import from any source** - pre-trimmed samples from commercial packs, field
   recordings, SDR radio captures, or any other source can be imported directly
   with automatic silence trimming, safety fades, and full analysis. Supports WAV,
-  BWF, FLAC, AIFF, and OGG.
+  BWF, FLAC, AIFF, OGG, and most other common audio formats.
 - **Ready-to-play GM drums map** - 47 reference instruments define what each
   MIDI note should sound like. Your captured samples are automatically matched to
   the closest reference and routed to the corresponding note, with per-instrument
