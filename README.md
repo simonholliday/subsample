@@ -2,16 +2,20 @@
 
 *A combine harvester for sound.*
 
-Subsample is an automatic sample harvester and MIDI instrument. Point a
-microphone at the world and it captures, analyses, and organises every usable
-sound into a playable MIDI instrument - automatically, in real time.
+Subsample is an automatic sample harvester, analyser, and MIDI instrument. Point
+a microphone at the world and it captures, analyses, processes, and organises
+every usable sound into a playable, mix-ready MIDI instrument - automatically, in
+real time. Import existing sample packs or field recordings and they receive the
+same treatment.
 
-Most samplers require you to manually record, chop, name, categorise, and map
-every sample by hand. Subsample automates the entire pipeline: it detects
-individual sounds from a live audio stream or pre-recorded files, builds a
-58-element acoustic fingerprint for each one, and assigns them to MIDI notes
-based on how they sound. The chaotic environment becomes an organised, playable
-sample pack - without you lifting a finger.
+Traditional samplers - hardware or software - require you to manually record,
+chop, name, categorise, and map every sample by hand. Subsample automates the
+entire pipeline: it detects individual sounds from a live audio stream or
+pre-recorded files, builds a 58-element acoustic fingerprint for each one,
+assigns them to MIDI notes based on how they sound, and runs a per-sample DSP
+processing chain that adapts its parameters from the audio content itself. A
+chaotic environment becomes an organised, mix-ready sample instrument - without
+you lifting a finger.
 
 ## What sets Subsample apart
 
@@ -20,24 +24,39 @@ sample pack - without you lifting a finger.
   drag-and-drop, no folder browsing, no per-pad assignment.
 - **Classification-free matching** - the same engine works for kicks and violins
   without training data, labels, or pre-defined categories. It is pure geometry:
-  similar sounds cluster together naturally in feature space.
+  similar sounds cluster together naturally in a 58-dimensional feature space.
+- **16-processor DSP transform pipeline** - pitch-shift, time-stretch, reverse,
+  high/low/band-pass filter, saturate, compress, limit, gate, distort, reshape,
+  transient shaping, pad-quantize, and HPSS harmonic/percussive separation. Each
+  processor runs per-sample in a background worker pool - processed variants are
+  ready before you press a key.
+- **Auto-adaptive processing** - processors derive their parameters from each
+  sample's own analysis data. The compressor reads peak level, onset speed, and
+  decay to set threshold, attack, and release. The gate sets its threshold from
+  the noise floor. Transient shaping adapts from the crest factor. Envelope
+  reshape tightens the tail based on decay character. Write `compress: true` or
+  `gate: true` and the right settings are chosen for each sample automatically.
+- **Beat-aware processing** - beat-quantized time-stretching uses onset-aligned
+  timemaps to lock samples to a target BPM with musical precision. Pad-quantize
+  offers an alternative for speech: it snaps onsets to a beat grid by inserting
+  silence rather than time-stretching, preserving natural timbre with no
+  artifacts.
 - **Real-time capture with zero-gap detection** - the input thread is never
   blocked waiting for analysis. Back-to-back sounds are captured reliably, even
   on USB audio.
 - **Pitch-aware** - tonal samples are automatically detected and mapped
   chromatically across a keyboard range, with background pitch-shifting at the
-  highest available quality.
-- **Intelligent per-sample defaults** - processors adapt to each sample
-  automatically. `compress: true` analyses peak level, onset speed, and decay
-  to choose threshold, attack, and release. Filters default to console
-  channel-strip values. New users get great results with zero configuration;
-  experienced users override any parameter explicitly.
+  highest available quality (Rubber Band offline finer mode).
+- **Import from any source** - pre-trimmed samples from commercial packs, field
+  recordings, SDR radio captures, or any other source can be imported directly
+  with automatic silence trimming, safety fades, and full analysis. Supports WAV,
+  BWF, FLAC, AIFF, and OGG.
 - **Ready-to-play GM drums map** - 47 instruments, pre-mixed with per-instrument
   filtering, adaptive compression on transient sounds, audience-perspective
   panning, and gain balancing. Point it at your samples and play.
 - **Config-driven** - everything is YAML. MIDI routing, similarity weights,
-  detection tuning, output format. Version-controllable, reproducible, no GUI
-  required.
+  detection tuning, processing chains, output format. Version-controllable,
+  reproducible, no GUI required.
 - **Headless** - runs on anything from a Raspberry Pi to a studio rack server.
   Drive it from a DAW, hardware controller, or Python sequencer over MIDI.
 
@@ -54,7 +73,10 @@ microphone records and plays back in stereo without any manual setting.
 
 You can also feed it pre-recorded WAV files - they pass through the same
 detection pipeline, making it easy to build sample libraries from existing
-recordings.
+recordings. For pre-trimmed sources (commercial sample packs, field recordings,
+SDR radio captures), `import_samples.py` bypasses detection entirely and imports
+files directly with silence trimming, safety fades, re-encoding, and full
+analysis.
 
 ### 2. Analyse
 
@@ -92,18 +114,30 @@ any manual intervention.
 
 ### 4. Process and mix
 
-Each assigned sample passes through a per-instrument processing chain before
-playback: filters carve frequency space, compression shapes dynamics, and pan
-and gain place it in the stereo mix. The chain is declared in the MIDI map and
-executed offline in the background - by the time you press a key, the processed
-variant is already waiting in memory.
+Each assigned sample passes through a per-instrument DSP processing chain before
+playback. The chain is declared in the MIDI map - a sequence of processors that
+can include filtering, compression, limiting, gating, distortion, saturation,
+envelope reshaping, transient shaping, time-stretching, pitch-shifting, reversal,
+harmonic/percussive separation, and beat quantization. Variants are computed
+offline in a background worker pool and cached to disk, so by the time you press
+a key the processed audio is already waiting in memory.
 
 Every processor is designed with **intelligent defaults that adapt per sample**.
 Filters default to classic console channel-strip values (80 Hz HPF, 16 kHz LPF).
 The compressor analyses each sample's peak level, onset speed, and decay
 character to set threshold, attack, and release automatically - a percussive kick
 gets a slow attack that preserves the beater transient, while a sustained pad
-gets a faster attack with longer release to avoid pumping.
+gets a faster attack with longer release to avoid pumping. The gate reads the
+noise floor to set its threshold. Transient shaping reads the crest factor to
+decide how much punch to add or remove. Envelope reshape reads the decay
+character to tighten the tail. Write `compress: true` or `transient: true` and
+the right parameters are derived from the audio itself.
+
+Beat-quantized time-stretching locks samples to a target BPM using onset-aligned
+timemaps - each onset is individually placed on the beat grid with minimal
+stretching between them. For speech and other material where time-stretch
+artifacts are unacceptable, pad-quantize snaps onsets to the grid by inserting
+silence instead, preserving natural timbre completely.
 
 The included `midi-map-gm-drums.yaml` applies all of this across the full GM
 percussion set: 47 instruments, each with researched filtering, compression
