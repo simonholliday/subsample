@@ -113,8 +113,9 @@ class PlayerConfig:
 
 	midi_map: typing.Optional[str] = None
 	"""Path to a MIDI routing map file (YAML). Defines which MIDI notes
-	trigger which samples. If omitted, the built-in GM drum mapping is
-	used. See midi-map.yaml.default for the format specification."""
+	trigger which samples. Required when the player is enabled — without
+	it the player will not start. See midi-map.yaml.default for the format
+	specification. midi-map-gm-drums.yaml is a complete GM percussion kit."""
 
 	watch_midi_map: bool = False
 	"""When True, monitor the midi_map file at runtime for changes and
@@ -123,7 +124,7 @@ class PlayerConfig:
 	on the next trigger.  Debounced to handle editors that write multiple
 	intermediate saves.
 
-	Requires midi_map to be set (the built-in default is not watched)."""
+	Requires midi_map to be set."""
 
 
 @dataclasses.dataclass(frozen=True)

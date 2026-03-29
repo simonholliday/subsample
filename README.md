@@ -27,6 +27,14 @@ sample pack - without you lifting a finger.
 - **Pitch-aware** - tonal samples are automatically detected and mapped
   chromatically across a keyboard range, with background pitch-shifting at the
   highest available quality.
+- **Intelligent per-sample defaults** - processors adapt to each sample
+  automatically. `compress: true` analyses peak level, onset speed, and decay
+  to choose threshold, attack, and release. Filters default to console
+  channel-strip values. New users get great results with zero configuration;
+  experienced users override any parameter explicitly.
+- **Ready-to-play GM drums map** - 47 instruments, pre-mixed with per-instrument
+  filtering, adaptive compression on transient sounds, audience-perspective
+  panning, and gain balancing. Point it at your samples and play.
 - **Config-driven** - everything is YAML. MIDI routing, similarity weights,
   detection tuning, output format. Version-controllable, reproducible, no GUI
   required.
@@ -82,6 +90,27 @@ As new sounds arrive, assignments update dynamically. Evicted samples are
 replaced by the next-best match. The instrument stays playable and fresh without
 any manual intervention.
 
+### 4. Process and mix
+
+Each assigned sample passes through a per-instrument processing chain before
+playback: filters carve frequency space, compression shapes dynamics, and pan
+and gain place it in the stereo mix. The chain is declared in the MIDI map and
+executed offline in the background - by the time you press a key, the processed
+variant is already waiting in memory.
+
+Every processor is designed with **intelligent defaults that adapt per sample**.
+Filters default to classic console channel-strip values (80 Hz HPF, 16 kHz LPF).
+The compressor analyses each sample's peak level, onset speed, and decay
+character to set threshold, attack, and release automatically - a percussive kick
+gets a slow attack that preserves the beater transient, while a sustained pad
+gets a faster attack with longer release to avoid pumping.
+
+The included `midi-map-gm-drums.yaml` applies all of this across the full GM
+percussion set: 47 instruments, each with researched filtering, compression
+(where appropriate), panning, and gain. The result is a coherent, pre-mixed drum
+kit from whatever samples you have - no manual tweaking required. Every setting
+can be overridden by an experienced user who wants precise control.
+
 ## MIDI map
 
 MIDI routing is defined in a YAML file - by default `midi-map.yaml` in the
@@ -89,12 +118,40 @@ project directory, referenced from `config.yaml`:
 
 ```yaml
 player:
-  midi_map: "./midi-map.yaml"
+  midi_map: midi-map.yaml
 ```
 
-Copy `midi-map.yaml.default` as your starting point. The file lists
-**assignments** - each mapping one or more MIDI notes on a given channel to
-sample targets.
+Two maps are included:
+
+- **`midi-map.yaml.default`** - template with common assignments and full format documentation
+- **`midi-map-gm-drums.yaml`** - complete GM percussion kit, ready to play (see below)
+
+Copy either file as your starting point. Each map lists **assignments** -
+mapping one or more MIDI notes on a given channel to sample targets.
+
+### The GM drums map — instant professional drum kit
+
+`midi-map-gm-drums.yaml` covers all 47 standard GM percussion notes (35-81).
+Point it at your instrument directory and every MIDI drum note automatically
+finds the closest matching sample and plays it through a professional mix chain:
+
+- **Similarity matching** - each note finds the best sample via spectral
+  fingerprint comparison against GM reference sounds
+- **Console-style filtering** - per-instrument HPF/LPF to carve frequency space
+  (30 Hz HPF on kicks, 300 Hz on hi-hats, 1 kHz on triangles, etc.)
+- **Adaptive compression** on 28 transient instruments - threshold, attack, and
+  release auto-adapt to each sample's analysis data.  Foundation sounds get
+  tailored settings: kicks at 6:1 with 15 ms attack (beater punch + thick body),
+  snares at 5:1 with 8 ms attack (stick crack + ring), hi-hats at gentle 2:1
+  (consistency without flattening dynamics).  Cymbals, shakers, and expressive
+  instruments are left uncompressed.
+- **Audience-perspective panning** - hi-hats left, ride right, toms spread
+  across the stereo field, kick and snare near centre
+- **Gain balancing** - cymbals and small percussion pulled back so the kit sits
+  together without any one instrument dominating
+
+The result: a new user with a collection of recorded samples hears a coherent,
+pre-mixed drum kit on first play — no manual configuration needed.
 
 ### Assignment fields
 
@@ -222,16 +279,55 @@ Available processors:
 | `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
 | `beat_quantize: { grid: 16 }` | grid subdivision | Time-stretch to session `target_bpm` |
 | `beat_quantize: { bpm: 120, grid: 8 }` | explicit BPM + grid | Time-stretch to a specific BPM |
-| `filter_low: { freq: 500 }` | freq (Hz), resonance (dB, default 0) | Low-pass filter |
-| `filter_high: { freq: 2000 }` | freq (Hz), resonance (dB, default 0) | High-pass filter |
-| `filter_band: { freq: 1000, resonance: 6 }` | freq (Hz), resonance (dB, default 0) | Band-pass (1-octave width) |
+| `filter_low: true` | freq (Hz, default 16000), resonance (dB, default 0) | Low-pass filter (console-style default) |
+| `filter_high: true` | freq (Hz, default 80), resonance (dB, default 0) | High-pass filter (console-style default) |
+| `filter_band: true` | freq (Hz, default 1000), q (default 0.7), resonance (dB, default 0) | Band-pass filter (Q sets width) |
 | `reverse: true` | none | Reverse the audio |
 | `saturate: { amount: 6 }` | amount (dB of drive) | Soft-clip saturation with level compensation |
+| `compress: true` | threshold (auto), ratio (4:1), attack (auto), release (auto), knee (6 dB), makeup (0 dB), lookahead (0 ms) | Dynamic range compressor (adapts to each sample) |
+| `limit: true` | threshold (-1 dB), release (50 ms), lookahead (5 ms) | Brickwall limiter (ratio 100:1, instant attack) |
 | `hpss_harmonic: true` | none | Keep only harmonic/tonal content (remove percussion) |
 | `hpss_percussive: true` | none | Keep only percussive/transient content (remove harmonics) |
 
-Filter resonance: 0 dB = flat Butterworth, higher values create a resonant
-peak at the cutoff (Chebyshev Type I, max 24 dB).
+All three filters can be used without parameters — they default to classic
+console channel-strip values:
+
+```yaml
+process:
+  - filter_high: true    # 80 Hz high-pass  (rumble filter)
+  - filter_low: true     # 16 kHz low-pass  (analog warmth roll-off)
+  - filter_band: true    # 1 kHz band-pass, Q 0.7 (wide mid sweep)
+```
+
+Override any parameter to taste. All filters are 2nd-order (12 dB/octave),
+flat Butterworth by default. Add resonance for a peak at the cutoff
+(Chebyshev Type I, max 24 dB). Band-pass Q controls width: lower = wider
+(0.7 = gentle sweep), higher = narrower (4.0 = surgical).
+
+The compressor and limiter share the same DSP back-end (Giannoulis et al.
+feed-forward design with soft knee and look-ahead). `compress: true` adapts to
+each sample automatically using the analysis data:
+
+- **threshold** — set 6 dB below the sample's peak level (always engages)
+- **attack** — slow for percussive samples (lets the transient punch through),
+  fast for gradual onsets (no transient to protect)
+- **release** — short for quick-decay samples (recovers before the next hit),
+  long for sustained sounds (avoids pumping)
+
+```yaml
+process:
+  - compress: true                                        # adapts to each sample
+  - compress: { threshold: -30, ratio: 10, attack: 0.5 } # explicit — squash + raise tail
+  - compress: { attack: 5 }                               # explicit attack, rest auto
+  - limit: true                                           # brickwall at -1 dBFS
+```
+
+Set any parameter explicitly to override its auto value. Fixed parameters
+(ratio, knee, makeup, lookahead) always use their defaults unless set.
+
+For the opposite of snappy drums (bring up room ambience and reverb tails), use
+a fast attack (< 1 ms), high ratio (10:1+), and low threshold (-30 dB) to
+squash transients and raise the relative level of the sustain/decay.
 
 HPSS (Harmonic/Percussive Source Separation) decomposes audio into sustained
 tonal content and transient clicks/hits. Useful as a pre-filter before repitch
@@ -254,6 +350,33 @@ pan: [75, 25]    # left of centre
 
 Channel order follows SMPTE: `[L, R]` for stereo; `[L, R, C, LFE, Ls, Rs]` for
 5.1. Multichannel output is planned - stereo is the current output format.
+
+### Banks - switching instrument sets via MIDI
+
+The MIDI map can optionally declare multiple instrument directories ("banks")
+that are all loaded at startup. Switch between them at runtime using MIDI
+Program Change messages - no restart, no disk I/O, instant switching:
+
+```yaml
+banks:
+  - name: "Acoustic Kit"
+    directory: samples/acoustic
+    program: 0
+  - name: "Electronic Kit"
+    directory: samples/electronic
+    program: 1
+
+bank_channel: 10    # MIDI channel for PC messages (1-16, or 0 = any)
+```
+
+When `banks:` is absent, the single `instrument.directory` from config.yaml is
+used as before. When present, it overrides `instrument.directory`. Each bank
+gets its own sample library, similarity index, and transform cache.
+
+Assignments are bank-agnostic - they query whichever bank is active. Named
+samples (`where: { name: X }`) that only exist in one bank silently produce no
+match in other banks; rule-based selects (`reference:`, `pitched:`, etc.) work
+naturally against whatever samples are present.
 
 ## Performance
 
@@ -416,7 +539,7 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
-| `player.midi_map` | `none` | Path to MIDI routing map YAML; if unset, uses built-in GM drum defaults |
+| `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit |
 | `player.max_polyphony` | `8` | Max simultaneous voices; per-voice gain = 1/max\_polyphony. Raise if clipping; lower for louder individual voices |
 | `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched |
 | `player.limiter_ceiling_db` | `-0.1` | Maximum output level (dBFS) the limiter allows; must exceed threshold |
@@ -490,10 +613,10 @@ exceed the limit. WAV files on disk are never deleted.
 
 ```yaml
 output:
-  directory: "./samples/captures"
+  directory: samples/captures
 
 instrument:
-  directory: "./samples/captures"
+  directory: samples/captures
 ```
 
 On startup, Subsample pre-loads all existing WAV files from `./samples/captures`.
@@ -561,7 +684,7 @@ and point `player.midi_map` at your working copy:
 ```yaml
 player:
   enabled: true
-  midi_map: "./midi-map.yaml"
+  midi_map: midi-map.yaml
   watch_midi_map: true
 ```
 
@@ -578,7 +701,7 @@ kick drum, snare, hi-hat, etc. Each reference is represented by its
 
 ```yaml
 reference:
-  directory: "./samples/reference"
+  directory: samples/reference
 ```
 
 Place one sidecar per sound class in the reference directory. The name is taken
@@ -855,6 +978,12 @@ Subsample makes use of these excellent open-source libraries:
 | [pyrubberband ↗](https://github.com/bmcfee/pyrubberband) | Pitch shifting and time-stretching (Rubber Band wrapper) | ISC |
 | [watchdog ↗](https://github.com/gorakhargosh/watchdog) | Filesystem monitoring for multi-machine sample hot-loading | Apache-2.0 |
 | [PyMidiDefs ↗](https://github.com/simonholliday/PyMidiDefs) | MIDI constant definitions (notes, CC, drums, GM) | MIT |
+
+### Academic references
+
+The compressor/limiter DSP is based on the feed-forward design described in:
+
+> D. Giannoulis, M. Massberg, and J. D. Reiss, "Digital Dynamic Range Compressor Design - A Tutorial and Analysis," *Journal of the Audio Engineering Society*, vol. 60, no. 6, pp. 399-408, 2012.
 
 ## About the Author
 

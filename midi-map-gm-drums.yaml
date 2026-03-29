@@ -1,0 +1,723 @@
+# ===================================================================
+# midi-map-gm-drums.yaml — Complete General MIDI drum kit
+# ===================================================================
+#
+# A ready-to-use MIDI map that assigns every standard GM percussion
+# note (35-81) to its closest matching sample from your instrument
+# library, using the reference samples in samples/reference/ for
+# similarity scoring.
+#
+# Each instrument gets console-style channel-strip processing:
+#   - High-pass and/or low-pass filters to carve frequency space
+#   - Adaptive compression on transient instruments (kicks, snares,
+#     toms, hand drums, etc.) — adapts threshold, attack, and release
+#     to each sample automatically.  Not applied to cymbals, hi-hats,
+#     shakers, or sustained/expressive instruments where it would
+#     pump, flatten dynamics, or sound unnatural.
+#   - Pan position following standard audience-perspective drum layout
+#   - Gain offset to balance the kit
+#
+# All filters are flat Butterworth (no resonance) for a natural,
+# transparent sound.  The similarity engine does the tonal matching;
+# filters just keep instruments out of each other's way.
+#
+# To use: copy this file to midi-map.yaml (or set player.midi_map
+# in config.yaml to point here).
+#
+# GM notes 27-34 (GS/XG electronic percussion) and 82-87 (extended
+# percussion) are not covered — no reference samples exist for these.
+#
+# ===================================================================
+
+assignments:
+
+  # =================================================================
+  # KICKS
+  # =================================================================
+
+  - name: Kick 2 (Acoustic Bass Drum)
+    channel: 10
+    notes: 35
+    select:
+      where:
+        reference: GM35_AcousticBassDrum
+      order_by: similarity
+    process:
+      - filter_high: { freq: 30 }
+      - filter_low: { freq: 8000 }
+      - compress: { ratio: 6, attack: 15 }
+
+  - name: Kick 1 (Bass Drum 1)
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: GM36_BassDrum1
+      order_by: similarity
+    process:
+      - filter_high: { freq: 30 }
+      - filter_low: { freq: 8000 }
+      - compress: { ratio: 6, attack: 15 }
+
+
+  # =================================================================
+  # SNARES, SIDE STICK, CLAP
+  # =================================================================
+
+  - name: Side Stick
+    channel: 10
+    notes: 37
+    select:
+      where:
+        reference: GM37_SideStick
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+      - filter_low: { freq: 10000 }
+      - compress: { ratio: 4, attack: 5 }
+    pan: [55, 45]
+
+  - name: Snare 1 (Acoustic Snare)
+    channel: 10
+    notes: 38
+    select:
+      where:
+        reference: GM38_AcousticSnare
+      order_by: similarity
+    process:
+      - filter_high: { freq: 80 }
+      - compress: { ratio: 5, attack: 8 }
+    pan: [55, 45]
+
+  - name: Hand Clap
+    channel: 10
+    notes: 39
+    select:
+      where:
+        reference: GM39_HandClap
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+      - compress: { ratio: 4, attack: 3 }
+
+  - name: Snare 2 (Electric Snare)
+    channel: 10
+    notes: 40
+    select:
+      where:
+        reference: GM40_ElectricSnare
+      order_by: similarity
+    process:
+      - filter_high: { freq: 100 }
+      - compress: { ratio: 5, attack: 8 }
+    pan: [55, 45]
+
+
+  # =================================================================
+  # TOMS — panned high-to-low, left-to-right (audience perspective)
+  # =================================================================
+
+  - name: Low Floor Tom
+    channel: 10
+    notes: 41
+    select:
+      where:
+        reference: GM41_LowFloorTom
+      order_by: similarity
+    process:
+      - filter_high: { freq: 50 }
+      - filter_low: { freq: 6000 }
+      - compress: true
+    pan: [25, 75]
+
+  - name: High Floor Tom
+    channel: 10
+    notes: 43
+    select:
+      where:
+        reference: GM43_HighFloorTom
+      order_by: similarity
+    process:
+      - filter_high: { freq: 60 }
+      - filter_low: { freq: 7000 }
+      - compress: true
+    pan: [30, 70]
+
+  - name: Low Tom
+    channel: 10
+    notes: 45
+    select:
+      where:
+        reference: GM45_LowTom
+      order_by: similarity
+    process:
+      - filter_high: { freq: 70 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    pan: [35, 65]
+
+  - name: Low Mid Tom
+    channel: 10
+    notes: 47
+    select:
+      where:
+        reference: GM47_LowMidTom
+      order_by: similarity
+    process:
+      - filter_high: { freq: 80 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    pan: [40, 60]
+
+  - name: Hi Mid Tom
+    channel: 10
+    notes: 48
+    select:
+      where:
+        reference: GM48_HiMidTom
+      order_by: similarity
+    process:
+      - filter_high: { freq: 90 }
+      - filter_low: { freq: 9000 }
+      - compress: true
+    pan: [60, 40]
+
+  - name: High Tom
+    channel: 10
+    notes: 50
+    select:
+      where:
+        reference: GM50_HighTom
+      order_by: similarity
+    process:
+      - filter_high: { freq: 100 }
+      - filter_low: { freq: 10000 }
+      - compress: true
+    pan: [65, 35]
+
+
+  # =================================================================
+  # HI-HATS — hard left (audience perspective)
+  # =================================================================
+
+  - name: Closed Hi-Hat
+    channel: 10
+    notes: 42
+    select:
+      where:
+        reference: GM42_ClosedHiHat
+      order_by: similarity
+    process:
+      - filter_high: { freq: 300 }
+      - compress: { ratio: 2, release: 80 }
+    gain: -2.0
+    pan: [80, 20]
+
+  - name: Pedal Hi-Hat
+    channel: 10
+    notes: 44
+    select:
+      where:
+        reference: GM44_PedalHiHat
+      order_by: similarity
+    process:
+      - filter_high: { freq: 300 }
+      - compress: { ratio: 2, release: 80 }
+    gain: -2.0
+    pan: [80, 20]
+
+  - name: Open Hi-Hat
+    channel: 10
+    notes: 46
+    select:
+      where:
+        reference: GM46_OpenHiHat
+      order_by: similarity
+    process:
+      - filter_high: { freq: 300 }
+      - compress: { ratio: 2, release: 80 }
+    gain: -2.0
+    pan: [80, 20]
+
+
+  # =================================================================
+  # CRASH CYMBALS — spread left/right
+  # =================================================================
+
+  - name: Crash Cymbal 1
+    channel: 10
+    notes: 49
+    select:
+      where:
+        reference: GM49_CrashCymbal1
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+    gain: -3.0
+    pan: [70, 30]
+
+  - name: Splash Cymbal
+    channel: 10
+    notes: 55
+    select:
+      where:
+        reference: GM55_SplashCymbal
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+    gain: -4.0
+    pan: [65, 35]
+
+  - name: Crash Cymbal 2
+    channel: 10
+    notes: 57
+    select:
+      where:
+        reference: GM57_CrashCymbal2
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+    gain: -3.0
+    pan: [30, 70]
+
+  - name: Chinese Cymbal
+    channel: 10
+    notes: 52
+    select:
+      where:
+        reference: GM52_ChineseCymbal
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+    gain: -4.0
+    pan: [35, 65]
+
+
+  # =================================================================
+  # RIDE CYMBALS — right side
+  # =================================================================
+
+  - name: Ride Cymbal 1
+    channel: 10
+    notes: 51
+    select:
+      where:
+        reference: GM51_RideCymbal1
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+    gain: -2.0
+    pan: [25, 75]
+
+  - name: Ride Bell
+    channel: 10
+    notes: 53
+    select:
+      where:
+        reference: GM53_RideBell
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+    gain: -1.0
+    pan: [25, 75]
+
+  - name: Ride Cymbal 2
+    channel: 10
+    notes: 59
+    select:
+      where:
+        reference: GM59_RideCymbal2
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+    gain: -2.0
+    pan: [20, 80]
+
+
+  # =================================================================
+  # TAMBOURINE, COWBELL, VIBRASLAP
+  # =================================================================
+
+  - name: Tambourine
+    channel: 10
+    notes: 54
+    select:
+      where:
+        reference: GM54_Tambourine
+      order_by: similarity
+    process:
+      - filter_high: { freq: 400 }
+    gain: -3.0
+    pan: [70, 30]
+
+  - name: Cowbell
+    channel: 10
+    notes: 56
+    select:
+      where:
+        reference: GM56_Cowbell
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    gain: -3.0
+    pan: [40, 60]
+
+  - name: Vibraslap
+    channel: 10
+    notes: 58
+    select:
+      where:
+        reference: GM58_Vibraslap
+      order_by: similarity
+    process:
+      - filter_high: { freq: 150 }
+      - filter_low: { freq: 10000 }
+    gain: -4.0
+
+
+  # =================================================================
+  # BONGOS
+  # =================================================================
+
+  - name: High Bongo
+    channel: 10
+    notes: 60
+    select:
+      where:
+        reference: GM60_HiBongo
+      order_by: similarity
+    process:
+      - filter_high: { freq: 150 }
+      - filter_low: { freq: 10000 }
+      - compress: true
+    gain: -2.0
+    pan: [55, 45]
+
+  - name: Low Bongo
+    channel: 10
+    notes: 61
+    select:
+      where:
+        reference: GM61_LowBongo
+      order_by: similarity
+    process:
+      - filter_high: { freq: 100 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    gain: -2.0
+    pan: [45, 55]
+
+
+  # =================================================================
+  # CONGAS
+  # =================================================================
+
+  - name: Mute Hi Conga
+    channel: 10
+    notes: 62
+    select:
+      where:
+        reference: GM62_MuteHiConga
+      order_by: similarity
+    process:
+      - filter_high: { freq: 150 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    gain: -2.0
+    pan: [55, 45]
+
+  - name: Open Hi Conga
+    channel: 10
+    notes: 63
+    select:
+      where:
+        reference: GM63_OpenHiConga
+      order_by: similarity
+    process:
+      - filter_high: { freq: 100 }
+      - filter_low: { freq: 10000 }
+      - compress: true
+    gain: -2.0
+    pan: [55, 45]
+
+  - name: Low Conga
+    channel: 10
+    notes: 64
+    select:
+      where:
+        reference: GM64_LowConga
+      order_by: similarity
+    process:
+      - filter_high: { freq: 80 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    gain: -2.0
+    pan: [45, 55]
+
+
+  # =================================================================
+  # TIMBALES
+  # =================================================================
+
+  - name: High Timbale
+    channel: 10
+    notes: 65
+    select:
+      where:
+        reference: GM65_HighTimbale
+      order_by: similarity
+    process:
+      - filter_high: { freq: 150 }
+      - filter_low: { freq: 10000 }
+      - compress: true
+    gain: -2.0
+    pan: [60, 40]
+
+  - name: Low Timbale
+    channel: 10
+    notes: 66
+    select:
+      where:
+        reference: GM66_LowTimbale
+      order_by: similarity
+    process:
+      - filter_high: { freq: 100 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    gain: -2.0
+    pan: [40, 60]
+
+
+  # =================================================================
+  # AGOGO BELLS
+  # =================================================================
+
+  - name: High Agogo
+    channel: 10
+    notes: 67
+    select:
+      where:
+        reference: GM67_HighAgogo
+      order_by: similarity
+    process:
+      - filter_high: { freq: 300 }
+      - filter_low: { freq: 10000 }
+      - compress: true
+    gain: -3.0
+    pan: [60, 40]
+
+  - name: Low Agogo
+    channel: 10
+    notes: 68
+    select:
+      where:
+        reference: GM68_LowAgogo
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    gain: -3.0
+    pan: [40, 60]
+
+
+  # =================================================================
+  # SHAKERS — cabasa, maracas
+  # =================================================================
+
+  - name: Cabasa
+    channel: 10
+    notes: 69
+    select:
+      where:
+        reference: GM69_Cabasa
+      order_by: similarity
+    process:
+      - filter_high: { freq: 500 }
+    gain: -3.0
+    pan: [65, 35]
+
+  - name: Maracas
+    channel: 10
+    notes: 70
+    select:
+      where:
+        reference: GM70_Maracas
+      order_by: similarity
+    process:
+      - filter_high: { freq: 500 }
+    gain: -3.0
+    pan: [35, 65]
+
+
+  # =================================================================
+  # WHISTLES
+  # =================================================================
+
+  - name: Short Whistle
+    channel: 10
+    notes: 71
+    select:
+      where:
+        reference: GM71_ShortWhistle
+      order_by: similarity
+    process:
+      - filter_high: { freq: 500 }
+      - filter_low: { freq: 12000 }
+    gain: -4.0
+
+  - name: Long Whistle
+    channel: 10
+    notes: 72
+    select:
+      where:
+        reference: GM72_LongWhistle
+      order_by: similarity
+    process:
+      - filter_high: { freq: 500 }
+      - filter_low: { freq: 12000 }
+    gain: -4.0
+
+
+  # =================================================================
+  # GUIRO
+  # =================================================================
+
+  - name: Short Guiro
+    channel: 10
+    notes: 73
+    select:
+      where:
+        reference: GM73_ShortGuiro
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+      - filter_low: { freq: 10000 }
+    gain: -3.0
+    pan: [45, 55]
+
+  - name: Long Guiro
+    channel: 10
+    notes: 74
+    select:
+      where:
+        reference: GM74_LongGuiro
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+      - filter_low: { freq: 10000 }
+    gain: -3.0
+    pan: [45, 55]
+
+
+  # =================================================================
+  # CLAVES
+  # =================================================================
+
+  - name: Claves
+    channel: 10
+    notes: 75
+    select:
+      where:
+        reference: GM75_Claves
+      order_by: similarity
+    process:
+      - filter_high: { freq: 500 }
+      - filter_low: { freq: 10000 }
+      - compress: true
+    gain: -3.0
+
+
+  # =================================================================
+  # WOODBLOCKS
+  # =================================================================
+
+  - name: Hi Wood Block
+    channel: 10
+    notes: 76
+    select:
+      where:
+        reference: GM76_HiWoodBlock
+      order_by: similarity
+    process:
+      - filter_high: { freq: 300 }
+      - filter_low: { freq: 10000 }
+      - compress: true
+    gain: -3.0
+    pan: [55, 45]
+
+  - name: Low Wood Block
+    channel: 10
+    notes: 77
+    select:
+      where:
+        reference: GM77_LowWoodBlock
+      order_by: similarity
+    process:
+      - filter_high: { freq: 200 }
+      - filter_low: { freq: 8000 }
+      - compress: true
+    gain: -3.0
+    pan: [45, 55]
+
+
+  # =================================================================
+  # CUICA
+  # =================================================================
+
+  - name: Mute Cuica
+    channel: 10
+    notes: 78
+    select:
+      where:
+        reference: GM78_MuteCuica
+      order_by: similarity
+    process:
+      - filter_high: { freq: 150 }
+      - filter_low: { freq: 8000 }
+    gain: -3.0
+    pan: [45, 55]
+
+  - name: Open Cuica
+    channel: 10
+    notes: 79
+    select:
+      where:
+        reference: GM79_OpenCuica
+      order_by: similarity
+    process:
+      - filter_high: { freq: 150 }
+      - filter_low: { freq: 10000 }
+    gain: -3.0
+    pan: [45, 55]
+
+
+  # =================================================================
+  # TRIANGLE
+  # =================================================================
+
+  - name: Mute Triangle
+    channel: 10
+    notes: 80
+    select:
+      where:
+        reference: GM80_MuteTriangle
+      order_by: similarity
+    process:
+      - filter_high: { freq: 1000 }
+    gain: -4.0
+    pan: [60, 40]
+
+  - name: Open Triangle
+    channel: 10
+    notes: 81
+    select:
+      where:
+        reference: GM81_OpenTriangle
+      order_by: similarity
+    process:
+      - filter_high: { freq: 1000 }
+    gain: -4.0
+    pan: [60, 40]

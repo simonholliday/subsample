@@ -113,6 +113,7 @@ How to add a new transform type
 import collections
 import concurrent.futures
 import dataclasses
+import math
 import hashlib
 import logging
 import os
@@ -213,13 +214,18 @@ class HighPassFilter:
 @dataclasses.dataclass(frozen=True)
 class BandPassFilter:
 
-	"""Band-pass filter — passes a 1-octave band centred on freq.
+	"""Band-pass filter — passes a band centred on freq with width set by Q.
 
 	freq:          Centre frequency in Hz.
+	q:             Quality factor controlling bandwidth.  Lower = wider band.
+	               Q = 0.707 (1/sqrt(2)) is the Butterworth response (~2 octaves).
+	               Q = 1.414 is ~1 octave.  Default 0.7 gives a wide, musical
+	               band like a console mid-sweep.
 	resonance_db:  Peak boost at the centre in dB.  0 = flat Butterworth.
 	"""
 
 	freq:          float
+	q:             float = 0.7
 	resonance_db:  float = 0.0
 
 
@@ -234,6 +240,67 @@ class Saturate:
 	"""
 
 	amount_db: float
+
+
+@dataclasses.dataclass(frozen=True)
+class Compress:
+
+	"""Feed-forward dynamic range compressor with soft knee and look-ahead.
+
+	When used without parameters (``compress: true``), threshold, attack, and
+	release adapt automatically to each sample's analysis data:
+
+	  - threshold: 6 dB below the sample's peak level (always engages)
+	  - attack:    slow for percussive samples (preserves transient snap),
+	               fast for gradual onsets (no transient to protect)
+	  - release:   short for quick-decay samples, long for sustained sounds
+
+	Set any parameter explicitly to override the auto value for that parameter.
+
+	For the opposite effect (squash transients, raise reverb tails), use a
+	fast attack (< 1 ms), high ratio (10+), and low threshold (-30 dB).
+
+	threshold_db:   Level above which compression begins (dBFS).
+	                None = auto (6 dB below sample peak).
+	ratio:          Compression ratio.  4:1 = moderate, 10:1+ = heavy.
+	                1.0 = no compression.
+	attack_ms:      How fast gain reduction engages (ms).  Slow = more punch.
+	                None = auto (adapts to sample onset character).
+	release_ms:     How fast gain recovers after the signal drops (ms).
+	                None = auto (adapts to sample decay character).
+	knee_db:        Soft knee width in dB.  0 = hard knee.  6 = smooth transition.
+	makeup_db:      Output gain boost in dB to compensate for level reduction.
+	lookahead_ms:   Delay audio so the gain envelope anticipates transients (ms).
+	                0 = no look-ahead.  5+ = catches fast peaks.
+	"""
+
+	threshold_db:  typing.Optional[float] = None
+	ratio:         float = 4.0
+	attack_ms:     typing.Optional[float] = None
+	release_ms:    typing.Optional[float] = None
+	knee_db:       float = 6.0
+	makeup_db:     float = 0.0
+	lookahead_ms:  float = 0.0
+
+
+@dataclasses.dataclass(frozen=True)
+class Limit:
+
+	"""Brickwall limiter — shortcut to the compressor with limiter presets.
+
+	Internally uses the same feed-forward compressor with hard knee,
+	ratio 100:1, near-instant attack, and look-ahead to catch transients
+	before they overshoot.  Only threshold, release, and look-ahead are
+	user-adjustable; the remaining parameters are fixed for clean limiting.
+
+	threshold_db:   Maximum output level (dBFS).
+	release_ms:     How fast gain recovers after a peak (ms).
+	lookahead_ms:   Anticipate peaks by this many ms (0 = none).
+	"""
+
+	threshold_db:  float = -1.0
+	release_ms:    float = 50.0
+	lookahead_ms:  float = 5.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -268,6 +335,8 @@ TransformStep = typing.Union[
 	HighPassFilter,
 	BandPassFilter,
 	Saturate,
+	Compress,
+	Limit,
 	HpssHarmonic,
 	HpssPercussive,
 	TimeStretch,
@@ -1800,13 +1869,15 @@ def _apply_filter (
 	freq:        float,
 	resonance_db: float,
 	btype:       str,
+	q:           float = 0.7,
 ) -> numpy.ndarray:
 
 	"""Shared implementation for low-pass, high-pass, and band-pass filters.
 
 	Uses a 2nd-order Butterworth (resonance_db == 0) or Chebyshev Type I
 	(resonance_db > 0) filter applied via second-order sections for numerical
-	stability.  Band-pass uses a fixed 1-octave bandwidth centred on freq.
+	stability.  Band-pass bandwidth is derived from Q (quality factor):
+	lower Q = wider band, higher Q = narrower band.
 	"""
 
 	nyquist = sample_rate / 2.0
@@ -1814,11 +1885,19 @@ def _apply_filter (
 	# Clamp resonance to a safe range.
 	resonance_db = max(0.0, min(resonance_db, _MAX_RESONANCE_DB))
 
+	# Clamp Q to a safe range (0.1 = very wide, 20 = very narrow).
+	q = max(0.1, min(q, 20.0))
+
 	# Build the Wn parameter.
 
 	if btype == "bandpass":
-		low  = max(1.0, freq / 1.4142135623730951)
-		high = min(nyquist - 1.0, freq * 1.4142135623730951)
+		# Compute band edges from centre frequency and Q.
+		# Q = f0 / bandwidth, so higher Q = narrower band.
+		# Exact geometric formula for -3 dB points:
+		term = 1.0 / (2.0 * q)
+		root = math.sqrt(term ** 2 + 1.0)
+		low  = max(1.0, freq * (root - term))
+		high = min(nyquist - 1.0, freq * (root + term))
 
 		if low >= high:
 			return audio
@@ -1881,9 +1960,9 @@ def _apply_band_pass (
 	step:        BandPassFilter,
 ) -> numpy.ndarray:
 
-	"""Band-pass filter — passes a 1-octave band centred on the frequency."""
+	"""Band-pass filter — passes a band centred on the frequency, width set by Q."""
 
-	return _apply_filter(audio, sample_rate, step.freq, step.resonance_db, "bandpass")
+	return _apply_filter(audio, sample_rate, step.freq, step.resonance_db, "bandpass", q=step.q)
 
 
 # ---------------------------------------------------------------------------
@@ -1914,6 +1993,229 @@ def _apply_saturate (
 
 	result: numpy.ndarray = saturated.astype(numpy.float32)
 	return result
+
+
+# ---------------------------------------------------------------------------
+# Compress / Limit handlers
+# ---------------------------------------------------------------------------
+
+# Tiny constant to avoid log10(0).
+_COMPRESS_EPSILON: float = 1e-10
+
+
+def _compress (
+	audio:        numpy.ndarray,
+	sample_rate:  int,
+	threshold_db: float,
+	ratio:        float,
+	attack_ms:    float,
+	release_ms:   float,
+	knee_db:      float,
+	makeup_db:    float,
+	lookahead_ms: float,
+) -> numpy.ndarray:
+
+	"""Feed-forward dynamic range compressor (Giannoulis et al., JAES 2012).
+
+	Shared back-end for both ``compress`` and ``limit`` processors.
+
+	1. Convert to dB.
+	2. Gain computer with soft knee (piecewise quadratic transition).
+	3. One-pole ballistics (attack/release smoothing per sample).
+	4. Optional look-ahead: audio is delayed so the gain envelope
+	   anticipates transients before they arrive.
+	5. Apply gain + makeup.
+
+	Multi-channel: the envelope is computed from the max absolute value
+	across channels (linked stereo), and the same gain curve is applied to
+	all channels to preserve the stereo image.
+
+	All processing is in float64 for numerical precision; the result is
+	returned as float32.
+	"""
+
+	if ratio <= 1.0:
+		# No compression.
+		if makeup_db != 0.0:
+			result: numpy.ndarray = (audio * 10.0 ** (makeup_db / 20.0)).astype(numpy.float32)
+			return result
+		return audio
+
+	n_frames = audio.shape[0]
+
+	if n_frames == 0:
+		return audio
+
+	# Work in float64 for precision.
+	audio_f64 = audio.astype(numpy.float64)
+
+	# Linked envelope: max absolute value across channels per frame.
+	if audio_f64.ndim == 1:
+		envelope = numpy.abs(audio_f64)
+	else:
+		envelope = numpy.max(numpy.abs(audio_f64), axis=1)
+
+	# Convert envelope to dB.
+	env_db = 20.0 * numpy.log10(envelope + _COMPRESS_EPSILON)
+
+	# ── Gain computer (vectorised) ──────────────────────────────────
+
+	T = threshold_db
+	R = ratio
+	W = max(knee_db, 0.0)
+
+	gain_db = numpy.zeros(n_frames, dtype=numpy.float64)
+
+	if W > 0.0:
+		# Soft knee: three regions.
+		below = env_db < (T - W / 2.0)
+		above = env_db > (T + W / 2.0)
+		knee  = ~below & ~above
+
+		# Below knee: no gain change (gain_db stays 0).
+		# Above knee: standard compression.
+		gain_db[above] = (T + (env_db[above] - T) / R) - env_db[above]
+		# Within knee: quadratic transition.
+		diff = env_db[knee] - T + W / 2.0
+		gain_db[knee] = ((1.0 / R - 1.0) * diff * diff) / (2.0 * W)
+	else:
+		# Hard knee: two regions.
+		above = env_db > T
+		gain_db[above] = (T + (env_db[above] - T) / R) - env_db[above]
+
+	# ── Ballistics (per-sample smoothing) ───────────────────────────
+
+	attack_s  = max(attack_ms / 1000.0, 1e-6)
+	release_s = max(release_ms / 1000.0, 1e-6)
+	alpha_a = math.exp(-1.0 / (sample_rate * attack_s))
+	alpha_r = math.exp(-1.0 / (sample_rate * release_s))
+
+	smoothed = numpy.empty(n_frames, dtype=numpy.float64)
+	s = 0.0  # initial state: no gain reduction
+
+	for i in range(n_frames):
+		g = gain_db[i]
+		if g < s:
+			# Signal rising above threshold — engage gain reduction (attack).
+			s = alpha_a * s + (1.0 - alpha_a) * g
+		else:
+			# Signal falling — release gain reduction.
+			s = alpha_r * s + (1.0 - alpha_r) * g
+		smoothed[i] = s
+
+	# ── Look-ahead ──────────────────────────────────────────────────
+
+	lookahead_samples = int(round(lookahead_ms / 1000.0 * sample_rate))
+
+	if lookahead_samples > 0:
+		# Delay the audio relative to the gain curve.  The gain curve was
+		# computed from the original signal, so gain reduction begins
+		# before the delayed peak arrives.
+		pad = numpy.zeros(
+			(lookahead_samples,) + audio_f64.shape[1:], dtype=numpy.float64,
+		)
+		audio_f64 = numpy.concatenate([pad, audio_f64], axis=0)[:n_frames]
+
+	# ── Apply gain + makeup ─────────────────────────────────────────
+
+	linear_gain = numpy.power(10.0, smoothed / 20.0)
+
+	if makeup_db != 0.0:
+		linear_gain *= 10.0 ** (makeup_db / 20.0)
+
+	if audio_f64.ndim == 1:
+		audio_f64 *= linear_gain
+	else:
+		audio_f64 *= linear_gain[:, numpy.newaxis]
+
+	return audio_f64.astype(numpy.float32)
+
+
+def _resolve_compress_params (
+	record: "subsample.library.SampleRecord",
+	step:   Compress,
+) -> tuple[float, float, float]:
+
+	"""Resolve adaptive compression parameters from sample analysis data.
+
+	For each of threshold_db, attack_ms, and release_ms: if the step value
+	is None (user did not set it), compute from the sample's analysis.
+	If the step value is a float (user set it explicitly), use it as-is.
+
+	Returns:
+		(threshold_db, attack_ms, release_ms) — all resolved to floats.
+	"""
+
+	# Threshold: 6 dB below the sample's peak level.  This ensures the
+	# compressor always engages on the top 6 dB of the signal's dynamic
+	# range, regardless of recording level.
+	if step.threshold_db is not None:
+		threshold_db = step.threshold_db
+	else:
+		peak_db = 20.0 * math.log10(record.level.peak + _COMPRESS_EPSILON)
+		threshold_db = peak_db - 6.0
+
+	# Attack: map from spectral.attack (0 = instant percussive, 1 = gradual).
+	# Percussive sounds → slow compressor attack (lets transient punch through).
+	# Gradual sounds → fast compressor attack (no transient to protect).
+	if step.attack_ms is not None:
+		attack_ms = step.attack_ms
+	else:
+		attack_ms = 1.0 + 29.0 * (1.0 - record.spectral.attack)
+
+	# Release: map from spectral.release (0 = short decay, 1 = long tail).
+	# Short-decay sounds → fast release (recovers before the next hit).
+	# Sustained sounds → slow release (avoids pumping artefacts).
+	if step.release_ms is not None:
+		release_ms = step.release_ms
+	else:
+		release_ms = 30.0 + 270.0 * record.spectral.release
+
+	return threshold_db, attack_ms, release_ms
+
+
+def _apply_compress (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Compress,
+) -> numpy.ndarray:
+
+	"""Dynamic range compressor — adapts to each sample when params are unset."""
+
+	threshold_db, attack_ms, release_ms = _resolve_compress_params(record, step)
+
+	return _compress(
+		audio, sample_rate,
+		threshold_db = threshold_db,
+		ratio        = step.ratio,
+		attack_ms    = attack_ms,
+		release_ms   = release_ms,
+		knee_db      = step.knee_db,
+		makeup_db    = step.makeup_db,
+		lookahead_ms = step.lookahead_ms,
+	)
+
+
+def _apply_limit (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Limit,
+) -> numpy.ndarray:
+
+	"""Brickwall limiter — compressor with limiter presets."""
+
+	return _compress(
+		audio, sample_rate,
+		threshold_db = step.threshold_db,
+		ratio        = 100.0,
+		attack_ms    = 0.01,
+		release_ms   = step.release_ms,
+		knee_db      = 0.0,
+		makeup_db    = 0.0,
+		lookahead_ms = step.lookahead_ms,
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -1981,6 +2283,8 @@ TransformProcessor._HANDLERS[LowPassFilter]   = _apply_low_pass
 TransformProcessor._HANDLERS[HighPassFilter]   = _apply_high_pass
 TransformProcessor._HANDLERS[BandPassFilter]  = _apply_band_pass
 TransformProcessor._HANDLERS[Saturate]        = _apply_saturate
+TransformProcessor._HANDLERS[Compress]        = _apply_compress
+TransformProcessor._HANDLERS[Limit]           = _apply_limit
 TransformProcessor._HANDLERS[HpssHarmonic]    = _apply_hpss_harmonic
 TransformProcessor._HANDLERS[HpssPercussive]  = _apply_hpss_percussive
 
@@ -2035,19 +2339,20 @@ def spec_from_process (
 
 		elif proc.name == "filter_low":
 			steps.append(LowPassFilter(
-				freq=float(proc.get("freq", 1000.0)),
+				freq=float(proc.get("freq", 16000.0)),
 				resonance_db=float(proc.get("resonance", 0.0)),
 			))
 
 		elif proc.name == "filter_high":
 			steps.append(HighPassFilter(
-				freq=float(proc.get("freq", 1000.0)),
+				freq=float(proc.get("freq", 80.0)),
 				resonance_db=float(proc.get("resonance", 0.0)),
 			))
 
 		elif proc.name == "filter_band":
 			steps.append(BandPassFilter(
 				freq=float(proc.get("freq", 1000.0)),
+				q=float(proc.get("q", 0.7)),
 				resonance_db=float(proc.get("resonance", 0.0)),
 			))
 
@@ -2057,6 +2362,29 @@ def spec_from_process (
 		elif proc.name == "saturate":
 			steps.append(Saturate(
 				amount_db=float(proc.get("amount", 6.0)),
+			))
+
+		elif proc.name == "compress":
+			# Adaptive fields: None = auto-compute from sample analysis.
+			# Explicit YAML values override the auto-computation.
+			_threshold_raw = proc.get("threshold")
+			_attack_raw    = proc.get("attack")
+			_release_raw   = proc.get("release")
+			steps.append(Compress(
+				threshold_db=float(_threshold_raw) if _threshold_raw is not None else None,
+				ratio=float(proc.get("ratio", 4.0)),
+				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
+				release_ms=float(_release_raw) if _release_raw is not None else None,
+				knee_db=float(proc.get("knee", 6.0)),
+				makeup_db=float(proc.get("makeup", 0.0)),
+				lookahead_ms=float(proc.get("lookahead", 0.0)),
+			))
+
+		elif proc.name == "limit":
+			steps.append(Limit(
+				threshold_db=float(proc.get("threshold", -1.0)),
+				release_ms=float(proc.get("release", 50.0)),
+				lookahead_ms=float(proc.get("lookahead", 5.0)),
 			))
 
 		elif proc.name == "hpss_harmonic":

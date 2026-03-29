@@ -1,5 +1,6 @@
 """Tests for subsample/transform.py — the sample transform pipeline scaffold."""
 
+import dataclasses
 import pathlib
 import threading
 import time
@@ -1641,6 +1642,257 @@ class TestSaturate:
 
 
 # ---------------------------------------------------------------------------
+# TestCompress
+# ---------------------------------------------------------------------------
+
+class TestCompress:
+
+	"""Tests for the _apply_compress handler and _compress() core."""
+
+	def _make_impulse (self, n_frames: int = 4410, peak: float = 0.9, sr: int = 44100) -> numpy.ndarray:
+		"""Create a mono impulse (sharp transient + exponential decay)."""
+		audio = numpy.zeros((n_frames, 1), dtype=numpy.float32)
+		audio[0, 0] = peak
+		decay = numpy.exp(-numpy.arange(n_frames, dtype=numpy.float32) * 10.0 / n_frames)
+		audio[:, 0] = peak * decay
+		return audio
+
+	def test_below_threshold_unchanged (self) -> None:
+		"""Signal entirely below threshold gets no gain reduction."""
+		audio = numpy.full((100, 1), 0.01, dtype=numpy.float32)  # ~ -40 dBFS
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Compress(threshold_db=-10.0, ratio=4.0, knee_db=0.0)
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		numpy.testing.assert_allclose(result, audio, atol=1e-5)
+
+	def test_above_threshold_reduced (self) -> None:
+		"""Signal above threshold is attenuated."""
+		audio = numpy.full((1000, 1), 0.5, dtype=numpy.float32)  # ~ -6 dBFS
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Compress(
+			threshold_db=-20.0, ratio=4.0, attack_ms=0.01, release_ms=5.0, knee_db=0.0,
+		)
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		# After ballistics settle, output should be lower than input.
+		assert float(numpy.max(numpy.abs(result[-100:]))) < float(numpy.max(numpy.abs(audio)))
+
+	def test_soft_knee_compresses_at_threshold (self) -> None:
+		"""Soft knee applies gain reduction at threshold; hard knee does not."""
+		# Signal at exactly -20 dBFS (threshold).  Hard knee: no reduction
+		# (signal is not above threshold).  Soft knee with W=12: threshold is
+		# at the centre of the knee (-26 to -14), so partial reduction applies.
+		level = 10.0 ** (-20.0 / 20.0)  # 0.1
+		audio = numpy.full((2000, 1), level, dtype=numpy.float32)
+		hard = subsample.transform._compress(audio, 44100, -20.0, 4.0, 0.01, 5.0, 0.0, 0.0, 0.0)
+		soft = subsample.transform._compress(audio, 44100, -20.0, 4.0, 0.01, 5.0, 12.0, 0.0, 0.0)
+		# Hard knee: signal at threshold → no compression → output ≈ input.
+		hard_level = float(numpy.mean(numpy.abs(hard[-200:])))
+		numpy.testing.assert_allclose(hard_level, level, atol=1e-3)
+		# Soft knee: signal within knee → some reduction → output < input.
+		soft_level = float(numpy.mean(numpy.abs(soft[-200:])))
+		assert soft_level < level * 0.99
+
+	def test_makeup_gain (self) -> None:
+		"""Makeup gain boosts the output level."""
+		audio = numpy.full((200, 1), 0.1, dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Compress(
+			threshold_db=-40.0, ratio=1.0, makeup_db=6.0,
+		)
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		# ratio=1 means no compression, so only makeup applies.
+		expected_gain = 10.0 ** (6.0 / 20.0)
+		numpy.testing.assert_allclose(result, audio * expected_gain, atol=1e-5)
+
+	def test_ratio_one_passthrough (self) -> None:
+		"""Ratio 1:1 is a passthrough (no compression)."""
+		audio = numpy.array([[0.5], [-0.3], [0.8]], dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Compress(ratio=1.0)
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		numpy.testing.assert_array_equal(result, audio)
+
+	def test_stereo_linked (self) -> None:
+		"""Multi-channel: same gain applied to both channels (preserves stereo image)."""
+		audio = numpy.zeros((1000, 2), dtype=numpy.float32)
+		audio[:, 0] = 0.8   # left loud
+		audio[:, 1] = 0.1   # right quiet
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Compress(
+			threshold_db=-10.0, ratio=4.0, attack_ms=0.01, release_ms=5.0, knee_db=0.0,
+		)
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		# Both channels should be reduced proportionally.
+		left_ratio = float(result[-1, 0]) / float(audio[-1, 0])
+		right_ratio = float(result[-1, 1]) / float(audio[-1, 1])
+		numpy.testing.assert_allclose(left_ratio, right_ratio, atol=1e-3)
+
+	def test_output_is_float32 (self) -> None:
+		audio = numpy.array([[0.5], [0.3]], dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Compress()
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		assert result.dtype == numpy.float32
+
+	def test_empty_audio (self) -> None:
+		audio = numpy.zeros((0, 1), dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Compress()
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		assert result.shape == (0, 1)
+
+	def test_silence_stays_silent (self) -> None:
+		audio = numpy.zeros((100, 1), dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Compress(threshold_db=-20.0, ratio=4.0)
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		numpy.testing.assert_allclose(result, 0.0, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# TestCompressAdaptive
+# ---------------------------------------------------------------------------
+
+class TestCompressAdaptive:
+
+	"""Tests for per-sample adaptive compression defaults."""
+
+	def _record_with (
+		self,
+		peak: float = 0.85,
+		rms: float = 0.25,
+		attack: float = 0.2,
+		release: float = 0.3,
+	) -> subsample.library.SampleRecord:
+		"""Create a record with custom level and spectral fields."""
+		record = _make_record(sample_id=1)
+		spectral = dataclasses.replace(record.spectral, attack=attack, release=release)
+		level = subsample.analysis.LevelResult(peak=peak, rms=rms)
+		return dataclasses.replace(record, spectral=spectral, level=level)
+
+	def test_auto_threshold_adapts_to_peak (self) -> None:
+		"""Auto threshold is relative to the sample's peak — different peaks → different thresholds."""
+		loud = self._record_with(peak=0.9)   # ~ -0.9 dBFS
+		quiet = self._record_with(peak=0.1)  # ~ -20 dBFS
+
+		audio = numpy.full((2000, 1), 0.5, dtype=numpy.float32)
+		step = subsample.transform.Compress()  # all auto
+
+		t_loud, _, _ = subsample.transform._resolve_compress_params(loud, step)
+		t_quiet, _, _ = subsample.transform._resolve_compress_params(quiet, step)
+
+		# Loud sample should have a higher (less negative) threshold.
+		assert t_loud > t_quiet
+		# Both should be 6 dB below their respective peaks.
+		import math
+		expected_loud = 20.0 * math.log10(0.9 + 1e-10) - 6.0
+		expected_quiet = 20.0 * math.log10(0.1 + 1e-10) - 6.0
+		assert abs(t_loud - expected_loud) < 0.01
+		assert abs(t_quiet - expected_quiet) < 0.01
+
+	def test_auto_attack_percussive_vs_gradual (self) -> None:
+		"""Percussive sample (low spectral.attack) → slow compressor attack."""
+		percussive = self._record_with(attack=0.0)  # instant onset
+		gradual = self._record_with(attack=1.0)      # very slow onset
+
+		step = subsample.transform.Compress()
+
+		_, a_perc, _ = subsample.transform._resolve_compress_params(percussive, step)
+		_, a_grad, _ = subsample.transform._resolve_compress_params(gradual, step)
+
+		# Percussive → slow attack (lets transient through).
+		assert a_perc > a_grad
+		assert abs(a_perc - 30.0) < 0.01  # 1 + 29*(1-0) = 30
+		assert abs(a_grad - 1.0) < 0.01   # 1 + 29*(1-1) = 1
+
+	def test_auto_release_short_vs_long (self) -> None:
+		"""Short-decay sample → fast compressor release."""
+		short = self._record_with(release=0.0)   # instant decay
+		long = self._record_with(release=1.0)     # very long tail
+
+		step = subsample.transform.Compress()
+
+		_, _, r_short = subsample.transform._resolve_compress_params(short, step)
+		_, _, r_long = subsample.transform._resolve_compress_params(long, step)
+
+		assert r_short < r_long
+		assert abs(r_short - 30.0) < 0.01   # 30 + 270*0 = 30
+		assert abs(r_long - 300.0) < 0.01   # 30 + 270*1 = 300
+
+	def test_explicit_overrides_auto (self) -> None:
+		"""Explicit values override auto; unset values still auto-compute."""
+		record = self._record_with(peak=0.5, attack=0.8, release=0.5)
+		step = subsample.transform.Compress(threshold_db=-18.0)  # explicit threshold only
+
+		t, a, r = subsample.transform._resolve_compress_params(record, step)
+
+		# Threshold: explicit → -18.0.
+		assert t == -18.0
+		# Attack: auto → 1 + 29*(1-0.8) = 6.8.
+		assert abs(a - 6.8) < 0.01
+		# Release: auto → 30 + 270*0.5 = 165.
+		assert abs(r - 165.0) < 0.01
+
+	def test_all_explicit_no_auto (self) -> None:
+		"""When all three adaptive params are set, no auto-computation occurs."""
+		record = self._record_with(peak=0.1, attack=0.0, release=0.0)
+		step = subsample.transform.Compress(threshold_db=-12.0, attack_ms=5.0, release_ms=50.0)
+
+		t, a, r = subsample.transform._resolve_compress_params(record, step)
+
+		assert t == -12.0
+		assert a == 5.0
+		assert r == 50.0
+
+	def test_auto_compress_actually_compresses (self) -> None:
+		"""compress: true with auto defaults actually reduces the signal."""
+		audio = numpy.full((2000, 1), 0.8, dtype=numpy.float32)
+		record = self._record_with(peak=0.85)
+		step = subsample.transform.Compress()  # all auto
+
+		result = subsample.transform._apply_compress(audio, 44100, record, step)
+		# Auto threshold ≈ -1.4 - 6 ≈ -7.4 dBFS.  Signal at 0.8 is ≈ -1.9 dBFS.
+		# Signal is above threshold → should be compressed.
+		assert float(numpy.max(numpy.abs(result[-200:]))) < float(numpy.max(numpy.abs(audio)))
+
+
+# ---------------------------------------------------------------------------
+# TestLimit
+# ---------------------------------------------------------------------------
+
+class TestLimit:
+
+	"""Tests for the _apply_limit handler (brickwall limiter)."""
+
+	def test_below_threshold_unchanged (self) -> None:
+		"""Signal below the limiter threshold passes through."""
+		# Use enough frames to exceed the default 5 ms look-ahead (221 samples at 44.1 kHz).
+		audio = numpy.full((2000, 1), 0.01, dtype=numpy.float32)  # ~ -40 dBFS
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Limit(threshold_db=-1.0)
+		result = subsample.transform._apply_limit(audio, 44100, record, step)
+		# Check the tail (past the look-ahead delay region).
+		numpy.testing.assert_allclose(result[300:], audio[300:], atol=1e-4)
+
+	def test_above_threshold_limited (self) -> None:
+		"""Signal above threshold is brought down near the ceiling."""
+		audio = numpy.full((2000, 1), 0.9, dtype=numpy.float32)  # ~ -0.9 dBFS
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Limit(threshold_db=-6.0, lookahead_ms=0.0)
+		result = subsample.transform._apply_limit(audio, 44100, record, step)
+		# After settling, the output should be substantially reduced.
+		output_peak = float(numpy.max(numpy.abs(result[-100:])))
+		assert output_peak < 0.9
+
+	def test_output_is_float32 (self) -> None:
+		audio = numpy.array([[0.5], [0.3]], dtype=numpy.float32)
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Limit()
+		result = subsample.transform._apply_limit(audio, 44100, record, step)
+		assert result.dtype == numpy.float32
+
+
+# ---------------------------------------------------------------------------
 # TestSpecFromProcess
 # ---------------------------------------------------------------------------
 
@@ -1751,6 +2003,60 @@ class TestSpecFromProcess:
 		spec = subsample.transform.spec_from_process(process)
 		assert isinstance(spec.steps[0], subsample.transform.Saturate)
 		assert spec.steps[0].amount_db == 8.0
+
+	def test_compress (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="compress",
+				params=(("threshold", -30), ("ratio", 8), ("attack", 1.0), ("release", 50)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert isinstance(spec.steps[0], subsample.transform.Compress)
+		assert spec.steps[0].threshold_db == -30.0
+		assert spec.steps[0].ratio == 8.0
+		assert spec.steps[0].attack_ms == 1.0
+		assert spec.steps[0].release_ms == 50.0
+		# Defaults for unset params:
+		assert spec.steps[0].knee_db == 6.0
+		assert spec.steps[0].makeup_db == 0.0
+		assert spec.steps[0].lookahead_ms == 0.0
+
+	def test_compress_defaults (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="compress"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert isinstance(spec.steps[0], subsample.transform.Compress)
+		# Adaptive fields default to None (auto-compute from sample).
+		assert spec.steps[0].threshold_db is None
+		assert spec.steps[0].attack_ms is None
+		assert spec.steps[0].release_ms is None
+		# Fixed fields keep their defaults.
+		assert spec.steps[0].ratio == 4.0
+		assert spec.steps[0].knee_db == 6.0
+
+	def test_limit (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="limit",
+				params=(("threshold", -3), ("release", 30), ("lookahead", 10)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert isinstance(spec.steps[0], subsample.transform.Limit)
+		assert spec.steps[0].threshold_db == -3.0
+		assert spec.steps[0].release_ms == 30.0
+		assert spec.steps[0].lookahead_ms == 10.0
+
+	def test_limit_defaults (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="limit"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert isinstance(spec.steps[0], subsample.transform.Limit)
+		assert spec.steps[0].threshold_db == -1.0
+		assert spec.steps[0].lookahead_ms == 5.0
 
 	def test_declaration_order_preserved (self) -> None:
 		"""Steps appear in the spec in the order declared in the process list."""

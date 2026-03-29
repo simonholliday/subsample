@@ -14,6 +14,36 @@
 #   Note specs: single (36 or C3), list ([36, 38]), range (C2..C4)
 #
 # ===================================================================
+# BANKS — multiple instrument directories (optional)
+# ===================================================================
+#
+# Declare banks to load samples from multiple directories and switch
+# between them at runtime using MIDI Program Change messages.
+#
+# When banks: is absent, the single instrument.directory from
+# config.yaml is used (no Program Change handling).
+#
+# When banks: is present, it overrides instrument.directory.
+# Each bank gets its own library, similarity index, and transform
+# cache — switching is instantaneous (no disk I/O at switch time).
+#
+#   banks:
+#     - name: "Acoustic Kit"
+#       directory: samples/acoustic
+#       program: 0                      # MIDI Program Change number (0-127)
+#     - name: "Electronic Kit"
+#       directory: samples/electronic
+#       program: 1
+#
+#   bank_channel: 10   # MIDI channel for PC messages (1-16, or 0 = any)
+#                       # Default: 10 (GM drum channel)
+#
+# Assignments are bank-agnostic — queries run against whichever bank
+# is active.  Named samples (where: { name: X }) that only exist in
+# one bank silently produce no match in other banks.
+#
+
+# ===================================================================
 # ASSIGNMENT STRUCTURE
 # ===================================================================
 #
@@ -90,18 +120,23 @@
 # The process block is an optional ordered list of processors.
 # They execute in the order you write them -- order matters!
 #
-#   repitch: true                         Pitch-shift to MIDI note
+#   repitch: true                        Pitch-shift to MIDI note
 #   repitch: { note: C4 }                Pitch-shift to a fixed note
 #   beat_quantize: { grid: 16 }          Time-stretch to session target_bpm
 #   beat_quantize: { bpm: 120, grid: 8 } Time-stretch to specific BPM
-#   filter_low: { freq: 500 }            Low-pass filter (Hz cutoff)
-#   filter_high: { freq: 2000 }          High-pass filter (Hz cutoff)
-#   filter_band: { freq: 1000 }          Band-pass filter (Hz centre, 1-octave)
-#   reverse: true                         Reverse the audio
+#   filter_low: { freq: 500 }            Low-pass filter (default 16 kHz)
+#   filter_high: { freq: 200 }           High-pass filter (default 80 Hz)
+#   filter_band: { freq: 800, q: 1.4 }  Band-pass filter (default 1 kHz, Q 0.7)
+#   reverse: true                        Reverse the audio
 #   saturate: { amount: 6 }              Soft-clip saturation (dB drive)
+#   compress: true                        Compressor (adapts to each sample)
+#   compress: { threshold: -30, ratio: 10, attack: 0.5 }  Squash + raise tail
+#   limit: true                           Brickwall limiter (default -1 dBFS)
 #
-# Filters accept an optional resonance parameter (dB, default 0):
+# Filters accept an optional resonance parameter (dB, default 0).
+# Band-pass accepts Q (quality factor; lower = wider, default 0.7):
 #   filter_low: { freq: 800, resonance: 12 }
+#   filter_band: { freq: 1000, q: 2.0 }
 #
 # HPSS separates harmonic (tonal) from percussive (transient) content:
 #   hpss_harmonic: true       Keep tonal content, remove percussion

@@ -763,7 +763,7 @@ assignments:
       order_by: similarity
     one_shot: true
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert (9, 36) in note_map
 		asgn, pick = note_map[(9, 36)]
@@ -784,7 +784,7 @@ assignments:
       order_by: similarity
     one_shot: true
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert note_map[(9, 36)][1] == 1   # pick 1
 		assert note_map[(9, 35)][1] == 2   # pick 2
@@ -800,7 +800,7 @@ assignments:
       where:
         reference: BD0025
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert (9, 36) in note_map
 		assert (10, 36) not in note_map
@@ -816,7 +816,7 @@ assignments:
       where:
         reference: BD0025
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		asgn, _ = note_map[(9, 36)]
 		assert asgn.one_shot is True
@@ -838,7 +838,7 @@ assignments:
         reference: BD0025
 """)
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			note_map = subsample.player.load_midi_map(path, [])
+			note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert len(note_map) == 0
 		assert any("BD0025" in r.message for r in caplog.records)
@@ -854,7 +854,7 @@ assignments:
       where:
         reference: bd0025
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert (9, 36) in note_map
 
@@ -864,7 +864,7 @@ assignments:
 
 	def test_empty_file_returns_empty_map (self, tmp_path: pathlib.Path) -> None:
 		path = self._write_map(tmp_path, "")
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 		assert note_map == {}
 
 	def test_multiple_assignments (self, tmp_path: pathlib.Path) -> None:
@@ -884,7 +884,7 @@ assignments:
       where:
         reference: SD5075
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025", "SD5075"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025", "SD5075"]).note_map
 
 		assert (9, 36) in note_map
 		assert (9, 38) in note_map
@@ -903,7 +903,7 @@ assignments:
         name: 2026-03-24_14-37-14
     one_shot: true
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (9, 36) in note_map
 		asgn, _ = note_map[(9, 36)]
@@ -921,7 +921,7 @@ assignments:
       where:
         name: some-recording
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 		assert (9, 36) in note_map
 
 	def test_default_map_parses (self) -> None:
@@ -933,7 +933,7 @@ assignments:
 			"GM46_OpenHiHat", "GM49_CrashCymbal1", "GM51_RideCymbal1",
 			"GM56_Cowbell", "GM54_Tambourine", "GM75_Claves",
 		]
-		note_map = subsample.player.load_midi_map(default_path, refs)
+		note_map = subsample.player.load_midi_map(default_path, refs).note_map
 
 		assert len(note_map) > 0
 		assert (9, 36) in note_map
@@ -950,7 +950,7 @@ assignments:
       where:
         reference: BD0025
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
+		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2).note_map
 
 		asgn, _ = note_map[(9, 36)]
 		assert asgn.pan_gains.shape == (2,)
@@ -969,7 +969,7 @@ assignments:
         reference: BD0025
     pan: {weights}
 """)
-			note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
+			note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2).note_map
 			asgn, _ = note_map[(9, 36)]
 			total_power = float(numpy.sum(asgn.pan_gains ** 2))
 			numpy.testing.assert_allclose(total_power, 1.0, atol=1e-5,
@@ -987,7 +987,7 @@ assignments:
         reference: BD0025
     pan: [100, 0]
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
+		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2).note_map
 		asgn, _ = note_map[(9, 36)]
 		numpy.testing.assert_allclose(asgn.pan_gains, [1.0, 0.0], atol=1e-5)
 
@@ -1021,7 +1021,7 @@ assignments:
       - repitch: true
     one_shot: false
 """)
-		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
+		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"]).note_map
 
 		for midi_note in [48, 50, 52]:
 			asgn, pick = note_map[(0, midi_note)]
@@ -1041,7 +1041,7 @@ assignments:
       order_by: similarity
     one_shot: true
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert note_map[(9, 36)][1] == 1
 		assert note_map[(9, 35)][1] == 2
@@ -1058,7 +1058,7 @@ assignments:
       where:
         reference: BD0025
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 		assert (9, 36) in note_map
 
 	def test_note_range_in_map (self, tmp_path: pathlib.Path) -> None:
@@ -1075,7 +1075,7 @@ assignments:
     process:
       - repitch: true
 """)
-		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
+		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"]).note_map
 
 		assert len(note_map) == 25
 		assert (0, 36) in note_map
@@ -1471,7 +1471,7 @@ assignments:
       - repitch: true
     one_shot: false
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (0, 36) in note_map
 		asgn, pick = note_map[(0, 36)]
@@ -1496,7 +1496,7 @@ assignments:
     process:
       - repitch: true
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (1, 60) in note_map
 		asgn, _ = note_map[(1, 60)]
@@ -1518,7 +1518,7 @@ assignments:
     process:
       - repitch: true
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (0, 60) in note_map
 		asgn, pick = note_map[(0, 60)]
@@ -1541,7 +1541,7 @@ assignments:
       - repitch: true
     one_shot: false
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		for midi_note in [48, 50, 52]:
 			asgn, pick = note_map[(0, midi_note)]
@@ -1562,7 +1562,7 @@ assignments:
     process:
       - repitch: true
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 		assert len(note_map) == 128
 
 
@@ -1597,7 +1597,7 @@ assignments:
       - repitch: true
     one_shot: false
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (1, 36) in note_map
 		asgn, pick = note_map[(1, 36)]
@@ -1617,7 +1617,7 @@ assignments:
       pick: 1
     one_shot: false
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (2, 36) in note_map
 		asgn, _ = note_map[(2, 36)]
@@ -1634,7 +1634,7 @@ assignments:
     select:
       order_by: newest
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 		assert (1, 60) in note_map
 
 
@@ -1667,7 +1667,7 @@ assignments:
           reference: BD0025
     one_shot: true
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"])
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert (9, 36) in note_map
 		asgn, _ = note_map[(9, 36)]
@@ -1689,7 +1689,7 @@ assignments:
       - order_by: oldest
       - order_by: newest
 """)
-		note_map = subsample.player.load_midi_map(path, [])
+		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		asgn, _ = note_map[(0, 60)]
 		assert len(asgn.select) == 3
@@ -1712,7 +1712,7 @@ assignments:
     process:
       - repitch: true
 """)
-		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"])
+		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"]).note_map
 
 		for midi_note in range(36, 49):
 			assert (0, midi_note) in note_map
@@ -1739,7 +1739,7 @@ assignments:
           reference: UNKNOWN
 """)
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			note_map = subsample.player.load_midi_map(path, [])
+			note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert len(note_map) == 0
 

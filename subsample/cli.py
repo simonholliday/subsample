@@ -35,6 +35,7 @@ import yaml
 
 import subsample.analysis
 import subsample.audio
+import subsample.bank
 import subsample.buffer
 import subsample.config
 import subsample.detector
@@ -331,6 +332,103 @@ def _run_recorder (
 		writer.shutdown()
 
 
+def _load_bank (
+	defn: subsample.bank.BankDefinition,
+	reference_library: subsample.library.ReferenceLibrary,
+	cfg: subsample.config.Config,
+	output_sample_rate: int,
+) -> subsample.bank.Bank:
+
+	"""Load a single instrument bank: library, similarity matrix, and transform pipeline.
+
+	Args:
+		defn:               Parsed bank definition from the MIDI map.
+		reference_library:  Shared reference library for similarity scoring.
+		cfg:                Full application config (memory limits, transform settings).
+		output_sample_rate: Effective player output sample rate for variant resampling.
+
+	Returns:
+		Fully loaded Bank ready for playback.
+	"""
+
+	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
+	directory = pathlib.Path(defn.directory)
+
+	# Load samples.
+	instrument_library = subsample.library.load_instrument_library(
+		directory,
+		max_instrument_bytes,
+		load_audio=True,
+		clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
+	)
+
+	# Similarity matrix (per-bank — rankings are relative to each bank's samples).
+	similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
+	if len(instrument_library) > 0:
+		similarity_matrix.bulk_add(instrument_library.samples())
+
+	# Transform pipeline (per-bank).
+	max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
+
+	transform_cache = subsample.transform.TransformCache(
+		max_memory_bytes=max_transform_bytes,
+	)
+
+	def _on_transform_complete (result: subsample.transform.TransformResult) -> None:
+		transform_cache.put(result)
+
+	def _on_transform_idle (completed: int) -> None:
+		_log.info(
+			"Transform queue idle [%s] — %d variant(s) processed  [cache: %s]",
+			defn.name, completed, transform_cache.format_memory(),
+		)
+
+	variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None
+	if cfg.transform.variant_cache_dir and cfg.transform.max_disk_mb > 0:
+		variant_disk_cache = subsample.transform.VariantDiskCache(
+			directory=pathlib.Path(cfg.transform.variant_cache_dir),
+			max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
+			sample_rate=output_sample_rate,
+		)
+
+	transform_processor = subsample.transform.TransformProcessor(
+		sample_rate=cfg.recorder.audio.sample_rate,
+		output_sample_rate=output_sample_rate,
+		bit_depth=cfg.recorder.audio.bit_depth,
+		on_complete=_on_transform_complete,
+		on_idle=_on_transform_idle,
+		disk_cache=variant_disk_cache,
+	)
+
+	transform_manager = subsample.transform.TransformManager(
+		cache=transform_cache,
+		processor=transform_processor,
+		instrument_library=instrument_library,
+		cfg=cfg.transform,
+		disk_cache=variant_disk_cache,
+	)
+
+	# Auto-enqueue variants for pre-loaded samples.
+	if len(instrument_library) > 0:
+		for record in instrument_library.samples():
+			transform_manager.on_sample_added(record)
+
+	_log.info(
+		"Bank %r loaded: %d sample(s) from %s  [%s]",
+		defn.name, len(instrument_library), defn.directory,
+		instrument_library.format_memory(),
+	)
+
+	return subsample.bank.Bank(
+		name=defn.name,
+		directory=directory,
+		program=defn.program,
+		instrument_library=instrument_library,
+		similarity_matrix=similarity_matrix,
+		transform_manager=transform_manager,
+	)
+
+
 def _start_player (
 	cfg: subsample.config.Config,
 	shutdown_event: threading.Event,
@@ -339,6 +437,7 @@ def _start_player (
 	reference_library: subsample.library.ReferenceLibrary,
 	player_cell: list[typing.Optional[subsample.player.MidiPlayer]],
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
+	bank_manager: typing.Optional[subsample.bank.BankManager] = None,
 ) -> None:
 
 	"""Select a MIDI input device (or create a virtual port), then run the player.
@@ -359,18 +458,30 @@ def _start_player (
 		                    call update_pitched_assignments() when the best match changes.
 		transform_manager:  Optional transform pipeline; enables pitched variant
 		                    playback when provided.
+		bank_manager:       Optional bank manager for multi-bank switching via MIDI
+		                    Program Change.
 	"""
 
-	# Load the MIDI routing map from config or fall back to the shipped default.
-	_midi_map_path = (
-		pathlib.Path(cfg.player.midi_map) if cfg.player.midi_map is not None
-		else pathlib.Path(__file__).parent.parent / "midi-map.yaml.default"
-	)
+	# Load the MIDI routing map.  Requires an explicit path in config —
+	# no hidden fallback.  A new user must set player.midi_map to get output.
+	if cfg.player.midi_map is None:
+		print(
+			"Player enabled but no MIDI map configured — "
+			"set player.midi_map in config.yaml "
+			"(e.g. midi_map: \"./midi-map-gm-drums.yaml\").",
+			file=sys.stderr,
+		)
+		_log.warning("player.midi_map is not set — player will not start")
+		return
+
+	_midi_map_path = pathlib.Path(cfg.player.midi_map)
 	try:
-		midi_map = subsample.player.load_midi_map(_midi_map_path, reference_library.names())
+		midi_map_result = subsample.player.load_midi_map(_midi_map_path, reference_library.names())
 	except (FileNotFoundError, ValueError) as exc:
 		print(f"Error loading MIDI map: {exc}", file=sys.stderr)
 		return
+
+	midi_map = midi_map_result.note_map
 
 	# Virtual port mode: bypass hardware device selection entirely.
 	# MidiPlayer.run() will open the named virtual port with virtual=True.
@@ -392,6 +503,7 @@ def _start_player (
 			max_polyphony=cfg.player.max_polyphony,
 			limiter_threshold_db=cfg.player.limiter_threshold_db,
 			limiter_ceiling_db=cfg.player.limiter_ceiling_db,
+			bank_manager=bank_manager,
 		)
 		player_cell[0] = player
 		player.update_pitched_assignments()
@@ -430,6 +542,7 @@ def _start_player (
 		max_polyphony=cfg.player.max_polyphony,
 		limiter_threshold_db=cfg.player.limiter_threshold_db,
 		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
+		bank_manager=bank_manager,
 	)
 	player_cell[0] = player
 	player.update_pitched_assignments()
@@ -476,116 +589,150 @@ def main () -> None:
 	if args.files:
 		_process_input_files(args.files, cfg)
 
-	# Create instrument library. PCM audio is only needed when the player is
-	# active — skipping it saves memory when player is disabled.
+	# --- Bank detection ---
+	# Pre-load the MIDI map to check for bank definitions before loading
+	# instrument libraries.  Banks override cfg.instrument.directory.
+	bank_manager: typing.Optional[subsample.bank.BankManager] = None
+	bank_definitions: list[subsample.bank.BankDefinition] = []
+	bank_channel: int = subsample.bank.DEFAULT_BANK_CHANNEL
+
+	if cfg.player.enabled and reference_library is not None and cfg.player.midi_map is not None:
+		_midi_map_path = pathlib.Path(cfg.player.midi_map)
+		try:
+			midi_map_result = subsample.player.load_midi_map(_midi_map_path, reference_library.names())
+			bank_definitions = midi_map_result.bank_definitions
+			bank_channel = midi_map_result.bank_channel
+		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+			_log.warning("Could not pre-load MIDI map for bank detection: %s", exc)
+
+	# Resolve the effective output sample rate for the player.
+	output_sample_rate = (
+		cfg.player.audio.sample_rate
+		if cfg.player.audio.sample_rate is not None
+		else cfg.recorder.audio.sample_rate
+	)
+
+	# Declare shared variables before the bank/single-directory branch.
 	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
-	if cfg.instrument.directory is not None and cfg.player.enabled:
-		instrument_library = subsample.library.load_instrument_library(
-			pathlib.Path(cfg.instrument.directory),
-			max_instrument_bytes,
-			load_audio=True,
-			clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
-		)
+	instrument_library:  subsample.library.InstrumentLibrary
+	similarity_matrix:   typing.Optional[subsample.similarity.SimilarityMatrix] = None
+	transform_manager:   typing.Optional[subsample.transform.TransformManager] = None
+
+	# --- Multi-bank loading ---
+	# When the MIDI map declares banks, load each one independently.
+	# cfg.instrument.directory is ignored (banks take precedence).
+	if bank_definitions and reference_library is not None:
+		if cfg.instrument.directory is not None:
+			_log.info(
+				"MIDI map declares %d bank(s) — ignoring instrument.directory (%s)",
+				len(bank_definitions), cfg.instrument.directory,
+			)
+
+		banks: list[subsample.bank.Bank] = []
+		for defn in bank_definitions:
+			bank = _load_bank(defn, reference_library, cfg, output_sample_rate)
+			banks.append(bank)
+			print(
+				f"  Bank {defn.program:<3d}     : {defn.name!r} — "
+				f"{len(bank.instrument_library)} sample(s) from {defn.directory}"
+			)
+
+		bank_manager = subsample.bank.BankManager(banks, bank_channel)
+
+		# The primary instrument_library/similarity/transform used by the
+		# recorder on_complete callback come from the first bank. Captures
+		# directed at a bank directory are also picked up by that bank's
+		# watcher (see below).
+		instrument_library  = banks[0].instrument_library
+		similarity_matrix   = banks[0].similarity_matrix
+		transform_manager   = banks[0].transform_manager
+
 		print(
-			f"  Instruments  : {len(instrument_library)} sample(s) loaded"
-			f" from {cfg.instrument.directory}"
+			f"  Banks        : {len(banks)} loaded — "
+			f"switch via Program Change on ch {bank_channel}"
 		)
-		_log.info(
-			"Instrument library: %d sample(s)  [%s]",
-			len(instrument_library), instrument_library.format_memory(),
-		)
+
+	# --- Single-directory mode (no banks) ---
 	else:
-		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
+		# Create instrument library. PCM audio is only needed when the player is
+		# active — skipping it saves memory when player is disabled.
+		if cfg.instrument.directory is not None and cfg.player.enabled:
+			instrument_library = subsample.library.load_instrument_library(
+				pathlib.Path(cfg.instrument.directory),
+				max_instrument_bytes,
+				load_audio=True,
+				clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
+			)
+			print(
+				f"  Instruments  : {len(instrument_library)} sample(s) loaded"
+				f" from {cfg.instrument.directory}"
+			)
+			_log.info(
+				"Instrument library: %d sample(s)  [%s]",
+				len(instrument_library), instrument_library.format_memory(),
+			)
+		else:
+			instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
+
+		# Build the similarity matrix now that both libraries are populated.
+		if reference_library is not None and cfg.player.enabled:
+			similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
+			if len(instrument_library) > 0:
+				similarity_matrix.bulk_add(instrument_library.samples())
+			print(f"  Similarity   : {similarity_matrix}")
+
+		# --- Transform pipeline ---
+		if cfg.player.enabled:
+			max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
+
+			_transform_cache = subsample.transform.TransformCache(
+				max_memory_bytes=max_transform_bytes,
+			)
+			def _on_transform_complete (
+				result: subsample.transform.TransformResult,
+			) -> None:
+				_transform_cache.put(result)
+
+			def _on_transform_idle (completed: int) -> None:
+				_log.info(
+					"Transform queue idle — %d variant(s) processed  [cache: %s]",
+					completed, _transform_cache.format_memory(),
+				)
+
+			_variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None
+
+			if cfg.transform.variant_cache_dir and cfg.transform.max_disk_mb > 0:
+				_variant_disk_cache = subsample.transform.VariantDiskCache(
+					directory=pathlib.Path(cfg.transform.variant_cache_dir),
+					max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
+					sample_rate=output_sample_rate,
+				)
+				_log.info(
+					"Variant disk cache: %s (max %.0f MB)",
+					cfg.transform.variant_cache_dir, cfg.transform.max_disk_mb,
+				)
+
+			_transform_processor = subsample.transform.TransformProcessor(
+				sample_rate=cfg.recorder.audio.sample_rate,
+				output_sample_rate=output_sample_rate,
+				bit_depth=cfg.recorder.audio.bit_depth,
+				on_complete=_on_transform_complete,
+				on_idle=_on_transform_idle,
+				disk_cache=_variant_disk_cache,
+			)
+			transform_manager = subsample.transform.TransformManager(
+				cache=_transform_cache,
+				processor=_transform_processor,
+				instrument_library=instrument_library,
+				cfg=cfg.transform,
+				disk_cache=_variant_disk_cache,
+			)
+
+			if len(instrument_library) > 0:
+				for _record in instrument_library.samples():
+					transform_manager.on_sample_added(_record)
 
 	analysis_params = subsample.analysis.compute_params(cfg.recorder.audio.sample_rate)
-
-	# Build the similarity matrix now that both libraries are populated.
-	# bulk_add() is vectorised (single matrix multiply for N × M scores),
-	# so loading hundreds of pre-existing instrument samples is fast.
-	# Only needed when the player is enabled — similarity scores drive
-	# note-to-sample routing and are not consumed by the recorder alone.
-	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix] = None
-	if reference_library is not None and cfg.player.enabled:
-		similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
-		if len(instrument_library) > 0:
-			similarity_matrix.bulk_add(instrument_library.samples())
-		print(f"  Similarity   : {similarity_matrix}")
-
-	# --- Transform pipeline ---
-	# Only needed when the player is enabled — variants (base, pitch-shifted,
-	# time-stretched) exist solely to serve MIDI-triggered playback.  Skip the
-	# entire pipeline when running recorder-only to avoid unnecessary CPU/memory
-	# usage and spurious "Auto-pitch" log messages.
-	transform_manager: typing.Optional[subsample.transform.TransformManager] = None
-
-	if cfg.player.enabled:
-		# Create the cache, processor, and manager now (before threads start) so
-		# that the on_complete callback and the player share the same instance.
-		# Phase 2: pitch shifting is active — on_sample_added() auto-enqueues
-		# variants for tonal samples via _apply_pitch() (Rubber Band, offline mode).
-		max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
-
-		_transform_cache = subsample.transform.TransformCache(
-			max_memory_bytes=max_transform_bytes,
-		)
-		def _on_transform_complete (
-			result: subsample.transform.TransformResult,
-		) -> None:
-			_transform_cache.put(result)
-
-		def _on_transform_idle (completed: int) -> None:
-			_log.info(
-				"Transform queue idle — %d variant(s) processed  [cache: %s]",
-				completed, _transform_cache.format_memory(),
-			)
-
-		# Resolve the effective output sample rate for the player.  Variants are
-		# resampled to this rate in the transform worker so they arrive at the
-		# player pre-converted — zero conversion overhead at trigger time.
-		output_sample_rate = (
-			cfg.player.audio.sample_rate
-			if cfg.player.audio.sample_rate is not None
-			else cfg.recorder.audio.sample_rate
-		)
-
-		# Disk cache for persistent variant storage across restarts.
-		_variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None
-
-		if cfg.transform.variant_cache_dir and cfg.transform.max_disk_mb > 0:
-			_variant_disk_cache = subsample.transform.VariantDiskCache(
-				directory=pathlib.Path(cfg.transform.variant_cache_dir),
-				max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
-				sample_rate=output_sample_rate,
-			)
-			_log.info(
-				"Variant disk cache: %s (max %.0f MB)",
-				cfg.transform.variant_cache_dir, cfg.transform.max_disk_mb,
-			)
-
-		_transform_processor = subsample.transform.TransformProcessor(
-			sample_rate=cfg.recorder.audio.sample_rate,
-			output_sample_rate=output_sample_rate,
-			bit_depth=cfg.recorder.audio.bit_depth,
-			on_complete=_on_transform_complete,
-			on_idle=_on_transform_idle,
-			disk_cache=_variant_disk_cache,
-		)
-		transform_manager = subsample.transform.TransformManager(
-			cache=_transform_cache,
-			processor=_transform_processor,
-			instrument_library=instrument_library,
-			cfg=cfg.transform,
-			disk_cache=_variant_disk_cache,
-		)
-
-		# Auto-enqueue pitch variants for all pre-loaded instrument samples.
-		# Live-captured samples are handled by the on_complete callback (below).
-		# Pre-loaded startup samples are never processed by that callback, so we
-		# notify the manager here, before threads start.  enqueue() returns
-		# immediately; variants are computed in the background by the worker pool.
-		if len(instrument_library) > 0:
-			for _record in instrument_library.samples():
-				transform_manager.on_sample_added(_record)
 
 	# --- Thread-based orchestration ---
 	# Both the recorder and player have blocking loops, so each runs on its own
@@ -624,7 +771,8 @@ def main () -> None:
 				target=_start_player,
 				args=(
 					cfg, shutdown_event, instrument_library,
-					similarity_matrix, reference_library, _player_cell, transform_manager,
+					similarity_matrix, reference_library, _player_cell,
+					transform_manager, bank_manager,
 				),
 				name="player",
 			))
@@ -633,37 +781,63 @@ def main () -> None:
 		print("Neither recorder nor player is enabled. Nothing to do.")
 		return
 
-	# --- Directory watcher ---
+	# --- Directory watchers ---
 	# Start after the instrument library and player are configured so the
 	# on_watched_sample callback can reference all live subsystems.
 	# Only active when player is enabled — the watcher's purpose is to feed
 	# new samples into the playback pipeline.
-	instrument_watcher: typing.Optional[subsample.watcher.InstrumentWatcher] = None
+	instrument_watchers: list[subsample.watcher.InstrumentWatcher] = []
 
-	if cfg.instrument.watch and cfg.instrument.directory is not None and cfg.player.enabled:
-		watch_dir = pathlib.Path(cfg.instrument.directory)
+	if cfg.instrument.watch and cfg.player.enabled:
 
-		# Collect sidecars already loaded at startup so the watcher ignores them.
-		# Resolve to absolute paths — the watcher resolves incoming paths via
-		# Path.resolve(), so the comparison must use the same form.
-		known_sidecars: set[pathlib.Path] = {
-			(fp.parent / (fp.name + ".analysis.json")).resolve()
-			for r in instrument_library.samples()
-			if (fp := r.filepath) is not None
-		}
+		# Multi-bank mode: one watcher per bank directory.
+		if bank_manager is not None:
+			for bank in bank_manager.all_banks():
+				_bank = bank  # capture for closure
 
-		def _on_watched_sample (record: subsample.library.SampleRecord) -> None:
-			_log.info("Watcher: new sample arrived — %s (%.2fs)", record.name, record.duration)
-			_integrate_sample(record, instrument_library, similarity_matrix,
-			                  transform_manager, _player_cell)
+				known = {
+					(fp.parent / (fp.name + ".analysis.json")).resolve()
+					for r in _bank.instrument_library.samples()
+					if (fp := r.filepath) is not None
+				}
 
-		instrument_watcher = subsample.watcher.InstrumentWatcher(
-			directory=watch_dir,
-			known_sidecars=known_sidecars,
-			on_sample_loaded=_on_watched_sample,
-		)
-		instrument_watcher.start()
-		print(f"  Watcher      : monitoring {cfg.instrument.directory} for new samples")
+				def _make_bank_callback (b: subsample.bank.Bank) -> typing.Callable[[subsample.library.SampleRecord], None]:
+					def cb (record: subsample.library.SampleRecord) -> None:
+						_log.info("Watcher [%s]: new sample — %s (%.2fs)", b.name, record.name, record.duration)
+						_integrate_sample(record, b.instrument_library, b.similarity_matrix,
+						                  b.transform_manager, _player_cell)
+					return cb
+
+				watcher = subsample.watcher.InstrumentWatcher(
+					directory=_bank.directory,
+					known_sidecars=known,
+					on_sample_loaded=_make_bank_callback(_bank),
+				)
+				watcher.start()
+				instrument_watchers.append(watcher)
+				print(f"  Watcher      : monitoring {_bank.directory} ({_bank.name!r})")
+
+		# Single-directory mode.
+		elif cfg.instrument.directory is not None:
+			known_sidecars: set[pathlib.Path] = {
+				(fp.parent / (fp.name + ".analysis.json")).resolve()
+				for r in instrument_library.samples()
+				if (fp := r.filepath) is not None
+			}
+
+			def _on_watched_sample (record: subsample.library.SampleRecord) -> None:
+				_log.info("Watcher: new sample arrived — %s (%.2fs)", record.name, record.duration)
+				_integrate_sample(record, instrument_library, similarity_matrix,
+				                  transform_manager, _player_cell)
+
+			watcher = subsample.watcher.InstrumentWatcher(
+				directory=pathlib.Path(cfg.instrument.directory),
+				known_sidecars=known_sidecars,
+				on_sample_loaded=_on_watched_sample,
+			)
+			watcher.start()
+			instrument_watchers.append(watcher)
+			print(f"  Watcher      : monitoring {cfg.instrument.directory} for new samples")
 
 	# --- MIDI map file watcher ---
 	# Monitors the MIDI map YAML file for changes so assignments can be
@@ -689,7 +863,7 @@ def main () -> None:
 			assert reference_library is not None
 
 			try:
-				new_map = subsample.player.load_midi_map(
+				result = subsample.player.load_midi_map(
 					path, reference_library.names(),
 				)
 			except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
@@ -698,7 +872,7 @@ def main () -> None:
 				)
 				return
 
-			player.reload_midi_map(new_map)
+			player.reload_midi_map(result.note_map)
 
 		midi_map_watcher = subsample.watcher.MidiMapWatcher(
 			path=_midi_map_watch_path,
@@ -723,14 +897,18 @@ def main () -> None:
 	for t in threads:
 		t.join(timeout=10.0)
 
-	if instrument_watcher is not None:
-		instrument_watcher.stop()
+	for iw in instrument_watchers:
+		iw.stop()
 
 	if midi_map_watcher is not None:
 		midi_map_watcher.stop()
 
 	# Drain any in-flight transform workers before exiting.
-	if transform_manager is not None:
+	if bank_manager is not None:
+		for bank in bank_manager.all_banks():
+			if bank.transform_manager is not None:
+				bank.transform_manager.shutdown()
+	elif transform_manager is not None:
 		transform_manager.shutdown()
 
 	print("Done.")

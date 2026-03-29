@@ -96,18 +96,26 @@ player:
   # value — never exceeds it.  Must be greater than limiter_threshold_db.
   # Range: limiter_threshold_db–0.0.
 
-  # midi_map: "./midi-map.yaml"
+  # midi_map: midi-map-gm-drums.yaml
   # Path to a MIDI routing map file.  Defines which MIDI notes trigger which
-  # samples.  See midi-map.yaml.default for the full format specification.
-  # If omitted, the built-in GM drum mapping is used.
+  # samples.  Required when the player is enabled — without it, the player
+  # will not start.
+  #
+  # Included maps:
+  #   midi-map-gm-drums.yaml   — complete GM percussion kit (47 instruments),
+  #                               pre-mixed with console-style filtering and
+  #                               panning.  Recommended starting point.
+  #   midi-map.yaml.default    — template with format documentation and
+  #                               examples.  Copy and customise.
+  #
+  # See midi-map.yaml.default for the full format specification.
 
   # watch_midi_map: false
   # When true, monitor the midi_map file at runtime for changes and reload
   # assignments without restarting.  Enables a "live-coding" workflow where
   # you edit sample assignments in your text editor and they take effect on
-  # the next MIDI trigger.  Requires midi_map to be set (the built-in
-  # default is not watched).  Debounced: rapid saves from text editors are
-  # coalesced into a single reload.
+  # the next MIDI trigger.  Requires midi_map to be set.  Debounced: rapid
+  # saves from text editors are coalesced into a single reload.
 
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
@@ -196,9 +204,9 @@ detection:
 # ---------------------------------------------------------------------------
 
 output:
-  directory: "./samples/captures"
+  directory: samples/captures
   # Directory where WAV files are saved. May be absolute or relative to cwd.
-  # Example: "/tmp/recordings", "~/audio_capture", "./samples/captures".
+  # Example: /tmp/recordings, ~/audio_capture, samples/captures.
   # Directory is created automatically if it does not exist.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values
 
@@ -279,7 +287,7 @@ analysis:
 #   # Range: 0.0-2.0. Set to 0.0 to disable.
 
 # reference:
-#   directory: "./samples/reference"
+#   directory: samples/reference
 #   Path to a directory containing pre-analyzed reference sounds. Each
 #   .analysis.json sidecar file found at the top level defines one canonical
 #   sample used for similarity classification (e.g. "kick", "snare", "hat").
@@ -300,7 +308,7 @@ analysis:
 #   # only controls how much audio is held in memory at once.
 #   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_instrument_values
 #
-#   directory: "./samples/captures"
+#   directory: samples/captures
 #   # Optional: pre-load instrument samples from this directory at startup.
 #   # Each sample requires both a WAV file and an .analysis.json sidecar.
 #   # If omitted, the instrument library starts empty and is populated as
@@ -325,9 +333,9 @@ analysis:
 #   # Persistent library pattern — set this to the same path as output.directory:
 #   #
 #   #   output:
-#   #     directory: "./samples/captures"
+#   #     directory: samples/captures
 #   #   instrument:
-#   #     directory: "./samples/captures"
+#   #     directory: samples/captures
 #   #
 #   # On startup, all existing WAV files are loaded into memory.
 #   # As new recordings arrive they are written to disk (persisting)

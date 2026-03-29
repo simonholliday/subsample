@@ -36,6 +36,7 @@ import yaml
 import pymididefs.notes
 import subsample.analysis
 import subsample.audio
+import subsample.bank
 import subsample.library
 import subsample.query
 import subsample.similarity
@@ -56,6 +57,24 @@ _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 # assignments without explicit pick).  For single-note or explicit-pick
 # assignments, this equals Assignment.pick.
 NoteMap = dict[tuple[int, int], tuple[subsample.query.Assignment, int]]
+
+
+@dataclasses.dataclass(frozen=True)
+class MidiMapResult:
+
+	"""Complete result of parsing a MIDI map YAML file.
+
+	Fields:
+		note_map:         Note routing table: (mido_channel, midi_note) → (Assignment, pick).
+		bank_definitions: Parsed bank declarations from the optional ``banks:`` key.
+		                  Empty list when no banks are declared (single-directory mode).
+		bank_channel:     MIDI channel for Program Change bank switching (user-facing 1-16,
+		                  0 = omni).  Only meaningful when bank_definitions is non-empty.
+	"""
+
+	note_map:         NoteMap
+	bank_definitions: list[subsample.bank.BankDefinition]
+	bank_channel:     int
 
 
 def _beat_quantize_params (process: subsample.query.ProcessSpec) -> tuple[typing.Optional[float], int]:
@@ -209,12 +228,13 @@ def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
 	output_channels: int = 2,
-) -> NoteMap:
+) -> MidiMapResult:
 
 	"""Load a MIDI routing map from a YAML file.
 
 	Parses the assignments list using the select/process pipeline format
-	and returns a lookup dict keyed by (mido_channel, midi_note).
+	and returns a MidiMapResult containing the note map, any bank
+	definitions, and the bank channel.
 
 	Each assignment declares:
 	  select:   Which sample to play — filter predicates, ordering, pick position.
@@ -236,8 +256,7 @@ def load_midi_map (
 		output_channels:  Number of output channels (default 2 = stereo).
 
 	Returns:
-		NoteMap: dict mapping (mido_channel, midi_note) → (Assignment, pick_position).
-		Empty dict if the file is empty or has no valid assignments.
+		MidiMapResult containing the NoteMap, bank definitions, and bank channel.
 
 	Raises:
 		FileNotFoundError: If the file does not exist.
@@ -250,9 +269,25 @@ def load_midi_map (
 	with path.open(encoding="utf-8") as fh:
 		raw = yaml.safe_load(fh)
 
-	if raw is None or "assignments" not in raw:
+	if raw is None:
+		_log.warning("MIDI map %s is empty — no notes will be mapped", path)
+		return MidiMapResult(
+			note_map={},
+			bank_definitions=[],
+			bank_channel=subsample.bank.DEFAULT_BANK_CHANNEL,
+		)
+
+	# Parse optional bank definitions.
+	bank_definitions = subsample.bank.parse_banks(raw.get("banks"))
+	bank_channel = int(raw.get("bank_channel", subsample.bank.DEFAULT_BANK_CHANNEL))
+
+	if "assignments" not in raw:
 		_log.warning("MIDI map %s has no assignments — no notes will be mapped", path)
-		return {}
+		return MidiMapResult(
+			note_map={},
+			bank_definitions=bank_definitions,
+			bank_channel=bank_channel,
+		)
 
 	reference_set = {name.upper() for name in reference_names}
 	note_map: NoteMap = {}
@@ -338,13 +373,18 @@ def load_midi_map (
 			note_map[(mido_channel, int(note))] = (assignment, pick)
 
 	_log.info(
-		"MIDI map loaded from %s: %d note(s) across %d assignment(s)",
+		"MIDI map loaded from %s: %d note(s) across %d assignment(s)%s",
 		path,
 		len(note_map),
 		len(raw.get("assignments", [])),
+		f", {len(bank_definitions)} bank(s)" if bank_definitions else "",
 	)
 
-	return note_map
+	return MidiMapResult(
+		note_map=note_map,
+		bank_definitions=bank_definitions,
+		bank_channel=bank_channel,
+	)
 
 
 @dataclasses.dataclass
@@ -499,12 +539,18 @@ class MidiPlayer:
 		max_polyphony: int = 8,
 		limiter_threshold_db: float = -1.5,
 		limiter_ceiling_db: float = -0.1,
+		bank_manager: typing.Optional[subsample.bank.BankManager] = None,
 	) -> None:
 
 		self._device_name        = device_name
 		self._shutdown_event     = shutdown_event
 		self._instrument_library = instrument_library
 		self._similarity_matrix  = similarity_matrix
+
+		# Bank manager: when provided, the player delegates library, similarity,
+		# and transform lookups to the active bank.  When None, the player uses
+		# the directly-passed instances (single-directory backward compat).
+		self._bank_manager       = bank_manager
 		self._sample_rate        = sample_rate
 		self._bit_depth          = bit_depth
 		self._output_device_name = output_device_name
@@ -605,6 +651,30 @@ class MidiPlayer:
 			len(self._note_map),
 			"\n  ".join(lines),
 		)
+
+	# -- Effective delegates -----------------------------------------------
+	# When a BankManager is present, the player delegates library, similarity,
+	# and transform lookups to the active bank.  When None (single-directory
+	# mode), the directly-passed instances are used.
+
+	@property
+	def _effective_instrument_library (self) -> subsample.library.InstrumentLibrary:
+		if self._bank_manager is not None:
+			return self._bank_manager.active_bank.instrument_library
+		return self._instrument_library
+
+	@property
+	def _effective_similarity_matrix (self) -> subsample.similarity.SimilarityMatrix:
+		if self._bank_manager is not None:
+			return self._bank_manager.active_bank.similarity_matrix
+		return self._similarity_matrix
+
+	@property
+	def _effective_transform_manager (self) -> typing.Optional[subsample.transform.TransformManager]:
+		if self._bank_manager is not None:
+			tm: typing.Any = self._bank_manager.active_bank.transform_manager
+			return typing.cast(typing.Optional[subsample.transform.TransformManager], tm)
+		return self._transform_manager
 
 	def run (self) -> None:
 
@@ -782,6 +852,15 @@ class MidiPlayer:
 							voice.releasing = True
 			return
 
+		# Program Change: switch the active instrument bank when a BankManager
+		# is configured and the message arrives on the designated bank channel.
+		if msg.type == "program_change" and self._bank_manager is not None:
+			bm = self._bank_manager
+			if bm.bank_channel_mido == -1 or msg.channel == bm.bank_channel_mido:
+				if bm.switch_to(msg.program):
+					self.update_assignments()
+			return
+
 		# Only act on note_on events; anything else is logged at DEBUG and ignored.
 		if msg.type != "note_on":
 			_log.debug("MIDI (ignored): %s", msg)
@@ -799,12 +878,14 @@ class MidiPlayer:
 
 		# ── Sample selection via query engine ─────────────────────────────
 
-		all_samples = self._instrument_library.samples()
+		eff_library    = self._effective_instrument_library
+		eff_similarity = self._effective_similarity_matrix
+		all_samples    = eff_library.samples()
 		sample_id: typing.Optional[int] = None
 
 		for select_spec in assignment.select:
 
-			ranked = subsample.query.query(select_spec, all_samples, self._similarity_matrix)
+			ranked = subsample.query.query(select_spec, all_samples, eff_similarity)
 
 			if ranked:
 				# pick is 1-indexed; clamp to available range, fall back to rank 0.
@@ -819,7 +900,7 @@ class MidiPlayer:
 			)
 			return
 
-		record = self._instrument_library.get(sample_id)
+		record = eff_library.get(sample_id)
 
 		if record is None or record.audio is None:
 			_log.debug("Sample %d not found or audio not loaded", sample_id)
@@ -827,7 +908,9 @@ class MidiPlayer:
 
 		# ── Variant lookup based on ProcessSpec ───────────────────────────
 
-		if self._transform_manager is not None:
+		eff_transform = self._effective_transform_manager
+
+		if eff_transform is not None:
 
 			# Build the full ordered transform chain from the process spec.
 			# Dynamic parameters (MIDI note, BPM) are substituted at the
@@ -863,7 +946,7 @@ class MidiPlayer:
 				)
 
 				if spec.steps:
-					variant = self._transform_manager.get_variant(sample_id, spec)
+					variant = eff_transform.get_variant(sample_id, spec)
 
 					if variant is not None:
 						rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains, assignment.gain_db)
@@ -877,7 +960,7 @@ class MidiPlayer:
 						return
 
 			# Fall back to the base variant (float32, peak-normalised, no DSP).
-			base = self._transform_manager.get_base(sample_id)
+			base = eff_transform.get_base(sample_id)
 
 			if base is not None:
 				rendered = self._render_float(base.audio, base.level, msg.velocity, pan_gains, assignment.gain_db)
@@ -951,8 +1034,13 @@ class MidiPlayer:
 		assignments exist.
 		"""
 
-		if self._transform_manager is None:
+		eff_transform = self._effective_transform_manager
+
+		if eff_transform is None:
 			return
+
+		eff_library    = self._effective_instrument_library
+		eff_similarity = self._effective_similarity_matrix
 
 		# Group notes by Assignment identity (object id) — all notes in the same
 		# assignment share the same select/process spec.  Collect (note, pick)
@@ -973,7 +1061,9 @@ class MidiPlayer:
 		if not groups:
 			return
 
-		all_samples = self._instrument_library.samples()
+		all_samples = eff_library.samples()
+		_total_assignments = 0
+		_total_variants = 0
 
 		for asgn, note_picks in groups.values():
 
@@ -981,7 +1071,7 @@ class MidiPlayer:
 			ranked: list[subsample.library.SampleRecord] = []
 
 			for select_spec in asgn.select:
-				ranked = subsample.query.query(select_spec, all_samples, self._similarity_matrix)
+				ranked = subsample.query.query(select_spec, all_samples, eff_similarity)
 
 				if ranked:
 					break
@@ -994,7 +1084,7 @@ class MidiPlayer:
 			# Repitch: all notes share pick=1 (same sample, pitched per note).
 			# The full process chain is passed so variants include filters, etc.
 			if asgn.process.has_repitch():
-				record = self._instrument_library.get(ranked[0].sample_id)
+				record = eff_library.get(ranked[0].sample_id)
 
 				if record is None:
 					continue
@@ -1006,9 +1096,11 @@ class MidiPlayer:
 					)
 
 				else:
-					self._transform_manager.enqueue_pitch_range(record, notes, process=asgn.process)
+					eff_transform.enqueue_pitch_range(record, notes, process=asgn.process)
+					_total_assignments += 1
+					_total_variants += len(notes)
 
-					_log.info(
+					_log.debug(
 						"Pitched %s: queued %d variant(s) for %r",
 						asgn.name, len(notes), record.name,
 					)
@@ -1032,7 +1124,7 @@ class MidiPlayer:
 						continue
 
 					seen_ids.add(sid)
-					record = self._instrument_library.get(sid)
+					record = eff_library.get(sid)
 
 					if record is None:
 						continue
@@ -1050,11 +1142,14 @@ class MidiPlayer:
 						target_bpm=bpm,
 						resolution=grid,
 					)
-					self._transform_manager.get_variant(sid, spec)
+					eff_transform.get_variant(sid, spec)
 					enqueued += 1
 
 				if enqueued > 0:
-					_log.info(
+					_total_assignments += 1
+					_total_variants += enqueued
+
+					_log.debug(
 						"beat_quantize %s: queued %d variant(s)",
 						asgn.name, enqueued,
 					)
@@ -1075,12 +1170,21 @@ class MidiPlayer:
 							continue
 
 						seen_ids_static.add(sid)
-						self._transform_manager.get_variant(sid, spec)
+						eff_transform.get_variant(sid, spec)
 
-					_log.info(
+					_total_assignments += 1
+					_total_variants += len(seen_ids_static)
+
+					_log.debug(
 						"Process %s: queued %d variant(s) (%d step(s))",
 						asgn.name, len(seen_ids_static), len(spec.steps),
 					)
+
+		if _total_assignments > 0:
+			_log.info(
+				"Assignments: %d with process chains, %d variant(s) queued",
+				_total_assignments, _total_variants,
+			)
 
 	# Backward-compatible alias — cli.py and tests call this name.
 	update_pitched_assignments = update_assignments
@@ -1094,8 +1198,8 @@ class MidiPlayer:
 		next call sees the new map.
 
 		Args:
-			new_map: Parsed NoteMap from load_midi_map().  Must be a complete
-			         replacement (not a diff).
+			new_map: Parsed NoteMap from load_midi_map().note_map.  Must be a
+			         complete replacement (not a diff).
 		"""
 
 		old_count = len(self._note_map)
