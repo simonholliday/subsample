@@ -100,16 +100,6 @@ class SampleRecord:
 	audio:       typing.Optional[numpy.ndarray] = None
 	filepath:    typing.Optional[pathlib.Path]  = None
 
-	def as_vector (self) -> numpy.ndarray:
-
-		"""Return the spectral fingerprint as a float32 1-D array.
-
-		Delegates to spectral.as_vector() — convenience accessor so callers do
-		not need to look up the nested spectral field for similarity comparison.
-		"""
-
-		return self.spectral.as_vector()
-
 
 class ReferenceLibrary:
 

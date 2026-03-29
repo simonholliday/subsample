@@ -325,6 +325,106 @@ class HpssPercussive:
 	"""
 
 
+@dataclasses.dataclass(frozen=True)
+class Gate:
+
+	"""Noise gate — silences audio below a threshold.
+
+	When used without parameters (``gate: true``), all settings adapt
+	automatically to the sample's analysis data:
+
+	  - threshold: 6 dB above the sample's noise floor (always engages)
+	  - attack:    fast for percussive sounds (gate opens instantly),
+	               slower for sustained sounds (avoids click)
+	  - release:   short for percussive (quick close), long for sustained
+	  - hold:      scaled to decay character (prevents chatter on decaying tails)
+	  - lookahead: small for percussive (catches transient start), none for sustained
+
+	Set any parameter explicitly to override the auto value.
+
+	threshold_db:   Level below which audio is silenced (dBFS).
+	                None = auto (noise_floor + 6 dB).
+	attack_ms:      How fast the gate opens when signal exceeds threshold (ms).
+	                None = auto (adapts to sample onset speed).
+	release_ms:     How fast the gate closes when signal drops below threshold (ms).
+	                None = auto (adapts to sample decay character).
+	hold_ms:        Minimum time the gate stays open after signal drops (ms).
+	                None = auto (adapts to sample decay).
+	lookahead_ms:   Delay audio so the gate opens before the transient (ms).
+	                None = auto (adapts to sample attack speed).
+	"""
+
+	threshold_db:  typing.Optional[float] = None
+	attack_ms:     typing.Optional[float] = None
+	release_ms:    typing.Optional[float] = None
+	hold_ms:       typing.Optional[float] = None
+	lookahead_ms:  typing.Optional[float] = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Distort:
+
+	"""Waveshaping distortion — aggressive harmonic saturation.
+
+	Goes beyond the gentle tanh curve of ``saturate`` with multiple shaping
+	modes: hard clipping, foldback, bit crushing, and sample-rate reduction.
+
+	When used without parameters (``distort: true``), drive and tone adapt
+	to the sample: peaky sounds get less drive (they already clip easily),
+	bright sounds get more post-distortion filtering to tame added harmonics.
+
+	mode:              Waveshaping algorithm.
+	                   "hard_clip" — flat ceiling at ±1 (classic digital clip).
+	                   "fold"      — signal folds back at ±1 (richer harmonics).
+	                   "bit_crush" — quantize to fewer amplitude levels (lo-fi).
+	                   "downsample" — reduce effective sample rate (aliasing).
+	drive_db:          Input gain before waveshaping (dB).
+	                   None = auto (adapts to crest factor).
+	mix:               Dry/wet blend (0.0 = fully dry, 1.0 = fully wet).
+	tone:              Post-distortion low-pass filter as fraction of Nyquist.
+	                   0.0 = very dark, 1.0 = no filtering.
+	                   None = auto (adapts to spectral rolloff).
+	bit_depth:         Target bit depth for bit_crush mode (1–16).
+	downsample_factor: Reduction factor for downsample mode (2–64).
+	"""
+
+	mode:              str                    = "hard_clip"
+	drive_db:          typing.Optional[float] = None
+	mix:               float                  = 1.0
+	tone:              typing.Optional[float] = None
+	bit_depth:         int                    = 8
+	downsample_factor: int                    = 4
+
+
+@dataclasses.dataclass(frozen=True)
+class Reshape:
+
+	"""Envelope reshaping — ADSR-style amplitude control.
+
+	Reshapes the amplitude envelope of the sound: tighten a loose kick,
+	truncate a reverb tail, add punch to a soft onset.  When used without
+	parameters (``reshape: true``), the release time auto-adapts to the
+	sample's natural decay, tightening the tail — the single most useful
+	default for a sampler ("clean up the capture for playback").
+
+	Parameters set to None mean "preserve the original envelope for this
+	phase."  Only the phases you specify are reshaped.
+
+	attack_ms:   Target attack time (ms).  None = preserve original onset.
+	hold_ms:     Time to hold at peak before decay begins (ms).
+	decay_ms:    Time from peak to sustain level (ms).  None = preserve.
+	sustain:     Sustain level as fraction of peak (0.0–1.0).
+	release_ms:  Fade-out time at the end of the sound (ms).
+	             None = auto (adapts to sample decay character).
+	"""
+
+	attack_ms:   typing.Optional[float] = None
+	hold_ms:     float                  = 0.0
+	decay_ms:    typing.Optional[float] = None
+	sustain:     float                  = 1.0
+	release_ms:  typing.Optional[float] = None
+
+
 # Union of all known transform step types.
 # Extend this when adding new transforms (see "How to add a new transform type"
 # in the module docstring).
@@ -340,6 +440,9 @@ TransformStep = typing.Union[
 	HpssHarmonic,
 	HpssPercussive,
 	TimeStretch,
+	Gate,
+	Distort,
+	Reshape,
 ]
 
 # ---------------------------------------------------------------------------
@@ -2273,6 +2376,376 @@ def _apply_hpss_percussive (
 
 
 # ---------------------------------------------------------------------------
+# Gate
+# ---------------------------------------------------------------------------
+
+# Epsilon for dB conversion — prevents log10(0) in gate threshold computation.
+_GATE_EPSILON: float = 1e-10
+
+
+def _resolve_gate_params (
+	record: "subsample.library.SampleRecord",
+	step:   Gate,
+) -> tuple[float, float, float, float, float]:
+
+	"""Resolve adaptive gate parameters from sample analysis data.
+
+	For each Optional field: if None, compute from analysis; if set, use as-is.
+
+	Returns:
+		(threshold_db, attack_ms, release_ms, hold_ms, lookahead_ms).
+	"""
+
+	# Threshold: 6 dB above the noise floor.
+	if step.threshold_db is not None:
+		threshold_db = step.threshold_db
+	else:
+		floor = record.level.noise_floor
+		threshold_db = 20.0 * math.log10(floor + _GATE_EPSILON) + 6.0
+
+	# Attack: percussive → fast gate open (1 ms), sustained → slower (5 ms).
+	if step.attack_ms is not None:
+		attack_ms = step.attack_ms
+	else:
+		attack_ms = 5.0 - 4.0 * record.spectral.attack
+
+	# Release: short-decay → fast close (20 ms), long-tail → slower (100 ms).
+	if step.release_ms is not None:
+		release_ms = step.release_ms
+	else:
+		release_ms = 20.0 + 80.0 * record.spectral.release
+
+	# Hold: longer-decaying sounds need longer hold to avoid chatter.
+	if step.hold_ms is not None:
+		hold_ms = step.hold_ms
+	else:
+		hold_ms = 10.0 + 40.0 * record.spectral.release
+
+	# Lookahead: percussive onsets benefit from a small lookahead.
+	if step.lookahead_ms is not None:
+		lookahead_ms = step.lookahead_ms
+	else:
+		lookahead_ms = 3.0 * (1.0 - record.spectral.attack)
+
+	return threshold_db, attack_ms, release_ms, hold_ms, lookahead_ms
+
+
+def _apply_gate (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Gate,
+) -> numpy.ndarray:
+
+	"""Apply a noise gate: silence audio below the threshold.
+
+	DSP: envelope detection → dB threshold → hold counter → one-pole
+	ballistics → gain multiplication.  Same ballistics model as the
+	compressor but with binary gain (open = 1.0, closed = 0.0).
+	"""
+
+	threshold_db, attack_ms, release_ms, hold_ms, lookahead_ms = _resolve_gate_params(record, step)
+
+	n_frames, n_channels = audio.shape
+
+	# Work in float64 for gain smoothing precision.
+	audio_f64 = audio.astype(numpy.float64)
+
+	# Linked envelope: max absolute value across channels per sample.
+	if n_channels == 1:
+		envelope = numpy.abs(audio_f64[:, 0])
+	else:
+		envelope = numpy.max(numpy.abs(audio_f64), axis=1)
+
+	# Convert to dB.
+	env_db = 20.0 * numpy.log10(envelope + _GATE_EPSILON)
+
+	# Gate gain: 1.0 where above threshold, 0.0 where below.
+	raw_gain = numpy.where(env_db >= threshold_db, 1.0, 0.0)
+
+	# Hold: keep the gate open for hold_samples after it would close.
+	hold_samples = int(hold_ms * sample_rate / 1000.0)
+
+	if hold_samples > 0:
+		held_gain = numpy.copy(raw_gain)
+		hold_counter = 0
+
+		for i in range(n_frames):
+			if raw_gain[i] > 0.5:
+				hold_counter = hold_samples
+				held_gain[i] = 1.0
+			elif hold_counter > 0:
+				hold_counter -= 1
+				held_gain[i] = 1.0
+			else:
+				held_gain[i] = 0.0
+
+		raw_gain = held_gain
+
+	# One-pole ballistics (same model as compressor).
+	alpha_a = 1.0 - math.exp(-1.0 / (attack_ms  * sample_rate / 1000.0)) if attack_ms  > 0.0 else 1.0
+	alpha_r = 1.0 - math.exp(-1.0 / (release_ms * sample_rate / 1000.0)) if release_ms > 0.0 else 1.0
+
+	smoothed = numpy.empty(n_frames, dtype=numpy.float64)
+	smoothed[0] = raw_gain[0]
+
+	for i in range(1, n_frames):
+		if raw_gain[i] > smoothed[i - 1]:
+			smoothed[i] = alpha_a * raw_gain[i] + (1.0 - alpha_a) * smoothed[i - 1]
+		else:
+			smoothed[i] = alpha_r * raw_gain[i] + (1.0 - alpha_r) * smoothed[i - 1]
+
+	# Lookahead: delay the audio relative to the gain envelope.
+	lookahead_samples = int(lookahead_ms * sample_rate / 1000.0)
+
+	if lookahead_samples > 0:
+		audio_f64 = numpy.pad(audio_f64, ((lookahead_samples, 0), (0, 0)), mode="constant")
+		audio_f64 = audio_f64[:n_frames]
+
+	# Apply gain.
+	result = audio_f64 * smoothed[:, numpy.newaxis]
+
+	return result.astype(numpy.float32)
+
+
+# ---------------------------------------------------------------------------
+# Distortion
+# ---------------------------------------------------------------------------
+
+def _resolve_distort_params (
+	record: "subsample.library.SampleRecord",
+	step:   Distort,
+) -> tuple[float, float]:
+
+	"""Resolve adaptive distortion parameters from sample analysis data.
+
+	Returns:
+		(drive_db, tone) — both resolved to floats.
+	"""
+
+	# Drive: peaky sounds (high crest) need less push; compressed sounds need more.
+	# Map crest_factor_db [3, 20] → drive [12, 3] dB (inverse relationship).
+	if step.drive_db is not None:
+		drive_db = step.drive_db
+	else:
+		cf_db = record.level.crest_factor_db
+		# Clamp to useful range and invert.
+		t = max(0.0, min(1.0, (cf_db - 3.0) / 17.0))   # 0 = low crest, 1 = high crest
+		drive_db = 12.0 - 9.0 * t                        # 12 dB for compressed, 3 dB for peaky
+
+	# Tone: bright sounds get more LPF to tame added harmonics.
+	# Map spectral_rolloff [0, 1] → tone [1.0, 0.3] (fraction of Nyquist).
+	if step.tone is not None:
+		tone = step.tone
+	else:
+		tone = 1.0 - 0.7 * record.spectral.spectral_rolloff
+
+	return drive_db, tone
+
+
+def _apply_distort (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Distort,
+) -> numpy.ndarray:
+
+	"""Apply waveshaping distortion.
+
+	Modes: hard_clip, fold, bit_crush, downsample.  All modes apply level
+	compensation (output peak matches input peak) and optional tone filtering.
+	"""
+
+	drive_db, tone = _resolve_distort_params(record, step)
+
+	n_frames = audio.shape[0]
+	drive = 10.0 ** (drive_db / 20.0)
+
+	# Store pre-distortion peak for level compensation.
+	pre_peak = float(numpy.max(numpy.abs(audio)))
+
+	if pre_peak < 1e-10:
+		return audio   # silence → silence
+
+	# Keep dry copy for mix blending.
+	dry = audio if step.mix >= 1.0 else audio.copy()
+
+	# Apply drive gain.
+	driven = audio * numpy.float32(drive)
+
+	# Waveshaping.
+	mode = step.mode
+
+	if mode == "hard_clip":
+		wet = numpy.clip(driven, -1.0, 1.0)
+
+	elif mode == "fold":
+		# Foldback: signal wraps around ±1 instead of clipping.
+		wet = numpy.abs(numpy.mod(driven + 1.0, 4.0) - 2.0) - 1.0
+
+	elif mode == "bit_crush":
+		levels = float(2 ** max(1, min(16, step.bit_depth)))
+		wet = (numpy.round(driven * levels) / levels).astype(numpy.float32)
+
+	elif mode == "downsample":
+		factor = max(2, min(64, step.downsample_factor))
+		# Repeat every Nth sample along the time axis.
+		wet = numpy.repeat(driven[::factor], factor, axis=0)[:n_frames]
+
+	else:
+		_log.warning("Unknown distortion mode %r — returning unchanged", mode)
+		return audio
+
+	# Level compensation: restore pre-distortion peak.
+	post_peak = float(numpy.max(numpy.abs(wet)))
+
+	if post_peak > 1e-10:
+		wet = wet * numpy.float32(pre_peak / post_peak)
+
+	# Tone filter: low-pass to tame high-frequency harmonics added by distortion.
+	if tone < 0.99:
+		cutoff_hz = max(200.0, tone * sample_rate / 2.0)
+		sos = scipy.signal.butter(2, cutoff_hz, btype="lowpass", fs=sample_rate, output="sos")
+
+		for ch in range(wet.shape[1]):
+			wet[:, ch] = scipy.signal.sosfilt(sos, wet[:, ch]).astype(numpy.float32)
+
+	# Dry/wet blend.
+	if step.mix < 1.0:
+		wet = dry * numpy.float32(1.0 - step.mix) + wet * numpy.float32(step.mix)
+
+	return wet.astype(numpy.float32)
+
+
+# ---------------------------------------------------------------------------
+# Envelope Reshaping
+# ---------------------------------------------------------------------------
+
+def _apply_reshape (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Reshape,
+) -> numpy.ndarray:
+
+	"""Reshape the amplitude envelope of the sound (ADSR-style).
+
+	Builds a gain curve from the ADSR parameters and multiplies it onto the
+	audio.  Phases set to None preserve the original envelope (gain = 1.0).
+	"""
+
+	n_frames = audio.shape[0]
+
+	# Resolve auto release.
+	if step.release_ms is not None:
+		release_ms = step.release_ms
+	else:
+		# Auto: tighten the tail based on the sample's natural decay character.
+		release_ms = 30.0 + 170.0 * record.spectral.release
+
+	# Check if there's anything to do.
+	is_noop = (
+		step.attack_ms is None
+		and step.hold_ms == 0.0
+		and step.decay_ms is None
+		and step.sustain >= 1.0
+		and release_ms is None
+	)
+
+	if is_noop:
+		return audio
+
+	# Find the onset point (where the sound begins).
+	if record.rhythm.attack_times:
+		onset_sample = int(record.rhythm.attack_times[0] * sample_rate)
+	else:
+		# Fallback: first sample exceeding 10% of peak.
+		peak_val = float(numpy.max(numpy.abs(audio)))
+
+		if peak_val < 1e-10:
+			return audio
+
+		threshold = 0.1 * peak_val
+		above = numpy.where(numpy.max(numpy.abs(audio), axis=1) > threshold)[0]
+		onset_sample = int(above[0]) if len(above) > 0 else 0
+
+	onset_sample = max(0, min(onset_sample, n_frames - 1))
+
+	# Find the peak sample position (for attack phase endpoint).
+	peak_sample = int(numpy.argmax(numpy.max(numpy.abs(audio), axis=1)))
+	peak_sample = max(onset_sample, peak_sample)
+
+	# Build the gain curve.
+	gain = numpy.ones(n_frames, dtype=numpy.float64)
+
+	cursor = onset_sample
+
+	# Attack phase: ramp from 0 to 1.
+	if step.attack_ms is not None:
+		attack_samples = max(1, int(step.attack_ms * sample_rate / 1000.0))
+		end = min(cursor + attack_samples, n_frames)
+
+		# Zero everything before onset.
+		gain[:cursor] = 0.0
+
+		# Linear ramp.
+		ramp_len = end - cursor
+
+		if ramp_len > 0:
+			gain[cursor:end] = numpy.linspace(0.0, 1.0, ramp_len)
+
+		cursor = end
+	else:
+		# Preserve original attack — advance cursor to peak.
+		cursor = peak_sample
+
+	# Hold phase: keep at 1.0.
+	if step.hold_ms > 0.0:
+		hold_samples = int(step.hold_ms * sample_rate / 1000.0)
+		cursor = min(cursor + hold_samples, n_frames)
+
+	# Decay phase: ramp from 1.0 to sustain level.
+	if step.decay_ms is not None:
+		decay_samples = max(1, int(step.decay_ms * sample_rate / 1000.0))
+		end = min(cursor + decay_samples, n_frames)
+		ramp_len = end - cursor
+
+		if ramp_len > 0:
+			gain[cursor:end] = numpy.linspace(1.0, step.sustain, ramp_len)
+
+		cursor = end
+
+		# Sustain region: constant at sustain level until release.
+		release_samples = max(1, int(release_ms * sample_rate / 1000.0))
+		release_start = max(cursor, n_frames - release_samples)
+		gain[cursor:release_start] = step.sustain
+	else:
+		# No explicit decay — sustain level applies from cursor onward.
+		if step.sustain < 1.0:
+			release_samples = max(1, int(release_ms * sample_rate / 1000.0))
+			release_start = max(cursor, n_frames - release_samples)
+			gain[cursor:release_start] = step.sustain
+		else:
+			release_samples = max(1, int(release_ms * sample_rate / 1000.0))
+			release_start = max(cursor, n_frames - release_samples)
+
+	# Release phase: fade from sustain level to 0.
+	release_samples = max(1, int(release_ms * sample_rate / 1000.0))
+	release_start = max(cursor, n_frames - release_samples)
+
+	if release_start < n_frames:
+		start_level = gain[release_start] if release_start < n_frames else step.sustain
+		gain[release_start:] = numpy.linspace(
+			start_level, 0.0, n_frames - release_start,
+		)
+
+	# Apply gain curve to all channels.
+	result = audio.astype(numpy.float64) * gain[:, numpy.newaxis]
+
+	return result.astype(numpy.float32)
+
+
+# ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------
 
@@ -2287,6 +2760,9 @@ TransformProcessor._HANDLERS[Compress]        = _apply_compress
 TransformProcessor._HANDLERS[Limit]           = _apply_limit
 TransformProcessor._HANDLERS[HpssHarmonic]    = _apply_hpss_harmonic
 TransformProcessor._HANDLERS[HpssPercussive]  = _apply_hpss_percussive
+TransformProcessor._HANDLERS[Gate]            = _apply_gate
+TransformProcessor._HANDLERS[Distort]         = _apply_distort
+TransformProcessor._HANDLERS[Reshape]         = _apply_reshape
 
 
 # ---------------------------------------------------------------------------
@@ -2392,6 +2868,44 @@ def spec_from_process (
 
 		elif proc.name == "hpss_percussive":
 			steps.append(HpssPercussive())
+
+		elif proc.name == "gate":
+			_threshold_raw = proc.get("threshold")
+			_attack_raw    = proc.get("attack")
+			_release_raw   = proc.get("release")
+			_hold_raw      = proc.get("hold")
+			_la_raw        = proc.get("lookahead")
+			steps.append(Gate(
+				threshold_db=float(_threshold_raw) if _threshold_raw is not None else None,
+				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
+				release_ms=float(_release_raw) if _release_raw is not None else None,
+				hold_ms=float(_hold_raw) if _hold_raw is not None else None,
+				lookahead_ms=float(_la_raw) if _la_raw is not None else None,
+			))
+
+		elif proc.name == "distort":
+			_drive_raw = proc.get("drive")
+			_tone_raw  = proc.get("tone")
+			steps.append(Distort(
+				mode=str(proc.get("mode", "hard_clip")),
+				drive_db=float(_drive_raw) if _drive_raw is not None else None,
+				mix=float(proc.get("mix", 1.0)),
+				tone=float(_tone_raw) if _tone_raw is not None else None,
+				bit_depth=int(proc.get("bit_depth", 8)),
+				downsample_factor=int(proc.get("downsample_factor", 4)),
+			))
+
+		elif proc.name == "reshape":
+			_attack_raw  = proc.get("attack")
+			_decay_raw   = proc.get("decay")
+			_release_raw = proc.get("release")
+			steps.append(Reshape(
+				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
+				hold_ms=float(proc.get("hold", 0.0)),
+				decay_ms=float(_decay_raw) if _decay_raw is not None else None,
+				sustain=float(proc.get("sustain", 1.0)),
+				release_ms=float(_release_raw) if _release_raw is not None else None,
+			))
 
 		else:
 			_log.warning("Unknown processor %r — skipped", proc.name)

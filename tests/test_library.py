@@ -82,14 +82,6 @@ class TestSampleRecord:
 		with pytest.raises(dataclasses.FrozenInstanceError):
 			record.name = "Y"  # type: ignore[misc]
 
-	def test_as_vector_delegates_to_spectral (self) -> None:
-		record = subsample.library.SampleRecord(
-			sample_id=1, name="X", spectral=tests.helpers._make_spectral(), rhythm=tests.helpers._make_rhythm(),
-			pitch=tests.helpers._make_pitch(), timbre=tests.helpers._make_timbre(), level=tests.helpers._make_level(),
-			band_energy=tests.helpers._make_band_energy(), params=tests.helpers._make_params(), duration=1.0,
-		)
-		assert numpy.array_equal(record.as_vector(), record.spectral.as_vector())
-
 
 # ---------------------------------------------------------------------------
 # TestAllocateId

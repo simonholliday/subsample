@@ -1,9 +1,9 @@
 {
-  "analysis_version": "11",
+  "analysis_version": "12",
   "audio_md5": "e66d21fc230104f7aca51db83cb629c8",
   "sample_rate": 44100,
   "bit_depth": 16,
-  "channels": 2,
+  "channels": 1,
   "duration": 0.4559637188208617,
   "captured_at": null,
   "params": {
@@ -22,7 +22,9 @@
     "spectral_contrast": 0.36239877549606947,
     "voiced_fraction": 0.0,
     "log_attack_time": 0.0,
-    "spectral_flux": 0.07740124883021689
+    "spectral_flux": 0.07740124883021689,
+    "spectral_rolloff": 0.9640052472625379,
+    "spectral_slope": 0.7001554312242239
   },
   "rhythm": {
     "tempo_bpm": 120.18531976744185,
@@ -158,7 +160,10 @@
   },
   "level": {
     "peak": 0.0772552490234375,
-    "rms": 0.008330383720393988
+    "rms": 0.008330383720393988,
+    "crest_factor": 9.273912417060146,
+    "crest_factor_db": 19.345259801937363,
+    "noise_floor": 0.00019379786681383848
   },
   "band_energy": {
     "energy_fractions": [

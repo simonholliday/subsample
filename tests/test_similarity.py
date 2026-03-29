@@ -122,34 +122,6 @@ def _library_with (*records: subsample.library.SampleRecord) -> subsample.librar
 
 
 # ---------------------------------------------------------------------------
-# TestAsVector — as_vector() on AnalysisResult is unchanged (9-element contract)
-# ---------------------------------------------------------------------------
-
-class TestAsVector:
-
-	def test_as_vector_length (self) -> None:
-		result = _make_spectral()
-		assert len(result.as_vector()) == 9
-
-	def test_as_vector_dtype (self) -> None:
-		result = _make_spectral()
-		assert result.as_vector().dtype == numpy.float32
-
-	def test_as_vector_values_match_fields (self) -> None:
-		result = _make_spectral(spectral_flatness=0.1, attack=0.9, voiced_fraction=0.3)
-		v = result.as_vector()
-		assert v[0] == pytest.approx(0.1)
-		assert v[1] == pytest.approx(0.9)
-		assert v[8] == pytest.approx(0.3)
-
-	def test_as_vector_all_values_in_range (self) -> None:
-		result = _make_spectral()
-		v = result.as_vector()
-		assert numpy.all(v >= 0.0)
-		assert numpy.all(v <= 1.0)
-
-
-# ---------------------------------------------------------------------------
 # TestBuildFeatureVector
 # ---------------------------------------------------------------------------
 

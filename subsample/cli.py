@@ -1023,8 +1023,10 @@ def _make_on_complete (
 	pipeline so derivative variants can be produced in the background.
 
 	Args:
-		store_audio:       When True, keep PCM data in the SampleRecord. Set to
-		                   cfg.player.enabled — audio is only needed for playback.
+		store_audio:       When True, build a SampleRecord (with PCM audio) and
+		                   integrate it into the live subsystems. Set to
+		                   cfg.player.enabled — in recorder-only mode no subsystem
+		                   reads from the instrument library, so integration is skipped.
 		transform_manager: Optional transform pipeline coordinator. When provided,
 		                   cascade-evicts derivatives for any evicted parents and
 		                   triggers auto-variant production for the new sample.
@@ -1047,14 +1049,17 @@ def _make_on_complete (
 	) -> None:
 
 		_log.info(
-			"Recorded %s  (%.2fs)\n  %s\n  %s\n  %s\n  %s\n  %s",
+			"Recorded %s  (%.2fs)  %s",
 			filepath.name, duration,
-			subsample.analysis.format_result(spectral, duration),
-			subsample.analysis.format_rhythm_result(rhythm),
-			subsample.analysis.format_pitch_result(pitch),
 			subsample.analysis.format_level_result(level),
-			subsample.analysis.format_band_energy_result(band_energy),
 		)
+
+		# Only build a SampleRecord and integrate into the live subsystems
+		# when the player is active.  In recorder-only mode nothing reads
+		# from the instrument library, similarity matrix, or transform
+		# pipeline, so the work (and its log line) would be pure noise.
+		if not store_audio:
+			return
 
 		record = subsample.library.SampleRecord(
 			sample_id   = subsample.library.allocate_id(),
@@ -1067,7 +1072,7 @@ def _make_on_complete (
 			band_energy = band_energy,
 			params      = analysis_params,
 			duration    = duration,
-			audio       = audio if store_audio else None,
+			audio       = audio,
 			filepath    = filepath,
 		)
 

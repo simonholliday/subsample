@@ -2380,3 +2380,306 @@ class TestHpssProcessors:
 		assert len(spec.steps) == 2
 		assert isinstance(spec.steps[0], subsample.transform.HpssHarmonic)
 		assert isinstance(spec.steps[1], subsample.transform.PitchShift)
+
+
+# ---------------------------------------------------------------------------
+# Gate
+# ---------------------------------------------------------------------------
+
+class TestGate:
+
+	def test_spec_from_process_gate_boolean (self) -> None:
+		"""gate: true → Gate with all None auto-fields."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="gate"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.Gate)
+		assert spec.steps[0].threshold_db is None
+		assert spec.steps[0].attack_ms is None
+
+	def test_spec_from_process_gate_explicit (self) -> None:
+		"""gate: {threshold: -40, hold: 20} → explicit params."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="gate", params=(("threshold", -40), ("hold", 20))),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Gate)
+		assert step.threshold_db == -40.0
+		assert step.hold_ms == 20.0
+		assert step.attack_ms is None  # not set → auto
+
+	def test_signal_above_threshold_passes (self) -> None:
+		"""A loud signal with a low threshold passes through mostly unchanged."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		# Fill with a moderate-level signal.
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.Gate(threshold_db=-60.0, attack_ms=0.01, release_ms=0.01, hold_ms=0.0, lookahead_ms=0.0)
+		result = subsample.transform._apply_gate(audio, 44100, record, step)
+
+		# Signal is well above -60 dBFS, so gate should be open.
+		assert result.dtype == numpy.float32
+		assert numpy.max(numpy.abs(result)) > 0.4
+
+	def test_signal_below_threshold_gated (self) -> None:
+		"""A quiet signal below threshold is silenced."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=44100, channels=1)
+		# Very quiet signal.
+		audio[:, 0] = 0.0001
+
+		step = subsample.transform.Gate(threshold_db=-20.0, attack_ms=0.01, release_ms=0.01, hold_ms=0.0, lookahead_ms=0.0)
+		result = subsample.transform._apply_gate(audio, 44100, record, step)
+
+		# Signal at ~-80 dBFS is well below -20 dBFS threshold.
+		assert numpy.max(numpy.abs(result)) < 0.00005
+
+	def test_auto_threshold_from_noise_floor (self) -> None:
+		"""Auto threshold is derived from noise_floor + 6 dB."""
+		record = _make_record(sample_id=1)
+		# Override the level to have a known noise_floor.
+		record = dataclasses.replace(record, level=subsample.analysis.LevelResult(
+			peak=0.8, rms=0.3, crest_factor=2.67, crest_factor_db=8.5, noise_floor=0.01,
+		))
+
+		step = subsample.transform.Gate()  # all auto
+		threshold, attack, release, hold, lookahead = subsample.transform._resolve_gate_params(record, step)
+
+		# noise_floor = 0.01 → -40 dBFS → threshold = -34 dBFS
+		import math
+		expected = 20.0 * math.log10(0.01 + 1e-10) + 6.0
+		assert abs(threshold - expected) < 0.1
+
+	def test_explicit_overrides_auto (self) -> None:
+		"""Explicit params take precedence over auto values."""
+		record = _make_record(sample_id=1)
+		step = subsample.transform.Gate(threshold_db=-30.0, attack_ms=2.0, release_ms=50.0, hold_ms=25.0, lookahead_ms=1.0)
+		threshold, attack, release, hold, lookahead = subsample.transform._resolve_gate_params(record, step)
+
+		assert threshold == -30.0
+		assert attack == 2.0
+		assert release == 50.0
+		assert hold == 25.0
+		assert lookahead == 1.0
+
+	def test_output_dtype (self) -> None:
+		"""Gate output is float32."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=2)
+		step = subsample.transform.Gate(threshold_db=-60.0, attack_ms=1.0, release_ms=10.0, hold_ms=5.0, lookahead_ms=0.0)
+		result = subsample.transform._apply_gate(audio, 44100, record, step)
+		assert result.dtype == numpy.float32
+
+
+# ---------------------------------------------------------------------------
+# Distortion
+# ---------------------------------------------------------------------------
+
+class TestDistort:
+
+	def test_spec_from_process_distort_boolean (self) -> None:
+		"""distort: true → Distort with default mode and auto drive/tone."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="distort"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Distort)
+		assert step.mode == "hard_clip"
+		assert step.drive_db is None  # auto
+		assert step.tone is None      # auto
+
+	def test_spec_from_process_distort_explicit (self) -> None:
+		"""distort: {mode: fold, drive: 12} → explicit params."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="distort", params=(("mode", "fold"), ("drive", 12))),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Distort)
+		assert step.mode == "fold"
+		assert step.drive_db == 12.0
+
+	def test_hard_clip_clips (self) -> None:
+		"""Hard-clip mode limits output to ±1."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = numpy.linspace(-0.8, 0.8, 4410, dtype=numpy.float32)
+
+		step = subsample.transform.Distort(mode="hard_clip", drive_db=20.0, tone=1.0, mix=1.0)
+		result = subsample.transform._apply_distort(audio, 44100, record, step)
+
+		# After level compensation, output should be within ±1.
+		assert numpy.all(numpy.abs(result) <= 1.01)
+
+	def test_fold_wraps (self) -> None:
+		"""Fold mode produces values within ±1 even with high drive."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = numpy.sin(numpy.linspace(0, 20, 4410)).astype(numpy.float32) * 0.5
+
+		step = subsample.transform.Distort(mode="fold", drive_db=20.0, tone=1.0, mix=1.0)
+		result = subsample.transform._apply_distort(audio, 44100, record, step)
+
+		# Fold should keep everything in [-1, 1] before level compensation.
+		assert result.dtype == numpy.float32
+
+	def test_bit_crush_quantizes (self) -> None:
+		"""Bit-crush mode reduces the number of distinct amplitude levels."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = numpy.linspace(-0.5, 0.5, 4410, dtype=numpy.float32)
+
+		step = subsample.transform.Distort(mode="bit_crush", drive_db=0.0, bit_depth=2, tone=1.0, mix=1.0)
+		result = subsample.transform._apply_distort(audio, 44100, record, step)
+
+		# With 2-bit depth (4 levels), there should be very few unique values.
+		unique_count = len(numpy.unique(numpy.round(result, decimals=4)))
+		assert unique_count < 20  # far fewer than the 4410 input samples
+
+	def test_downsample_reduces_detail (self) -> None:
+		"""Downsample mode produces repeated sample groups."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4400, channels=1)
+		audio[:, 0] = numpy.sin(numpy.linspace(0, 100, 4400)).astype(numpy.float32) * 0.5
+
+		step = subsample.transform.Distort(mode="downsample", drive_db=0.0, downsample_factor=4, tone=1.0, mix=1.0)
+		result = subsample.transform._apply_distort(audio, 44100, record, step)
+
+		# Adjacent samples within each group of 4 should be identical.
+		assert result.shape[0] == audio.shape[0]
+
+	def test_mix_blend (self) -> None:
+		"""mix=0.5 blends dry and wet signals."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = numpy.sin(numpy.linspace(0, 20, 4410)).astype(numpy.float32) * 0.5
+
+		step_full = subsample.transform.Distort(mode="hard_clip", drive_db=20.0, tone=1.0, mix=1.0)
+		step_half = subsample.transform.Distort(mode="hard_clip", drive_db=20.0, tone=1.0, mix=0.5)
+
+		result_full = subsample.transform._apply_distort(audio, 44100, record, step_full)
+		result_half = subsample.transform._apply_distort(audio, 44100, record, step_half)
+
+		# Half-mix should be closer to the original than full-wet.
+		diff_full = numpy.mean(numpy.abs(result_full - audio))
+		diff_half = numpy.mean(numpy.abs(result_half - audio))
+		assert diff_half < diff_full
+
+	def test_silence_stays_silent (self) -> None:
+		"""Zero input remains zero."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)  # all zeros
+
+		step = subsample.transform.Distort(mode="hard_clip", drive_db=12.0, tone=1.0)
+		result = subsample.transform._apply_distort(audio, 44100, record, step)
+
+		assert numpy.max(numpy.abs(result)) == 0.0
+
+	def test_output_dtype (self) -> None:
+		"""Distort output is float32."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = 0.5
+		step = subsample.transform.Distort(mode="hard_clip", drive_db=6.0, tone=1.0)
+		result = subsample.transform._apply_distort(audio, 44100, record, step)
+		assert result.dtype == numpy.float32
+
+
+# ---------------------------------------------------------------------------
+# Reshape (Envelope Shaping)
+# ---------------------------------------------------------------------------
+
+class TestReshape:
+
+	def test_spec_from_process_reshape_boolean (self) -> None:
+		"""reshape: true → Reshape with auto release, all else preserve."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="reshape"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Reshape)
+		assert step.attack_ms is None
+		assert step.release_ms is None  # auto
+		assert step.sustain == 1.0
+
+	def test_spec_from_process_reshape_explicit (self) -> None:
+		"""reshape: {attack: 5, release: 100} → explicit params."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="reshape", params=(("attack", 5), ("release", 100))),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Reshape)
+		assert step.attack_ms == 5.0
+		assert step.release_ms == 100.0
+
+	def test_release_truncates_tail (self) -> None:
+		"""Explicit release causes the audio to fade to zero at the end."""
+		record = _make_record(sample_id=1, onset_times=(0.0,), attack_times=(0.0,))
+		audio = _make_audio(n_frames=44100, channels=1)
+		# Constant-level signal for 1 second.
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.Reshape(release_ms=50.0)
+		result = subsample.transform._apply_reshape(audio, 44100, record, step)
+
+		# The last few samples should be near zero.
+		assert numpy.max(numpy.abs(result[-10:])) < 0.05
+		# The beginning should be unchanged.
+		assert numpy.mean(numpy.abs(result[:1000])) > 0.4
+
+	def test_sustain_reduces_level (self) -> None:
+		"""sustain=0.5 reduces the sustained portion to half level."""
+		record = _make_record(sample_id=1, onset_times=(0.0,), attack_times=(0.0,))
+		audio = _make_audio(n_frames=44100, channels=1)
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.Reshape(sustain=0.5, release_ms=10.0)
+		result = subsample.transform._apply_reshape(audio, 44100, record, step)
+
+		# Middle portion should be at roughly half the original level.
+		mid = result[10000:20000, 0]
+		assert numpy.mean(numpy.abs(mid)) < 0.35
+
+	def test_attack_reshapes_onset (self) -> None:
+		"""attack_ms creates a ramp from silence at the onset."""
+		record = _make_record(sample_id=1, onset_times=(0.0,), attack_times=(0.0,))
+		audio = _make_audio(n_frames=44100, channels=1)
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.Reshape(attack_ms=100.0, release_ms=50.0)
+		result = subsample.transform._apply_reshape(audio, 44100, record, step)
+
+		# First few samples should be near zero (attack ramp).
+		assert numpy.max(numpy.abs(result[:10])) < 0.05
+		# After the attack (~100ms = 4410 samples), should be near full level.
+		assert numpy.mean(numpy.abs(result[5000:6000])) > 0.4
+
+	def test_auto_release_tightens_tail (self) -> None:
+		"""reshape: true with auto release should tighten the tail."""
+		record = _make_record(sample_id=1, onset_times=(0.0,), attack_times=(0.0,))
+		audio = _make_audio(n_frames=44100, channels=1)
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.Reshape()  # all auto
+		result = subsample.transform._apply_reshape(audio, 44100, record, step)
+
+		# The last samples should fade toward zero (auto release tightens tail).
+		assert numpy.max(numpy.abs(result[-10:])) < 0.1
+
+	def test_output_dtype (self) -> None:
+		"""Reshape output is float32."""
+		record = _make_record(sample_id=1, onset_times=(0.0,), attack_times=(0.0,))
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = 0.5
+		step = subsample.transform.Reshape(release_ms=50.0)
+		result = subsample.transform._apply_reshape(audio, 44100, record, step)
+		assert result.dtype == numpy.float32

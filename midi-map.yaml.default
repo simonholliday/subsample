@@ -142,6 +142,19 @@
 #   hpss_harmonic: true       Keep tonal content, remove percussion
 #   hpss_percussive: true     Keep percussion, remove tonal content
 #
+#   - gate: true                            # Noise gate (auto-adapts to noise floor)
+#   - gate: { threshold: -40 }              # Gate with explicit threshold (dBFS)
+#   - gate: { hold: 20, release: 50 }       # Gate with explicit hold and release (ms)
+#
+#   - distort: true                          # Hard-clip distortion (auto drive and tone)
+#   - distort: { mode: fold, drive: 12 }     # Foldback distortion, 12 dB drive
+#   - distort: { mode: bit_crush, bit_depth: 4, mix: 0.5 }  # Lo-fi bit-crush, 50% blend
+#   - distort: { mode: downsample, downsample_factor: 8 }    # Retro sample-rate reduction
+#
+#   - reshape: true                          # Auto tail-tightening
+#   - reshape: { release: 50 }              # Explicit 50 ms release fade
+#   - reshape: { attack: 5, sustain: 0.5, release: 100 }  # Fast attack, half sustain
+#
 # Omit process entirely for unprocessed playback (base variant).
 #
 # ===================================================================

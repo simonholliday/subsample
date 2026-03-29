@@ -312,30 +312,6 @@ class AnalysisResult:
 	Computed as the linear regression slope of the log-magnitude spectrum
 	against log-frequency, then normalised from the empirical range."""
 
-	def as_vector (self) -> numpy.ndarray:
-
-		"""Return nine of the eleven spectral metrics as a float32 1-D array (excludes log_attack_time and spectral_flux).
-
-		This is the **spectral fingerprint** of the sound — a fixed-length
-		vector where every element is normalised to [0.0, 1.0]:
-
-		  [spectral_flatness, attack, release, spectral_centroid,
-		   spectral_bandwidth, zcr, harmonic_ratio, spectral_contrast,
-		   voiced_fraction]
-
-		Used for display and export (e.g. sidecar JSON, analysis output).
-		For similarity scoring, see `_build_feature_vector()` in
-		`subsample.similarity`, which uses all 11 AnalysisResult fields
-		directly and does not call this method.
-		"""
-
-		return numpy.array([
-			self.spectral_flatness, self.attack,          self.release,
-			self.spectral_centroid, self.spectral_bandwidth,
-			self.zcr, self.harmonic_ratio, self.spectral_contrast, self.voiced_fraction,
-		], dtype=numpy.float32)
-
-
 @dataclasses.dataclass(frozen=True)
 class RhythmResult:
 

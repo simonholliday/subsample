@@ -288,6 +288,9 @@ Available processors:
 | `limit: true` | threshold (-1 dB), release (50 ms), lookahead (5 ms) | Brickwall limiter (ratio 100:1, instant attack) |
 | `hpss_harmonic: true` | none | Keep only harmonic/tonal content (remove percussion) |
 | `hpss_percussive: true` | none | Keep only percussive/transient content (remove harmonics) |
+| `gate: true` | threshold (auto), attack (auto), release (auto), hold (auto), lookahead (auto) | Noise gate - silences audio below the noise floor. All parameters auto-adapt: threshold from noise floor, attack/release/hold from onset and decay character. |
+| `distort: true` | mode (hard_clip), drive (auto), mix (1.0), tone (auto), bit_depth (8), downsample_factor (4) | Waveshaping distortion with four modes: hard_clip, fold, bit_crush, downsample. Drive adapts to crest factor; tone adapts to spectral rolloff. |
+| `reshape: true` | attack (preserve), hold (0), decay (preserve), sustain (1.0), release (auto) | ADSR envelope reshaping. Default auto-tightens the tail. Set attack, decay, sustain, release to reshape specific phases. |
 
 All three filters can be used without parameters — they default to classic
 console channel-strip values:
@@ -324,6 +327,21 @@ process:
 
 Set any parameter explicitly to override its auto value. Fixed parameters
 (ratio, knee, makeup, lookahead) always use their defaults unless set.
+
+The noise gate, distortion, and envelope reshaper follow the same pattern -
+`true` gives you intelligent auto defaults, explicit parameters override:
+
+```yaml
+process:
+  - gate: true                              # auto noise gate
+  - gate: { threshold: -40, hold: 20 }      # explicit threshold
+  - distort: true                            # hard-clip with auto drive
+  - distort: { mode: fold, drive: 12 }       # foldback distortion
+  - distort: { mode: bit_crush, bit_depth: 4, mix: 0.5 }
+  - reshape: true                            # auto tail-tightening
+  - reshape: { attack: 5, release: 100 }     # fast attack, controlled release
+  - reshape: { sustain: 0.5, release: 50 }   # half sustain, tight tail
+```
 
 For the opposite of snappy drums (bring up room ambience and reverb tails), use
 a fast attack (< 1 ms), high ratio (10:1+), and low threshold (-30 dB) to
