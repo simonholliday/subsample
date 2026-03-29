@@ -477,7 +477,7 @@ def _load_one_sample (
 		return None
 
 	if load_audio:
-		audio: typing.Optional[numpy.ndarray] = _load_wav_audio(audio_path)
+		audio: typing.Optional[numpy.ndarray] = load_wav_audio(audio_path)
 
 		if audio is None:
 			return None
@@ -600,7 +600,7 @@ def load_instrument_library (
 	return lib
 
 
-def _load_wav_audio (path: pathlib.Path) -> typing.Optional[numpy.ndarray]:
+def load_wav_audio (path: pathlib.Path) -> typing.Optional[numpy.ndarray]:
 
 	"""Read a WAV file into a numpy array matching the capture pipeline format.
 

@@ -597,6 +597,57 @@ class TestSimilarityMatrix:
 		assert scores[0].score >= scores[1].score
 		assert scores[0].name == "BD"
 
+	# ----- add_reference (path-based references) ----------------------------
+
+	def test_add_reference_scores_against_existing_instruments (self) -> None:
+		"""add_reference() should score a new reference against all existing instruments."""
+		bd_ref = _make_record("BD", _make_spectral(spectral_flatness=0.9))
+		matrix = subsample.similarity.SimilarityMatrix(
+			_library_with(bd_ref), _SPECTRAL_ONLY_CFG,
+		)
+
+		# Add some instruments
+		i1 = _make_record("I1", _make_spectral(spectral_flatness=0.9))
+		i2 = _make_record("I2", _make_spectral(spectral_flatness=0.1))
+		matrix.add(i1)
+		matrix.add(i2)
+
+		# Now add a new reference with a high flatness (should match i1 better)
+		new_ref = _make_record("/tmp/new_ref", _make_spectral(spectral_flatness=0.95))
+		matrix.add_reference(new_ref, [i1, i2])
+
+		# The new reference should have i1 at rank 0 and i2 at rank 1
+		assert matrix.get_match("/tmp/new_ref".upper(), 0) == i1.sample_id
+		assert matrix.get_match("/tmp/new_ref".upper(), 1) == i2.sample_id
+
+	def test_add_reference_idempotent (self) -> None:
+		"""add_reference() should be idempotent — calling twice should have no effect."""
+		ref = _make_record("REF", _make_spectral())
+		matrix = subsample.similarity.SimilarityMatrix(_library_with(ref), _DEFAULT_CFG)
+
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+
+		new_ref = _make_record("/tmp/new", _make_spectral())
+		matrix.add_reference(new_ref, [inst])
+
+		# Call again with the same reference — should be a no-op
+		matrix.add_reference(new_ref, [inst])
+
+		# Should still be retrievable
+		assert matrix.get_match("/tmp/new".upper(), 0) == inst.sample_id
+
+	def test_add_reference_empty_instruments_creates_empty_ranking (self) -> None:
+		"""add_reference() with empty instrument list should create an empty ranking."""
+		ref = _make_record("REF", _make_spectral())
+		matrix = subsample.similarity.SimilarityMatrix(_library_with(ref), _DEFAULT_CFG)
+
+		new_ref = _make_record("/tmp/empty", _make_spectral())
+		matrix.add_reference(new_ref, [])
+
+		# The new reference should exist but have no matches
+		assert matrix.get_match("/tmp/empty".upper(), 0) is None
+
 	# ----- thread safety ----------------------------------------------------
 
 	def test_concurrent_add_and_get_match_do_not_raise (self) -> None:

@@ -224,6 +224,201 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 	return [_single(item) for item in notes_raw]
 
 
+def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.library.SampleRecord]:
+
+	"""Load a reference sample from a filesystem path.
+
+	The path must have a corresponding .analysis.json sidecar file. The reference
+	sample's name (key in the similarity matrix) is set to the canonical absolute
+	path string so that get_matches(str(path)) works.
+
+	Args:
+		path: Absolute path to the WAV file (or sidecar).
+
+	Returns:
+		SampleRecord with name=str(path.resolve()), or None if the sidecar cannot be loaded.
+	"""
+
+	path = pathlib.Path(path).resolve()
+	sidecar_path = subsample.cache.cache_path(path)
+
+	if not sidecar_path.exists():
+		_log.warning(
+			"Reference sample sidecar not found for %s — this reference will be skipped",
+			path,
+		)
+		return None
+
+	result = subsample.cache.load_sidecar(sidecar_path)
+	if result is None:
+		_log.warning(
+			"Failed to load analysis sidecar for %s — this reference will be skipped",
+			path,
+		)
+		return None
+
+	spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+
+	return subsample.library.SampleRecord(
+		sample_id   = subsample.library.allocate_id(),
+		name        = str(path.resolve()),  # Use absolute path as the key
+		spectral    = spectral,
+		rhythm      = rhythm,
+		pitch       = pitch,
+		timbre      = timbre,
+		level       = level,
+		band_energy = band_energy,
+		params      = params,
+		duration    = duration,
+		audio       = None,  # Reference samples don't need audio
+		filepath    = path if path.exists() else None,
+	)
+
+
+def _load_instrument_from_path (path: pathlib.Path) -> typing.Optional[subsample.library.SampleRecord]:
+
+	"""Load an instrument sample (WAV + sidecar) from a filesystem path.
+
+	The sample's name is set to the filename stem (e.g. "2026-03-27_09-28-12")
+	so that it can be matched by where: { name: ... } predicates.
+
+	Args:
+		path: Absolute path to the WAV file (or sidecar).
+
+	Returns:
+		SampleRecord with audio loaded, or None if loading fails.
+	"""
+
+	path = pathlib.Path(path).resolve()
+	sidecar_path = subsample.cache.cache_path(path)
+	name = path.stem
+
+	if not sidecar_path.exists():
+		_log.warning(
+			"Instrument sample sidecar not found for %s — this sample will be skipped",
+			path,
+		)
+		return None
+
+	if not path.exists():
+		_log.warning(
+			"Instrument sample WAV not found: %s — this sample will be skipped",
+			path,
+		)
+		return None
+
+	result = subsample.cache.load_sidecar(sidecar_path)
+	if result is None:
+		_log.warning(
+			"Failed to load analysis sidecar for %s — this sample will be skipped",
+			path,
+		)
+		return None
+
+	spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+
+	# Load the audio data
+	audio = subsample.library.load_wav_audio(path)
+	if audio is None:
+		_log.warning(
+			"Failed to load audio from %s — this sample will be skipped",
+			path,
+		)
+		return None
+
+	return subsample.library.SampleRecord(
+		sample_id   = subsample.library.allocate_id(),
+		name        = name,
+		spectral    = spectral,
+		rhythm      = rhythm,
+		pitch       = pitch,
+		timbre      = timbre,
+		level       = level,
+		band_energy = band_energy,
+		params      = params,
+		duration    = duration,
+		audio       = audio,
+		filepath    = path,
+	)
+
+
+def _resolve_path_references (
+	note_map: NoteMap,
+	matrices: list[subsample.similarity.SimilarityMatrix],
+	instrument_lib: subsample.library.InstrumentLibrary,
+) -> None:
+
+	"""Load path-based references and instruments, adding them to the appropriate collections.
+
+	Scans all assignments in the note map for path-based references and names, loads them
+	from disk, and adds them to the similarity matrices and/or instrument library.
+
+	Args:
+		note_map:      Note routing table: (mido_channel, midi_note) → (Assignment, pick).
+		matrices:      List of SimilarityMatrix (one per bank) to add references to.
+		instrument_lib: InstrumentLibrary to add path-based instruments to.
+	"""
+
+	# Collect unique paths for references and instruments
+	ref_paths: set[str] = set()
+	inst_paths: set[str] = set()
+
+	# Extract unique assignments from the note map
+	seen_assignments: set[int] = set()
+
+	for (assignment, pick) in note_map.values():
+		assignment_id = id(assignment)
+		if assignment_id in seen_assignments:
+			continue
+		seen_assignments.add(assignment_id)
+
+		for select_spec in assignment.select:
+			ref = select_spec.where.reference
+			if ref is not None and subsample.query.is_path_like(ref):
+				# Path-based reference (absolute path from parse-time resolution)
+				ref_paths.add(ref)
+
+			name_path = select_spec.where.name_path
+			if name_path is not None:
+				inst_paths.add(name_path)
+
+	# Load path-based references and add to all matrices
+	for ref_path in ref_paths:
+		path = pathlib.Path(ref_path)
+		record = _load_reference_from_path(path)
+		if record is None:
+			continue
+
+		# Add to every bank's similarity matrix
+		instruments = instrument_lib.samples()
+		for matrix in matrices:
+			matrix.add_reference(record, instruments)
+
+		_log.debug("Added path-based reference from %s", path)
+
+	# Load path-based instruments and add to library
+	for inst_path in inst_paths:
+		path = pathlib.Path(inst_path)
+		name = path.stem
+
+		# Skip if already in the library
+		existing_id = instrument_lib.find_by_name(name)
+		if existing_id is not None:
+			_log.debug(
+				"Instrument sample %s already in library (id %d) — skipping load from %s",
+				name, existing_id, path,
+			)
+			continue
+
+		record = _load_instrument_from_path(path)
+		if record is None:
+			continue
+
+		instrument_lib.add(record)
+
+		_log.debug("Added path-based instrument from %s", path)
+
+
 def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
@@ -250,6 +445,10 @@ def load_midi_map (
 	with a WARNING — this prevents silent failures when using a map built
 	for a different reference library.
 
+	Path-based references (containing "/" or starting with ".") are resolved
+	relative to the MIDI map file's directory and added to the reference set
+	(without validation against reference_names).
+
 	Args:
 		path:             Path to the MIDI map YAML file.
 		reference_names:  Names from the loaded reference library (case-insensitive).
@@ -265,6 +464,8 @@ def load_midi_map (
 
 	if not path.exists():
 		raise FileNotFoundError(f"MIDI map not found: {path}")
+
+	midi_map_dir = path.parent
 
 	with path.open(encoding="utf-8") as fh:
 		raw = yaml.safe_load(fh)
@@ -316,15 +517,19 @@ def load_midi_map (
 		if select_raw is None:
 			raise ValueError(f"MIDI map assignment {name!r}: missing 'select'")
 
-		select_specs = subsample.query.parse_select(select_raw, name)
+		select_specs = subsample.query.parse_select(select_raw, name, midi_map_dir)
 
 		# Validate reference predicates against the loaded reference library.
+		# Path-based references (containing "/" or starting with ".") are resolved
+		# at parse time and don't need to be in the reference library.
 		valid = True
 
 		for spec in select_specs:
 			ref = spec.where.reference
 
-			if ref is not None and ref.upper() not in reference_set:
+			# Skip validation for path-based references (those with "/" in them
+			# are absolute paths resolved at parse time)
+			if ref is not None and "/" not in ref and ref.upper() not in reference_set:
 				_log.warning(
 					"MIDI map assignment %r: reference %r not in reference library — skipping",
 					name, ref,

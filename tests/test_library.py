@@ -652,7 +652,7 @@ class TestLoadWavAudio:
 	def test_loads_16bit_wav (self, tmp_path: pathlib.Path) -> None:
 		path = tmp_path / "test.wav"
 		tests.helpers._make_wav(path, n_frames=512)
-		audio = subsample.library._load_wav_audio(path)
+		audio = subsample.library.load_wav_audio(path)
 		assert audio is not None
 		assert audio.dtype == numpy.int16
 		assert audio.shape == (512, 1)
@@ -664,5 +664,5 @@ class TestLoadWavAudio:
 	) -> None:
 		import logging
 		with caplog.at_level(logging.WARNING, logger="subsample.library"):
-			result = subsample.library._load_wav_audio(tmp_path / "missing.wav")
+			result = subsample.library.load_wav_audio(tmp_path / "missing.wav")
 		assert result is None

@@ -22,6 +22,7 @@ import datetime
 import hashlib
 import io
 import logging
+import math
 import os
 import pathlib
 import threading
@@ -280,7 +281,8 @@ class SampleProcessor:
 			# Skipped for file imports (filename_base set) — clipping already occurred.
 			if req.filename_base is None and level.peak >= 1.0:
 				_log.warning(
-					"input clipped (peak 0.0 dBFS) — reduce input gain to avoid distortion"
+					"input clipped (peak %.1f dBFS) — reduce input gain to avoid distortion",
+					20.0 * math.log10(level.peak),
 				)
 
 			write_result = self._write_wav(

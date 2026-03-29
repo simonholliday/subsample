@@ -283,6 +283,53 @@ class SimilarityMatrix:
 
 			self._scores[sid] = score_row
 
+	def add_reference (
+		self,
+		record: subsample.library.SampleRecord,
+		instruments: list[subsample.library.SampleRecord],
+	) -> None:
+
+		"""Add a new reference and score it against all current instrument samples.
+
+		Used to add path-based references at MIDI-map load time. Computes similarity
+		between the new reference and every instrument in the library, building the
+		ranked list and updating score caches.
+
+		Idempotent: calling with a reference whose name is already in the matrix
+		is a no-op (the existing reference is not replaced).
+
+		Args:
+			record:      The reference sample record (name.upper() becomes the key).
+			instruments: All current instrument samples (for scoring).
+		"""
+
+		key = record.name.upper()
+
+		with self._lock:
+			if key in self._ref_vectors:
+				return  # Already present; idempotent
+
+			vec = _build_feature_vector(record, self._similarity_cfg)
+
+			self._ref_vectors[key] = vec
+			self._rankings[key] = []
+
+			for inst in instruments:
+				inst_vec = _build_feature_vector(inst, self._similarity_cfg)
+				score = _cosine_similarity(vec, inst_vec)
+
+				# Add to the ranking for this reference
+				bisect.insort(
+					self._rankings[key],
+					RankedMatch(sample_id=inst.sample_id, score=score),
+					key=lambda m: -m.score,
+				)
+
+				# Update the per-instrument score cache (for get_scores)
+				if inst.sample_id not in self._scores:
+					self._scores[inst.sample_id] = {}
+				self._scores[inst.sample_id][key] = score
+
 	def remove (self, sample_ids: list[int]) -> None:
 
 		"""Remove evicted instrument samples from all ranked lists.

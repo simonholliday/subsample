@@ -37,6 +37,7 @@ this is microseconds and needs no secondary indices.
 
 import dataclasses
 import logging
+import pathlib
 import typing
 
 import numpy
@@ -48,6 +49,15 @@ if typing.TYPE_CHECKING:
 	import subsample.similarity
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def is_path_like(s: str) -> bool:
+	"""Return True if the string looks like a filesystem path."""
+	return "/" in s or s.startswith(".")
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +80,7 @@ class WherePredicate:
 	max_pitch_hz:  typing.Optional[float] = None
 	reference:     typing.Optional[str]   = None
 	name:          typing.Optional[str]   = None
+	name_path:     typing.Optional[str]   = None  # Resolved absolute path for path-based name predicates
 
 	def matches (self, record: "subsample.library.SampleRecord") -> bool:
 
@@ -301,9 +312,20 @@ def query (
 # YAML parsing — select block
 # ---------------------------------------------------------------------------
 
-def _parse_where (raw: typing.Any, assignment_name: str) -> WherePredicate:
+def _parse_where (
+	raw: typing.Any,
+	assignment_name: str,
+	midi_map_dir: pathlib.Path = pathlib.Path.cwd(),
+) -> WherePredicate:
 
-	"""Parse a ``where:`` dict from a MIDI map assignment into a WherePredicate."""
+	"""Parse a ``where:`` dict from a MIDI map assignment into a WherePredicate.
+
+	Args:
+		raw:                The raw YAML value of the 'where' block.
+		assignment_name:    Human-readable name of the assignment (for error messages).
+		midi_map_dir:       Directory of the MIDI map file; used to resolve relative paths.
+		                    Defaults to current working directory.
+	"""
 
 	if raw is None:
 		return WherePredicate()
@@ -338,10 +360,22 @@ def _parse_where (raw: typing.Any, assignment_name: str) -> WherePredicate:
 				kwargs[key + "_hz"] = float(value)
 
 		elif key == "reference":
-			kwargs["reference"] = str(value)
+			ref = str(value)
+			if is_path_like(ref):
+				# Path-based reference: resolve to absolute path (used as matrix key)
+				kwargs["reference"] = str((midi_map_dir / ref).resolve())
+			else:
+				# Bare name: keep as-is; case-insensitive lookup happens at query time
+				kwargs["reference"] = ref
 
 		elif key == "name":
-			kwargs["name"] = str(value)
+			raw_name = str(value)
+			if is_path_like(raw_name):
+				# Path-based name: store the stem in 'name', resolved path in 'name_path'
+				kwargs["name"] = pathlib.Path(raw_name).stem
+				kwargs["name_path"] = str((midi_map_dir / raw_name).resolve())
+			else:
+				kwargs["name"] = raw_name
 
 		else:
 			_log.warning(
@@ -363,16 +397,27 @@ def _note_name_to_hz (name: str) -> float:
 	return float(librosa.midi_to_hz(midi_note))
 
 
-def _parse_select_spec (raw: typing.Any, assignment_name: str) -> SelectSpec:
+def _parse_select_spec (
+	raw: typing.Any,
+	assignment_name: str,
+	midi_map_dir: pathlib.Path = pathlib.Path.cwd(),
+) -> SelectSpec:
 
-	"""Parse a single ``select:`` dict into a SelectSpec."""
+	"""Parse a single ``select:`` dict into a SelectSpec.
+
+	Args:
+		raw:             The raw YAML value of the 'select' entry.
+		assignment_name: Human-readable name of the assignment (for error messages).
+		midi_map_dir:    Directory of the MIDI map file; used to resolve relative paths.
+		                 Defaults to current working directory.
+	"""
 
 	if not isinstance(raw, dict):
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: 'select' entry must be a mapping"
 		)
 
-	where = _parse_where(raw.get("where"), assignment_name)
+	where = _parse_where(raw.get("where"), assignment_name, midi_map_dir)
 
 	order_by = str(raw.get("order_by", "newest"))
 
@@ -396,19 +441,29 @@ def _parse_select_spec (raw: typing.Any, assignment_name: str) -> SelectSpec:
 	return SelectSpec(where=where, order_by=order_by, pick=pick)
 
 
-def parse_select (raw: typing.Any, assignment_name: str) -> tuple[SelectSpec, ...]:
+def parse_select (
+	raw: typing.Any,
+	assignment_name: str,
+	midi_map_dir: pathlib.Path = pathlib.Path.cwd(),
+) -> tuple[SelectSpec, ...]:
 
 	"""Parse the ``select:`` block, which can be a single spec or a fallback list.
 
 	Returns a tuple of SelectSpec objects.  At trigger time, each is tried in
 	order; the first that returns a non-empty result wins.
+
+	Args:
+		raw:             The raw YAML value of the 'select' block.
+		assignment_name: Human-readable name of the assignment (for error messages).
+		midi_map_dir:    Directory of the MIDI map file; used to resolve relative paths.
+		                 Defaults to current working directory.
 	"""
 
 	if isinstance(raw, dict):
-		return (_parse_select_spec(raw, assignment_name),)
+		return (_parse_select_spec(raw, assignment_name, midi_map_dir),)
 
 	if isinstance(raw, list):
-		return tuple(_parse_select_spec(entry, assignment_name) for entry in raw)
+		return tuple(_parse_select_spec(entry, assignment_name, midi_map_dir) for entry in raw)
 
 	raise ValueError(
 		f"MIDI map assignment {assignment_name!r}: 'select' must be a mapping or a list of mappings"

@@ -483,6 +483,18 @@ def _start_player (
 
 	midi_map = midi_map_result.note_map
 
+	# Resolve path-based references and instruments from the MIDI map
+	matrices: list[subsample.similarity.SimilarityMatrix] = []
+	if bank_manager is not None:
+		# Multi-bank mode: resolve into each bank's matrix
+		for bank in bank_manager.all_banks():
+			matrices.append(bank.similarity_matrix)
+	else:
+		# Single-bank mode: use the global similarity matrix
+		matrices.append(similarity_matrix)
+
+	subsample.player._resolve_path_references(midi_map, matrices, instrument_library)
+
 	# Virtual port mode: bypass hardware device selection entirely.
 	# MidiPlayer.run() will open the named virtual port with virtual=True.
 	if cfg.player.virtual_midi_port is not None:
@@ -741,7 +753,7 @@ def main () -> None:
 	shutdown_event = threading.Event()
 	threads: list[threading.Thread] = []
 
-	# Shared cell so the on_complete callback can call update_pitched_assignments
+	# Shared cell so the on_complete callback can call update_assignments
 	# when the best-matching sample changes for a pitched keyboard assignment.
 	# _start_player sets this before calling player.run().
 	_player_cell: list[typing.Optional[subsample.player.MidiPlayer]] = [None]

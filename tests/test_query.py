@@ -318,6 +318,58 @@ class TestParseSelect:
 		specs = subsample.query.parse_select(raw, "test")
 		assert specs[0].order_by == "similarity"
 
+	def test_path_based_reference_resolves_to_absolute (self) -> None:
+
+		"""Path-based references (containing "/") are resolved to absolute paths."""
+
+		import pathlib
+		import tempfile
+
+		with tempfile.TemporaryDirectory() as tmpdir:
+			midi_map_dir = pathlib.Path(tmpdir)
+			raw = {"where": {"reference": "relative/path/to/ref"}}
+			specs = subsample.query.parse_select(raw, "test", midi_map_dir)
+
+			# Should be resolved to an absolute path
+			assert specs[0].where.reference.startswith("/")
+			assert "relative/path/to/ref" in specs[0].where.reference
+
+	def test_bare_name_reference_preserved (self) -> None:
+
+		"""Bare name references (no "/") are preserved as-is for case-insensitive lookup."""
+
+		raw = {"where": {"reference": "BD0025"}}
+		specs = subsample.query.parse_select(raw, "test")
+		assert specs[0].where.reference == "BD0025"
+
+	def test_path_based_name_stored_as_stem (self) -> None:
+
+		"""Path-based names store the stem in 'name' and path in 'name_path'."""
+
+		import pathlib
+		import tempfile
+
+		with tempfile.TemporaryDirectory() as tmpdir:
+			midi_map_dir = pathlib.Path(tmpdir)
+			raw = {"where": {"name": "captures/2026-03-27_10-04-07"}}
+			specs = subsample.query.parse_select(raw, "test", midi_map_dir)
+
+			# Stem should be extracted
+			assert specs[0].where.name == "2026-03-27_10-04-07"
+			# Path should be resolved and stored
+			assert specs[0].where.name_path is not None
+			assert specs[0].where.name_path.startswith("/")
+			assert "captures/2026-03-27_10-04-07" in specs[0].where.name_path
+
+	def test_bare_name_has_no_name_path (self) -> None:
+
+		"""Bare names don't set the name_path field."""
+
+		raw = {"where": {"name": "my-sample"}}
+		specs = subsample.query.parse_select(raw, "test")
+		assert specs[0].where.name == "my-sample"
+		assert specs[0].where.name_path is None
+
 	def test_invalid_order_by_raises (self) -> None:
 
 		with pytest.raises(ValueError, match="order_by"):
