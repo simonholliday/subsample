@@ -914,12 +914,20 @@ class MidiPlayer:
 		pa = subsample.audio.create_pyaudio()
 
 		# Resolve output device — mirrors the input device selection pattern.
+		output_devices = subsample.audio.list_output_devices(pa)
+
 		if self._output_device_name is not None:
-			output_device_index: int = subsample.audio.find_output_device_by_name(
-				pa, self._output_device_name,
-			)
+			try:
+				output_device_index: int = subsample.audio.find_output_device_by_name(
+					pa, self._output_device_name,
+				)
+			except ValueError:
+				_log.warning(
+					"Configured audio output device %r not found — prompting for selection",
+					self._output_device_name,
+				)
+				output_device_index = subsample.audio.select_output_device(output_devices)
 		else:
-			output_devices = subsample.audio.list_output_devices(pa)
 			output_device_index = subsample.audio.select_output_device(output_devices)
 
 		# Callback mode: PortAudio pulls audio from _audio_callback on its own

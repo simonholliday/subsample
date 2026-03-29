@@ -257,10 +257,18 @@ def _run_recorder (
 	pa = subsample.audio.create_pyaudio()
 
 	try:
+		devices = subsample.audio.list_input_devices(pa)
+
 		if cfg.recorder.audio.device is not None:
-			device_index = subsample.audio.find_device_by_name(pa, cfg.recorder.audio.device)
+			try:
+				device_index = subsample.audio.find_device_by_name(pa, cfg.recorder.audio.device)
+			except ValueError:
+				_log.warning(
+					"Configured audio input device %r not found — prompting for selection",
+					cfg.recorder.audio.device,
+				)
+				device_index = subsample.audio.select_device(devices)
 		else:
-			devices = subsample.audio.list_input_devices(pa)
 			device_index = subsample.audio.select_device(devices)
 
 		# Resolve channel count: if not set in config, detect from the device.
@@ -531,7 +539,14 @@ def _start_player (
 		devices = subsample.player.list_midi_input_devices()
 
 		if cfg.player.midi_device is not None:
-			device_name = subsample.player.find_midi_device_by_name(cfg.player.midi_device)
+			try:
+				device_name = subsample.player.find_midi_device_by_name(cfg.player.midi_device)
+			except ValueError:
+				_log.warning(
+					"Configured MIDI device %r not found — prompting for selection",
+					cfg.player.midi_device,
+				)
+				device_name = subsample.player.select_midi_device(devices)
 		else:
 			device_name = subsample.player.select_midi_device(devices)
 
