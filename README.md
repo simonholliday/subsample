@@ -51,9 +51,12 @@ you lifting a finger.
   recordings, SDR radio captures, or any other source can be imported directly
   with automatic silence trimming, safety fades, and full analysis. Supports WAV,
   BWF, FLAC, AIFF, and OGG.
-- **Ready-to-play GM drums map** - 47 instruments, pre-mixed with per-instrument
+- **Ready-to-play GM drums map** - 47 reference instruments define what each
+  MIDI note should sound like. Your captured samples are automatically matched to
+  the closest reference and routed to the corresponding note, with per-instrument
   filtering, adaptive compression on transient sounds, audience-perspective
-  panning, and gain balancing. Point it at your samples and play.
+  panning, and gain balancing already configured. No samples are included - the
+  map is a template that organises whatever you feed it.
 - **Config-driven** - everything is YAML. MIDI routing, similarity weights,
   detection tuning, processing chains, output format. Version-controllable,
   reproducible, no GUI required.
