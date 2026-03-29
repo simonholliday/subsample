@@ -470,6 +470,8 @@ def _deserialize_spectral (data: dict[str, typing.Any]) -> subsample.analysis.An
 		voiced_fraction    = float(data.get("voiced_fraction", 0.0)),
 		log_attack_time    = float(data.get("log_attack_time", 0.0)),
 		spectral_flux      = float(data.get("spectral_flux", 0.0)),
+		spectral_rolloff   = float(data.get("spectral_rolloff", 0.0)),
+		spectral_slope     = float(data.get("spectral_slope", 0.0)),
 	)
 
 
@@ -575,8 +577,11 @@ def _deserialize_level (data: dict[str, typing.Any]) -> subsample.analysis.Level
 	"""
 
 	return subsample.analysis.LevelResult(
-		peak = float(data.get("peak", 0.0)),
-		rms  = float(data.get("rms",  0.0)),
+		peak            = float(data.get("peak", 0.0)),
+		rms             = float(data.get("rms",  0.0)),
+		crest_factor    = float(data.get("crest_factor", 0.0)),
+		crest_factor_db = float(data.get("crest_factor_db", 0.0)),
+		noise_floor     = float(data.get("noise_floor", 0.0)),
 	)
 
 

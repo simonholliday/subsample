@@ -3,7 +3,7 @@
 import math
 
 import numpy
-
+import pytest
 import warnings
 
 import subsample.analysis
@@ -65,19 +65,19 @@ class TestLogNormalize:
 
 	def test_at_min_ref_returns_zero (self) -> None:
 		"""A value equal to min_ref should map to exactly 0.0."""
-		assert subsample.analysis._log_normalize(0.001, 0.001, 2.0) == 0.0
+		assert subsample.analysis.log_normalize(0.001, 0.001, 2.0) == 0.0
 
 	def test_below_min_ref_returns_zero (self) -> None:
 		"""Any value below min_ref should clamp to 0.0."""
-		assert subsample.analysis._log_normalize(0.0005, 0.001, 2.0) == 0.0
+		assert subsample.analysis.log_normalize(0.0005, 0.001, 2.0) == 0.0
 
 	def test_at_max_ref_returns_one (self) -> None:
 		"""A value equal to max_ref should map to exactly 1.0."""
-		assert subsample.analysis._log_normalize(2.0, 0.001, 2.0) == 1.0
+		assert subsample.analysis.log_normalize(2.0, 0.001, 2.0) == 1.0
 
 	def test_above_max_ref_returns_one (self) -> None:
 		"""Any value above max_ref should clamp to 1.0."""
-		assert subsample.analysis._log_normalize(5.0, 0.001, 2.0) == 1.0
+		assert subsample.analysis.log_normalize(5.0, 0.001, 2.0) == 1.0
 
 	def test_geometric_midpoint_returns_half (self) -> None:
 		"""The geometric mean of min and max should map to 0.5.
@@ -86,7 +86,7 @@ class TestLogNormalize:
 		This is the perceptual halfway point on a log scale.
 		"""
 		midpoint = math.sqrt(0.001 * 2.0)
-		score = subsample.analysis._log_normalize(midpoint, 0.001, 2.0)
+		score = subsample.analysis.log_normalize(midpoint, 0.001, 2.0)
 
 		assert abs(score - 0.5) < 1e-6
 
@@ -1603,3 +1603,128 @@ class TestRefineOnsetsToAttacks:
 		for attack, onset in zip(result.attack_times, result.onset_times):
 			assert isinstance(attack, float)
 			assert attack <= onset + 0.0001
+
+
+# ---------------------------------------------------------------------------
+# Crest factor
+# ---------------------------------------------------------------------------
+
+class TestCrestFactor:
+
+	def test_sine_wave_crest_factor (self) -> None:
+		"""A pure sine wave has crest factor = sqrt(2) ≈ 1.414 (~3 dB)."""
+		sr = 44100
+		t = numpy.linspace(0, 1.0, sr, dtype=numpy.float32)
+		mono = 0.5 * numpy.sin(2.0 * numpy.pi * 440.0 * t)
+
+		result = subsample.analysis.compute_level(mono)
+
+		assert result.crest_factor == pytest.approx(math.sqrt(2.0), abs=0.01)
+		assert result.crest_factor_db == pytest.approx(3.01, abs=0.1)
+
+	def test_silence_crest_factor_is_zero (self) -> None:
+		"""Silent signal should have crest_factor = 0 (guard value)."""
+		mono = numpy.zeros(4410, dtype=numpy.float32)
+		result = subsample.analysis.compute_level(mono)
+		assert result.crest_factor == 0.0
+		assert result.crest_factor_db == 0.0
+
+	def test_empty_signal_crest_factor_is_zero (self) -> None:
+		"""Empty signal should have crest_factor = 0."""
+		mono = numpy.array([], dtype=numpy.float32)
+		result = subsample.analysis.compute_level(mono)
+		assert result.crest_factor == 0.0
+
+	def test_impulse_has_high_crest (self) -> None:
+		"""A single impulse in silence has a very high crest factor."""
+		mono = numpy.zeros(44100, dtype=numpy.float32)
+		mono[0] = 0.9
+
+		result = subsample.analysis.compute_level(mono)
+
+		# Impulse should have much higher crest than a sine wave
+		assert result.crest_factor > 10.0
+		assert result.crest_factor_db > 20.0
+
+
+# ---------------------------------------------------------------------------
+# Noise floor
+# ---------------------------------------------------------------------------
+
+class TestNoiseFloor:
+
+	def test_noise_floor_requires_params (self) -> None:
+		"""noise_floor is 0.0 when params is not provided."""
+		mono = numpy.random.randn(44100).astype(numpy.float32) * 0.1
+		result = subsample.analysis.compute_level(mono)
+		assert result.noise_floor == 0.0
+
+	def test_noise_floor_with_params (self) -> None:
+		"""noise_floor is non-zero when params is provided for a non-silent signal."""
+		mono = numpy.random.randn(44100).astype(numpy.float32) * 0.1
+		params = subsample.analysis.compute_params(44100)
+		result = subsample.analysis.compute_level(mono, params)
+		assert result.noise_floor > 0.0
+
+	def test_silence_noise_floor_is_zero (self) -> None:
+		"""Silent signal should have noise_floor = 0."""
+		mono = numpy.zeros(44100, dtype=numpy.float32)
+		params = subsample.analysis.compute_params(44100)
+		result = subsample.analysis.compute_level(mono, params)
+		assert result.noise_floor == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Spectral rolloff and slope
+# ---------------------------------------------------------------------------
+
+class TestSpectralRolloffAndSlope:
+
+	def test_analyze_mono_returns_rolloff_and_slope (self) -> None:
+		"""analyze_mono() should return spectral_rolloff and spectral_slope in [0, 1]."""
+		sr = 44100
+		params = subsample.analysis.compute_params(sr)
+		mono = numpy.random.randn(sr).astype(numpy.float32) * 0.1
+
+		result = subsample.analysis.analyze_mono(mono, params)
+
+		assert 0.0 <= result.spectral_rolloff <= 1.0
+		assert 0.0 <= result.spectral_slope <= 1.0
+
+	def test_empty_signal_rolloff_and_slope_are_zero (self) -> None:
+		"""Empty signal should return 0.0 for both new metrics."""
+		params = subsample.analysis.compute_params(44100)
+		mono = numpy.array([], dtype=numpy.float32)
+
+		result = subsample.analysis.analyze_mono(mono, params)
+
+		assert result.spectral_rolloff == 0.0
+		assert result.spectral_slope == 0.0
+
+	def test_low_frequency_tone_has_low_rolloff (self) -> None:
+		"""A low-frequency sine wave should have a low spectral rolloff."""
+		sr = 44100
+		params = subsample.analysis.compute_params(sr)
+		t = numpy.linspace(0, 1.0, sr, dtype=numpy.float32)
+		mono = 0.5 * numpy.sin(2.0 * numpy.pi * 100.0 * t)
+
+		result = subsample.analysis.analyze_mono(mono, params)
+
+		# 100 Hz tone: rolloff should be in the lower part of the range
+		assert result.spectral_rolloff < 0.5
+
+	def test_analyze_all_returns_rolloff_and_slope (self) -> None:
+		"""analyze_all() results include the new spectral fields."""
+		sr = 44100
+		params = subsample.analysis.compute_params(sr)
+		cfg = subsample.config.AnalysisConfig()
+		mono = numpy.random.randn(sr).astype(numpy.float32) * 0.1
+
+		spectral, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
+			mono, params, cfg,
+		)
+
+		assert 0.0 <= spectral.spectral_rolloff <= 1.0
+		assert 0.0 <= spectral.spectral_slope <= 1.0
+		# Also verify level has crest factor from analyze_all path
+		assert level.crest_factor > 0.0

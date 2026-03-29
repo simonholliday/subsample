@@ -105,7 +105,7 @@ warnings.filterwarnings("ignore", message="Empty filters detected in mel frequen
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "11"
+ANALYSIS_VERSION: str = "12"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -175,6 +175,22 @@ _ONSET_DECAY_MS: float = 50.0
 # Log normalisation spreads the useful range; values outside are clamped.
 _FLUX_MIN: float = 0.01
 _FLUX_MAX: float = 5.0
+
+# Crest factor normalisation range (linear ratio, NOT dB).
+# sqrt(2) is the crest factor of a pure sine wave — the lowest value for any
+# real periodic signal.  10.0 (~20 dB) represents a very peaky sparse transient.
+# Typical drums sit at 3–8 (10–18 dB); sustained tones around 1.5–2.5 (3–8 dB).
+CREST_MIN: float = math.sqrt(2.0)   # ~1.414, sine wave
+CREST_MAX: float = 10.0             # ~20 dB, very peaky
+
+# Spectral slope normalisation range (dB/octave).
+# Measured as the linear regression slope of log-magnitude vs log-frequency.
+# Most real-world audio has a negative slope (bass-dominant); bright sounds
+# approach zero or slightly positive.
+#   -6 dB/oct — heavily bass-dominated (sub rumble, bowed bass)
+#   +2 dB/oct — unusually bright (isolated cymbal shimmer, bright noise burst)
+_SLOPE_MIN_DB_OCT: float = -6.0
+_SLOPE_MAX_DB_OCT: float =  2.0
 
 # Multi-band energy envelope: frequency band boundaries in Hz.
 # These four bands directly encode the physical signatures of drum types:
@@ -280,6 +296,21 @@ class AnalysisResult:
 	1.0 = rapidly and continuously evolving spectrum (busy percussion, brushes).
 	High values indicate sounds where the spectral shape changes frequently,
 	not just at a single transient."""
+
+	spectral_rolloff: float = 0.0
+	"""Frequency below which 85% of spectral energy lives, log-mapped to [0, 1].
+	0.0 = all energy concentrated at the lowest frequencies (sub-bass rumble),
+	1.0 = energy extends to the highest frequencies (white noise, bright cymbals).
+	Complements spectral_centroid: two sounds with the same centre of mass can
+	have very different rolloff points (one tightly clustered, one spread wide)."""
+
+	spectral_slope: float = 0.0
+	"""Overall tilt of the spectrum, linearly mapped to [0, 1].
+	0.0 = steeply bass-dominated (kick drum, bass guitar),
+	0.5 = roughly flat spectrum,
+	1.0 = bright / treble-dominated (hi-hat, cymbal shimmer).
+	Computed as the linear regression slope of the log-magnitude spectrum
+	against log-frequency, then normalised from the empirical range."""
 
 	def as_vector (self) -> numpy.ndarray:
 
@@ -478,6 +509,23 @@ class LevelResult:
 	0.0 = silence. Represents perceived average loudness and is the primary
 	value used to normalise levels across samples with different recording volumes."""
 
+	crest_factor: float = 0.0
+	"""Peak-to-RMS ratio (linear).  Measures how peaky/transient the waveform is.
+	0.0 = silent signal (guard value).  sqrt(2) ≈ 1.41 = pure sine wave (3 dB).
+	Typical drums = 3–10 (10–20 dB).  Very sparse impulse = 10+ (20+ dB).
+	Loudness-invariant: a quiet snare and a loud snare have the same crest factor."""
+
+	crest_factor_db: float = 0.0
+	"""Crest factor in decibels: 20 * log10(crest_factor).
+	0.0 = silent (guard) or pure DC.  ~3 dB = sine wave.  10–18 dB = typical drums.
+	More intuitive than the linear ratio for audio engineers."""
+
+	noise_floor: float = 0.0
+	"""5th percentile of frame-level RMS, representing the recording's ambient
+	noise level.  Same [0, 1] scale as rms.  0.0 when unknown (e.g. when
+	computed without AnalysisParams) or when the signal is silent.
+	Useful for future gating processors to auto-set their threshold."""
+
 
 @dataclasses.dataclass(frozen=True)
 class BandEnergyResult:
@@ -634,6 +682,8 @@ def analyze_mono (
 			voiced_fraction=0.0,
 			log_attack_time=0.0,
 			spectral_flux=0.0,
+			spectral_rolloff=0.0,
+			spectral_slope=0.0,
 		)
 
 	# Clamp n_fft to the signal length for short recordings. librosa zero-pads
@@ -669,8 +719,21 @@ def analyze_mono (
 	voiced_fraction = _compute_voiced_fraction(mono, params, pyin_voiced_flag=_pyin_voiced_flag)
 	log_attack_time, spectral_flux = _compute_spectral_onset_features(params, S_magnitude)
 
+	# Spectral rolloff: frequency below which 85% of spectral energy lives.
+	# Reuses S_power (already computed above at the STFT step).
+	rolloff_raw = librosa.feature.spectral_rolloff(
+		S=S_power, sr=params.sample_rate, roll_percent=0.85,
+	)
+	spectral_rolloff = log_normalize(
+		float(numpy.mean(rolloff_raw)), _FREQ_MIN_HZ, params.sample_rate / 2,
+	)
+
+	# Spectral slope: linear regression of log-magnitude vs log-frequency.
+	# Captures the overall bass-to-treble tilt of the spectrum.
+	spectral_slope = _compute_spectral_slope(S_magnitude, params)
+
 	return AnalysisResult(
-		spectral_flatness=_log_normalize(
+		spectral_flatness=log_normalize(
 			float(numpy.mean(flatness)), _FLATNESS_MIN, _FLATNESS_MAX
 		),
 		attack=attack,
@@ -683,6 +746,8 @@ def analyze_mono (
 		voiced_fraction=voiced_fraction,
 		log_attack_time=log_attack_time,
 		spectral_flux=spectral_flux,
+		spectral_rolloff=spectral_rolloff,
+		spectral_slope=spectral_slope,
 	)
 
 
@@ -1091,20 +1156,33 @@ def has_stable_pitch (
 	)
 
 
-def compute_level (mono: numpy.ndarray) -> LevelResult:
+def compute_level (
+	mono: numpy.ndarray,
+	params: AnalysisParams | None = None,
+) -> LevelResult:
 
-	"""Compute peak and RMS amplitude from a normalised float32 mono signal.
+	"""Compute peak, RMS, crest factor, and noise floor from a normalised float32 mono signal.
 
-	Both metrics are derived from the same float32 signal produced by
+	Both peak and RMS are derived from the same float32 signal produced by
 	to_mono_float(), so values are naturally in [0.0, 1.0]. The computation
 	is trivially cheap and always runs alongside the other analyses.
 
+	Crest factor (peak / rms) is a loudness-invariant ratio that captures the
+	dynamic profile of the sound — high for peaky transients, low for sustained
+	or compressed signals.
+
+	Noise floor (5th percentile of frame-level RMS) represents the quietest
+	frames in the recording.  Requires ``params`` for the frame-level RMS
+	computation; when ``params`` is None, noise_floor defaults to 0.0.
+
 	Args:
-		mono: Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+		mono:   Shape (n_frames,), dtype float32, values in [-1.0, 1.0].
+		params: FFT parameters for frame-level RMS computation (noise floor).
+		        When None, noise_floor is 0.0.
 
 	Returns:
-		LevelResult with peak and rms in [0.0, 1.0].
-		Both are 0.0 for an empty or silent signal.
+		LevelResult with peak, rms, crest_factor, crest_factor_db, and noise_floor.
+		All are 0.0 for an empty or silent signal.
 	"""
 
 	if mono.size == 0:
@@ -1113,7 +1191,36 @@ def compute_level (mono: numpy.ndarray) -> LevelResult:
 	peak = float(numpy.max(numpy.abs(mono)))
 	rms  = float(numpy.sqrt(numpy.mean(mono.astype(numpy.float64) ** 2)))
 
-	return LevelResult(peak=peak, rms=rms)
+	# Crest factor: peak-to-RMS ratio.  Guard against division by zero for
+	# near-silent signals where rms rounds to 0.
+	if rms > 1e-10:
+		cf    = peak / rms
+		cf_db = 20.0 * math.log10(cf)
+	else:
+		cf    = 0.0
+		cf_db = 0.0
+
+	# Noise floor: 5th percentile of per-frame RMS.  Only computed when
+	# AnalysisParams are available (live capture and analyze_all paths).
+	noise_floor = 0.0
+
+	if params is not None and mono.shape[0] > 0:
+		frame_rms = librosa.feature.rms(
+			y=mono,
+			frame_length=params.n_fft,
+			hop_length=params.hop_length,
+		)[0]
+
+		if frame_rms.size > 0:
+			noise_floor = float(numpy.percentile(frame_rms, 5))
+
+	return LevelResult(
+		peak=peak,
+		rms=rms,
+		crest_factor=cf,
+		crest_factor_db=cf_db,
+		noise_floor=noise_floor,
+	)
 
 
 def format_level_result (result: LevelResult) -> str:
@@ -1138,10 +1245,16 @@ def format_level_result (result: LevelResult) -> str:
 		db = 20.0 * math.log10(v)
 		return f"{db:.1f}"
 
-	return (
-		f"peak={result.peak:.4f} ({_dbfs(result.peak)}dBFS)"
-		f"  rms={result.rms:.4f} ({_dbfs(result.rms)}dBFS)"
-	)
+	parts = [
+		f"peak={result.peak:.4f} ({_dbfs(result.peak)}dBFS)",
+		f"rms={result.rms:.4f} ({_dbfs(result.rms)}dBFS)",
+		f"crest={result.crest_factor:.2f} ({result.crest_factor_db:.1f}dB)",
+	]
+
+	if result.noise_floor > 0.0:
+		parts.append(f"floor={result.noise_floor:.4f} ({_dbfs(result.noise_floor)}dBFS)")
+
+	return "  ".join(parts)
 
 
 def analyze_band_energy (
@@ -1231,7 +1344,7 @@ def analyze_band_energy (
 			decay_frames = len(post_peak)
 
 		decay_seconds = decay_frames * effective_hop / params.sample_rate
-		decay_rate    = _log_normalize(decay_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
+		decay_rate    = log_normalize(decay_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
 		decay_rates.append(decay_rate)
 
 	return BandEnergyResult(
@@ -1508,7 +1621,7 @@ def analyze_all (
 	rhythm      = analyze_rhythm(mono, params, rhythm_cfg, _percussive=safe_percussive)
 	spectral    = analyze_mono(mono, params, _pyin_voiced_flag=pyin[1] if pyin is not None else None, _hpss_ratio=harmonic_ratio)
 	pitch, timbre = analyze_pitch(mono, params, _pyin_result=pyin)
-	level       = compute_level(mono)
+	level       = compute_level(mono, params)
 	band_energy = analyze_band_energy(mono, params)
 
 	return spectral, rhythm, pitch, timbre, level, band_energy
@@ -1588,7 +1701,7 @@ def to_mono_float (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
 	return numpy.mean(float_audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]
 
 
-def _log_normalize (value: float, min_ref: float, max_ref: float) -> float:
+def log_normalize (value: float, min_ref: float, max_ref: float) -> float:
 
 	"""Map a value to [0.0, 1.0] using a logarithmic scale.
 
@@ -1667,12 +1780,67 @@ def _compute_spectral_onset_features (
 	seconds_per_frame = params.hop_length / params.sample_rate
 	first_active = int(active[0])
 	attack_seconds = (peak_idx - first_active) * seconds_per_frame
-	log_attack_time = _log_normalize(attack_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
+	log_attack_time = log_normalize(attack_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
 
 	# --- mean spectral flux, log-normalised ---
-	spectral_flux = _log_normalize(float(numpy.mean(onset_env)), _FLUX_MIN, _FLUX_MAX)
+	spectral_flux = log_normalize(float(numpy.mean(onset_env)), _FLUX_MIN, _FLUX_MAX)
 
 	return (log_attack_time, spectral_flux)
+
+
+def _compute_spectral_slope (
+	S_magnitude: numpy.ndarray,
+	params: AnalysisParams,
+) -> float:
+
+	"""Compute the overall spectral tilt as a normalised [0, 1] value.
+
+	The slope is the first-order coefficient of a linear regression of the
+	mean log-magnitude spectrum against log-frequency (dB per octave).
+
+	A steep negative slope indicates a bass-dominated sound (kick drum, bass
+	guitar).  A slope near zero indicates a flat spectrum (white noise).
+	A positive slope indicates a bright, treble-dominated sound (hi-hat shimmer).
+
+	The result is linearly mapped from [_SLOPE_MIN_DB_OCT, _SLOPE_MAX_DB_OCT]
+	to [0, 1] and clamped.
+
+	Args:
+		S_magnitude: Magnitude spectrogram, shape (n_fft//2+1, n_frames).
+		params:      FFT parameters (for frequency axis computation).
+
+	Returns:
+		Normalised spectral slope in [0, 1].
+	"""
+
+	# Mean magnitude spectrum across all time frames.
+	mean_mag = numpy.mean(S_magnitude, axis=1)
+
+	# Frequency axis for each FFT bin.
+	freqs = librosa.fft_frequencies(sr=params.sample_rate, n_fft=params.n_fft)
+
+	# Skip bin 0 (DC) to avoid log(0).
+	freqs    = freqs[1:]
+	mean_mag = mean_mag[1:]
+
+	# Guard: if all magnitudes are zero (silence), return midpoint.
+	if numpy.max(mean_mag) < 1e-10:
+		return 0.5
+
+	# Suppress zeros in the magnitude before taking the log.
+	mean_mag = numpy.maximum(mean_mag, 1e-10)
+
+	log_freq = numpy.log2(freqs)
+	log_mag  = 20.0 * numpy.log10(mean_mag)
+
+	# Linear regression: log_mag = slope * log_freq + intercept.
+	# slope is in dB per octave (since log_freq is base-2).
+	slope, _ = numpy.polyfit(log_freq, log_mag, 1)
+
+	# Normalise from [_SLOPE_MIN_DB_OCT, _SLOPE_MAX_DB_OCT] to [0, 1].
+	normalized = (float(slope) - _SLOPE_MIN_DB_OCT) / (_SLOPE_MAX_DB_OCT - _SLOPE_MIN_DB_OCT)
+
+	return max(0.0, min(1.0, normalized))
 
 
 def _compute_attack_release (
@@ -1744,8 +1912,8 @@ def _compute_attack_release (
 	last_active = int(active_frames[-1])
 	release_seconds = (last_active - peak_idx) * seconds_per_frame
 
-	attack_score = _log_normalize(attack_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
-	release_score = _log_normalize(release_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
+	attack_score = log_normalize(attack_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
+	release_score = log_normalize(release_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
 
 	return (attack_score, release_score)
 
@@ -1781,7 +1949,7 @@ def _compute_spectral_centroid (
 
 	nyquist = params.sample_rate / 2.0
 
-	return _log_normalize(mean_hz, _FREQ_MIN_HZ, nyquist)
+	return log_normalize(mean_hz, _FREQ_MIN_HZ, nyquist)
 
 
 def _compute_spectral_bandwidth (
@@ -1816,7 +1984,7 @@ def _compute_spectral_bandwidth (
 
 	nyquist = params.sample_rate / 2.0
 
-	return _log_normalize(mean_hz, _FREQ_MIN_HZ, nyquist)
+	return log_normalize(mean_hz, _FREQ_MIN_HZ, nyquist)
 
 
 def _compute_zcr (

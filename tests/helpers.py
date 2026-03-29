@@ -43,6 +43,8 @@ def _make_spectral () -> subsample.analysis.AnalysisResult:
 		voiced_fraction    = 0.9,
 		log_attack_time    = 0.15,
 		spectral_flux      = 0.45,
+		spectral_rolloff   = 0.55,
+		spectral_slope     = 0.35,
 	)
 
 
@@ -101,7 +103,13 @@ def _make_level () -> subsample.analysis.LevelResult:
 
 	"""Return a representative LevelResult with typical field values."""
 
-	return subsample.analysis.LevelResult(peak=0.85, rms=0.25)
+	return subsample.analysis.LevelResult(
+		peak=0.85,
+		rms=0.25,
+		crest_factor=3.4,
+		crest_factor_db=10.63,
+		noise_floor=0.01,
+	)
 
 
 def _make_band_energy () -> subsample.analysis.BandEnergyResult:
@@ -168,6 +176,8 @@ def _write_sidecar (
 			"voiced_fraction":    spectral.voiced_fraction,
 			"log_attack_time":    spectral.log_attack_time,
 			"spectral_flux":      spectral.spectral_flux,
+			"spectral_rolloff":   spectral.spectral_rolloff,
+			"spectral_slope":     spectral.spectral_slope,
 		},
 		"rhythm": {
 			"tempo_bpm":        rhythm.tempo_bpm,
@@ -192,8 +202,11 @@ def _write_sidecar (
 			"mfcc_onset": list(timbre.mfcc_onset),
 		},
 		"level": {
-			"peak": level.peak,
-			"rms":  level.rms,
+			"peak":            level.peak,
+			"rms":             level.rms,
+			"crest_factor":    level.crest_factor,
+			"crest_factor_db": level.crest_factor_db,
+			"noise_floor":     level.noise_floor,
 		},
 		"band_energy": {
 			"energy_fractions": list(band_energy.energy_fractions),

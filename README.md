@@ -9,7 +9,7 @@ sound into a playable MIDI instrument - automatically, in real time.
 Most samplers require you to manually record, chop, name, categorise, and map
 every sample by hand. Subsample automates the entire pipeline: it detects
 individual sounds from a live audio stream or pre-recorded files, builds a
-55-element acoustic fingerprint for each one, and assigns them to MIDI notes
+58-element acoustic fingerprint for each one, and assigns them to MIDI notes
 based on how they sound. The chaotic environment becomes an organised, playable
 sample pack - without you lifting a finger.
 
@@ -58,12 +58,12 @@ recordings.
 
 ### 2. Analyse
 
-Each captured sound is fingerprinted across 55 acoustic dimensions spanning five
+Each captured sound is fingerprinted across 58 acoustic dimensions spanning five
 groups:
 
 | Group | Dimensions | What it captures |
 |-------|-----------|------------------|
-| Spectral shape | 11 | Brightness, noisiness, attack/release character |
+| Spectral shape | 14 | Brightness, noisiness, attack/release character |
 | Sustained timbre | 12 | Steady-state tonal colour |
 | Timbre dynamics | 12 | How the sound evolves over time |
 | Attack character | 12 | Transient signature |
@@ -81,7 +81,7 @@ improves, stale sidecars are detected and re-analysed automatically on startup.
 ### 3. Assign
 
 Sounds are matched to your reference library using cosine similarity on the
-55-element feature vector. The best kick-like sound maps to your kick pad; the
+58-element feature vector. The best kick-like sound maps to your kick pad; the
 best snare maps to your snare. When multiple notes share a reference, they
 receive ranked matches: first note gets the best match, second note gets the
 second-best, and so on.
@@ -425,7 +425,7 @@ in the background by a worker pool; no latency is added at trigger time.
 ## Similarity engine
 
 Every new sample is scored against every reference using cosine similarity on a
-55-element composite feature vector built from five groups: spectral shape (11
+58-element composite feature vector built from five groups: spectral shape (14
 dimensions), sustained timbre (12), timbre dynamics (12), attack character (12),
 and band energy (8). Each group is independently normalised and scaled by a
 configurable weight (`similarity.weight_*`), so you can emphasise whichever
@@ -879,13 +879,14 @@ recording concurrently and independently.
 ### Similarity engine
 
 Every new instrument sample is scored against every reference using cosine
-similarity on a 55-element composite vector. The vector is split into five
+similarity on a 58-element composite vector. The vector is split into five
 groups, each independently L2-normalised so that no single group dominates by
 scale:
 
 ```
-Group 1 (x11): spectral shape   [flatness, attack, release, centroid, bandwidth, zcr,
-                                  harmonic, contrast, voiced, log_attack, flux]
+Group 1 (x14): spectral shape   [flatness, attack, release, centroid, bandwidth, zcr,
+                                  harmonic, contrast, voiced, log_attack, flux,
+                                  spectral_rolloff, spectral_slope, crest_factor]
 Group 2 (x12): sustained MFCC   [mean timbre, coefficients 1-12]
 Group 3 (x12): delta-MFCC       [timbre trajectory, coefficients 1-12]
 Group 4 (x12): onset-weighted   [attack character, coefficients 1-12]

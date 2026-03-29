@@ -479,8 +479,21 @@ def _build_feature_vector (
 
 	parts: list[numpy.ndarray] = []
 
-	# --- Spectral group (11 values, already [0, 1]) ---
+	# --- Spectral group (14 values, all [0, 1]) ---
 	if cfg.weight_spectral > 0.0:
+
+		# Normalised crest factor: computed from LevelResult (raw engineering
+		# values) rather than stored redundantly in AnalysisResult.  The log
+		# normalisation spreads the perceptually useful range [sqrt(2), 10]
+		# across [0, 1].
+		if record.level.rms > 1e-10:
+			cf = record.level.peak / record.level.rms
+			cf_norm = subsample.analysis.log_normalize(
+				cf, subsample.analysis.CREST_MIN, subsample.analysis.CREST_MAX,
+			)
+		else:
+			cf_norm = 0.0
+
 		spectral = numpy.array([
 			record.spectral.spectral_flatness,
 			record.spectral.attack,
@@ -493,6 +506,9 @@ def _build_feature_vector (
 			record.spectral.voiced_fraction,
 			record.spectral.log_attack_time,
 			record.spectral.spectral_flux,
+			record.spectral.spectral_rolloff,
+			record.spectral.spectral_slope,
+			cf_norm,
 		], dtype=numpy.float32)
 		parts.append(_l2_normalize(spectral) * cfg.weight_spectral)
 

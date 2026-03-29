@@ -435,3 +435,52 @@ class TestBandEnergyCache:
 		assert isinstance(r_band_energy, subsample.analysis.BandEnergyResult)
 		assert all(v == 0.0 for v in r_band_energy.energy_fractions)
 		assert all(v == 0.0 for v in r_band_energy.decay_rates)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat: v11 sidecars missing new analysis fields
+# ---------------------------------------------------------------------------
+
+class TestV11SidecarBackwardCompat:
+
+	"""Sidecars written before v12 lack spectral_rolloff, spectral_slope,
+	crest_factor, crest_factor_db, and noise_floor.  Deserialization should
+	fall back to 0.0 for all missing fields."""
+
+	def test_missing_spectral_fields_default_to_zero (self, tmp_path: pathlib.Path) -> None:
+		"""Spectral fields absent from sidecar deserialize as 0.0."""
+		sidecar = tests.helpers._write_sidecar(tmp_path, "old")
+
+		data = json.loads(sidecar.read_text())
+
+		# Simulate a v11 sidecar by removing the new spectral fields
+		data["spectral"].pop("spectral_rolloff", None)
+		data["spectral"].pop("spectral_slope", None)
+		sidecar.write_text(json.dumps(data), encoding="utf-8")
+
+		# Use load_sidecar (skips MD5 check) to test deserialization directly
+		result = subsample.cache.load_sidecar(sidecar)
+		assert result is not None
+		spectral = result[0]
+		assert spectral.spectral_rolloff == 0.0
+		assert spectral.spectral_slope == 0.0
+
+	def test_missing_level_fields_default_to_zero (self, tmp_path: pathlib.Path) -> None:
+		"""Level fields absent from sidecar deserialize as 0.0."""
+		sidecar = tests.helpers._write_sidecar(tmp_path, "old")
+
+		data = json.loads(sidecar.read_text())
+
+		# Simulate a v11 sidecar by removing the new level fields
+		data["level"].pop("crest_factor", None)
+		data["level"].pop("crest_factor_db", None)
+		data["level"].pop("noise_floor", None)
+		sidecar.write_text(json.dumps(data), encoding="utf-8")
+
+		# Use load_sidecar (skips MD5 check) to test deserialization directly
+		result = subsample.cache.load_sidecar(sidecar)
+		assert result is not None
+		level = result[6]
+		assert level.crest_factor == 0.0
+		assert level.crest_factor_db == 0.0
+		assert level.noise_floor == 0.0

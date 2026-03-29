@@ -156,15 +156,15 @@ class TestAsVector:
 class TestBuildFeatureVector:
 
 	def test_full_vector_length (self) -> None:
-		# Default config: all 5 groups active → 11 + 12 + 12 + 12 + 8 = 55
+		# Default config: all 5 groups active → 14 + 12 + 12 + 12 + 8 = 58
 		record = _make_record("X", _make_spectral())
 		v = subsample.similarity._build_feature_vector(record, _DEFAULT_CFG)
-		assert len(v) == 55
+		assert len(v) == 58
 
 	def test_spectral_only_length (self) -> None:
 		record = _make_record("X", _make_spectral())
 		v = subsample.similarity._build_feature_vector(record, _SPECTRAL_ONLY_CFG)
-		assert len(v) == 11
+		assert len(v) == 14
 
 	def test_timbre_only_length (self) -> None:
 		# weight_timbre=1, weight_timbre_delta=0.5, weight_timbre_onset=1 → 12+12+12=36
@@ -722,6 +722,8 @@ class TestLevelIndependence:
 			duration    = 1.0,
 		)
 
+		# Loud record: same peak-to-rms ratio as quiet (crest factor ≈ 3.33)
+		# so the similarity vector's crest factor element is identical.
 		record_loud = subsample.library.SampleRecord(
 			sample_id   = subsample.library.allocate_id(),
 			name        = "loud",
@@ -744,7 +746,7 @@ class TestLevelIndependence:
 				voiced_frame_count=0,
 			),
 			timbre      = timbre,
-			level       = subsample.analysis.LevelResult(peak=0.95, rms=0.70),
+			level       = subsample.analysis.LevelResult(peak=0.95, rms=0.285),
 			band_energy = tests.helpers._make_band_energy(),
 			params      = subsample.analysis.compute_params(44100),
 			duration    = 1.0,
@@ -781,11 +783,11 @@ class TestBandEnergyGroup:
 		)
 
 	def test_band_energy_weight_zero_excludes_group (self) -> None:
-		"""Setting weight_band_energy=0 should produce a 47-element vector."""
+		"""Setting weight_band_energy=0 should produce a 50-element vector."""
 		cfg = subsample.config.SimilarityConfig(weight_band_energy=0.0)
 		record = _make_record("X", _make_spectral())
 		v = subsample.similarity._build_feature_vector(record, cfg)
-		assert len(v) == 47
+		assert len(v) == 50
 
 	def test_band_energy_only_has_8_elements (self) -> None:
 		"""Band-energy-only config should produce an 8-element vector."""
