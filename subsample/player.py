@@ -80,32 +80,44 @@ class MidiMapResult:
 	bank_channel:     int
 
 
-def _beat_quantize_params (process: subsample.query.ProcessSpec) -> tuple[typing.Optional[float], int]:
+def _beat_quantize_params (
+	process: subsample.query.ProcessSpec,
+	config_bpm: float = 0.0,
+) -> tuple[typing.Optional[float], int]:
 
 	"""Extract BPM and grid from a beat_quantize processor step.
 
-	Returns (target_bpm, grid) where target_bpm is None when no explicit
-	BPM is declared (falling back to the global transform.target_bpm).
+	Returns (target_bpm, grid). When no explicit BPM is declared in the
+	step, falls back to config_bpm (from transform.target_bpm in config).
 	"""
 
 	beat_step = next(s for s in process.steps if s.name == "beat_quantize")
 	bpm  = float(beat_step.get("bpm", 0))
 	grid = int(beat_step.get("grid", 16))
 
+	if bpm <= 0:
+		bpm = config_bpm
+
 	return (bpm if bpm > 0 else None, grid)
 
 
-def _pad_quantize_params (process: subsample.query.ProcessSpec) -> tuple[typing.Optional[float], int]:
+def _pad_quantize_params (
+	process: subsample.query.ProcessSpec,
+	config_bpm: float = 0.0,
+) -> tuple[typing.Optional[float], int]:
 
 	"""Extract BPM and grid from a pad_quantize processor step.
 
-	Returns (target_bpm, grid) where target_bpm is None when no explicit
-	BPM is declared (falling back to the global transform.target_bpm).
+	Returns (target_bpm, grid). When no explicit BPM is declared in the
+	step, falls back to config_bpm (from transform.target_bpm in config).
 	"""
 
 	pad_step = next(s for s in process.steps if s.name == "pad_quantize")
 	bpm  = float(pad_step.get("bpm", 0))
 	grid = int(pad_step.get("grid", 16))
+
+	if bpm <= 0:
+		bpm = config_bpm
 
 	return (bpm if bpm > 0 else None, grid)
 
@@ -328,7 +340,10 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 	)
 
 
-def _load_instrument_from_path (path: pathlib.Path) -> typing.Optional[subsample.library.SampleRecord]:
+def _load_instrument_from_path (
+	path: pathlib.Path,
+	target_sample_rate: typing.Optional[int] = None,
+) -> typing.Optional[subsample.library.SampleRecord]:
 
 	"""Load an instrument sample (WAV + sidecar) from a filesystem path.
 
@@ -336,7 +351,8 @@ def _load_instrument_from_path (path: pathlib.Path) -> typing.Optional[subsample
 	so that it can be matched by where: { name: ... } predicates.
 
 	Args:
-		path: Absolute path to the WAV file (or sidecar).
+		path:               Absolute path to the WAV file (or sidecar).
+		target_sample_rate: When set, resample audio to this rate on load.
 
 	Returns:
 		SampleRecord with audio loaded, or None if loading fails.
@@ -370,8 +386,8 @@ def _load_instrument_from_path (path: pathlib.Path) -> typing.Optional[subsample
 
 	spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
 
-	# Load the audio data
-	audio = subsample.library.load_wav_audio(path)
+	# Load the audio data, resampling to the output rate if needed.
+	audio = subsample.library.load_wav_audio(path, target_sample_rate)
 	if audio is None:
 		_log.warning(
 			"Failed to load audio from %s — this sample will be skipped",
@@ -425,6 +441,7 @@ def _resolve_path_references (
 	note_map: NoteMap,
 	matrices: list[subsample.similarity.SimilarityMatrix],
 	instrument_lib: subsample.library.InstrumentLibrary,
+	target_sample_rate: typing.Optional[int] = None,
 ) -> None:
 
 	"""Load path-based references, instruments, and directory samples from the MIDI map.
@@ -493,7 +510,7 @@ def _resolve_path_references (
 			if instrument_lib.find_by_name(name) is not None:
 				continue
 
-			record = _load_instrument_from_path(wav_path)
+			record = _load_instrument_from_path(wav_path, target_sample_rate)
 
 			if record is not None:
 				instrument_lib.add(record)
@@ -530,7 +547,7 @@ def _resolve_path_references (
 			)
 			continue
 
-		record = _load_instrument_from_path(path)
+		record = _load_instrument_from_path(path, target_sample_rate)
 		if record is None:
 			continue
 
@@ -865,12 +882,14 @@ class MidiPlayer:
 		limiter_threshold_db: float = -1.5,
 		limiter_ceiling_db: float = -0.1,
 		bank_manager: typing.Optional[subsample.bank.BankManager] = None,
+		target_bpm: float = 0.0,
 	) -> None:
 
 		self._device_name        = device_name
 		self._shutdown_event     = shutdown_event
 		self._instrument_library = instrument_library
 		self._similarity_matrix  = similarity_matrix
+		self._target_bpm         = target_bpm
 
 		# Bank manager: when provided, the player delegates library, similarity,
 		# and transform lookups to the active bank.  When None, the player uses
@@ -1267,7 +1286,7 @@ class MidiPlayer:
 
 				if assignment.process.has_beat_quantize():
 					if record.rhythm.tempo_bpm > 0.0:
-						bpm_for_spec, grid_for_spec = _beat_quantize_params(assignment.process)
+						bpm_for_spec, grid_for_spec = _beat_quantize_params(assignment.process, self._target_bpm)
 					else:
 						_log.warning(
 							"beat_quantize %s: sample %r has no detected tempo — "
@@ -1276,7 +1295,7 @@ class MidiPlayer:
 						)
 
 				if assignment.process.has_pad_quantize():
-					bpm_for_spec, grid_for_spec = _pad_quantize_params(assignment.process)
+					bpm_for_spec, grid_for_spec = _pad_quantize_params(assignment.process, self._target_bpm)
 
 				spec = subsample.transform.spec_from_process(
 					assignment.process,
@@ -1450,7 +1469,7 @@ class MidiPlayer:
 			# a variant for every distinct pick position.  The full process
 			# chain is included via spec_from_process().
 			elif asgn.process.has_beat_quantize():
-				bpm, grid = _beat_quantize_params(asgn.process)
+				bpm, grid = _beat_quantize_params(asgn.process, self._target_bpm)
 				enqueued = 0
 
 				# Deduplicate by sample_id — multiple notes with the same pick
@@ -1499,7 +1518,7 @@ class MidiPlayer:
 			# Pad-quantize: same dedup pattern as beat_quantize but no
 			# tempo check — pad_quantize only needs onsets, not source tempo.
 			elif asgn.process.has_pad_quantize():
-				bpm, grid = _pad_quantize_params(asgn.process)
+				bpm, grid = _pad_quantize_params(asgn.process, self._target_bpm)
 				enqueued = 0
 				seen_ids_pad: set[int] = set()
 

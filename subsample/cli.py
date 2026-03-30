@@ -368,6 +368,7 @@ def _load_bank (
 		max_instrument_bytes,
 		load_audio=True,
 		clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
+		target_sample_rate=output_sample_rate,
 	)
 
 	# Similarity matrix (per-bank — rankings are relative to each bank's samples).
@@ -501,7 +502,17 @@ def _start_player (
 		# Single-bank mode: use the global similarity matrix
 		matrices.append(similarity_matrix)
 
-	subsample.player._resolve_path_references(midi_map, matrices, instrument_library)
+	# Resolve the effective output sample rate for resampling loaded samples.
+	effective_output_sr = (
+		cfg.player.audio.sample_rate
+		if cfg.player.audio.sample_rate is not None
+		else cfg.recorder.audio.sample_rate
+	)
+
+	subsample.player._resolve_path_references(
+		midi_map, matrices, instrument_library,
+		target_sample_rate=effective_output_sr,
+	)
 
 	# Virtual port mode: bypass hardware device selection entirely.
 	# MidiPlayer.run() will open the named virtual port with virtual=True.
@@ -524,6 +535,7 @@ def _start_player (
 			limiter_threshold_db=cfg.player.limiter_threshold_db,
 			limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 			bank_manager=bank_manager,
+			target_bpm=cfg.transform.target_bpm,
 		)
 		player_cell[0] = player
 		player.update_pitched_assignments()
@@ -570,6 +582,7 @@ def _start_player (
 		limiter_threshold_db=cfg.player.limiter_threshold_db,
 		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 		bank_manager=bank_manager,
+		target_bpm=cfg.transform.target_bpm,
 	)
 	player_cell[0] = player
 	player.update_pitched_assignments()
@@ -684,6 +697,7 @@ def main () -> None:
 				max_instrument_bytes,
 				load_audio=True,
 				clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
+				target_sample_rate=output_sample_rate,
 			)
 			print(
 				f"  Instruments  : {len(instrument_library)} sample(s) loaded"
@@ -834,6 +848,7 @@ def main () -> None:
 					directory=_bank.directory,
 					known_sidecars=known,
 					on_sample_loaded=_make_bank_callback(_bank),
+					target_sample_rate=output_sample_rate,
 				)
 				watcher.start()
 				instrument_watchers.append(watcher)
@@ -856,6 +871,7 @@ def main () -> None:
 				directory=pathlib.Path(cfg.instrument.directory),
 				known_sidecars=known_sidecars,
 				on_sample_loaded=_on_watched_sample,
+				target_sample_rate=output_sample_rate,
 			)
 			watcher.start()
 			instrument_watchers.append(watcher)

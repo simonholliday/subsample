@@ -24,7 +24,6 @@ import typing
 import watchdog.events
 import watchdog.observers
 
-import subsample.audio
 import subsample.cache
 import subsample.library
 
@@ -55,11 +54,13 @@ class InstrumentWatcher:
 		directory: pathlib.Path,
 		known_sidecars: set[pathlib.Path],
 		on_sample_loaded: typing.Callable[[subsample.library.SampleRecord], None],
+		target_sample_rate: typing.Optional[int] = None,
 	) -> None:
 
 		self._directory = directory
 		self._known_sidecars: frozenset[pathlib.Path] = frozenset(known_sidecars)
 		self._on_sample_loaded = on_sample_loaded
+		self._target_sample_rate = target_sample_rate
 
 		# Active debounce timers keyed by resolved sidecar path.
 		# Protected by _lock — modified from the watchdog callback thread and
@@ -157,12 +158,12 @@ class InstrumentWatcher:
 			)
 			return
 
-		try:
-			file_info = subsample.audio.read_audio_file(audio_path)
-		except (OSError, ValueError) as exc:
+		audio = subsample.library.load_wav_audio(audio_path, self._target_sample_rate)
+
+		if audio is None:
 			self._schedule_retry(
 				sidecar_path, attempt,
-				reason=f"could not read WAV ({audio_name}): {exc}",
+				reason=f"could not read WAV ({audio_name})",
 			)
 			return
 
@@ -177,7 +178,7 @@ class InstrumentWatcher:
 			band_energy = band_energy,
 			params      = params,
 			duration    = duration,
-			audio       = file_info.audio,
+			audio       = audio,
 			filepath    = audio_path,
 		)
 

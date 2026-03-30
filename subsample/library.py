@@ -32,6 +32,7 @@ import threading
 import typing
 import wave
 
+import librosa
 import numpy
 
 import subsample.analysis
@@ -405,6 +406,7 @@ def _load_one_sample (
 	load_audio: bool,
 	clean_orphaned_sidecars: bool,
 	orphan_hint_shown: threading.Event,
+	target_sample_rate: typing.Optional[int] = None,
 ) -> typing.Optional[_LoadedSample]:
 
 	"""Load one instrument sample (sidecar + optional audio) from disk.
@@ -420,6 +422,8 @@ def _load_one_sample (
 		                         warning and a one-time hint about the option.
 		orphan_hint_shown:       Shared event; set after the hint is logged so
 		                         it appears at most once across all workers.
+		target_sample_rate:      When set, resample audio to this rate on load
+		                         (soxr_hq quality). None = keep native rate.
 
 	Returns a _LoadedSample on success, or None if any step fails (the
 	reason will have already been logged by the callee).
@@ -467,7 +471,7 @@ def _load_one_sample (
 		return None
 
 	if load_audio:
-		audio: typing.Optional[numpy.ndarray] = load_wav_audio(audio_path)
+		audio: typing.Optional[numpy.ndarray] = load_wav_audio(audio_path, target_sample_rate)
 
 		if audio is None:
 			return None
@@ -486,6 +490,7 @@ def load_instrument_library (
 	max_memory_bytes: int,
 	load_audio: bool = True,
 	clean_orphaned_sidecars: bool = False,
+	target_sample_rate: typing.Optional[int] = None,
 ) -> InstrumentLibrary:
 
 	"""Discover and load instrument samples (WAV + sidecar) from a directory.
@@ -552,6 +557,7 @@ def load_instrument_library (
 			executor.submit(
 				_load_one_sample, path, load_audio,
 				clean_orphaned_sidecars, orphan_hint_shown,
+				target_sample_rate,
 			)
 			for path in sidecar_paths
 		]
@@ -590,7 +596,10 @@ def load_instrument_library (
 	return lib
 
 
-def load_wav_audio (path: pathlib.Path) -> typing.Optional[numpy.ndarray]:
+def load_wav_audio (
+	path: pathlib.Path,
+	target_sample_rate: typing.Optional[int] = None,
+) -> typing.Optional[numpy.ndarray]:
 
 	"""Read a WAV file into a numpy array matching the capture pipeline format.
 
@@ -598,12 +607,50 @@ def load_wav_audio (path: pathlib.Path) -> typing.Optional[numpy.ndarray]:
 	the capture pipeline (int16 for 16-bit, left-shifted int32 for 24-bit, int32
 	for 32-bit). Returns None and logs a WARNING on any read error.
 
+	When target_sample_rate is set and differs from the file's native rate,
+	the audio is resampled via librosa (soxr_hq, broadcast quality) so that
+	in-memory audio is always at the output device rate.
+
 	Delegates to subsample.audio.read_audio_file() for the actual reading.
 	"""
 
 	try:
-		return subsample.audio.read_audio_file(path).audio
-
+		info = subsample.audio.read_audio_file(path)
 	except (wave.Error, OSError, ValueError) as exc:
 		_log.warning("Could not read audio from %s: %s", path.name, exc)
 		return None
+
+	audio = info.audio
+
+	if target_sample_rate is not None and info.sample_rate != target_sample_rate:
+		_log.debug(
+			"Resampling %s from %d Hz to %d Hz",
+			path.name, info.sample_rate, target_sample_rate,
+		)
+
+		original_dtype = audio.dtype
+
+		# Convert to float32 for high-quality resampling.
+		if original_dtype == numpy.int16:
+			float_audio = audio.astype(numpy.float32) / 32768.0
+		elif original_dtype == numpy.int32:
+			float_audio = audio.astype(numpy.float32) / 2147483648.0
+		else:
+			float_audio = audio.astype(numpy.float32)
+
+		# librosa.resample expects (channels, n_frames) — transpose.
+		resampled = librosa.resample(
+			float_audio.T,
+			orig_sr=info.sample_rate,
+			target_sr=target_sample_rate,
+		).T.astype(numpy.float32)
+
+		# Convert back to original integer dtype.
+		if original_dtype == numpy.int16:
+			audio = numpy.clip(resampled * 32768.0, -32768, 32767).astype(numpy.int16)
+		elif original_dtype == numpy.int32:
+			audio = numpy.clip(resampled * 2147483648.0, -2147483648, 2147483647).astype(numpy.int32)
+		else:
+			audio = resampled
+
+	return audio
