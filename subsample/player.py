@@ -359,15 +359,7 @@ def _load_instrument_from_path (
 	"""
 
 	path = pathlib.Path(path).resolve()
-	sidecar_path = subsample.cache.cache_path(path)
 	name = path.stem
-
-	if not sidecar_path.exists():
-		_log.warning(
-			"Instrument sample sidecar not found for %s — this sample will be skipped",
-			path,
-		)
-		return None
 
 	if not path.exists():
 		_log.warning(
@@ -376,10 +368,10 @@ def _load_instrument_from_path (
 		)
 		return None
 
-	result = subsample.cache.load_sidecar(sidecar_path)
+	result = subsample.cache.load_or_analyze(path)
 	if result is None:
 		_log.warning(
-			"Failed to load analysis sidecar for %s — this sample will be skipped",
+			"Failed to load or analyze %s — this sample will be skipped",
 			path,
 		)
 		return None

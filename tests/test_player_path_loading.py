@@ -56,11 +56,15 @@ class TestLoadInstrumentFromPath:
 		assert record.name == "my_inst"
 		assert record.audio is not None
 
-	def test_returns_none_when_sidecar_missing (self, tmp_path: pathlib.Path) -> None:
-		"""Returns None when sidecar is absent."""
+	def test_analyzes_and_loads_when_sidecar_missing (self, tmp_path: pathlib.Path) -> None:
+		"""Auto-generates sidecar and loads the sample when no sidecar exists."""
 		path = tmp_path / "no_sidecar.wav"
 		tests.helpers._make_wav(path)
-		assert subsample.player._load_instrument_from_path(path) is None
+		record = subsample.player._load_instrument_from_path(path)
+		assert record is not None
+		assert record.name == "no_sidecar"
+		# Sidecar should have been written for next time.
+		assert subsample.cache.cache_path(path).exists()
 
 	def test_returns_none_when_wav_missing (self, tmp_path: pathlib.Path) -> None:
 		"""Returns None when WAV file is absent (sidecar only)."""

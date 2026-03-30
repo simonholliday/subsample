@@ -228,6 +228,7 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 def _reanalyze_and_save (
 	audio_path: pathlib.Path,
 	cached_version: typing.Optional[str] = None,
+	silent: bool = False,
 ) -> _LoadResult | None:
 
 	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
@@ -248,13 +249,14 @@ def _reanalyze_and_save (
 		(spectral, rhythm, pitch, timbre, params, duration, level) on success, None on error.
 	"""
 
-	if cached_version is not None:
-		_log.info(
-			"Re-analyzing %s (analysis version %s → %s)…",
-			audio_path.name, cached_version, subsample.analysis.ANALYSIS_VERSION,
-		)
-	else:
-		_log.info("Re-analyzing %s (audio changed or sidecar stale)…", audio_path.name)
+	if not silent:
+		if cached_version is not None:
+			_log.info(
+				"Re-analyzing %s (analysis version %s → %s)…",
+				audio_path.name, cached_version, subsample.analysis.ANALYSIS_VERSION,
+			)
+		else:
+			_log.info("Re-analyzing %s (audio changed or sidecar stale)…", audio_path.name)
 
 	try:
 		file_info = subsample.audio.read_audio_file(audio_path)
@@ -280,6 +282,33 @@ def _reanalyze_and_save (
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
 
 	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
+
+
+def load_or_analyze (audio_path: pathlib.Path) -> _LoadResult | None:
+
+	"""Load cached analysis for an audio file, generating it if no sidecar exists.
+
+	Like load_cache(), but instead of returning None when the sidecar is absent,
+	runs the full analysis pipeline and writes the sidecar for next time.
+
+	Used for named instrument samples referenced directly in the MIDI map that
+	were not imported through the normal pipeline (no pre-existing sidecar).
+
+	Args:
+		audio_path: Path to the audio file.
+
+	Returns:
+		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
+		tuple on success, else None.
+	"""
+
+	sidecar = cache_path(audio_path)
+
+	if not sidecar.exists():
+		_log.info("No sidecar for %s — analyzing now…", audio_path.name)
+		return _reanalyze_and_save(audio_path, silent=True)
+
+	return load_cache(audio_path)
 
 
 def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
