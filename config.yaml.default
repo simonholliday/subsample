@@ -290,7 +290,8 @@ analysis:
 # Reference samples (the sounds each MIDI note should resemble) are declared
 # as path-based predicates in the MIDI map, not here:
 #   where: { reference: samples/reference/GM36_BassDrum1.wav }
-# If the WAV file exists but has no .analysis.json sidecar, Subsample
+# Named instrument samples (where: { name: path/to/file.wav }) also work.
+# If a WAV file is referenced but has no .analysis.json sidecar, Subsample
 # generates one automatically on startup.
 # See midi-map-gm-drums.yaml for examples.
 
@@ -310,6 +311,7 @@ analysis:
 #   # pool of samples that MIDI map rules evaluate against. New samples
 #   # arriving in this directory (via capture or import) trigger
 #   # re-evaluation of all assignments.
+#   # Overridden when banks: is declared in the MIDI map (see README).
 #   # Default: samples/captures (same as output.directory).
 #
 #   clean_orphaned_sidecars: false

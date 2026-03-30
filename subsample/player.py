@@ -73,11 +73,14 @@ class MidiMapResult:
 		                  Empty list when no banks are declared (single-directory mode).
 		bank_channel:     MIDI channel for Program Change bank switching (user-facing 1-16,
 		                  0 = omni).  Only meaningful when bank_definitions is non-empty.
+		default_bank:     MIDI program number of the bank to activate at startup.
+		                  None means use the first bank in the list.
 	"""
 
 	note_map:         NoteMap
 	bank_definitions: list[subsample.bank.BankDefinition]
 	bank_channel:     int
+	default_bank:     typing.Optional[int] = None
 
 
 def _beat_quantize_params (
@@ -610,6 +613,8 @@ def load_midi_map (
 	# Parse optional bank definitions.
 	bank_definitions = subsample.bank.parse_banks(raw.get("banks"))
 	bank_channel = int(raw.get("bank_channel", subsample.bank.DEFAULT_BANK_CHANNEL))
+	raw_default_bank = raw.get("default_bank")
+	default_bank: typing.Optional[int] = int(raw_default_bank) if raw_default_bank is not None else None
 
 	if "assignments" not in raw:
 		_log.warning("MIDI map %s has no assignments — no notes will be mapped", path)
@@ -617,6 +622,7 @@ def load_midi_map (
 			note_map={},
 			bank_definitions=bank_definitions,
 			bank_channel=bank_channel,
+			default_bank=default_bank,
 		)
 
 	reference_set = {name.upper() for name in reference_names}
@@ -718,6 +724,7 @@ def load_midi_map (
 		note_map=note_map,
 		bank_definitions=bank_definitions,
 		bank_channel=bank_channel,
+		default_bank=default_bank,
 	)
 
 

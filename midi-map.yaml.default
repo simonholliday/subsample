@@ -37,6 +37,8 @@
 #
 #   bank_channel: 10   # MIDI channel for PC messages (1-16, or 0 = any)
 #                       # Default: 10 (GM drum channel)
+#   default_bank: 0    # Program number of the bank to activate at startup
+#                       # Default: first bank in the list
 #
 # Assignments are bank-agnostic — queries run against whichever bank
 # is active.  Named samples (where: { name: X }) that only exist in

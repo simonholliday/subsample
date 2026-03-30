@@ -193,7 +193,8 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 		audio_path: Path to the audio file.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level) tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
+		tuple on success, else None.
 	"""
 
 	sidecar = cache_path(audio_path)
@@ -244,9 +245,12 @@ def _reanalyze_and_save (
 		cached_version: The analysis_version string found in the stale sidecar,
 		                if available. When provided, the log message includes the
 		                old → new version transition so the cause is clear.
+		silent:         When True, suppress the INFO log message (caller already
+		                logged its own message).
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level) on success, None on error.
+		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
+		on success, None on error.
 	"""
 
 	if not silent:

@@ -631,6 +631,7 @@ def main () -> None:
 	bank_manager: typing.Optional[subsample.bank.BankManager] = None
 	bank_definitions: list[subsample.bank.BankDefinition] = []
 	bank_channel: int = subsample.bank.DEFAULT_BANK_CHANNEL
+	default_bank: typing.Optional[int] = None
 
 	if cfg.player.enabled and cfg.player.midi_map is not None:
 		_midi_map_path = pathlib.Path(cfg.player.midi_map)
@@ -638,6 +639,7 @@ def main () -> None:
 			midi_map_result = subsample.player.load_midi_map(_midi_map_path, [])
 			bank_definitions = midi_map_result.bank_definitions
 			bank_channel = midi_map_result.bank_channel
+			default_bank = midi_map_result.default_bank
 		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
 			_log.warning("Could not pre-load MIDI map for bank detection: %s", exc)
 
@@ -672,7 +674,7 @@ def main () -> None:
 				f"{len(bank.instrument_library)} sample(s) from {defn.directory}"
 			)
 
-		bank_manager = subsample.bank.BankManager(banks, bank_channel)
+		bank_manager = subsample.bank.BankManager(banks, bank_channel, default_program=default_bank)
 
 		# The primary instrument_library/similarity/transform used by the
 		# recorder on_complete callback come from the first bank. Captures

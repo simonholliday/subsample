@@ -242,7 +242,7 @@ All `where` predicates must pass (AND logic). Available predicates:
 | `min_pitch` / `max_pitch` | Hz or note name | Filter by detected frequency |
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
 | `name` | string or path | Exact filename stem match, or path to a specific WAV |
-| `directory` | path | Only match samples from this directory (auto-loads samples on startup) |
+| `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Banks vs directory predicate](#banks-vs-directory-predicate)) |
 
 Available `order_by` values: `newest`, `oldest`, `similarity` (requires
 `reference`), `duration_asc`, `duration_desc`, `pitch_asc`, `pitch_desc`,
@@ -432,6 +432,7 @@ banks:
     program: 1
 
 bank_channel: 10    # MIDI channel for PC messages (1-16, or 0 = any)
+default_bank: 0     # program number to activate at startup (default: first in list)
 ```
 
 When `banks:` is absent, the single `instrument.directory` from config.yaml is
@@ -442,6 +443,29 @@ Assignments are bank-agnostic - they query whichever bank is active. Named
 samples (`where: { name: X }`) that only exist in one bank silently produce no
 match in other banks; rule-based selects (`reference:`, `pitched:`, etc.) work
 naturally against whatever samples are present.
+
+#### Banks vs directory predicate
+
+Banks and `where: { directory: ... }` both load samples from a directory, but
+they solve different problems:
+
+- **Banks** swap the entire sample pool at once. Only one bank is active at a
+  time - a MIDI Program Change switches all assignments to a new set of samples.
+  Use banks when you want the same MIDI map rules to evaluate against completely
+  different sample collections (e.g. "Acoustic Kit" vs "Electronic Kit").
+
+- **`where: { directory: ... }`** filters within the active pool. It is
+  per-assignment, and multiple assignments can each reference a different
+  directory simultaneously. Use it when different notes in the same map need
+  samples from different directories at the same time (e.g. kicks from one
+  folder, hi-hats from another).
+
+| | Banks | `where: { directory }` |
+|---|---|---|
+| Scope | All assignments share one active bank | Per-assignment filter |
+| Switching | MIDI Program Change swaps the whole pool | Always active |
+| Simultaneous directories | No (one bank at a time) | Yes (each assignment can use a different directory) |
+| Use case | Swap entire kits | Mix sources within one kit |
 
 ## Performance
 
@@ -626,9 +650,9 @@ weights - is optional and rarely needs changing.
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory samples; oldest evicted (FIFO) when exceeded |
-| `instrument.directory` | `samples/captures` | Directory of instrument samples to load at startup (the pool that MIDI map rules evaluate against) |
+| `instrument.directory` | `samples/captures` | Directory of instrument samples to load at startup (overridden by `banks:` in the MIDI map when present) |
 | `instrument.clean_orphaned_sidecars` | `false` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
-| `instrument.watch` | `false` | Monitor `instrument.directory` at runtime for new samples arriving from a remote recorder instance (see Multi-machine setup) |
+| `instrument.watch` | `false` | Monitor `instrument.directory` (or each bank directory) at runtime for new samples arriving from a remote recorder instance (see Multi-machine setup) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |

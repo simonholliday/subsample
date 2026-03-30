@@ -188,14 +188,22 @@ class BankManager:
 	new bank.
 	"""
 
-	def __init__ (self, banks: list[Bank], bank_channel: int = DEFAULT_BANK_CHANNEL) -> None:
+	def __init__ (
+		self,
+		banks: list[Bank],
+		bank_channel: int = DEFAULT_BANK_CHANNEL,
+		default_program: typing.Optional[int] = None,
+	) -> None:
 
 		"""Initialise with a list of loaded banks.
 
 		Args:
-			banks:        Non-empty list of loaded Bank objects.
-			bank_channel: MIDI channel (1-16, user-facing) that listens for
-			              Program Change messages.  0 = omni (any channel).
+			banks:           Non-empty list of loaded Bank objects.
+			bank_channel:    MIDI channel (1-16, user-facing) that listens for
+			                 Program Change messages.  0 = omni (any channel).
+			default_program: MIDI program number of the bank to activate at
+			                 startup.  When None (or not found), the first bank
+			                 in the list is used.
 
 		Raises:
 			ValueError: If banks is empty or contains duplicate program numbers.
@@ -215,7 +223,7 @@ class BankManager:
 			self._banks[bank.program] = bank
 
 		self._lock: threading.Lock = threading.Lock()
-		self._active: Bank = banks[0]
+		self._active: Bank = self._banks.get(default_program, banks[0]) if default_program is not None else banks[0]
 
 		# Store as mido 0-indexed internally.  0 (omni) stays as -1 to
 		# distinguish from channel 1 (mido 0).

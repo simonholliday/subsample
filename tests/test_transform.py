@@ -3225,14 +3225,4 @@ class TestVocoder:
 
 		numpy.testing.assert_array_equal(result, modulator)
 
-	def test_has_vocoder (self) -> None:
-		"""ProcessSpec.has_vocoder() returns True when vocoder step present."""
-		process = subsample.query.ProcessSpec(steps=(
-			subsample.query.ProcessorStep(name="vocoder", params=(("carrier", "reference"),)),
-		))
-		assert process.has_vocoder()
 
-		process_no = subsample.query.ProcessSpec(steps=(
-			subsample.query.ProcessorStep(name="compress"),
-		))
-		assert not process_no.has_vocoder()

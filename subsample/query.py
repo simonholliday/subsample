@@ -55,7 +55,7 @@ _log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def is_path_like(s: str) -> bool:
+def is_path_like (s: str) -> bool:
 	"""Return True if the string looks like a filesystem path."""
 	return "/" in s or s.startswith(".")
 
