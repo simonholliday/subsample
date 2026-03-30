@@ -601,14 +601,10 @@ def main () -> None:
 
 	_print_banner(cfg)
 
-	# Load reference library first — before instrument samples — so that similarity
-	# comparisons against reference sounds are available as instrument samples load.
-	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None
-	if cfg.reference is not None:
-		reference_library = subsample.library.load_reference_library(
-			pathlib.Path(cfg.reference.directory)
-		)
-		print(f"  Reference    : {len(reference_library)} sample(s) loaded from {cfg.reference.directory}")
+	# Reference library starts empty.  Path-based references declared in
+	# the MIDI map are loaded later by _resolve_path_references() during
+	# player startup, which adds them to the similarity matrix dynamically.
+	reference_library = subsample.library.ReferenceLibrary([])
 
 	# Process any input files through the detection pipeline.
 	# Segments are written to the output directory (which is typically the same
@@ -623,10 +619,10 @@ def main () -> None:
 	bank_definitions: list[subsample.bank.BankDefinition] = []
 	bank_channel: int = subsample.bank.DEFAULT_BANK_CHANNEL
 
-	if cfg.player.enabled and reference_library is not None and cfg.player.midi_map is not None:
+	if cfg.player.enabled and cfg.player.midi_map is not None:
 		_midi_map_path = pathlib.Path(cfg.player.midi_map)
 		try:
-			midi_map_result = subsample.player.load_midi_map(_midi_map_path, reference_library.names())
+			midi_map_result = subsample.player.load_midi_map(_midi_map_path, [])
 			bank_definitions = midi_map_result.bank_definitions
 			bank_channel = midi_map_result.bank_channel
 		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
@@ -648,12 +644,11 @@ def main () -> None:
 	# --- Multi-bank loading ---
 	# When the MIDI map declares banks, load each one independently.
 	# cfg.instrument.directory is ignored (banks take precedence).
-	if bank_definitions and reference_library is not None:
-		if cfg.instrument.directory is not None:
-			_log.info(
-				"MIDI map declares %d bank(s) — ignoring instrument.directory (%s)",
-				len(bank_definitions), cfg.instrument.directory,
-			)
+	if bank_definitions:
+		_log.info(
+			"MIDI map declares %d bank(s) — ignoring instrument.directory (%s)",
+			len(bank_definitions), cfg.instrument.directory,
+		)
 
 		banks: list[subsample.bank.Bank] = []
 		for defn in bank_definitions:
@@ -683,7 +678,7 @@ def main () -> None:
 	else:
 		# Create instrument library. PCM audio is only needed when the player is
 		# active — skipping it saves memory when player is disabled.
-		if cfg.instrument.directory is not None and cfg.player.enabled:
+		if cfg.player.enabled:
 			instrument_library = subsample.library.load_instrument_library(
 				pathlib.Path(cfg.instrument.directory),
 				max_instrument_bytes,
@@ -701,8 +696,10 @@ def main () -> None:
 		else:
 			instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
 
-		# Build the similarity matrix now that both libraries are populated.
-		if reference_library is not None and cfg.player.enabled:
+		# Build the similarity matrix.  It starts empty; path-based references
+		# from the MIDI map are added dynamically during player startup via
+		# _resolve_path_references().
+		if cfg.player.enabled:
 			similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
 			if len(instrument_library) > 0:
 				similarity_matrix.bulk_add(instrument_library.samples())
@@ -786,11 +783,9 @@ def main () -> None:
 		))
 
 	if cfg.player.enabled:
-		if similarity_matrix is None or reference_library is None:
+		if similarity_matrix is None:
 			print(
-				"Player enabled but no reference library configured — "
-				"note-to-sample routing requires a reference library. "
-				"Add a reference.directory to config.yaml.",
+				"Player enabled but similarity matrix could not be created.",
 				file=sys.stderr,
 			)
 		else:
@@ -845,7 +840,7 @@ def main () -> None:
 				print(f"  Watcher      : monitoring {_bank.directory} ({_bank.name!r})")
 
 		# Single-directory mode.
-		elif cfg.instrument.directory is not None:
+		else:
 			known_sidecars: set[pathlib.Path] = {
 				(fp.parent / (fp.name + ".analysis.json")).resolve()
 				for r in instrument_library.samples()

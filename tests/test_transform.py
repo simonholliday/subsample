@@ -2,12 +2,14 @@
 
 import dataclasses
 import pathlib
+import tempfile
 import threading
 import time
 import typing
 
 import numpy
 import pytest
+import soundfile
 
 import subsample.analysis
 import subsample.config
@@ -2991,3 +2993,246 @@ class TestTransient:
 		result = subsample.transform._apply_transient(audio, sr, record, step)
 
 		assert result.shape[1] == 2
+
+
+# ---------------------------------------------------------------------------
+# Vocoder
+# ---------------------------------------------------------------------------
+
+def _write_carrier_wav (path: pathlib.Path, sr: int = 44100, duration: float = 0.5) -> None:
+
+	"""Write a simple carrier WAV file (sawtooth wave) for vocoder tests."""
+
+	n = int(sr * duration)
+	t = numpy.linspace(0, duration, n, dtype=numpy.float32)
+	# Sawtooth: harmonically rich carrier.
+	saw = 2.0 * (t * 220.0 - numpy.floor(t * 220.0 + 0.5)).astype(numpy.float32)
+	saw *= 0.5  # scale to [-0.5, 0.5]
+	soundfile.write(str(path), saw.reshape(-1, 1), sr, subtype="PCM_16")
+
+
+class TestVocoder:
+
+	def test_spec_from_process_vocoder (self, tmp_path: pathlib.Path) -> None:
+		"""vocoder: {carrier: ...} → Vocoder step with correct path."""
+		carrier = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier)
+
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="vocoder", params=(("carrier", str(carrier)),)),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Vocoder)
+		assert step.carrier_path == str(carrier.resolve())
+		assert step.bands == 24
+		assert step.depth == 1.0
+
+	def test_spec_from_process_vocoder_reference (self) -> None:
+		"""vocoder: {carrier: reference} → Vocoder with reference_path substitution."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="vocoder", params=(("carrier", "reference"),)),
+		))
+		spec = subsample.transform.spec_from_process(
+			process, reference_path="/resolved/ref.wav",
+		)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.Vocoder)
+		assert step.carrier_path == "/resolved/ref.wav"
+
+	def test_spec_from_process_vocoder_reference_no_path (self) -> None:
+		"""vocoder: {carrier: reference} without reference_path → step skipped."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="vocoder", params=(("carrier", "reference"),)),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 0
+
+	def test_spec_from_process_vocoder_no_carrier (self) -> None:
+		"""vocoder: true (no carrier) → step skipped."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="vocoder"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 0
+
+	def test_vocoder_basic_cross_synthesis (self, tmp_path: pathlib.Path) -> None:
+		"""Vocoder output differs from both dry modulator and carrier."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.3 * sr)
+
+		# Modulator: white noise burst (spectrally flat, rhythmic).
+		rng = numpy.random.default_rng(42)
+		modulator = rng.uniform(-0.5, 0.5, (n, 1)).astype(numpy.float32)
+
+		# Carrier: sawtooth (harmonically rich, steady).
+		carrier_path = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier_path, sr=sr, duration=0.3)
+
+		step = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=16)
+		result = subsample.transform._apply_vocoder(modulator, sr, record, step)
+
+		assert result.shape == modulator.shape
+		assert result.dtype == numpy.float32
+
+		# Output should not be silence.
+		assert numpy.max(numpy.abs(result)) > 0.01
+
+		# Output should differ from the dry modulator (not identical).
+		assert not numpy.allclose(result, modulator, atol=0.01)
+
+	def test_vocoder_depth_zero_returns_dry (self, tmp_path: pathlib.Path) -> None:
+		"""depth=0.0 → output equals dry modulator."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.2 * sr)
+
+		rng = numpy.random.default_rng(42)
+		modulator = rng.uniform(-0.3, 0.3, (n, 1)).astype(numpy.float32)
+
+		carrier_path = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier_path, sr=sr, duration=0.2)
+
+		step = subsample.transform.Vocoder(carrier_path=str(carrier_path), depth=0.0)
+		result = subsample.transform._apply_vocoder(modulator, sr, record, step)
+
+		numpy.testing.assert_allclose(result, modulator, atol=1e-5)
+
+	def test_vocoder_band_count_affects_output (self, tmp_path: pathlib.Path) -> None:
+		"""Different band counts produce different outputs."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.2 * sr)
+
+		rng = numpy.random.default_rng(42)
+		modulator = rng.uniform(-0.5, 0.5, (n, 1)).astype(numpy.float32)
+
+		carrier_path = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier_path, sr=sr, duration=0.2)
+
+		step_8 = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=8)
+		step_24 = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=24)
+
+		result_8 = subsample.transform._apply_vocoder(modulator.copy(), sr, record, step_8)
+		result_24 = subsample.transform._apply_vocoder(modulator.copy(), sr, record, step_24)
+
+		assert not numpy.allclose(result_8, result_24, atol=0.01)
+
+	def test_vocoder_carrier_shorter_loops (self, tmp_path: pathlib.Path) -> None:
+		"""Carrier shorter than modulator is looped without error."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.5 * sr)
+
+		rng = numpy.random.default_rng(42)
+		modulator = rng.uniform(-0.3, 0.3, (n, 1)).astype(numpy.float32)
+
+		# Short carrier (0.1s vs 0.5s modulator).
+		carrier_path = tmp_path / "short_carrier.wav"
+		_write_carrier_wav(carrier_path, sr=sr, duration=0.1)
+
+		step = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=16)
+		result = subsample.transform._apply_vocoder(modulator, sr, record, step)
+
+		assert result.shape == modulator.shape
+		assert numpy.max(numpy.abs(result)) > 0.01
+
+	def test_vocoder_carrier_longer_truncates (self, tmp_path: pathlib.Path) -> None:
+		"""Carrier longer than modulator is truncated without error."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.1 * sr)
+
+		rng = numpy.random.default_rng(42)
+		modulator = rng.uniform(-0.3, 0.3, (n, 1)).astype(numpy.float32)
+
+		# Long carrier (1.0s vs 0.1s modulator).
+		carrier_path = tmp_path / "long_carrier.wav"
+		_write_carrier_wav(carrier_path, sr=sr, duration=1.0)
+
+		step = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=16)
+		result = subsample.transform._apply_vocoder(modulator, sr, record, step)
+
+		assert result.shape == modulator.shape
+
+	def test_vocoder_formant_shift (self, tmp_path: pathlib.Path) -> None:
+		"""Formant shift produces different output from unshifted."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.2 * sr)
+
+		rng = numpy.random.default_rng(42)
+		modulator = rng.uniform(-0.5, 0.5, (n, 1)).astype(numpy.float32)
+
+		carrier_path = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier_path, sr=sr, duration=0.2)
+
+		step_normal = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=16)
+		step_shifted = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=16, formant_shift=5)
+
+		result_normal = subsample.transform._apply_vocoder(modulator.copy(), sr, record, step_normal)
+		result_shifted = subsample.transform._apply_vocoder(modulator.copy(), sr, record, step_shifted)
+
+		assert not numpy.allclose(result_normal, result_shifted, atol=0.01)
+
+	def test_vocoder_silence_returns_silence (self, tmp_path: pathlib.Path) -> None:
+		"""Silent modulator produces silent output."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.1 * sr)
+
+		modulator = numpy.zeros((n, 1), dtype=numpy.float32)
+
+		carrier_path = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier_path, sr=sr, duration=0.1)
+
+		step = subsample.transform.Vocoder(carrier_path=str(carrier_path))
+		result = subsample.transform._apply_vocoder(modulator, sr, record, step)
+
+		assert numpy.max(numpy.abs(result)) == 0.0
+
+	def test_vocoder_stereo_preserved (self, tmp_path: pathlib.Path) -> None:
+		"""Stereo modulator produces stereo output."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.2 * sr)
+
+		rng = numpy.random.default_rng(42)
+		modulator = rng.uniform(-0.5, 0.5, (n, 2)).astype(numpy.float32)
+
+		carrier_path = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier_path, sr=sr, duration=0.2)
+
+		step = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=16)
+		result = subsample.transform._apply_vocoder(modulator, sr, record, step)
+
+		assert result.shape == (n, 2)
+
+	def test_vocoder_missing_carrier_returns_dry (self) -> None:
+		"""Missing carrier file → returns dry modulator with warning."""
+		record = _make_record(sample_id=1)
+		sr = 44100
+		n = int(0.1 * sr)
+
+		rng = numpy.random.default_rng(42)
+		modulator = rng.uniform(-0.3, 0.3, (n, 1)).astype(numpy.float32)
+
+		step = subsample.transform.Vocoder(carrier_path="/nonexistent/carrier.wav")
+		result = subsample.transform._apply_vocoder(modulator, sr, record, step)
+
+		numpy.testing.assert_array_equal(result, modulator)
+
+	def test_has_vocoder (self) -> None:
+		"""ProcessSpec.has_vocoder() returns True when vocoder step present."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="vocoder", params=(("carrier", "reference"),)),
+		))
+		assert process.has_vocoder()
+
+		process_no = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="compress"),
+		))
+		assert not process_no.has_vocoder()

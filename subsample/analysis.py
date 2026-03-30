@@ -1006,8 +1006,7 @@ def format_result (result: AnalysisResult, duration: float) -> str:
 		duration: Recording length in seconds.
 
 	Returns:
-		String of the form:
-		"duration=X.XXs  flatness=X.XXX  attack=X.XXX  ...  zcr=X.XXX  harmonic=X.XXX  contrast=X.XXX  voiced=X.XXX"
+		Single-line string with all 13 spectral metrics.
 	"""
 
 	return (
@@ -1023,6 +1022,8 @@ def format_result (result: AnalysisResult, duration: float) -> str:
 		f"  voiced={result.voiced_fraction:.3f}"
 		f"  log_attack={result.log_attack_time:.3f}"
 		f"  flux={result.spectral_flux:.3f}"
+		f"  rolloff={result.spectral_rolloff:.3f}"
+		f"  slope={result.spectral_slope:.3f}"
 	)
 
 
@@ -1696,6 +1697,9 @@ def log_normalize (value: float, min_ref: float, max_ref: float) -> float:
 	Returns:
 		Normalised score in [0.0, 1.0].
 	"""
+
+	if min_ref >= max_ref:
+		return 0.0
 
 	if value <= min_ref:
 		return 0.0

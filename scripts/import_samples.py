@@ -246,7 +246,8 @@ def main () -> None:
 		type=str,
 		default=None,
 		metavar="DIR",
-		help="Target directory (default: output.directory from config.yaml)",
+		help="Target directory (default: output.directory from config.yaml). "
+		     "Import to the instrument directory to make samples immediately playable.",
 	)
 	parser.add_argument(
 		"--force",

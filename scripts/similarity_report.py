@@ -1,18 +1,14 @@
 """Print the top-N most similar instrument samples for each reference sample.
 
-Replicates the exact startup sequence from the main application:
-  1. Load config (same config.yaml / config.yaml.default)
-  2. Load reference library  → IDs 1..M  (sorted filename order)
-  3. Load instrument library → IDs M+1..M+N (sorted filename order)
-  4. Build SimilarityMatrix and score with bulk_add()
-
-Because IDs are allocated from the same shared counter in the same order, the
-numeric IDs shown here match exactly what the live application assigns.
+Loads reference samples from a directory (--reference-dir, defaults to
+samples/reference) and instrument samples from the configured
+instrument.directory.  Builds a SimilarityMatrix and prints the top-N
+matches for each reference.
 
 Usage:
 	python scripts/similarity_report.py
 	python scripts/similarity_report.py --top 10
-	python scripts/similarity_report.py --config /path/to/config.yaml
+	python scripts/similarity_report.py --reference-dir samples/reference
 """
 
 import argparse
@@ -54,6 +50,13 @@ def _parse_args () -> argparse.Namespace:
 		metavar="PATH",
 		help="Path to config.yaml (default: auto-discover as per main app)",
 	)
+	parser.add_argument(
+		"--reference-dir",
+		type=pathlib.Path,
+		default=pathlib.Path("samples/reference"),
+		metavar="DIR",
+		help="Directory containing reference .analysis.json sidecar files (default: samples/reference)",
+	)
 	return parser.parse_args()
 
 
@@ -65,34 +68,19 @@ def main () -> None:
 
 	cfg = subsample.config.load_config(args.config)
 
-	# Both libraries must be configured — without references there is nothing to
-	# compare against, and without instruments there are no results to rank.
-	if cfg.reference is None:
-		print(
-			"Error: no reference directory configured.\n"
-			"Add a [reference] section to config.yaml:\n"
-			"  reference:\n"
-			"    directory: ./reference",
-			file=sys.stderr,
-		)
-		sys.exit(1)
-
 	if cfg.instrument.directory is None:
 		print(
 			"Error: no instrument directory configured.\n"
-			"Add a [instrument] section to config.yaml:\n"
+			"Add an instrument section to config.yaml:\n"
 			"  instrument:\n"
 			"    directory: ./samples",
 			file=sys.stderr,
 		)
 		sys.exit(1)
 
-	# --- Load libraries in the same order as cli.py:main() ---
-	# Reference samples are loaded first so their IDs match the live application.
+	# --- Load libraries ---
 
-	reference_library = subsample.library.load_reference_library(
-		pathlib.Path(cfg.reference.directory)
-	)
+	reference_library = subsample.library.load_reference_library(args.reference_dir)
 
 	if len(reference_library) == 0:
 		print("No reference samples found — nothing to compare against.", file=sys.stderr)

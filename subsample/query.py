@@ -81,6 +81,7 @@ class WherePredicate:
 	reference:     typing.Optional[str]   = None
 	name:          typing.Optional[str]   = None
 	name_path:     typing.Optional[str]   = None  # Resolved absolute path for path-based name predicates
+	directory:     typing.Optional[str]   = None  # Resolved absolute path; filters to samples from this directory
 
 	def matches (self, record: "subsample.library.SampleRecord") -> bool:
 
@@ -120,6 +121,15 @@ class WherePredicate:
 
 		if self.name is not None and record.name != self.name:
 			return False
+
+		if self.directory is not None:
+			if record.filepath is None:
+				return False
+
+			try:
+				pathlib.Path(record.filepath).resolve().relative_to(pathlib.Path(self.directory).resolve())
+			except ValueError:
+				return False
 
 		# reference is handled externally by the query runner (needs SimilarityMatrix).
 		# WherePredicate.matches() is a record-level filter; reference scoring
@@ -219,6 +229,10 @@ class ProcessSpec:
 	def has_pad_quantize (self) -> bool:
 		"""True if any step is a pad_quantize processor."""
 		return any(s.name == "pad_quantize" for s in self.steps)
+
+	def has_vocoder (self) -> bool:
+		"""True if any step is a vocoder processor."""
+		return any(s.name == "vocoder" for s in self.steps)
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +394,9 @@ def _parse_where (
 				kwargs["name_path"] = str((midi_map_dir / raw_name).resolve())
 			else:
 				kwargs["name"] = raw_name
+
+		elif key == "directory":
+			kwargs["directory"] = str((midi_map_dir / str(value)).resolve())
 
 		else:
 			_log.warning(

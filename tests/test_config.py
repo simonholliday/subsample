@@ -82,7 +82,7 @@ class TestLoadDefault:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
 		assert cfg.instrument.max_memory_mb == 100.0
-		assert cfg.instrument.directory is None
+		assert cfg.instrument.directory == "samples/captures"
 
 	def test_default_similarity_values (self) -> None:
 		# Similarity section is commented-out in config.yaml.default so defaults

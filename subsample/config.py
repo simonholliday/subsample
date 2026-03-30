@@ -160,13 +160,6 @@ class AnalysisConfig:
 
 
 @dataclasses.dataclass(frozen=True)
-class ReferenceConfig:
-
-	directory: str
-	"""Path to the directory containing reference .analysis.json sidecar files."""
-
-
-@dataclasses.dataclass(frozen=True)
 class SimilarityConfig:
 
 	weight_spectral: float = 1.0
@@ -212,10 +205,11 @@ class InstrumentConfig:
 	room. Only in-memory audio is removed; WAV files on disk are never deleted.
 	At 44100 Hz 16-bit mono, 100 MB ≈ 19 minutes of audio."""
 
-	directory: typing.Optional[str] = None
-	"""Optional path to a directory of pre-analyzed instrument samples to load
-	at startup. Each sample requires both a WAV file and an .analysis.json
-	sidecar. If omitted, the instrument library starts empty."""
+	directory: str = "samples/captures"
+	"""Path to the directory of instrument samples to load at startup.
+	Each sample requires both a WAV file and an .analysis.json sidecar.
+	Defaults to the captures directory so newly recorded samples are
+	immediately available for playback."""
 
 	clean_orphaned_sidecars: bool = False
 	"""When True, automatically delete .analysis.json sidecar files whose
@@ -293,7 +287,6 @@ class Config:
 	similarity: SimilarityConfig = dataclasses.field(default_factory=SimilarityConfig)
 	player: PlayerConfig = dataclasses.field(default_factory=PlayerConfig)
 	transform: TransformConfig = dataclasses.field(default_factory=TransformConfig)
-	reference: typing.Optional[ReferenceConfig] = None
 
 
 def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
@@ -601,7 +594,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	instrument_raw: dict[str, typing.Any] = raw.get("instrument", {})
 	instrument = InstrumentConfig(
 		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
-		directory=instrument_raw.get("directory"),
+		directory=str(instrument_raw.get("directory", "samples/captures")),
 		clean_orphaned_sidecars=bool(instrument_raw.get("clean_orphaned_sidecars", False)),
 		watch=bool(instrument_raw.get("watch", False)),
 	)
@@ -627,14 +620,6 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 				f"{name} must be in [0.0, 2.0] (got {value}). "
 				"Set to 0.0 to disable a feature group entirely."
 			)
-
-	reference_raw: typing.Optional[dict[str, typing.Any]] = raw.get("reference")
-	if reference_raw is not None:
-		reference: typing.Optional[ReferenceConfig] = ReferenceConfig(
-			directory=str(_require(reference_raw, "directory", "reference")),
-		)
-	else:
-		reference = None
 
 	transform_raw: dict[str, typing.Any] = raw.get("transform", {})
 	quantize_resolution = int(transform_raw.get("quantize_resolution", 16))
@@ -663,5 +648,4 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		similarity=similarity,
 		player=player,
 		transform=transform,
-		reference=reference,
 	)

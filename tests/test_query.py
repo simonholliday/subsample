@@ -457,6 +457,70 @@ class TestProcessSpec:
 		assert not spec.has_beat_quantize()
 
 
+class TestDirectoryPredicate:
+
+	def test_directory_matches_filepath_under_dir (self) -> None:
+		"""Directory predicate matches records whose filepath is under the directory."""
+		record = _make_record(name="test")
+		import dataclasses, pathlib
+		record = dataclasses.replace(record, filepath=pathlib.Path("/samples/captures/test.wav"))
+		pred = subsample.query.WherePredicate(directory="/samples/captures")
+		assert pred.matches(record)
+
+	def test_directory_rejects_filepath_outside_dir (self) -> None:
+		"""Directory predicate rejects records from a different directory."""
+		record = _make_record(name="test")
+		import dataclasses, pathlib
+		record = dataclasses.replace(record, filepath=pathlib.Path("/samples/other/test.wav"))
+		pred = subsample.query.WherePredicate(directory="/samples/captures")
+		assert not pred.matches(record)
+
+	def test_directory_rejects_prefix_overlap (self) -> None:
+		"""Directory predicate must not match dirs that share a prefix (e.g. captures2)."""
+		record = _make_record(name="test")
+		import dataclasses, pathlib
+		record = dataclasses.replace(record, filepath=pathlib.Path("/samples/captures2/test.wav"))
+		pred = subsample.query.WherePredicate(directory="/samples/captures")
+		assert not pred.matches(record)
+
+	def test_directory_rejects_no_filepath (self) -> None:
+		"""Directory predicate rejects records with no filepath."""
+		record = _make_record(name="test")
+		pred = subsample.query.WherePredicate(directory="/samples/captures")
+		assert not pred.matches(record)
+
+	def test_directory_combined_with_other_predicates (self) -> None:
+		"""Directory predicate works alongside other predicates."""
+		import dataclasses, pathlib
+		record = _make_record(name="test", duration=2.0, onset_count=5)
+		record = dataclasses.replace(record, filepath=pathlib.Path("/samples/captures/test.wav"))
+
+		# Passes both directory and min_onsets
+		pred = subsample.query.WherePredicate(directory="/samples/captures", min_onsets=3)
+		assert pred.matches(record)
+
+		# Passes directory but fails min_onsets
+		pred2 = subsample.query.WherePredicate(directory="/samples/captures", min_onsets=10)
+		assert not pred2.matches(record)
+
+	def test_parse_where_directory (self) -> None:
+		"""_parse_where correctly parses a directory predicate."""
+		import pathlib
+		pred = subsample.query._parse_where(
+			{"directory": "samples/captures"},
+			"test_assignment",
+			midi_map_dir=pathlib.Path("/project"),
+		)
+		assert pred.directory == "/project/samples/captures"
+
+	def test_has_vocoder (self) -> None:
+		"""ProcessSpec.has_vocoder() returns True when vocoder step present."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="vocoder", params=(("carrier", "reference"),)),
+		))
+		assert process.has_vocoder()
+
+
 class TestSelectSpec:
 
 	def test_defaults (self) -> None:

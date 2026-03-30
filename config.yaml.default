@@ -287,17 +287,12 @@ analysis:
 #   # for drum-heavy libraries; decrease for pitched instrument libraries.
 #   # Range: 0.0-2.0. Set to 0.0 to disable.
 
-# reference:
-#   directory: samples/reference
-#   Path to a directory containing pre-analyzed reference sounds. Each
-#   .analysis.json sidecar file found at the top level defines one canonical
-#   sample used for similarity classification (e.g. "kick", "snare", "hat").
-#   The audio file does not need to be present — only the sidecar is required.
-#   The sample name is derived from the audio filename stem:
-#     GM36_BassDrum1.wav.analysis.json  →  "GM36_BassDrum1"
-#     kick.wav.analysis.json            →  "kick"
-#   Lookup is case-insensitive. If this section is omitted, reference
-#   classification is disabled and no library is loaded at startup.
+# Reference samples (the sounds each MIDI note should resemble) are declared
+# as path-based predicates in the MIDI map, not here:
+#   where: { reference: samples/reference/GM36_BassDrum1.wav }
+# If the WAV file exists but has no .analysis.json sidecar, Subsample
+# generates one automatically on startup.
+# See midi-map-gm-drums.yaml for examples.
 
 # instrument:
 #   max_memory_mb: 100.0
@@ -310,11 +305,12 @@ analysis:
 #   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_instrument_values
 #
 #   directory: samples/captures
-#   # Optional: pre-load instrument samples from this directory at startup.
-#   # Each sample requires both a WAV file and an .analysis.json sidecar.
-#   # If omitted, the instrument library starts empty and is populated as
-#   # recordings are captured.  Set to output.directory to load previous
-#   # recordings on restart.
+#   # Directory of instrument samples to load at startup. Each sample
+#   # requires both a WAV file and an .analysis.json sidecar. This is the
+#   # pool of samples that MIDI map rules evaluate against. New samples
+#   # arriving in this directory (via capture or import) trigger
+#   # re-evaluation of all assignments.
+#   # Default: samples/captures (same as output.directory).
 #
 #   clean_orphaned_sidecars: false
 #   # When true, .analysis.json sidecar files whose corresponding audio file

@@ -25,11 +25,11 @@ you lifting a finger.
 - **Classification-free matching** - the same engine works for kicks and violins
   without training data, labels, or pre-defined categories. It is pure geometry:
   similar sounds cluster together naturally in a 58-dimensional feature space.
-- **16-processor DSP transform pipeline** - pitch-shift, time-stretch, reverse,
+- **17-processor DSP transform pipeline** - pitch-shift, time-stretch, reverse,
   high/low/band-pass filter, saturate, compress, limit, gate, distort, reshape,
-  transient shaping, pad-quantize, and HPSS harmonic/percussive separation. Each
-  processor runs per-sample in a background worker pool - processed variants are
-  ready before you press a key.
+  transient shaping, pad-quantize, vocoder (cross-synthesis), and HPSS
+  harmonic/percussive separation. Each processor runs per-sample in a background
+  worker pool - processed variants are ready before you press a key.
 - **Auto-adaptive processing** - processors derive their parameters from each
   sample's own analysis data. The compressor reads peak level, onset speed, and
   decay to set threshold, attack, and release. The gate sets its threshold from
@@ -240,8 +240,9 @@ All `where` predicates must pass (AND logic). Available predicates:
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
 | `min_tempo` / `max_tempo` | float (BPM) | Filter by detected tempo |
 | `min_pitch` / `max_pitch` | Hz or note name | Filter by detected frequency |
-| `reference` | string | Similarity match against a named reference sample |
-| `name` | string | Exact filename stem match |
+| `reference` | path | Similarity match against a reference sample (path to WAV) |
+| `name` | string or path | Exact filename stem match, or path to a specific WAV |
+| `directory` | path | Only match samples from this directory (auto-loads samples on startup) |
 
 Available `order_by` values: `newest`, `oldest`, `similarity` (requires
 `reference`), `duration_asc`, `duration_desc`, `pitch_asc`, `pitch_desc`,
@@ -258,8 +259,8 @@ that returns a result wins:
 
 ```yaml
 select:
-  - where: { name: my-favourite-kick }     # try specific sample first
-  - where: { reference: GM36_BassDrum1 }           # fall back to similarity match
+  - where: { name: my-favourite-kick }                               # try specific sample first
+  - where: { reference: samples/reference/GM36_BassDrum1.wav }       # fall back to similarity match
 ```
 
 #### Examples
@@ -268,7 +269,7 @@ select:
 # GM kicks - ranked by similarity to a kick reference
 select:
   where:
-    reference: GM36_BassDrum1
+    reference: samples/reference/GM36_BassDrum1.wav
   order_by: similarity
 
 # Pitched keyboard - oldest tonal sample, repitched per note
@@ -330,6 +331,7 @@ Available processors:
 | `distort: true` | mode (hard_clip), drive (auto), mix (1.0), tone (auto), bit_depth (8), downsample_factor (4) | Waveshaping distortion with four modes: hard_clip, fold, bit_crush, downsample. Drive adapts to crest factor; tone adapts to spectral rolloff. |
 | `reshape: true` | attack (preserve), hold (0), decay (preserve), sustain (1.0), release (auto) | ADSR envelope reshaping. Default auto-tightens the tail. Set attack, decay, sustain, release to reshape specific phases. |
 | `transient: true` | amount (auto) | Transient enhancement/taming via HPSS rebalancing. Auto-adapts from crest factor: peaky samples are tamed, dull samples enhanced. |
+| `vocoder: { carrier: reference }` | carrier (required), bands (24), depth (1.0), formant_shift (0) | Channel vocoder cross-synthesis. Imposes the sample's spectral envelope onto a carrier signal. `carrier: reference` uses this note's reference sample; or specify a file path. |
 
 All three filters can be used without parameters — they default to classic
 console channel-strip values:
@@ -384,6 +386,8 @@ process:
   - transient: { amount: 6 }                # enhance transients by 6 dB
   - transient: { amount: -3 }               # tame transients by 3 dB
   - pad_quantize: { bpm: 120, grid: 8 }     # silence-pad onsets to eighth-note grid
+  - vocoder: { carrier: reference }           # cross-synthesise with this note's reference
+  - vocoder: { carrier: samples/reference/GM36_BassDrum1.wav, bands: 16, depth: 0.8 }
 ```
 
 For the opposite of snappy drums (bring up room ambience and reverb tails), use
@@ -622,10 +626,9 @@ weights - is optional and rarely needs changing.
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory samples; oldest evicted (FIFO) when exceeded |
-| `instrument.directory` | `none` | Optional directory to pre-load instrument samples from at startup |
+| `instrument.directory` | `samples/captures` | Directory of instrument samples to load at startup (the pool that MIDI map rules evaluate against) |
 | `instrument.clean_orphaned_sidecars` | `false` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
 | `instrument.watch` | `false` | Monitor `instrument.directory` at runtime for new samples arriving from a remote recorder instance (see Multi-machine setup) |
-| `reference.directory` | `none` | Optional directory of reference sounds for similarity classification |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
@@ -758,28 +761,25 @@ text editors are debounced into a single reload.
 
 Reference samples define the canonical sound classes you want to match against -
 kick drum, snare, hi-hat, etc. Each reference is represented by its
-`.analysis.json` sidecar file only; the original audio is not required.
+`.analysis.json` sidecar file alongside the original audio. References are
+declared as path-based `where: { reference: ... }` predicates in the MIDI map:
 
 ```yaml
-reference:
-  directory: samples/reference
+- name: Bass Drum
+  notes: 36
+  select:
+    where:
+      reference: samples/reference/GM36_BassDrum1.wav
 ```
 
-Place one sidecar per sound class in the reference directory. The name is taken
-from the audio filename stem:
-
-```
-samples/reference/
-  GM36_BassDrum1.wav.analysis.json    →  "GM36_BassDrum1"
-  GM38_AcousticSnare.wav.analysis.json →  "GM38_AcousticSnare"
-  GM42_ClosedHiHat.wav.analysis.json   →  "GM42_ClosedHiHat"
-```
-
-At startup, reference samples are loaded before instrument samples. For every
-instrument sample, Subsample computes cosine similarity against every reference
-and maintains a ranked list per reference - most similar instrument first. When a
-sample is evicted from the instrument library, it is also removed from the ranked
-lists.
+During player startup, each path-based reference is loaded from its sidecar and
+added to the similarity matrix. If a WAV file exists but its `.analysis.json`
+sidecar is missing, Subsample generates it automatically - you can point at any
+WAV file as a reference without pre-processing. For every instrument sample,
+Subsample computes cosine similarity against every reference and maintains a
+ranked list per reference - most similar instrument first. When a sample is
+evicted from the instrument
+library, it is also removed from the ranked lists.
 
 Query the ranked lists programmatically:
 

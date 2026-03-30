@@ -31,12 +31,15 @@ import typing
 import mido
 import numpy
 import pyaudio
+import soundfile
 import yaml
 
 import pymididefs.notes
 import subsample.analysis
 import subsample.audio
 import subsample.bank
+import subsample.cache
+import subsample.config
 import subsample.library
 import subsample.query
 import subsample.similarity
@@ -243,19 +246,54 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 
 	"""Load a reference sample from a filesystem path.
 
-	The path must have a corresponding .analysis.json sidecar file. The reference
-	sample's name (key in the similarity matrix) is set to the canonical absolute
-	path string so that get_matches(str(path)) works.
+	If the analysis sidecar does not exist but the audio file does, the
+	sidecar is generated automatically so users can point at any WAV file
+	as a reference without running the analysis script first.
+
+	The reference sample's name (key in the similarity matrix) is set to
+	the canonical absolute path string so that get_matches(str(path)) works.
 
 	Args:
-		path: Absolute path to the WAV file (or sidecar).
+		path: Absolute path to the WAV file.
 
 	Returns:
-		SampleRecord with name=str(path.resolve()), or None if the sidecar cannot be loaded.
+		SampleRecord with name=str(path.resolve()), or None on failure.
 	"""
 
 	path = pathlib.Path(path).resolve()
 	sidecar_path = subsample.cache.cache_path(path)
+
+	# Auto-generate sidecar if missing but the audio file exists.
+	if not sidecar_path.exists() and path.exists():
+		_log.info("Generating analysis sidecar for reference %s", path.name)
+
+		try:
+			data, samplerate = soundfile.read(str(path), always_2d=True, dtype="float32")
+			mono = numpy.mean(data, axis=1, dtype=numpy.float32)
+
+			params = subsample.analysis.compute_params(samplerate)
+			rhythm_cfg = subsample.config.AnalysisConfig()
+			spectral, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
+				mono, params, rhythm_cfg,
+			)
+			duration = len(data) / samplerate
+
+			audio_md5 = subsample.cache.compute_audio_md5(path)
+			subsample.cache.save_cache(
+				audio_path  = path,
+				audio_md5   = audio_md5,
+				params      = params,
+				spectral    = spectral,
+				rhythm      = rhythm,
+				pitch       = pitch,
+				timbre      = timbre,
+				duration    = duration,
+				level       = level,
+				band_energy = band_energy,
+			)
+		except Exception as exc:
+			_log.warning("Could not generate sidecar for %s: %s", path.name, exc)
+			return None
 
 	if not sidecar_path.exists():
 		_log.warning(
@@ -276,7 +314,7 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 
 	return subsample.library.SampleRecord(
 		sample_id   = subsample.library.allocate_id(),
-		name        = str(path.resolve()),  # Use absolute path as the key
+		name        = str(path.resolve()),
 		spectral    = spectral,
 		rhythm      = rhythm,
 		pitch       = pitch,
@@ -285,7 +323,7 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 		band_energy = band_energy,
 		params      = params,
 		duration    = duration,
-		audio       = None,  # Reference samples don't need audio
+		audio       = None,
 		filepath    = path if path.exists() else None,
 	)
 
@@ -357,16 +395,44 @@ def _load_instrument_from_path (path: pathlib.Path) -> typing.Optional[subsample
 	)
 
 
+def _reference_wav_path (assignment: subsample.query.Assignment) -> typing.Optional[str]:
+
+	"""Resolve the reference sample WAV path for an assignment.
+
+	Returns the absolute path string if the assignment's primary select spec
+	has a path-based reference, or None otherwise.  Used by the vocoder
+	processor to resolve ``carrier: reference``.
+	"""
+
+	if not assignment.select:
+		return None
+
+	ref = assignment.select[0].where.reference
+
+	if ref is None:
+		return None
+
+	if subsample.query.is_path_like(ref):
+		resolved = pathlib.Path(ref).resolve()
+
+		if resolved.exists():
+			return str(resolved)
+
+	return None
+
+
 def _resolve_path_references (
 	note_map: NoteMap,
 	matrices: list[subsample.similarity.SimilarityMatrix],
 	instrument_lib: subsample.library.InstrumentLibrary,
 ) -> None:
 
-	"""Load path-based references and instruments, adding them to the appropriate collections.
+	"""Load path-based references, instruments, and directory samples from the MIDI map.
 
-	Scans all assignments in the note map for path-based references and names, loads them
-	from disk, and adds them to the similarity matrices and/or instrument library.
+	Scans all assignments in the note map for:
+	  - Path-based references → loaded and added to similarity matrices
+	  - Path-based instruments → loaded and added to instrument library
+	  - Directory predicates → all samples in the directory loaded into instrument library
 
 	Args:
 		note_map:      Note routing table: (mido_channel, midi_note) → (Assignment, pick).
@@ -374,9 +440,10 @@ def _resolve_path_references (
 		instrument_lib: InstrumentLibrary to add path-based instruments to.
 	"""
 
-	# Collect unique paths for references and instruments
+	# Collect unique paths for references, instruments, and directories
 	ref_paths: set[str] = set()
 	inst_paths: set[str] = set()
+	dir_paths: set[str] = set()
 
 	# Extract unique assignments from the note map
 	seen_assignments: set[int] = set()
@@ -390,12 +457,50 @@ def _resolve_path_references (
 		for select_spec in assignment.select:
 			ref = select_spec.where.reference
 			if ref is not None and subsample.query.is_path_like(ref):
-				# Path-based reference (absolute path from parse-time resolution)
 				ref_paths.add(ref)
 
 			name_path = select_spec.where.name_path
 			if name_path is not None:
 				inst_paths.add(name_path)
+
+			if select_spec.where.directory is not None:
+				dir_paths.add(select_spec.where.directory)
+
+	# Load samples from directory predicates into the instrument library.
+	# This must happen before reference loading so that directory samples
+	# are available for similarity scoring.
+	for dir_path in sorted(dir_paths):
+		directory = pathlib.Path(dir_path)
+
+		if not directory.is_dir():
+			_log.warning("MIDI map directory predicate: %s is not a directory — skipped", dir_path)
+			continue
+
+		loaded = 0
+
+		try:
+			sidecars = sorted(directory.glob("*.analysis.json"))
+		except (PermissionError, OSError) as exc:
+			_log.warning("Cannot read directory %s: %s — skipped", dir_path, exc)
+			continue
+
+		for sidecar in sidecars:
+			wav_name = sidecar.name.replace(".analysis.json", "")
+			wav_path = directory / wav_name
+			name = pathlib.Path(wav_name).stem
+
+			# Skip if already in the library.
+			if instrument_lib.find_by_name(name) is not None:
+				continue
+
+			record = _load_instrument_from_path(wav_path)
+
+			if record is not None:
+				instrument_lib.add(record)
+				loaded += 1
+
+		if loaded > 0:
+			_log.info("Loaded %d sample(s) from directory predicate %s", loaded, dir_path)
 
 	# Load path-based references and add to all matrices
 	for ref_path in ref_paths:
@@ -1178,6 +1283,7 @@ class MidiPlayer:
 					midi_note=midi_note_for_spec,
 					target_bpm=bpm_for_spec,
 					resolution=grid_for_spec,
+					reference_path=_reference_wav_path(assignment),
 				)
 
 				if spec.steps:
@@ -1376,6 +1482,7 @@ class MidiPlayer:
 						asgn.process,
 						target_bpm=bpm,
 						resolution=grid,
+						reference_path=_reference_wav_path(asgn),
 					)
 					eff_transform.get_variant(sid, spec)
 					enqueued += 1
@@ -1413,6 +1520,7 @@ class MidiPlayer:
 						asgn.process,
 						target_bpm=bpm,
 						resolution=grid,
+						reference_path=_reference_wav_path(asgn),
 					)
 					eff_transform.get_variant(sid, spec)
 					enqueued += 1
@@ -1429,7 +1537,10 @@ class MidiPlayer:
 			# Process-only (no repitch, no beat/pad_quantize): pre-compute the
 			# static chain (filters, saturate, reverse, etc.) once per sample.
 			else:
-				spec = subsample.transform.spec_from_process(asgn.process)
+				spec = subsample.transform.spec_from_process(
+					asgn.process,
+					reference_path=_reference_wav_path(asgn),
+				)
 
 				if spec.steps:
 					seen_ids_static: set[int] = set()

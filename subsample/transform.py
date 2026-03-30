@@ -127,6 +127,7 @@ import librosa
 import numpy
 import pyrubberband
 import scipy.signal
+import soundfile
 
 import subsample.analysis
 import subsample.library
@@ -477,6 +478,36 @@ class PadQuantize:
 	resolution:  int = 16
 
 
+@dataclasses.dataclass(frozen=True)
+class Vocoder:
+
+	"""Channel vocoder cross-synthesis: impose the modulator's spectral envelope
+	on a carrier signal.
+
+	Splits both modulator (the pipeline audio) and carrier (a fixed audio file)
+	through a bank of logarithmically-spaced bandpass filters.  For each band,
+	the modulator's amplitude envelope is extracted and applied to the
+	corresponding carrier band.  The result is the carrier's tonal character
+	shaped by the modulator's rhythm and transients.
+
+	When used with ``carrier: reference`` in the MIDI map, the carrier is
+	automatically resolved to the current note's reference sample WAV —
+	effectively "tuning" captured sounds toward their reference target.
+
+	carrier_path:   Absolute path to the carrier WAV file.
+	bands:          Number of frequency bands (8 = robotic, 16 = classic,
+	                24 = natural, 32+ = transparent).
+	depth:          Wet/dry mix (0.0 = dry modulator, 1.0 = full vocoder).
+	formant_shift:  Shift carrier filter bank centre frequencies up/down
+	                in semitones relative to the modulator bank.
+	"""
+
+	carrier_path:   str
+	bands:          int   = 24
+	depth:          float = 1.0
+	formant_shift:  int   = 0
+
+
 # Union of all known transform step types.
 # Extend this when adding new transforms (see "How to add a new transform type"
 # in the module docstring).
@@ -497,6 +528,7 @@ TransformStep = typing.Union[
 	Reshape,
 	Transient,
 	PadQuantize,
+	Vocoder,
 ]
 
 # ---------------------------------------------------------------------------
@@ -1609,10 +1641,11 @@ class TransformManager:
 
 		"""React to a target BPM change.
 
-		Invalidates all cached TimeStretch variants, then re-enqueues new
-		time-stretch jobs for every rhythmic sample in the instrument library.
-		Deduplication in TransformProcessor prevents flooding the queue if this
-		is called repeatedly in quick succession (e.g. a BPM knob being turned).
+		Invalidates all cached TimeStretch and PadQuantize variants, then
+		re-enqueues new jobs for every rhythmic sample in the instrument
+		library. Deduplication in TransformProcessor prevents flooding the
+		queue if this is called repeatedly in quick succession (e.g. a BPM
+		knob being turned).
 		"""
 
 		invalidated = self._cache.remove_by_step_type(TimeStretch)
@@ -3037,6 +3070,210 @@ def _apply_pad_quantize (
 
 
 # ---------------------------------------------------------------------------
+# Channel vocoder (cross-synthesis)
+# ---------------------------------------------------------------------------
+
+# Module-level cache for carrier audio files.  Carriers are typically small
+# reference samples loaded once per session; caching avoids redundant disk I/O
+# when many variants use the same carrier.
+_carrier_cache: dict[str, numpy.ndarray] = {}
+_carrier_cache_lock = threading.Lock()
+
+
+def _load_carrier (path: str, target_sr: int) -> numpy.ndarray:
+
+	"""Load and cache a carrier audio file as mono float32 at the target sample rate.
+
+	Returns shape (n_frames,) float32.  Resamples if the file's native rate
+	differs from target_sr.
+	"""
+
+	cache_key = f"{path}@{target_sr}"
+
+	with _carrier_cache_lock:
+		cached = _carrier_cache.get(cache_key)
+
+	if cached is not None:
+		return cached
+
+	data, sr = soundfile.read(path, always_2d=True, dtype="float32")
+
+	# Mix to mono — vocoder operates per-band on a single channel pair.
+	mono = numpy.mean(data, axis=1, dtype=numpy.float32)
+
+	# Resample if necessary.
+	if sr != target_sr:
+		mono = librosa.resample(mono, orig_sr=sr, target_sr=target_sr)
+
+	with _carrier_cache_lock:
+		_carrier_cache[cache_key] = mono
+
+	return mono
+
+
+def _build_filter_bank (
+	n_bands:    int,
+	sample_rate: int,
+	semitone_shift: int = 0,
+) -> list[numpy.ndarray]:
+
+	"""Build a bank of logarithmically-spaced Butterworth bandpass filters.
+
+	Returns a list of SOS arrays, one per band.  Centre frequencies span
+	80 Hz to min(12000, sr/2 - 100) Hz on a logarithmic scale.
+
+	semitone_shift shifts all centre frequencies by the given number of
+	semitones (positive = higher, negative = lower).
+	"""
+
+	nyquist = sample_rate / 2.0
+	f_low  = 80.0
+	f_high = min(12000.0, nyquist - 100.0)
+
+	if f_high <= f_low:
+		return []
+
+	# Apply semitone shift.
+	if semitone_shift != 0:
+		shift_factor = 2.0 ** (semitone_shift / 12.0)
+		f_low  *= shift_factor
+		f_high *= shift_factor
+
+		# Clamp to valid range.
+		f_low  = max(20.0, f_low)
+		f_high = min(nyquist - 100.0, f_high)
+
+		if f_high <= f_low:
+			return []
+
+	centres = numpy.geomspace(f_low, f_high, n_bands)
+
+	filters: list[numpy.ndarray] = []
+
+	for i, fc in enumerate(centres):
+		# Band edges: geometric midpoints between adjacent centres.
+		if i == 0:
+			lo = fc / (centres[1] / fc) ** 0.5 if n_bands > 1 else fc * 0.8
+		else:
+			lo = (centres[i - 1] * fc) ** 0.5
+
+		if i == n_bands - 1:
+			hi = fc * (fc / centres[-2]) ** 0.5 if n_bands > 1 else fc * 1.25
+		else:
+			hi = (fc * centres[i + 1]) ** 0.5
+
+		# Clamp to valid Butterworth range (strictly within (0, nyquist)).
+		lo = max(20.0, lo)
+		hi = min(nyquist - 1.0, hi)
+
+		if hi <= lo:
+			continue
+
+		sos = scipy.signal.butter(4, [lo, hi], btype="band", fs=sample_rate, output="sos")
+		filters.append(sos)
+
+	return filters
+
+
+def _extract_envelope (signal: numpy.ndarray, sample_rate: int) -> numpy.ndarray:
+
+	"""Extract the amplitude envelope of a signal via the Hilbert transform.
+
+	Returns a smoothed envelope (lowpass at ~50 Hz) that preserves transients
+	while removing carrier-frequency ripple.
+	"""
+
+	analytic = scipy.signal.hilbert(signal)
+	envelope = numpy.abs(analytic).astype(numpy.float32)
+
+	# Smooth with a one-pole lowpass at ~50 Hz.
+	cutoff = min(50.0, sample_rate / 4.0)
+	sos = scipy.signal.butter(2, cutoff, btype="low", fs=sample_rate, output="sos")
+	envelope = scipy.signal.sosfiltfilt(sos, envelope).astype(numpy.float32)
+
+	return envelope
+
+
+def _apply_vocoder (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Vocoder,
+) -> numpy.ndarray:
+
+	"""Channel vocoder cross-synthesis.
+
+	The pipeline audio (modulator) has its per-band spectral envelope extracted
+	and applied to the carrier audio loaded from step.carrier_path.  The result
+	is the carrier's tonal character shaped by the modulator's rhythm and
+	transients.
+	"""
+
+	# Load carrier.
+	try:
+		carrier_mono = _load_carrier(step.carrier_path, sample_rate)
+	except (OSError, soundfile.SoundFileError) as exc:
+		_log.warning("Vocoder: could not load carrier %r: %s — returning dry", step.carrier_path, exc)
+		return audio
+
+	n_frames, n_channels = audio.shape
+	pre_peak = float(numpy.max(numpy.abs(audio)))
+
+	if pre_peak < 1e-10:
+		return audio
+
+	# Build filter banks for modulator and carrier (carrier may be shifted).
+	mod_filters = _build_filter_bank(step.bands, sample_rate, semitone_shift=0)
+	car_filters = _build_filter_bank(step.bands, sample_rate, semitone_shift=step.formant_shift)
+
+	if not mod_filters or not car_filters:
+		_log.warning("Vocoder: could not build filter bank — returning dry")
+		return audio
+
+	n_bands = min(len(mod_filters), len(car_filters))
+
+	result = numpy.zeros_like(audio)
+
+	for ch in range(n_channels):
+		mod_signal = audio[:, ch]
+
+		# Prepare carrier for this channel: loop or truncate to match length.
+		carrier = carrier_mono
+
+		if len(carrier) < n_frames:
+			# Loop the carrier to fill the modulator length.
+			repeats = (n_frames // len(carrier)) + 1
+			carrier = numpy.tile(carrier, repeats)[:n_frames]
+		else:
+			carrier = carrier[:n_frames]
+
+		vocoded = numpy.zeros(n_frames, dtype=numpy.float32)
+
+		for b in range(n_bands):
+			# Filter modulator and carrier through corresponding bands.
+			mod_band = scipy.signal.sosfiltfilt(mod_filters[b], mod_signal).astype(numpy.float32)
+			car_band = scipy.signal.sosfiltfilt(car_filters[b], carrier).astype(numpy.float32)
+
+			# Extract modulator envelope and apply to carrier band.
+			env = _extract_envelope(mod_band, sample_rate)
+			vocoded += car_band * env
+
+		result[:, ch] = vocoded
+
+	# Level compensation: match the original peak.
+	post_peak = float(numpy.max(numpy.abs(result)))
+
+	if post_peak > 1e-10:
+		result = result * numpy.float32(pre_peak / post_peak)
+
+	# Wet/dry mix.
+	if step.depth < 1.0:
+		result = numpy.float32(step.depth) * result + numpy.float32(1.0 - step.depth) * audio
+
+	return result.astype(numpy.float32)
+
+
+# ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------
 
@@ -3056,6 +3293,7 @@ TransformProcessor._HANDLERS[Distort]         = _apply_distort
 TransformProcessor._HANDLERS[Reshape]         = _apply_reshape
 TransformProcessor._HANDLERS[Transient]       = _apply_transient
 TransformProcessor._HANDLERS[PadQuantize]     = _apply_pad_quantize
+TransformProcessor._HANDLERS[Vocoder]        = _apply_vocoder
 
 
 # ---------------------------------------------------------------------------
@@ -3063,10 +3301,11 @@ TransformProcessor._HANDLERS[PadQuantize]     = _apply_pad_quantize
 # ---------------------------------------------------------------------------
 
 def spec_from_process (
-	process:    subsample.query.ProcessSpec,
-	midi_note:  typing.Optional[int]   = None,
-	target_bpm: typing.Optional[float] = None,
-	resolution: int                    = 16,
+	process:        subsample.query.ProcessSpec,
+	midi_note:      typing.Optional[int]   = None,
+	target_bpm:     typing.Optional[float] = None,
+	resolution:     int                    = 16,
+	reference_path: typing.Optional[str]   = None,
 ) -> TransformSpec:
 
 	"""Build an ordered TransformSpec from a MIDI map process pipeline.
@@ -3074,7 +3313,8 @@ def spec_from_process (
 	Iterates the process steps in *declaration order*, converting each
 	ProcessorStep into the corresponding TransformStep dataclass.  Dynamic
 	parameters (midi_note for repitch, target_bpm/resolution for
-	beat_quantize) are substituted at the position the user declared them.
+	beat_quantize, reference_path for vocoder carrier: reference) are
+	substituted at the position the user declared them.
 
 	Steps with unresolvable dynamic parameters (e.g. repitch when midi_note
 	is None) are silently skipped.  Unknown processor names log a warning
@@ -3212,6 +3452,32 @@ def spec_from_process (
 
 			if bpm > 0.0:
 				steps.append(PadQuantize(target_bpm=bpm, resolution=grid))
+
+		elif proc.name == "vocoder":
+			carrier_raw = proc.get("carrier")
+
+			if carrier_raw is not None:
+				carrier_str = str(carrier_raw)
+
+				# "reference" keyword: resolve to the assignment's reference WAV path.
+				if carrier_str == "reference":
+					if reference_path is not None:
+						carrier_str = reference_path
+					else:
+						_log.warning("vocoder carrier: reference but no reference path available — skipped")
+						continue
+				else:
+					# Explicit file path — resolve relative to cwd.
+					carrier_str = str(pathlib.Path(carrier_str).resolve())
+
+				steps.append(Vocoder(
+					carrier_path=carrier_str,
+					bands=int(proc.get("bands", 24)),
+					depth=float(proc.get("depth", 1.0)),
+					formant_shift=int(proc.get("formant_shift", 0)),
+				))
+			else:
+				_log.warning("vocoder requires a 'carrier' parameter — skipped")
 
 		else:
 			_log.warning("Unknown processor %r — skipped", proc.name)
