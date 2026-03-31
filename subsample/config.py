@@ -557,8 +557,8 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		hold_time=float(_require(detection_raw, "hold_time", "detection")),
 		warmup_seconds=float(_require(detection_raw, "warmup_seconds", "detection")),
 		ema_alpha=float(_require(detection_raw, "ema_alpha", "detection")),
-		trim_pre_samples=int(detection_raw.get("trim_pre_samples", 15)),
-		trim_post_samples=int(detection_raw.get("trim_post_samples", 85)),
+		trim_pre_samples=int(detection_raw.get("trim_pre_samples", 10)),
+		trim_post_samples=int(detection_raw.get("trim_post_samples", 90)),
 	)
 
 	if not (0.0 < detection.ema_alpha <= 1.0):

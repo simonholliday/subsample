@@ -185,17 +185,17 @@ detection:
   # Range: 1–10 seconds. Typical: 2–5 seconds. Longer = slower startup, cleaner detection.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
 
-  trim_pre_samples: 15
+  trim_pre_samples: 10
   # Extra audio samples to keep before the detected signal onset when trimming silence.
   # Creates a fade-in envelope (S-curve) over these samples for smooth audio onset.
-  # At 44100 Hz, 15 samples ≈ 0.34 ms. Range: 0–100 samples.
+  # At 44100 Hz, 10 samples ≈ 0.23 ms. Range: 0–100 samples.
   # Smaller = abrupt onset. Larger = longer fade-in and pre-signal context.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
 
-  trim_post_samples: 85
+  trim_post_samples: 90
   # Extra audio samples to keep after the detected signal end when trimming silence.
   # Creates a fade-out envelope (S-curve) over these samples for smooth audio release.
-  # At 44100 Hz, 85 samples ≈ 1.93 ms. Range: 0–100 samples.
+  # At 44100 Hz, 90 samples ≈ 2.04 ms. Range: 0–100 samples.
   # Smaller = abrupt cutoff. Larger = longer fade-out and post-signal tail.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
 

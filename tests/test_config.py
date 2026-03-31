@@ -125,8 +125,8 @@ class TestLoadDefault:
 	def test_default_trim_padding_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.detection.trim_pre_samples == 15
-		assert cfg.detection.trim_post_samples == 85
+		assert cfg.detection.trim_pre_samples == 10
+		assert cfg.detection.trim_post_samples == 90
 
 
 class TestLoadCustomConfig:
@@ -677,7 +677,7 @@ class TestConfigCascade:
 		"""Passing the default config path explicitly loads correctly without double-merging."""
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 		assert cfg.recorder.audio.sample_rate == 44100
-		assert cfg.detection.trim_pre_samples == 15
+		assert cfg.detection.trim_pre_samples == 10
 
 	def test_channels_null_override_yields_none (self, tmp_path: pathlib.Path) -> None:
 		"""Explicitly setting channels: null in user config overrides the default (1)."""
