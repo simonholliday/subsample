@@ -316,10 +316,10 @@ analysis:
 #   # Overridden when banks: is declared in the MIDI map (see README).
 #   # Default: samples/captures (same as output.directory).
 #
-#   clean_orphaned_sidecars: false
-#   # When true, .analysis.json sidecar files whose corresponding audio file
-#   # has been deleted are automatically removed at startup. When false
-#   # (default), orphaned sidecars are skipped with a warning.
+#   clean_orphaned_sidecars: true
+#   # When true (default), .analysis.json sidecar files whose corresponding
+#   # audio file has been deleted are automatically removed at startup. When
+#   # false, orphaned sidecars are skipped with a warning.
 #   # Note: this only applies to instrument samples. Reference sidecars are
 #   # intentionally allowed to exist without their audio file.
 #
