@@ -13,10 +13,29 @@ midi-map.yaml
 # Logs
 *.log
 
-# samples/ — subdirectory-specific rules live in their own .gitignore files.
-# The top-level directory is tracked so its structure (subdirs, .gitkeep,
-# per-directory .gitignore) is committed.  Audio and variant content is
-# excluded by the .gitignore in each subdirectory.
+# Audio and video files — never tracked anywhere in the repo.
+*.wav
+*.flac
+*.aiff
+*.aif
+*.ogg
+*.mp3
+*.mpeg
+*.m4a
+*.wma
+*.opus
+*.mp4
+*.mkv
+*.avi
+*.mov
+
+# Analysis sidecars — generated locally, not tracked (except in
+# samples/reference/ which un-ignores them via its own .gitignore).
+*.analysis.json
+
+# samples/ — directory structure is committed via .gitkeep files.
+# Per-directory .gitignore files handle any additional whitelisting
+# (e.g. samples/reference/ tracks *.analysis.json sidecars).
 !samples/
 
 # Local-only extraction script (not distributed; see samples/reference/CREDITS.md)

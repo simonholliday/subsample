@@ -1,5 +1,4 @@
-# Ignore everything, then whitelist only what should be committed.
-*
+# Reference sidecars and credits are tracked; audio is globally ignored.
 !*.analysis.json
 !CREDITS.md
 !.gitignore
