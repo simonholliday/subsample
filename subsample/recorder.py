@@ -72,6 +72,19 @@ _OnCompleteCallback = typing.Callable[
 ]
 
 
+def _format_filename (timestamp: datetime.datetime, fmt: str) -> str:
+
+	"""Format a filename from a timestamp using an extended strftime format.
+
+	Supports all standard strftime codes plus ``%3f`` which expands to the
+	zero-padded 3-digit millisecond value (e.g. "007", "123").  This avoids
+	collisions when two recordings end in the same second.
+	"""
+
+	ms = f"{timestamp.microsecond // 1000:03d}"
+	return timestamp.strftime(fmt.replace("%3f", ms))
+
+
 @dataclasses.dataclass(frozen=True)
 class _ProcessRequest:
 
@@ -348,7 +361,7 @@ class SampleProcessor:
 
 		fname_base = (
 			filename_base if filename_base is not None
-			else timestamp.strftime(self._cfg.output.filename_format)
+			else _format_filename(timestamp, self._cfg.output.filename_format)
 		)
 		filepath = self._output_dir / (fname_base + ".wav")
 

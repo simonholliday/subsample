@@ -68,7 +68,7 @@ class TestLoadDefault:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
 		assert cfg.output.directory == "samples/captures"
-		assert cfg.output.filename_format == "%Y-%m-%d_%H-%M-%S"
+		assert cfg.output.filename_format == "%Y-%m-%d_%H-%M-%S-%3f"
 
 	def test_default_analysis_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)

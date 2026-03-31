@@ -645,7 +645,7 @@ weights - is optional and rarely needs changing.
 | `detection.trim_pre_samples` | `15` | Samples to keep before signal onset (S-curve fade applied) |
 | `detection.trim_post_samples` | `85` | Samples to keep after signal end (S-curve fade applied) |
 | `output.directory` | `./samples/captures` | Where WAV files are saved |
-| `output.filename_format` | `%Y-%m-%d_%H-%M-%S` | strftime format for filenames |
+| `output.filename_format` | `%Y-%m-%d_%H-%M-%S-%3f` | strftime format for filenames (`%3f` = 3-digit milliseconds) |
 | `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
@@ -674,8 +674,8 @@ Recordings are saved as uncompressed 16, 24, or 32-bit WAV files (depending on
 
 ```
 samples/
-  2026-03-17_14-32-01.wav
-  2026-03-17_14-35-44.wav
+  2026-03-17_14-32-01-472.wav
+  2026-03-17_14-35-44-091.wav
 ```
 
 **File input mode** - filenames from the original audio file's stem plus a

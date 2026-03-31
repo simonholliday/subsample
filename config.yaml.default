@@ -210,11 +210,13 @@ output:
   # Directory is created automatically if it does not exist.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values
 
-  filename_format: "%Y-%m-%d_%H-%M-%S"
+  filename_format: "%Y-%m-%d_%H-%M-%S-%3f"
   # strftime format for output filenames (no extension; .wav is added automatically).
   # Timestamps are the datetime the recording ended, not started.
+  # %3f is a custom token for zero-padded 3-digit milliseconds (000-999).
   # Examples:
-  #   "%Y-%m-%d_%H-%M-%S"        → 2026-03-18_14-32-01.wav
+  #   "%Y-%m-%d_%H-%M-%S-%3f"    → 2026-03-18_14-32-01-123.wav (default)
+  #   "%Y-%m-%d_%H-%M-%S"        → 2026-03-18_14-32-01.wav (no ms; may overwrite same-second files)
   #   "%H-%M-%S"                  → 14-32-01.wav (time only, overwrites same-second files)
   #   "%Y%m%d_%H%M%S"             → 20260318_143201.wav (compact, ISO 8601-ish)
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values

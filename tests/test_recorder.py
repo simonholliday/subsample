@@ -17,6 +17,33 @@ import subsample.recorder
 import tests.helpers
 
 
+class TestFormatFilename:
+
+	def test_3f_expands_to_milliseconds (self) -> None:
+		"""The custom %3f token is replaced with zero-padded 3-digit milliseconds."""
+		ts = datetime.datetime(2026, 3, 30, 18, 30, 19, 123456)
+		result = subsample.recorder._format_filename(ts, "%Y-%m-%d_%H-%M-%S-%3f")
+		assert result == "2026-03-30_18-30-19-123"
+
+	def test_3f_zero_milliseconds (self) -> None:
+		"""Zero microseconds produces '000'."""
+		ts = datetime.datetime(2026, 1, 1, 0, 0, 0, 0)
+		result = subsample.recorder._format_filename(ts, "%Y-%m-%d_%H-%M-%S-%3f")
+		assert result == "2026-01-01_00-00-00-000"
+
+	def test_3f_truncates_microseconds (self) -> None:
+		"""Microseconds are truncated to milliseconds, not rounded."""
+		ts = datetime.datetime(2026, 3, 30, 12, 0, 0, 999999)
+		result = subsample.recorder._format_filename(ts, "%Y-%m-%d_%H-%M-%S-%3f")
+		assert result == "2026-03-30_12-00-00-999"
+
+	def test_format_without_3f (self) -> None:
+		"""Formats without %3f work unchanged (plain strftime)."""
+		ts = datetime.datetime(2026, 3, 30, 18, 30, 19, 123456)
+		result = subsample.recorder._format_filename(ts, "%Y-%m-%d_%H-%M-%S")
+		assert result == "2026-03-30_18-30-19"
+
+
 class TestPackInt24:
 
 	def test_zero_samples (self) -> None:
