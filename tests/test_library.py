@@ -510,18 +510,21 @@ class TestLoadInstrumentLibrary:
 		assert record.audio.shape[0] == 2048  # n_frames
 		assert record.audio.shape[1] == 1     # mono
 
-	def test_skips_missing_wav (
+	def test_deletes_orphaned_sidecar_by_default (
 		self,
 		tmp_path: pathlib.Path,
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
 		import logging
-		# Write sidecar only — no WAV
-		_write_sidecar(tmp_path, "KICK")
-		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+		# Write sidecar only — no WAV.  Default (clean_orphaned_sidecars=True)
+		# should delete it and log an INFO.
+		sidecar = _write_sidecar(tmp_path, "KICK")
+		with caplog.at_level(logging.INFO, logger="subsample.library"):
 			lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
 		assert len(lib) == 0
-		assert any("not found" in r.message.lower() for r in caplog.records)
+		assert not sidecar.exists()
+		messages = [r.message for r in caplog.records]
+		assert any("orphaned" in m.lower() for m in messages)
 
 	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
 		_write_wav_and_sidecar(tmp_path, "KICK")

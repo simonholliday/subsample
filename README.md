@@ -653,7 +653,7 @@ weights - is optional and rarely needs changing.
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory samples; oldest evicted (FIFO) when exceeded |
 | `instrument.directory` | `samples/captures` | Directory of instrument samples to load at startup (overridden by `banks:` in the MIDI map when present) |
-| `instrument.clean_orphaned_sidecars` | `false` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
+| `instrument.clean_orphaned_sidecars` | `true` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
 | `instrument.watch` | `false` | Monitor `instrument.directory` (or each bank directory) at runtime for new samples arriving from a remote recorder instance (see Multi-machine setup) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |

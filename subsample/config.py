@@ -211,11 +211,10 @@ class InstrumentConfig:
 	Defaults to the captures directory so newly recorded samples are
 	immediately available for playback."""
 
-	clean_orphaned_sidecars: bool = False
-	"""When True, automatically delete .analysis.json sidecar files whose
-	corresponding audio file has been deleted. When False (default), orphaned
-	sidecars are skipped with a warning and a one-time hint explaining how to
-	enable this feature.
+	clean_orphaned_sidecars: bool = True
+	"""When True (default), automatically delete .analysis.json sidecar files
+	whose corresponding audio file has been deleted. When False, orphaned
+	sidecars are skipped with a warning.
 
 	Note: this only applies to instrument samples. Reference samples are
 	intentionally allowed to exist as sidecar-only (no audio required)."""
@@ -595,7 +594,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	instrument = InstrumentConfig(
 		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
 		directory=str(instrument_raw.get("directory", "samples/captures")),
-		clean_orphaned_sidecars=bool(instrument_raw.get("clean_orphaned_sidecars", False)),
+		clean_orphaned_sidecars=bool(instrument_raw.get("clean_orphaned_sidecars", True)),
 		watch=bool(instrument_raw.get("watch", False)),
 	)
 

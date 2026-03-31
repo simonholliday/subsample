@@ -417,9 +417,8 @@ def _load_one_sample (
 	Args:
 		sidecar_path:            Path to the .analysis.json sidecar file.
 		load_audio:              When True, load PCM data from the WAV file.
-		clean_orphaned_sidecars: When True, delete sidecars whose WAV is missing
-		                         instead of just warning. When False, log a
-		                         warning and a one-time hint about the option.
+		clean_orphaned_sidecars: When True (default), delete sidecars whose WAV
+		                         is missing. When False, log a warning and skip.
 		orphan_hint_shown:       Shared event; set after the hint is logged so
 		                         it appears at most once across all workers.
 		target_sample_rate:      When set, resample audio to this rate on load
@@ -489,7 +488,7 @@ def load_instrument_library (
 	directory: pathlib.Path,
 	max_memory_bytes: int,
 	load_audio: bool = True,
-	clean_orphaned_sidecars: bool = False,
+	clean_orphaned_sidecars: bool = True,
 	target_sample_rate: typing.Optional[int] = None,
 ) -> InstrumentLibrary:
 
@@ -497,9 +496,8 @@ def load_instrument_library (
 
 	Like load_reference_library(), but also loads the audio data from each WAV
 	file (unless load_audio=False). Unlike reference samples, instrument samples
-	require the WAV to be present — sidecars without a matching WAV are either
-	skipped with a WARNING (default) or deleted (if clean_orphaned_sidecars is
-	True).
+	require the WAV to be present — sidecars without a matching WAV are deleted
+	by default (clean_orphaned_sidecars=True) or skipped with a warning.
 
 	Scans the top level of directory only (non-recursive). Samples are added in
 	sorted filename order; the memory limit is respected using FIFO eviction.
@@ -512,8 +510,8 @@ def load_instrument_library (
 		load_audio:               When True (default), load PCM data into each record's
 		                          audio field. When False, audio is left as None to save
 		                          memory — use this when playback is not required.
-		clean_orphaned_sidecars:  When True, delete sidecars whose WAV is missing.
-		                          When False (default), log a warning and skip.
+		clean_orphaned_sidecars:  When True (default), delete sidecars whose WAV
+		                          is missing. When False, log a warning and skip.
 
 	Returns:
 		InstrumentLibrary containing all successfully loaded samples.
