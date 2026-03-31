@@ -126,8 +126,10 @@
 #   repitch: { note: C4 }                Pitch-shift to a fixed note
 #   beat_quantize: { grid: 16 }          Time-stretch to session target_bpm
 #   beat_quantize: { bpm: 120, grid: 8 } Time-stretch to specific BPM
+#   beat_quantize: { grid: 16, amount: 0.5 }  Partial quantize (0.0-1.0; default 1.0)
 #   - pad_quantize: { grid: 16 }              # Silence-pad onsets to session target_bpm
 #   - pad_quantize: { bpm: 120, grid: 8 }     # Silence-pad to specific BPM and grid
+#   - pad_quantize: { grid: 8, amount: 0.75 } # Partial quantize for looser feel
 #   filter_low: { freq: 500 }            Low-pass filter (default 16 kHz)
 #   filter_high: { freq: 200 }           High-pass filter (default 80 Hz)
 #   filter_band: { freq: 800, q: 1.4 }  Band-pass filter (default 1 kHz, Q 0.7)

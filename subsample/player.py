@@ -31,7 +31,7 @@ import typing
 import mido
 import numpy
 import pyaudio
-import soundfile
+import soundfile  # type: ignore[import-untyped]
 import yaml
 
 import pymididefs.notes
@@ -284,7 +284,7 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 
 		try:
 			data, samplerate = soundfile.read(str(path), always_2d=True, dtype="float32")
-			mono = numpy.mean(data, axis=1, dtype=numpy.float32)
+			mono: numpy.ndarray = numpy.asarray(numpy.mean(data, axis=1, dtype=numpy.float32))
 
 			params = subsample.analysis.compute_params(samplerate)
 			rhythm_cfg = subsample.config.AnalysisConfig()

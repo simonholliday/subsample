@@ -317,7 +317,9 @@ Available processors:
 | `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
 | `beat_quantize: { grid: 16 }` | grid subdivision | Time-stretch to session `target_bpm` |
 | `beat_quantize: { bpm: 120, grid: 8 }` | explicit BPM + grid | Time-stretch to a specific BPM |
+| `beat_quantize: { amount: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantize - onsets move partway to the grid for a looser feel |
 | `pad_quantize: { grid: 16 }` | bpm (config), grid (16) | Onset-aligned silence padding - snaps onsets to the beat grid by inserting silence between segments rather than time-stretching. No pitch/speed change. Ideal for speech. |
+| `pad_quantize: { amount: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantize - same as beat_quantize amount but for silence-pad mode |
 | `filter_low: true` | freq (Hz, default 16000), resonance (dB, default 0) | Low-pass filter (console-style default) |
 | `filter_high: true` | freq (Hz, default 80), resonance (dB, default 0) | High-pass filter (console-style default) |
 | `filter_band: true` | freq (Hz, default 1000), q (default 0.7), resonance (dB, default 0) | Band-pass filter (Q sets width) |

@@ -127,7 +127,7 @@ import librosa
 import numpy
 import pyrubberband
 import scipy.signal
-import soundfile
+import soundfile  # type: ignore[import-untyped]
 
 import subsample.analysis
 import subsample.library
@@ -168,10 +168,14 @@ class TimeStretch:
 	target_bpm: The desired playback tempo in BPM.
 	resolution: Grid subdivision (1=whole, 2=half, 4=quarter, 8=eighth,
 	            16=sixteenth).  Higher values give finer onset alignment.
+	amount:     Quantize strength (0.0 = no change, 1.0 = full snap to grid).
+	            Values between 0 and 1 move onsets partway toward the grid
+	            for a more natural, less rigid feel.
 	"""
 
 	target_bpm:  float
 	resolution:  int = 16
+	amount:      float = 1.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -472,10 +476,14 @@ class PadQuantize:
 	target_bpm: The desired playback tempo in BPM.
 	resolution: Grid subdivision (1=whole, 2=half, 4=quarter, 8=eighth,
 	            16=sixteenth).  Higher values give finer onset alignment.
+	amount:     Quantize strength (0.0 = no change, 1.0 = full snap to grid).
+	            Values between 0 and 1 move onsets partway toward the grid
+	            for a more natural, less rigid feel.
 	"""
 
 	target_bpm:  float
 	resolution:  int = 16
+	amount:      float = 1.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1929,7 +1937,7 @@ def _apply_time_stretch (
 
 	source_bpm = record.rhythm.tempo_bpm
 
-	if source_bpm <= 0.0:
+	if source_bpm <= 0.0 or step.amount <= 0.0:
 		return audio
 
 	# Duration ratio: >1 means output is longer (slower tempo), <1 means shorter.
@@ -1982,6 +1990,10 @@ def _apply_time_stretch (
 		min_points=len(rebased) + 2,
 	)
 	snapped  = _snap_onsets_to_grid(tuple(rebased), grid)
+
+	# Partial quantize: interpolate between original and grid-snapped positions.
+	if step.amount < 1.0:
+		snapped = [r + step.amount * (s - r) for r, s in zip(rebased, snapped)]
 
 	# ── Build time map (source sample → target sample) ────────────────────
 
@@ -2945,6 +2957,10 @@ def _apply_pad_quantize (
 		float32, shape (n_frames_out, channels) — pad-quantized audio.
 	"""
 
+	# amount=0 means no quantization — return the original audio.
+	if step.amount <= 0.0:
+		return audio
+
 	# Prefer sample-accurate attack times, same as beat_quantize.
 	attack_times = record.rhythm.attack_times
 
@@ -2985,6 +3001,10 @@ def _apply_pad_quantize (
 		min_points=len(rebased) + 4,
 	)
 	snapped = _snap_onsets_to_grid(tuple(rebased), grid)
+
+	# Partial quantize: interpolate between original and grid-snapped positions.
+	if step.amount < 1.0:
+		snapped = [r + step.amount * (s - r) for r, s in zip(rebased, snapped)]
 
 	# ── Segment extraction and placement ──────────────────────────────────
 
@@ -3099,11 +3119,11 @@ def _load_carrier (path: str, target_sr: int) -> numpy.ndarray:
 	data, sr = soundfile.read(path, always_2d=True, dtype="float32")
 
 	# Mix to mono — vocoder operates per-band on a single channel pair.
-	mono = numpy.mean(data, axis=1, dtype=numpy.float32)
+	mono: numpy.ndarray = numpy.asarray(numpy.mean(data, axis=1, dtype=numpy.float32))
 
 	# Resample if necessary.
 	if sr != target_sr:
-		mono = librosa.resample(mono, orig_sr=sr, target_sr=target_sr)
+		mono = numpy.asarray(librosa.resample(mono, orig_sr=sr, target_sr=target_sr))
 
 	with _carrier_cache_lock:
 		_carrier_cache[cache_key] = mono
@@ -3342,9 +3362,10 @@ def spec_from_process (
 		elif proc.name == "beat_quantize":
 			bpm = float(proc.get("bpm", target_bpm or 0.0))
 			grid = int(proc.get("grid", resolution))
+			amount = max(0.0, min(1.0, float(proc.get("amount", 1.0))))
 
 			if bpm > 0.0:
-				steps.append(TimeStretch(target_bpm=bpm, resolution=grid))
+				steps.append(TimeStretch(target_bpm=bpm, resolution=grid, amount=amount))
 
 		elif proc.name == "filter_low":
 			steps.append(LowPassFilter(
@@ -3449,9 +3470,10 @@ def spec_from_process (
 		elif proc.name == "pad_quantize":
 			bpm = float(proc.get("bpm", target_bpm or 0.0))
 			grid = int(proc.get("grid", resolution))
+			amount = max(0.0, min(1.0, float(proc.get("amount", 1.0))))
 
 			if bpm > 0.0:
-				steps.append(PadQuantize(target_bpm=bpm, resolution=grid))
+				steps.append(PadQuantize(target_bpm=bpm, resolution=grid, amount=amount))
 
 		elif proc.name == "vocoder":
 			carrier_raw = proc.get("carrier")

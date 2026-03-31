@@ -2707,6 +2707,20 @@ class TestPadQuantize:
 		assert isinstance(step, subsample.transform.PadQuantize)
 		assert step.target_bpm == 120.0
 		assert step.resolution == 8
+		assert step.amount == 1.0
+
+	def test_spec_from_process_pad_quantize_amount (self) -> None:
+		"""pad_quantize: {bpm: 120, amount: 0.5} → PadQuantize with amount."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("bpm", 120), ("amount", 0.5)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.PadQuantize)
+		assert step.amount == 0.5
 
 	def test_spec_from_process_pad_quantize_boolean (self) -> None:
 		"""pad_quantize: true with target_bpm → PadQuantize with defaults."""
@@ -2855,6 +2869,66 @@ class TestPadQuantize:
 		result = subsample.transform._apply_pad_quantize(audio, sr, record, step)
 
 		assert result.dtype == numpy.float32
+
+	def test_amount_zero_returns_unchanged (self) -> None:
+		"""amount=0.0 returns original audio with no grid snapping."""
+		sr = 44100
+		audio = _make_audio(n_frames=int(0.1 * sr), channels=1)
+		audio[:, 0] = 0.5
+
+		record = _make_record(
+			sample_id=1,
+			onset_times=(0.0, 0.03),
+			attack_times=(0.0, 0.03),
+		)
+
+		step = subsample.transform.PadQuantize(target_bpm=120.0, resolution=8, amount=0.0)
+		result = subsample.transform._apply_pad_quantize(audio, sr, record, step)
+
+		numpy.testing.assert_array_equal(result, audio)
+
+	def test_amount_half_less_displacement (self) -> None:
+		"""amount=0.5 moves onsets less than amount=1.0."""
+		sr = 44100
+		audio = _make_audio(n_frames=int(0.15 * sr), channels=1)
+		audio[0, 0] = 0.9
+		audio[int(0.05 * sr), 0] = 0.9
+
+		record = _make_record(
+			sample_id=1,
+			onset_times=(0.0, 0.05),
+			attack_times=(0.0, 0.05),
+		)
+
+		full = subsample.transform.PadQuantize(target_bpm=120.0, resolution=4, amount=1.0)
+		half = subsample.transform.PadQuantize(target_bpm=120.0, resolution=4, amount=0.5)
+
+		result_full = subsample.transform._apply_pad_quantize(audio, sr, record, full)
+		result_half = subsample.transform._apply_pad_quantize(audio, sr, record, half)
+
+		# Half-quantize should produce a shorter output (less silence inserted)
+		# than full quantize, since the second onset moves less.
+		assert result_half.shape[0] < result_full.shape[0]
+
+	def test_amount_clamped (self) -> None:
+		"""amount is clamped to [0.0, 1.0] in spec_from_process."""
+		process_over = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("bpm", 120), ("amount", 2.0)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process_over)
+		assert spec.steps[0].amount == 1.0
+
+		process_under = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("bpm", 120), ("amount", -0.5)),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process_under)
+		assert spec.steps[0].amount == 0.0
 
 
 # ---------------------------------------------------------------------------
