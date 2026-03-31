@@ -2,8 +2,9 @@
 
 Handles PyAudio lifecycle, input device enumeration, interactive device
 selection, stream creation, and bit-depth-aware sample unpacking.
-Also provides read_audio_file() for reading WAV files into the same
-integer array format used by the capture pipeline.
+Also provides read_audio_file() for reading audio files (WAV, FLAC,
+AIFF, OGG, MP3/MPEG, and other formats via libsndfile) into the same integer
+array format used by the capture pipeline.
 Keeps all audio I/O concerns isolated from the rest of the application.
 """
 
@@ -52,39 +53,68 @@ class AudioFileInfo:
 
 def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 
-	"""Read a WAV file and return its audio data with format metadata.
+	"""Read an audio file and return its data with format metadata.
 
-	Reads using the wave module for header parsing and delegates to
-	unpack_audio() for dtype conversion (including the 24-bit left-shift),
-	so the returned array is identical in format to what AudioReader produces.
+	Tries the stdlib wave module first (WAV files).  If that fails, falls
+	back to soundfile (libsndfile) which supports WAV, FLAC, AIFF, OGG,
+	MP3/MPEG, and many other formats.  Audio from soundfile is converted to 16-bit
+	PCM so the returned array is identical in format to what AudioReader
+	produces.
 
 	Args:
-		path: Path to the WAV file.
+		path: Path to the audio file.
 
 	Returns:
 		AudioFileInfo with audio array, sample_rate, bit_depth, and channels.
 
 	Raises:
-		wave.Error: If the file is not a valid WAV file.
+		ValueError: If the file format is not supported by either reader.
 		OSError:    If the file cannot be opened or read.
-		ValueError: If the bit depth is not 16, 24, or 32.
 	"""
 
-	with wave.open(str(path), "rb") as wf:
-		channels     = wf.getnchannels()
-		sample_width = wf.getsampwidth()
-		sample_rate  = wf.getframerate()
-		raw_bytes    = wf.readframes(wf.getnframes())
+	# Fast path: WAV via stdlib (avoids soundfile overhead and preserves
+	# the original bit depth for 16/24/32-bit WAV files).
+	try:
+		with wave.open(str(path), "rb") as wf:
+			channels     = wf.getnchannels()
+			sample_width = wf.getsampwidth()
+			sample_rate  = wf.getframerate()
+			raw_bytes    = wf.readframes(wf.getnframes())
 
-	bit_depth = sample_width * 8
-	audio = unpack_audio(raw_bytes, bit_depth, channels)
+		bit_depth = sample_width * 8
+		audio = unpack_audio(raw_bytes, bit_depth, channels)
 
-	return AudioFileInfo(
-		audio       = audio,
-		sample_rate = sample_rate,
-		bit_depth   = bit_depth,
-		channels    = channels,
-	)
+		return AudioFileInfo(
+			audio       = audio,
+			sample_rate = sample_rate,
+			bit_depth   = bit_depth,
+			channels    = channels,
+		)
+
+	except wave.Error:
+		pass  # Not a WAV file — fall through to soundfile.
+
+	# Fallback: soundfile (libsndfile) handles FLAC, AIFF, OGG, and more.
+	try:
+		import soundfile  # type: ignore[import-untyped]
+
+		data, sample_rate = soundfile.read(str(path), dtype="int16", always_2d=True)
+		audio = numpy.ascontiguousarray(data)
+
+		return AudioFileInfo(
+			audio       = audio,
+			sample_rate = sample_rate,
+			bit_depth   = 16,
+			channels    = audio.shape[1],
+		)
+
+	except Exception as exc:
+		supported = "WAV, FLAC, AIFF, OGG, MP3/MPEG"
+
+		raise ValueError(
+			f"Unsupported audio format: {path.name} — "
+			f"convert to a supported format ({supported}) and try again"
+		) from exc
 
 
 @contextlib.contextmanager

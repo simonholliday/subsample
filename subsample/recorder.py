@@ -128,6 +128,7 @@ class SampleProcessor:
 		cfg: subsample.config.Config,
 		analysis_params: subsample.analysis.AnalysisParams,
 		on_complete: typing.Optional[_OnCompleteCallback] = None,
+		warn_backlog: bool = True,
 	) -> None:
 
 		"""Start the worker pool and ensure the output directory exists.
@@ -138,13 +139,17 @@ class SampleProcessor:
 			on_complete:     Optional callback invoked on a worker thread after
 			                 each recording is written and analyzed. Receives
 			                 (filepath, spectral, rhythm, pitch, timbre, level,
-			                 duration, audio). Use a queue to pass results back
-			                 to the main thread if needed.
+			                 band_energy, duration, audio). Use a queue to pass
+			                 results back to the main thread if needed.
+			warn_backlog:    When True (default), log a WARNING when 3+ segments
+			                 are in-flight. Set False for file-input mode where
+			                 faster-than-realtime enqueue is expected.
 		"""
 
 		self._cfg             = cfg
 		self._analysis_params = analysis_params
 		self._on_complete     = on_complete
+		self._warn_backlog    = warn_backlog
 
 		output_dir = pathlib.Path(cfg.output.directory)
 		output_dir.mkdir(parents=True, exist_ok=True)
@@ -208,7 +213,7 @@ class SampleProcessor:
 			self._futures.append(future)
 			depth = sum(1 for f in self._futures if not f.done())
 
-		if depth >= 3:
+		if self._warn_backlog and depth >= 3:
 			_log.warning(
 				"sample-processor backlog: %d in-flight — processing may be falling behind captures",
 				depth,

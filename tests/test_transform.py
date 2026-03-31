@@ -114,6 +114,8 @@ def _make_record_unpitched (
 		voiced_fraction    = 0.1,
 		log_attack_time    = 0.5,
 		spectral_flux      = 0.5,
+		spectral_rolloff   = 0.5,
+		spectral_slope     = 0.3,
 	)
 
 	audio = _make_pcm_audio()
@@ -3298,5 +3300,41 @@ class TestVocoder:
 		result = subsample.transform._apply_vocoder(modulator, sr, record, step)
 
 		numpy.testing.assert_array_equal(result, modulator)
+
+	def test_carrier_cache_evicts_oldest (self, tmp_path: pathlib.Path) -> None:
+		"""Carrier cache evicts the oldest entry when the budget is exceeded."""
+
+		# Write two small carrier files.
+		c1 = tmp_path / "c1.wav"
+		c2 = tmp_path / "c2.wav"
+		_write_carrier_wav(c1, duration=0.01)
+		_write_carrier_wav(c2, duration=0.01)
+
+		# Clear the cache and set a tiny budget.
+		orig_max = subsample.transform._CARRIER_CACHE_MAX_BYTES
+
+		try:
+			subsample.transform._carrier_cache.clear()
+			subsample.transform._carrier_cache_order.clear()
+			subsample.transform._carrier_cache_bytes = 0
+			# Budget fits one carrier (441 samples × 4 bytes = 1764) but not two.
+			subsample.transform._CARRIER_CACHE_MAX_BYTES = 1800
+
+			mono1 = subsample.transform._load_carrier(str(c1), 44100)
+			key1 = f"{c1}@44100"
+			assert key1 in subsample.transform._carrier_cache
+
+			mono2 = subsample.transform._load_carrier(str(c2), 44100)
+			key2 = f"{c2}@44100"
+
+			# c2 should be in cache; c1 should have been evicted.
+			assert key2 in subsample.transform._carrier_cache
+			assert key1 not in subsample.transform._carrier_cache
+
+		finally:
+			subsample.transform._CARRIER_CACHE_MAX_BYTES = orig_max
+			subsample.transform._carrier_cache.clear()
+			subsample.transform._carrier_cache_order.clear()
+			subsample.transform._carrier_cache_bytes = 0
 
 

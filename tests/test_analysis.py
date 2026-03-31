@@ -533,6 +533,8 @@ class TestFormatResult:
 			voiced_fraction=0.933,
 			log_attack_time=0.123,
 			spectral_flux=0.456,
+			spectral_rolloff=0.678,
+			spectral_slope=0.234,
 		)
 
 	def test_contains_all_field_names (self) -> None:
@@ -551,6 +553,8 @@ class TestFormatResult:
 		assert "voiced=" in s
 		assert "log_attack=" in s
 		assert "flux=" in s
+		assert "rolloff=" in s
+		assert "slope=" in s
 
 	def test_duration_formatted_correctly (self) -> None:
 		"""Duration should appear as e.g. 'duration=0.07s'."""

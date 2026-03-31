@@ -336,14 +336,52 @@ class TestReadAudioFile:
 		with pytest.raises(OSError):
 			subsample.audio.read_audio_file(pathlib.Path("/nonexistent/path.wav"))
 
-	def test_non_wav_raises (self) -> None:
-		"""read_audio_file() should raise wave.Error for a non-WAV file."""
+	def test_non_audio_raises_valueerror (self) -> None:
+		"""read_audio_file() should raise ValueError for an unsupported format."""
 		with tempfile.TemporaryDirectory() as tmp:
 			path = pathlib.Path(tmp) / "notawav.wav"
 			path.write_bytes(b"this is not a wav file")
 
-			with pytest.raises(wave.Error):
+			with pytest.raises(ValueError, match="Unsupported audio format"):
 				subsample.audio.read_audio_file(path)
+
+
+# ---------------------------------------------------------------------------
+# float32_to_pcm_bytes round-trip
+# ---------------------------------------------------------------------------
+
+class TestFloat32ToPcmBytes:
+
+	def test_round_trip_16bit (self) -> None:
+		"""16-bit PCM → unpack → float32_to_pcm_bytes → within ±1 of original."""
+		samples = numpy.array([[1000, -1000], [32767, -32768]], dtype=numpy.int16)
+		raw = samples.tobytes()
+		unpacked = subsample.audio.unpack_audio(raw, 16, 2)
+		repacked = subsample.audio.float32_to_pcm_bytes(
+			unpacked.astype(numpy.float32) / 32768.0, 16,
+		)
+		restored = subsample.audio.unpack_audio(repacked, 16, 2)
+		# Float32 quantisation may introduce ±1 LSB error.
+		numpy.testing.assert_allclose(restored, unpacked, atol=1)
+
+	def test_round_trip_32bit (self) -> None:
+		"""32-bit PCM → unpack → float32_to_pcm_bytes → recoverable bytes."""
+		samples = numpy.array([[100000, -100000]], dtype=numpy.int32)
+		raw = samples.tobytes()
+		unpacked = subsample.audio.unpack_audio(raw, 32, 2)
+		repacked = subsample.audio.float32_to_pcm_bytes(
+			unpacked.astype(numpy.float32) / 2147483648.0, 32,
+		)
+		# 32-bit round-trip may lose LSBs due to float32 precision; check shape.
+		restored = subsample.audio.unpack_audio(repacked, 32, 2)
+		assert restored.shape == unpacked.shape
+		assert restored.dtype == unpacked.dtype
+
+	def test_output_length (self) -> None:
+		"""Output byte length matches expected frames * channels * sample_width."""
+		audio = numpy.zeros((10, 2), dtype=numpy.float32)
+		result = subsample.audio.float32_to_pcm_bytes(audio, 16)
+		assert len(result) == 10 * 2 * 2  # 10 frames, 2 channels, 2 bytes each
 
 
 # ---------------------------------------------------------------------------

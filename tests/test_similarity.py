@@ -49,6 +49,7 @@ def _make_spectral (**overrides: float) -> subsample.analysis.AnalysisResult:
 		spectral_centroid=0.5, spectral_bandwidth=0.5,
 		zcr=0.5, harmonic_ratio=0.5, spectral_contrast=0.5, voiced_fraction=0.5,
 		log_attack_time=0.5, spectral_flux=0.5,
+		spectral_rolloff=0.5, spectral_slope=0.5,
 	)
 	defaults.update(overrides)
 	return subsample.analysis.AnalysisResult(**defaults)

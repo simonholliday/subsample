@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "subsample"
 dynamic = ["version"]
-description = "Ambient audio sample recorder"
+description = "Automatic sample harvester, analyser, and MIDI instrument"
 readme = "README.md"
 authors = [{ name = "Simon Holliday", email = "simon.holliday@protonmail.com" }]
 license = { text = "AGPL-3.0-or-later" }

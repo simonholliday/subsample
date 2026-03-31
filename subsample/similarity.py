@@ -454,7 +454,7 @@ def _build_feature_vector (
 	float32 array. Groups with weight 0.0 are omitted entirely.
 
 	Groups:
-	  Spectral (11):           all AnalysisResult fields, already in [0, 1].
+	  Spectral (14):           all AnalysisResult fields + crest factor, already in [0, 1].
 	  Timbre / sustained (12): MFCC coefficients 1–12 (mean over duration).
 	  Timbre / delta (12):     delta-MFCC coefficients 1–12 (timbre trajectory).
 	  Timbre / onset (12):     onset-weighted MFCC coefficients 1–12 (attack).
@@ -465,7 +465,7 @@ def _build_feature_vector (
 	overall log-energy. Within a group, coeff 0 would bias similarity toward
 	loudness rather than spectral shape; coeff 1–12 carry the timbral information.
 
-	When all five groups are active the result is a 55-element vector. Cosine
+	When all five groups are active the result is a 58-element vector. Cosine
 	similarity on this vector equals a weighted average of per-group cosine
 	similarities (weights squared, renormalised). See module docstring.
 

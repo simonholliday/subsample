@@ -281,6 +281,7 @@ def _reanalyze_and_save (
 		save_cache(
 			audio_path, audio_md5, params, spectral, rhythm, pitch, timbre,
 			duration, level, band_energy,
+			bit_depth=file_info.bit_depth, channels=file_info.channels,
 		)
 	except OSError as exc:
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
@@ -330,7 +331,8 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 		sidecar_path: Path to the .analysis.json sidecar file directly.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level) tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
+		tuple on success, else None.
 	"""
 
 	# Unlike load_cache(), a missing sidecar is unexpected here — warn explicitly.

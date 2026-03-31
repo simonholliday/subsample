@@ -192,7 +192,7 @@ def _process_input_files (
 
 		analysis_params = subsample.analysis.compute_params(file_info.sample_rate)
 
-		writer = subsample.recorder.SampleProcessor(cfg, analysis_params, on_complete=None)
+		writer = subsample.recorder.SampleProcessor(cfg, analysis_params, on_complete=None, warn_backlog=False)
 
 		segment_index = 1
 		chunk_size = cfg.recorder.audio.chunk_size
@@ -624,6 +624,7 @@ def main () -> None:
 	# as the instrument directory), so they are picked up by the instrument loader below.
 	if args.files:
 		_process_input_files(args.files, cfg)
+		return
 
 	# --- Bank detection ---
 	# Pre-load the MIDI map to check for bank definitions before loading

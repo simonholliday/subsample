@@ -153,7 +153,6 @@ class PitchShift:
 	target_midi_note: int
 
 
-
 @dataclasses.dataclass(frozen=True)
 class TimeStretch:
 
@@ -2743,13 +2742,16 @@ def _apply_reshape (
 		# Auto: tighten the tail based on the sample's natural decay character.
 		release_ms = 30.0 + 170.0 * record.spectral.release
 
-	# Check if there's anything to do.
+	# Check if there's anything to do.  Auto-release always applies (it
+	# tightens the tail based on the sample's natural decay), so we only
+	# skip when attack/hold/decay/sustain are all at their pass-through
+	# values AND release is explicitly disabled (set to 0).
 	is_noop = (
 		step.attack_ms is None
 		and step.hold_ms == 0.0
 		and step.decay_ms is None
 		and step.sustain >= 1.0
-		and release_ms is None
+		and step.release_ms == 0.0
 	)
 
 	if is_noop:
@@ -3095,8 +3097,12 @@ def _apply_pad_quantize (
 
 # Module-level cache for carrier audio files.  Carriers are typically small
 # reference samples loaded once per session; caching avoids redundant disk I/O
-# when many variants use the same carrier.
+# when many variants use the same carrier.  FIFO eviction when the 10 MB
+# budget is exceeded (same pattern as InstrumentLibrary).
+_CARRIER_CACHE_MAX_BYTES: int = 10 * 1024 * 1024
 _carrier_cache: dict[str, numpy.ndarray] = {}
+_carrier_cache_order: collections.deque[str] = collections.deque()
+_carrier_cache_bytes: int = 0
 _carrier_cache_lock = threading.Lock()
 
 
@@ -3125,8 +3131,23 @@ def _load_carrier (path: str, target_sr: int) -> numpy.ndarray:
 	if sr != target_sr:
 		mono = numpy.asarray(librosa.resample(mono, orig_sr=sr, target_sr=target_sr))
 
+	global _carrier_cache_bytes
+
 	with _carrier_cache_lock:
+
+		# FIFO eviction: drop oldest entries until the new carrier fits.
+		new_bytes = mono.nbytes
+
+		while _carrier_cache_bytes + new_bytes > _CARRIER_CACHE_MAX_BYTES and _carrier_cache_order:
+			oldest = _carrier_cache_order.popleft()
+			evicted = _carrier_cache.pop(oldest, None)
+
+			if evicted is not None:
+				_carrier_cache_bytes -= evicted.nbytes
+
 		_carrier_cache[cache_key] = mono
+		_carrier_cache_order.append(cache_key)
+		_carrier_cache_bytes += new_bytes
 
 	return mono
 

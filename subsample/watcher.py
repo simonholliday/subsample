@@ -214,8 +214,7 @@ class InstrumentWatcher:
 
 		with self._lock:
 			self._timers[sidecar_path] = timer
-
-		timer.start()
+			timer.start()
 
 
 class _SidecarHandler (watchdog.events.FileSystemEventHandler):

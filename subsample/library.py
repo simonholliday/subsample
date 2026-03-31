@@ -73,7 +73,7 @@ class SampleRecord:
 		sample_id: Session-unique numeric ID (allocated by allocate_id()).
 		name:      Stem of the audio filename (e.g. "BD0025", "kick").
 		           Preserves original casing from the filename.
-		spectral:    Eleven normalised [0, 1] spectral metrics (the spectral fingerprint).
+		spectral:    Thirteen normalised [0, 1] spectral metrics (the spectral fingerprint).
 		rhythm:      Tempo, beat grid, pulse curve, onset times.
 		pitch:       Fundamental frequency, chroma profile, pitch class.
 		timbre:      MFCC timbral fingerprints (mfcc, mfcc_delta, mfcc_onset).

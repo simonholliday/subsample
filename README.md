@@ -939,15 +939,10 @@ repository; audio files are local-only and .gitignored.
   the machine-gun effect on rapid notes.
 - **MIDI CC mapping** - mod wheel, volume, sustain pedal, expression - map
   continuous controllers to parameters in real time.
-- **Program change** - switch between MIDI map presets on the fly via MIDI
-  program change messages.
-
 ### Playback and sound design
 
-- **Envelope shaping** - per-voice attack/release adjustment. The data model is
-  in place; the DSP implementation is next.
-- **Effects processing** - filter, reverb, delay - per-voice or per-bus effects
-  for shaping the output without an external mixer.
+- **Reverb and delay** - per-voice or per-bus spatial effects for shaping the
+  output without an external mixer.
 - **Loop playback** - sustain loops for pads, drones, and textures that play
   continuously while a key is held.
 - **Multichannel output** - surround sound output beyond stereo, using SMPTE
