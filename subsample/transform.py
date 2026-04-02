@@ -3341,12 +3341,49 @@ TransformProcessor._HANDLERS[Vocoder]        = _apply_vocoder
 # Process spec → TransformSpec conversion
 # ---------------------------------------------------------------------------
 
+def _resolve_cc (
+	value: typing.Any,
+	cc_state: typing.Optional[dict[tuple[int, int], int]],
+	default: typing.Any = None,
+) -> typing.Any:
+
+	"""Resolve a parameter value that may be a CcBinding.
+
+	If value is a CcBinding, look up the current CC value in cc_state and
+	map it to the output range.  Falls back to the binding's default_value
+	when no matching CC state is found.
+
+	If value is not a CcBinding, returns it unchanged (or default if None).
+	"""
+
+	if not isinstance(value, subsample.query.CcBinding):
+		return value if value is not None else default
+
+	if cc_state is not None:
+
+		# Channel-specific match first.
+		if value.channel is not None:
+			cc_val = cc_state.get((value.channel - 1, value.cc))
+
+			if cc_val is not None:
+				return value.resolve(cc_val)
+
+		# Omni: match any channel with this CC number.
+		else:
+			for (_, num), val in cc_state.items():
+				if num == value.cc:
+					return value.resolve(val)
+
+	return value.default_value
+
+
 def spec_from_process (
 	process:        subsample.query.ProcessSpec,
 	midi_note:      typing.Optional[int]   = None,
 	target_bpm:     typing.Optional[float] = None,
 	resolution:     int                    = 16,
 	reference_path: typing.Optional[str]   = None,
+	cc_state:       typing.Optional[dict[tuple[int, int], int]] = None,
 ) -> TransformSpec:
 
 	"""Build an ordered TransformSpec from a MIDI map process pipeline.
@@ -3356,6 +3393,10 @@ def spec_from_process (
 	parameters (midi_note for repitch, target_bpm/resolution for
 	beat_quantize, reference_path for vocoder carrier: reference) are
 	substituted at the position the user declared them.
+
+	Parameters that are CcBinding instances are resolved from cc_state at
+	call time.  When cc_state is None or the CC number has no current value,
+	the binding's default_value is used.
 
 	Steps with unresolvable dynamic parameters (e.g. repitch when midi_note
 	is None) are silently skipped.  Unknown processor names log a warning
@@ -3381,30 +3422,30 @@ def spec_from_process (
 				steps.append(PitchShift(target_midi_note=midi_note))
 
 		elif proc.name == "beat_quantize":
-			bpm = float(proc.get("bpm", target_bpm or 0.0))
-			grid = int(proc.get("grid", resolution))
-			amount = max(0.0, min(1.0, float(proc.get("amount", 1.0))))
+			bpm = float(_resolve_cc(proc.get("bpm"), cc_state, target_bpm or 0.0))
+			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution))
+			amount = max(0.0, min(1.0, float(_resolve_cc(proc.get("amount"), cc_state, 1.0))))
 
 			if bpm > 0.0:
 				steps.append(TimeStretch(target_bpm=bpm, resolution=grid, amount=amount))
 
 		elif proc.name == "filter_low":
 			steps.append(LowPassFilter(
-				freq=float(proc.get("freq", 16000.0)),
-				resonance_db=float(proc.get("resonance", 0.0)),
+				freq=float(_resolve_cc(proc.get("freq"), cc_state, 16000.0)),
+				resonance_db=float(_resolve_cc(proc.get("resonance"), cc_state, 0.0)),
 			))
 
 		elif proc.name == "filter_high":
 			steps.append(HighPassFilter(
-				freq=float(proc.get("freq", 80.0)),
-				resonance_db=float(proc.get("resonance", 0.0)),
+				freq=float(_resolve_cc(proc.get("freq"), cc_state, 80.0)),
+				resonance_db=float(_resolve_cc(proc.get("resonance"), cc_state, 0.0)),
 			))
 
 		elif proc.name == "filter_band":
 			steps.append(BandPassFilter(
-				freq=float(proc.get("freq", 1000.0)),
-				q=float(proc.get("q", 0.7)),
-				resonance_db=float(proc.get("resonance", 0.0)),
+				freq=float(_resolve_cc(proc.get("freq"), cc_state, 1000.0)),
+				q=float(_resolve_cc(proc.get("q"), cc_state, 0.7)),
+				resonance_db=float(_resolve_cc(proc.get("resonance"), cc_state, 0.0)),
 			))
 
 		elif proc.name == "reverse":
@@ -3412,30 +3453,30 @@ def spec_from_process (
 
 		elif proc.name == "saturate":
 			steps.append(Saturate(
-				amount_db=float(proc.get("amount", 6.0)),
+				amount_db=float(_resolve_cc(proc.get("amount"), cc_state, 6.0)),
 			))
 
 		elif proc.name == "compress":
 			# Adaptive fields: None = auto-compute from sample analysis.
 			# Explicit YAML values override the auto-computation.
-			_threshold_raw = proc.get("threshold")
-			_attack_raw    = proc.get("attack")
-			_release_raw   = proc.get("release")
+			_threshold_raw = _resolve_cc(proc.get("threshold"), cc_state)
+			_attack_raw    = _resolve_cc(proc.get("attack"), cc_state)
+			_release_raw   = _resolve_cc(proc.get("release"), cc_state)
 			steps.append(Compress(
 				threshold_db=float(_threshold_raw) if _threshold_raw is not None else None,
-				ratio=float(proc.get("ratio", 4.0)),
+				ratio=float(_resolve_cc(proc.get("ratio"), cc_state, 4.0)),
 				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
 				release_ms=float(_release_raw) if _release_raw is not None else None,
-				knee_db=float(proc.get("knee", 6.0)),
-				makeup_db=float(proc.get("makeup", 0.0)),
-				lookahead_ms=float(proc.get("lookahead", 0.0)),
+				knee_db=float(_resolve_cc(proc.get("knee"), cc_state, 6.0)),
+				makeup_db=float(_resolve_cc(proc.get("makeup"), cc_state, 0.0)),
+				lookahead_ms=float(_resolve_cc(proc.get("lookahead"), cc_state, 0.0)),
 			))
 
 		elif proc.name == "limit":
 			steps.append(Limit(
-				threshold_db=float(proc.get("threshold", -1.0)),
-				release_ms=float(proc.get("release", 50.0)),
-				lookahead_ms=float(proc.get("lookahead", 5.0)),
+				threshold_db=float(_resolve_cc(proc.get("threshold"), cc_state, -1.0)),
+				release_ms=float(_resolve_cc(proc.get("release"), cc_state, 50.0)),
+				lookahead_ms=float(_resolve_cc(proc.get("lookahead"), cc_state, 5.0)),
 			))
 
 		elif proc.name == "hpss_harmonic":
@@ -3445,11 +3486,11 @@ def spec_from_process (
 			steps.append(HpssPercussive())
 
 		elif proc.name == "gate":
-			_threshold_raw = proc.get("threshold")
-			_attack_raw    = proc.get("attack")
-			_release_raw   = proc.get("release")
-			_hold_raw      = proc.get("hold")
-			_la_raw        = proc.get("lookahead")
+			_threshold_raw = _resolve_cc(proc.get("threshold"), cc_state)
+			_attack_raw    = _resolve_cc(proc.get("attack"), cc_state)
+			_release_raw   = _resolve_cc(proc.get("release"), cc_state)
+			_hold_raw      = _resolve_cc(proc.get("hold"), cc_state)
+			_la_raw        = _resolve_cc(proc.get("lookahead"), cc_state)
 			steps.append(Gate(
 				threshold_db=float(_threshold_raw) if _threshold_raw is not None else None,
 				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
@@ -3459,39 +3500,39 @@ def spec_from_process (
 			))
 
 		elif proc.name == "distort":
-			_drive_raw = proc.get("drive")
-			_tone_raw  = proc.get("tone")
+			_drive_raw = _resolve_cc(proc.get("drive"), cc_state)
+			_tone_raw  = _resolve_cc(proc.get("tone"), cc_state)
 			steps.append(Distort(
 				mode=str(proc.get("mode", "hard_clip")),
 				drive_db=float(_drive_raw) if _drive_raw is not None else None,
-				mix=float(proc.get("mix", 1.0)),
+				mix=float(_resolve_cc(proc.get("mix"), cc_state, 1.0)),
 				tone=float(_tone_raw) if _tone_raw is not None else None,
-				bit_depth=int(proc.get("bit_depth", 8)),
-				downsample_factor=int(proc.get("downsample_factor", 4)),
+				bit_depth=int(_resolve_cc(proc.get("bit_depth"), cc_state, 8)),
+				downsample_factor=int(_resolve_cc(proc.get("downsample_factor"), cc_state, 4)),
 			))
 
 		elif proc.name == "reshape":
-			_attack_raw  = proc.get("attack")
-			_decay_raw   = proc.get("decay")
-			_release_raw = proc.get("release")
+			_attack_raw  = _resolve_cc(proc.get("attack"), cc_state)
+			_decay_raw   = _resolve_cc(proc.get("decay"), cc_state)
+			_release_raw = _resolve_cc(proc.get("release"), cc_state)
 			steps.append(Reshape(
 				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
-				hold_ms=float(proc.get("hold", 0.0)),
+				hold_ms=float(_resolve_cc(proc.get("hold"), cc_state, 0.0)),
 				decay_ms=float(_decay_raw) if _decay_raw is not None else None,
-				sustain=float(proc.get("sustain", 1.0)),
+				sustain=float(_resolve_cc(proc.get("sustain"), cc_state, 1.0)),
 				release_ms=float(_release_raw) if _release_raw is not None else None,
 			))
 
 		elif proc.name == "transient":
-			_amount_raw = proc.get("amount")
+			_amount_raw = _resolve_cc(proc.get("amount"), cc_state)
 			steps.append(Transient(
 				amount_db=float(_amount_raw) if _amount_raw is not None else None,
 			))
 
 		elif proc.name == "pad_quantize":
-			bpm = float(proc.get("bpm", target_bpm or 0.0))
-			grid = int(proc.get("grid", resolution))
-			amount = max(0.0, min(1.0, float(proc.get("amount", 1.0))))
+			bpm = float(_resolve_cc(proc.get("bpm"), cc_state, target_bpm or 0.0))
+			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution))
+			amount = max(0.0, min(1.0, float(_resolve_cc(proc.get("amount"), cc_state, 1.0))))
 
 			if bpm > 0.0:
 				steps.append(PadQuantize(target_bpm=bpm, resolution=grid, amount=amount))
@@ -3515,9 +3556,9 @@ def spec_from_process (
 
 				steps.append(Vocoder(
 					carrier_path=carrier_str,
-					bands=int(proc.get("bands", 24)),
-					depth=float(proc.get("depth", 1.0)),
-					formant_shift=int(proc.get("formant_shift", 0)),
+					bands=int(_resolve_cc(proc.get("bands"), cc_state, 24)),
+					depth=float(_resolve_cc(proc.get("depth"), cc_state, 1.0)),
+					formant_shift=int(_resolve_cc(proc.get("formant_shift"), cc_state, 0)),
 				))
 			else:
 				_log.warning("vocoder requires a 'carrier' parameter — skipped")

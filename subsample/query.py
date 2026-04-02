@@ -208,6 +208,39 @@ class ProcessorStep:
 
 
 @dataclasses.dataclass(frozen=True)
+class CcBinding:
+
+	"""Maps a MIDI CC number to a numeric processor parameter.
+
+	When a processor parameter value is a CcBinding (instead of a scalar),
+	the actual value is resolved at note-on time from the current CC state.
+
+	cc:       MIDI CC number (0–127).
+	min_val:  Output value when CC = 0.
+	max_val:  Output value when CC = 127.
+	default:  Value before any CC is received. None → midpoint of min/max.
+	channel:  MIDI channel (1–16, user-facing). None → omni (any channel).
+	"""
+
+	cc:      int
+	min_val: float = 0.0
+	max_val: float = 1.0
+	default: typing.Optional[float] = None
+	channel: typing.Optional[int]   = None
+
+	@property
+	def default_value (self) -> float:
+		"""Return the default, falling back to the midpoint of the range."""
+		if self.default is not None:
+			return self.default
+		return (self.min_val + self.max_val) / 2.0
+
+	def resolve (self, cc_value: int) -> float:
+		"""Map a CC value (0–127) to the output range."""
+		return self.min_val + (cc_value / 127.0) * (self.max_val - self.min_val)
+
+
+@dataclasses.dataclass(frozen=True)
 class ProcessSpec:
 
 	"""Ordered sequence of processors to apply after sample selection.
@@ -541,7 +574,22 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 
 			elif isinstance(proc_value, dict):
 				# e.g. "beat_quantize: { grid: 16, bpm: 120 }"
-				frozen_params = tuple((str(k), v) for k, v in proc_value.items())
+				# Param values that are dicts with a "cc" key become CcBindings.
+				resolved_params: list[tuple[str, typing.Any]] = []
+
+				for k, v in proc_value.items():
+					if isinstance(v, dict) and "cc" in v:
+						resolved_params.append((str(k), CcBinding(
+							cc=int(v["cc"]),
+							min_val=float(v.get("min", 0.0)),
+							max_val=float(v.get("max", 1.0)),
+							default=float(v["default"]) if "default" in v else None,
+							channel=int(v["channel"]) if "channel" in v else None,
+						)))
+					else:
+						resolved_params.append((str(k), v))
+
+				frozen_params = tuple(resolved_params)
 				steps.append(ProcessorStep(name=str(proc_name), params=frozen_params))
 
 			else:

@@ -95,8 +95,15 @@ def _beat_quantize_params (
 	"""
 
 	beat_step = next(s for s in process.steps if s.name == "beat_quantize")
-	bpm  = float(beat_step.get("bpm", 0))
-	grid = int(beat_step.get("grid", 16))
+	bpm_raw = beat_step.get("bpm", 0)
+	grid_raw = beat_step.get("grid", 16)
+
+	# CcBinding means BPM will be resolved at note-on time — treat as "provided".
+	if isinstance(bpm_raw, subsample.query.CcBinding):
+		return (bpm_raw.default_value or config_bpm or 120.0, int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16)
+
+	bpm = float(bpm_raw)
+	grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16
 
 	if bpm <= 0:
 		bpm = config_bpm
@@ -116,8 +123,15 @@ def _pad_quantize_params (
 	"""
 
 	pad_step = next(s for s in process.steps if s.name == "pad_quantize")
-	bpm  = float(pad_step.get("bpm", 0))
-	grid = int(pad_step.get("grid", 16))
+	bpm_raw = pad_step.get("bpm", 0)
+	grid_raw = pad_step.get("grid", 16)
+
+	# CcBinding means BPM will be resolved at note-on time — treat as "provided".
+	if isinstance(bpm_raw, subsample.query.CcBinding):
+		return (bpm_raw.default_value or config_bpm or 120.0, int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16)
+
+	bpm = float(bpm_raw)
+	grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16
 
 	if bpm <= 0:
 		bpm = config_bpm
@@ -842,6 +856,24 @@ def select_midi_device (devices: list[str]) -> str:
 		print(f"  Please enter a number between 0 and {len(devices) - 1}.")
 
 
+_CC_DEBOUNCE_SECONDS: float = 0.2
+
+
+def _collect_mapped_ccs (note_map: NoteMap) -> set[int]:
+
+	"""Return the set of CC numbers used by CcBinding params in the note map."""
+
+	ccs: set[int] = set()
+
+	for assignment, _ in note_map.values():
+		for step in assignment.process.steps:
+			for _, value in step.params:
+				if isinstance(value, subsample.query.CcBinding):
+					ccs.add(value.cc)
+
+	return ccs
+
+
 class MidiPlayer:
 
 	"""Listens for MIDI messages and plays back instrument samples polyphonically.
@@ -955,6 +987,19 @@ class MidiPlayer:
 		# the old one plays instead of the unprocessed base — giving smooth
 		# transitions for gradual BPM or amount changes.
 		self._last_played: dict[tuple[int, int], subsample.transform.TransformResult] = {}
+
+		# MIDI CC state: (mido_channel, cc_number) → current value (0–127).
+		# Updated on every control_change message; read at note-on time by
+		# spec_from_process() to resolve CcBinding parameters.
+		self._cc_state: dict[tuple[int, int], int] = {}
+
+		# Set of CC numbers that are mapped to processor parameters in the
+		# current MIDI map.  Used for O(1) "is this CC relevant?" checks.
+		self._mapped_ccs: set[int] = _collect_mapped_ccs(midi_map)
+
+		# Debounce timer for CC-triggered re-evaluation.
+		self._cc_debounce_timer: typing.Optional[threading.Timer] = None
+		self._cc_debounce_lock: threading.Lock = threading.Lock()
 
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
@@ -1094,6 +1139,10 @@ class MidiPlayer:
 					self._shutdown_event.wait(timeout=0.01)
 
 		finally:
+			with self._cc_debounce_lock:
+				if self._cc_debounce_timer is not None:
+					self._cc_debounce_timer.cancel()
+
 			port.close()
 			stream.stop_stream()
 			stream.close()
@@ -1221,6 +1270,28 @@ class MidiPlayer:
 					self.update_assignments()
 			return
 
+		# Control Change: update CC state and debounce re-evaluation for
+		# mapped parameters (CcBinding in the process pipeline).
+		if msg.type == "control_change":
+			self._cc_state[(msg.channel, msg.control)] = msg.value
+
+			if msg.control in self._mapped_ccs:
+				_log.info(
+					"CC ch%d #%d = %d",
+					msg.channel + 1, msg.control, msg.value,
+				)
+
+				with self._cc_debounce_lock:
+					if self._cc_debounce_timer is not None:
+						self._cc_debounce_timer.cancel()
+
+					self._cc_debounce_timer = threading.Timer(
+						_CC_DEBOUNCE_SECONDS, self.update_assignments,
+					)
+					self._cc_debounce_timer.start()
+
+			return
+
 		# Only act on note_on events; anything else is logged at DEBUG and ignored.
 		if msg.type != "note_on":
 			_log.debug("MIDI (ignored): %s", msg)
@@ -1308,6 +1379,7 @@ class MidiPlayer:
 					target_bpm=bpm_for_spec,
 					resolution=grid_for_spec,
 					reference_path=_reference_wav_path(assignment),
+					cc_state=self._cc_state,
 				)
 
 				if spec.steps:
@@ -1522,6 +1594,7 @@ class MidiPlayer:
 						target_bpm=bpm,
 						resolution=grid,
 						reference_path=_reference_wav_path(asgn),
+						cc_state=self._cc_state,
 					)
 					eff_transform.get_variant(sid, spec)
 					enqueued += 1
@@ -1560,6 +1633,7 @@ class MidiPlayer:
 						target_bpm=bpm,
 						resolution=grid,
 						reference_path=_reference_wav_path(asgn),
+						cc_state=self._cc_state,
 					)
 					eff_transform.get_variant(sid, spec)
 					enqueued += 1
@@ -1579,6 +1653,7 @@ class MidiPlayer:
 				spec = subsample.transform.spec_from_process(
 					asgn.process,
 					reference_path=_reference_wav_path(asgn),
+					cc_state=self._cc_state,
 				)
 
 				if spec.steps:
@@ -1626,6 +1701,7 @@ class MidiPlayer:
 
 		old_count = len(self._note_map)
 		self._note_map = new_map
+		self._mapped_ccs = _collect_mapped_ccs(new_map)
 		self.update_assignments()
 
 		_log.info(

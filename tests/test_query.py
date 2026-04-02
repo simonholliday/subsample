@@ -457,6 +457,68 @@ class TestProcessSpec:
 		assert not spec.has_beat_quantize()
 
 
+class TestCcBinding:
+
+	def test_resolve_min (self) -> None:
+		"""CC value 0 maps to min_val."""
+		b = subsample.query.CcBinding(cc=1, min_val=60.0, max_val=180.0)
+		assert b.resolve(0) == 60.0
+
+	def test_resolve_max (self) -> None:
+		"""CC value 127 maps to max_val."""
+		b = subsample.query.CcBinding(cc=1, min_val=60.0, max_val=180.0)
+		assert b.resolve(127) == 180.0
+
+	def test_resolve_midpoint (self) -> None:
+		"""CC value 64 maps approximately to midpoint."""
+		b = subsample.query.CcBinding(cc=1, min_val=0.0, max_val=1.0)
+		assert abs(b.resolve(64) - 64.0 / 127.0) < 1e-6
+
+	def test_default_value_explicit (self) -> None:
+		"""Explicit default is returned."""
+		b = subsample.query.CcBinding(cc=1, default=0.75)
+		assert b.default_value == 0.75
+
+	def test_default_value_midpoint (self) -> None:
+		"""No explicit default → midpoint of min/max."""
+		b = subsample.query.CcBinding(cc=1, min_val=60.0, max_val=180.0)
+		assert b.default_value == 120.0
+
+	def test_defaults (self) -> None:
+		"""Default range is 0.0–1.0, omni channel."""
+		b = subsample.query.CcBinding(cc=1)
+		assert b.min_val == 0.0
+		assert b.max_val == 1.0
+		assert b.channel is None
+
+	def test_parse_cc_binding_in_process (self) -> None:
+		"""A dict param with 'cc' key is parsed as CcBinding."""
+		raw = [{"pad_quantize": {"grid": 16, "amount": {"cc": 1, "min": 0.0, "max": 1.0}}}]
+		spec = subsample.query.parse_process(raw, "test")
+		step = spec.steps[0]
+		amount = step.get("amount")
+		assert isinstance(amount, subsample.query.CcBinding)
+		assert amount.cc == 1
+		assert amount.min_val == 0.0
+		assert amount.max_val == 1.0
+
+	def test_parse_cc_binding_with_channel (self) -> None:
+		"""Channel is parsed when present."""
+		raw = [{"pad_quantize": {"amount": {"cc": 1, "channel": 10}}}]
+		spec = subsample.query.parse_process(raw, "test")
+		amount = spec.steps[0].get("amount")
+		assert isinstance(amount, subsample.query.CcBinding)
+		assert amount.channel == 10
+
+	def test_parse_scalar_params_unchanged (self) -> None:
+		"""Non-dict params remain as plain values."""
+		raw = [{"pad_quantize": {"grid": 16, "bpm": 120}}]
+		spec = subsample.query.parse_process(raw, "test")
+		step = spec.steps[0]
+		assert step.get("grid") == 16
+		assert step.get("bpm") == 120
+
+
 class TestDirectoryPredicate:
 
 	def test_directory_matches_filepath_under_dir (self) -> None:

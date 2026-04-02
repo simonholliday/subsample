@@ -469,6 +469,36 @@ they solve different problems:
 | Simultaneous directories | No (one bank at a time) | Yes (each assignment can use a different directory) |
 | Use case | Swap entire kits | Mix sources within one kit |
 
+### CC mapping - real-time parameter control
+
+Any numeric processor parameter can be controlled by a MIDI CC message.
+Replace the scalar value with a CC binding:
+
+```yaml
+process:
+  - pad_quantize: { grid: 16, amount: { cc: 1 } }
+  - beat_quantize: { bpm: { cc: 2, min: 60, max: 180 }, grid: 16 }
+  - filter_low: { freq: { cc: 74, min: 200, max: 16000 } }
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `cc` | yes | | CC number (0-127) |
+| `min` | no | `0.0` | Output value when CC = 0 |
+| `max` | no | `1.0` | Output value when CC = 127 |
+| `default` | no | midpoint | Value before any CC is received |
+| `channel` | no | any | MIDI channel (1-16); omit for omni |
+
+When a mapped CC changes, new variants are enqueued after a 200 ms debounce.
+Until the new variant is ready, the previous processed variant continues to
+play - giving smooth transitions for gradual changes.
+
+**Important:** use stepped/discrete controllers (knobs, faders, buttons) for CC
+mapping. Do not use pitch bend, aftertouch, or high-resolution continuous
+controllers - these generate hundreds of messages per second and would flood the
+transform queue. Each distinct CC value produces a new variant; the transform
+cache evicts the oldest when its memory budget is exceeded.
+
 ## Performance
 
 ### Zero-latency playback

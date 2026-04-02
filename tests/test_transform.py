@@ -2107,6 +2107,76 @@ class TestSpecFromProcess:
 
 
 # ---------------------------------------------------------------------------
+# TestCcResolution
+# ---------------------------------------------------------------------------
+
+class TestCcResolution:
+
+	"""Tests for CC binding resolution in spec_from_process."""
+
+	def test_cc_binding_resolves_from_state (self) -> None:
+		"""CcBinding amount is resolved from cc_state."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("bpm", 120), ("amount", subsample.query.CcBinding(cc=1))),
+			),
+		))
+		cc_state = {(9, 1): 127}  # ch10 (mido 9), CC#1 = 127
+		spec = subsample.transform.spec_from_process(process, cc_state=cc_state)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.PadQuantize)
+		assert step.amount == 1.0  # CC 127 → max of [0, 1]
+
+	def test_cc_binding_uses_default_when_no_state (self) -> None:
+		"""CcBinding falls back to default_value when cc_state is None."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("bpm", 120), ("amount", subsample.query.CcBinding(cc=1, default=0.75))),
+			),
+		))
+		spec = subsample.transform.spec_from_process(process, cc_state=None)
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.PadQuantize)
+		assert step.amount == 0.75
+
+	def test_cc_binding_channel_specific (self) -> None:
+		"""Channel-specific CcBinding only matches that channel."""
+		binding = subsample.query.CcBinding(cc=1, min_val=0.0, max_val=1.0, channel=10)
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("bpm", 120), ("amount", binding)),
+			),
+		))
+
+		# CC on channel 10 (mido 9): should resolve.
+		cc_state_match = {(9, 1): 64}
+		spec = subsample.transform.spec_from_process(process, cc_state=cc_state_match)
+		assert abs(spec.steps[0].amount - 64.0 / 127.0) < 1e-6
+
+		# CC on channel 1 (mido 0): should NOT match, fall back to default.
+		cc_state_wrong = {(0, 1): 127}
+		spec2 = subsample.transform.spec_from_process(process, cc_state=cc_state_wrong)
+		assert spec2.steps[0].amount == 0.5  # default = midpoint
+
+	def test_cc_binding_omni (self) -> None:
+		"""Omni CcBinding (channel=None) matches any channel."""
+		binding = subsample.query.CcBinding(cc=1)
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("bpm", 120), ("amount", binding)),
+			),
+		))
+		cc_state = {(5, 1): 0}  # arbitrary channel
+		spec = subsample.transform.spec_from_process(process, cc_state=cc_state)
+		assert spec.steps[0].amount == 0.0  # CC 0 → min
+
+
+# ---------------------------------------------------------------------------
 # TestVariantCacheKey
 # ---------------------------------------------------------------------------
 

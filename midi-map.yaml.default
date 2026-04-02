@@ -167,6 +167,26 @@
 #
 # Omit process entirely for unprocessed playback (base variant).
 #
+# CC MAPPING — bind processor parameters to MIDI CC
+# ─────────────────────────────────────────────────
+# Replace any numeric parameter with a CC binding:
+#
+#   amount: { cc: 1 }                        # CC#1, range 0.0–1.0
+#   bpm: { cc: 2, min: 60, max: 180 }        # CC#2, range 60–180 BPM
+#   freq: { cc: 74, min: 200, max: 16000 }   # CC#74, range 200–16000 Hz
+#
+# Optional fields:
+#   channel: 10       # Listen on channel 10 only (default: any channel)
+#   default: 0.75     # Initial value before any CC received (default: midpoint)
+#
+# WARNING: CC mapping triggers background variant processing on each
+# distinct CC value. Use stepped/discrete controllers (knobs, faders,
+# buttons) -- NOT pitch bend, aftertouch, or high-resolution continuous
+# controllers, which generate hundreds of messages per second and would
+# flood the transform queue. Changes are debounced (200 ms) and each
+# distinct CC value produces a new variant; the transform cache evicts
+# the oldest when its memory budget is exceeded.
+#
 # ===================================================================
 
 
