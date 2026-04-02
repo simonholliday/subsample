@@ -967,8 +967,6 @@ repository; audio files are local-only and .gitignored.
   layers) for more expressive performance.
 - **Round-robin** - cycle through sample variants on repeated triggers to avoid
   the machine-gun effect on rapid notes.
-- **MIDI CC mapping** - mod wheel, volume, sustain pedal, expression - map
-  continuous controllers to parameters in real time.
 ### Playback and sound design
 
 - **Reverb and delay** - per-voice or per-bus spatial effects for shaping the
@@ -993,8 +991,6 @@ repository; audio files are local-only and .gitignored.
 
 - **Random selection** - `order_by: random` to pick a different sample on each
   trigger.
-- **CC modulation** - map MIDI CC messages to real-time parameter control
-  (volume, pan, filter cutoff).
 
 ## Architecture
 

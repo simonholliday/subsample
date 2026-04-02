@@ -301,6 +301,9 @@ class BankManager:
 			bank_channel: New bank channel (user-facing 1-16, or 0 for omni).
 		"""
 
+		if not banks:
+			raise ValueError("update_banks requires at least one bank")
+
 		new_map: dict[int, Bank] = {}
 
 		for bank in banks:

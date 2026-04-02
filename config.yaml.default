@@ -351,8 +351,8 @@ analysis:
 # The transform pipeline creates derivative versions of existing samples for
 # playback: pitch-shifted variants so tonal samples can play across a keyboard,
 # time-stretched variants to match a target BPM, and envelope-adjusted variants
-# for percussive use. Derivatives are held in memory only — they are never
-# written to disk and are regenerated on demand.
+# for percussive use. Derivatives are cached in memory and optionally
+# persisted to disk (variant_cache_dir) for faster startup.
 #
 # Pitch shifting and time-stretching are active (requires rubberband-cli).
 # See README-AGENTS.md "Transform pipeline" for implementation guidance.

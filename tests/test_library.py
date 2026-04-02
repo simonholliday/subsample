@@ -556,7 +556,7 @@ class TestLoadInstrumentLibrary:
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
 		import logging
-		# Sidecar without WAV — default behaviour (clean_orphaned_sidecars=False)
+		# Sidecar without WAV — explicitly disabled (clean_orphaned_sidecars=False)
 		sidecar = _write_sidecar(tmp_path, "KICK")
 		with caplog.at_level(logging.DEBUG, logger="subsample.library"):
 			lib = subsample.library.load_instrument_library(

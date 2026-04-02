@@ -83,52 +83,29 @@ class MidiMapResult:
 	default_bank:     typing.Optional[int] = None
 
 
-def _beat_quantize_params (
+def _quantize_params (
 	process: subsample.query.ProcessSpec,
+	step_name: str,
 	config_bpm: float = 0.0,
 ) -> tuple[typing.Optional[float], int]:
 
-	"""Extract BPM and grid from a beat_quantize processor step.
+	"""Extract BPM and grid from a beat_quantize or pad_quantize step.
 
 	Returns (target_bpm, grid). When no explicit BPM is declared in the
 	step, falls back to config_bpm (from transform.target_bpm in config).
+	CcBinding values are treated as "provided" so the quantize path activates;
+	the actual value is resolved later in spec_from_process().
 	"""
 
-	beat_step = next(s for s in process.steps if s.name == "beat_quantize")
-	bpm_raw = beat_step.get("bpm", 0)
-	grid_raw = beat_step.get("grid", 16)
+	step = next(s for s in process.steps if s.name == step_name)
+	bpm_raw = step.get("bpm", 0)
+	grid_raw = step.get("grid", 16)
 
 	# CcBinding means BPM will be resolved at note-on time — treat as "provided".
 	if isinstance(bpm_raw, subsample.query.CcBinding):
-		return (bpm_raw.default_value or config_bpm or 120.0, int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16)
-
-	bpm = float(bpm_raw)
-	grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16
-
-	if bpm <= 0:
-		bpm = config_bpm
-
-	return (bpm if bpm > 0 else None, grid)
-
-
-def _pad_quantize_params (
-	process: subsample.query.ProcessSpec,
-	config_bpm: float = 0.0,
-) -> tuple[typing.Optional[float], int]:
-
-	"""Extract BPM and grid from a pad_quantize processor step.
-
-	Returns (target_bpm, grid). When no explicit BPM is declared in the
-	step, falls back to config_bpm (from transform.target_bpm in config).
-	"""
-
-	pad_step = next(s for s in process.steps if s.name == "pad_quantize")
-	bpm_raw = pad_step.get("bpm", 0)
-	grid_raw = pad_step.get("grid", 16)
-
-	# CcBinding means BPM will be resolved at note-on time — treat as "provided".
-	if isinstance(bpm_raw, subsample.query.CcBinding):
-		return (bpm_raw.default_value or config_bpm or 120.0, int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16)
+		bpm = bpm_raw.default_value or config_bpm or 120.0
+		grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16
+		return (bpm, grid)
 
 	bpm = float(bpm_raw)
 	grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16
@@ -321,6 +298,9 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 				band_energy = band_energy,
 			)
 		except Exception as exc:
+			# Broad catch: soundfile.read() can raise LibsndfileError (not an
+			# OSError subclass), analysis can raise numpy/librosa errors.
+			# All are non-fatal — the reference is simply skipped.
 			_log.warning("Could not generate sidecar for %s: %s", path.name, exc)
 			return None
 
@@ -882,11 +862,11 @@ class MidiPlayer:
 	it blocks until shutdown_event is set, then closes the MIDI port and
 	PyAudio stream and returns cleanly.
 
-	Note → reference mapping is loaded from a YAML file by the caller via
-	load_midi_map() and passed as the `midi_map` parameter.  The map keys
-	notes by (mido_channel, midi_note) and stores (ref_name, rank, one_shot,
-	pan_gains) per note.  At trigger time, the most similar instrument sample
-	to the reference is looked up from the SimilarityMatrix and played back.
+	Note routing is loaded from a YAML file by the caller via load_midi_map()
+	and passed as the `midi_map` parameter.  The map keys notes by
+	(mido_channel, midi_note) and stores (Assignment, pick_position) per note.
+	At trigger time, the query engine evaluates the assignment's select chain
+	against the active instrument library to find the best-matching sample.
 
 	Mixing: triggered notes are added as _Voice objects to a shared list.
 	A PyAudio callback stream reads from all active voices simultaneously,
@@ -993,6 +973,11 @@ class MidiPlayer:
 		# spec_from_process() to resolve CcBinding parameters.
 		self._cc_state: dict[tuple[int, int], int] = {}
 
+		# Omni CC state: cc_number → most recent value from any channel.
+		# Used by _resolve_cc for omni CcBindings (channel=None) so the most
+		# recent CC update wins regardless of which channel sent it.
+		self._cc_omni: dict[int, int] = {}
+
 		# Set of CC numbers that are mapped to processor parameters in the
 		# current MIDI map.  Used for O(1) "is this CC relevant?" checks.
 		self._mapped_ccs: set[int] = _collect_mapped_ccs(midi_map)
@@ -1000,6 +985,9 @@ class MidiPlayer:
 		# Debounce timer for CC-triggered re-evaluation.
 		self._cc_debounce_timer: typing.Optional[threading.Timer] = None
 		self._cc_debounce_lock: threading.Lock = threading.Lock()
+
+		# Throttle for CC INFO log — at most one per CC number per second.
+		self._cc_last_log: dict[int, float] = {}
 
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
@@ -1267,6 +1255,7 @@ class MidiPlayer:
 			bm = self._bank_manager
 			if bm.bank_channel_mido == -1 or msg.channel == bm.bank_channel_mido:
 				if bm.switch_to(msg.program):
+					self._last_played.clear()
 					self.update_assignments()
 			return
 
@@ -1274,12 +1263,23 @@ class MidiPlayer:
 		# mapped parameters (CcBinding in the process pipeline).
 		if msg.type == "control_change":
 			self._cc_state[(msg.channel, msg.control)] = msg.value
+			self._cc_omni[msg.control] = msg.value
 
 			if msg.control in self._mapped_ccs:
-				_log.info(
+				_log.debug(
 					"CC ch%d #%d = %d",
 					msg.channel + 1, msg.control, msg.value,
 				)
+
+				now = time.monotonic()
+				last = self._cc_last_log.get(msg.control, 0.0)
+
+				if now - last >= 1.0:
+					self._cc_last_log[msg.control] = now
+					_log.info(
+						"CC ch%d #%d = %d (mapped)",
+						msg.channel + 1, msg.control, msg.value,
+					)
 
 				with self._cc_debounce_lock:
 					if self._cc_debounce_timer is not None:
@@ -1362,7 +1362,7 @@ class MidiPlayer:
 
 				if assignment.process.has_beat_quantize():
 					if record.rhythm.tempo_bpm > 0.0:
-						bpm_for_spec, grid_for_spec = _beat_quantize_params(assignment.process, self._target_bpm)
+						bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "beat_quantize", self._target_bpm)
 					else:
 						_log.warning(
 							"beat_quantize %s: sample %r has no detected tempo — "
@@ -1371,7 +1371,7 @@ class MidiPlayer:
 						)
 
 				if assignment.process.has_pad_quantize():
-					bpm_for_spec, grid_for_spec = _pad_quantize_params(assignment.process, self._target_bpm)
+					bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "pad_quantize", self._target_bpm)
 
 				spec = subsample.transform.spec_from_process(
 					assignment.process,
@@ -1380,6 +1380,7 @@ class MidiPlayer:
 					resolution=grid_for_spec,
 					reference_path=_reference_wav_path(assignment),
 					cc_state=self._cc_state,
+					cc_omni=self._cc_omni,
 				)
 
 				if spec.steps:
@@ -1561,7 +1562,7 @@ class MidiPlayer:
 			# a variant for every distinct pick position.  The full process
 			# chain is included via spec_from_process().
 			elif asgn.process.has_beat_quantize():
-				bpm, grid = _beat_quantize_params(asgn.process, self._target_bpm)
+				bpm, grid = _quantize_params(asgn.process, "beat_quantize", self._target_bpm)
 				enqueued = 0
 
 				# Deduplicate by sample_id — multiple notes with the same pick
@@ -1595,6 +1596,7 @@ class MidiPlayer:
 						resolution=grid,
 						reference_path=_reference_wav_path(asgn),
 						cc_state=self._cc_state,
+						cc_omni=self._cc_omni,
 					)
 					eff_transform.get_variant(sid, spec)
 					enqueued += 1
@@ -1611,7 +1613,7 @@ class MidiPlayer:
 			# Pad-quantize: same dedup pattern as beat_quantize but no
 			# tempo check — pad_quantize only needs onsets, not source tempo.
 			elif asgn.process.has_pad_quantize():
-				bpm, grid = _pad_quantize_params(asgn.process, self._target_bpm)
+				bpm, grid = _quantize_params(asgn.process, "pad_quantize", self._target_bpm)
 				enqueued = 0
 				seen_ids_pad: set[int] = set()
 
@@ -1634,6 +1636,7 @@ class MidiPlayer:
 						resolution=grid,
 						reference_path=_reference_wav_path(asgn),
 						cc_state=self._cc_state,
+						cc_omni=self._cc_omni,
 					)
 					eff_transform.get_variant(sid, spec)
 					enqueued += 1
@@ -1654,6 +1657,7 @@ class MidiPlayer:
 					asgn.process,
 					reference_path=_reference_wav_path(asgn),
 					cc_state=self._cc_state,
+					cc_omni=self._cc_omni,
 				)
 
 				if spec.steps:

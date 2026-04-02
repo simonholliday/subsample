@@ -314,6 +314,7 @@ class AnalysisResult:
 	Computed as the linear regression slope of the log-magnitude spectrum
 	against log-frequency, then normalised from the empirical range."""
 
+
 @dataclasses.dataclass(frozen=True)
 class RhythmResult:
 
@@ -610,6 +611,8 @@ def analyze (
 			voiced_fraction=0.0,
 			log_attack_time=0.0,
 			spectral_flux=0.0,
+			spectral_rolloff=0.0,
+			spectral_slope=0.0,
 		)
 
 	mono = to_mono_float(audio, bit_depth)

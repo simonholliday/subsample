@@ -40,7 +40,9 @@ import logging
 import pathlib
 import typing
 
+import librosa
 import numpy
+import pymididefs.notes
 
 import subsample.analysis
 
@@ -443,9 +445,6 @@ def _parse_where (
 def _note_name_to_hz (name: str) -> float:
 
 	"""Convert a note name (e.g. 'C3') to Hz for pitch filtering."""
-
-	import pymididefs.notes
-	import librosa
 
 	midi_note = pymididefs.notes.name_to_note(name)
 	return float(librosa.midi_to_hz(midi_note))

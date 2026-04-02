@@ -2115,15 +2115,15 @@ class TestCcResolution:
 	"""Tests for CC binding resolution in spec_from_process."""
 
 	def test_cc_binding_resolves_from_state (self) -> None:
-		"""CcBinding amount is resolved from cc_state."""
+		"""CcBinding amount is resolved from cc_omni (omni mode)."""
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
 				params=(("bpm", 120), ("amount", subsample.query.CcBinding(cc=1))),
 			),
 		))
-		cc_state = {(9, 1): 127}  # ch10 (mido 9), CC#1 = 127
-		spec = subsample.transform.spec_from_process(process, cc_state=cc_state)
+		cc_omni = {1: 127}  # CC#1 = 127 (last-write-wins, any channel)
+		spec = subsample.transform.spec_from_process(process, cc_omni=cc_omni)
 		assert len(spec.steps) == 1
 		step = spec.steps[0]
 		assert isinstance(step, subsample.transform.PadQuantize)
@@ -2163,7 +2163,7 @@ class TestCcResolution:
 		assert spec2.steps[0].amount == 0.5  # default = midpoint
 
 	def test_cc_binding_omni (self) -> None:
-		"""Omni CcBinding (channel=None) matches any channel."""
+		"""Omni CcBinding (channel=None) uses cc_omni (last-write-wins)."""
 		binding = subsample.query.CcBinding(cc=1)
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
@@ -2171,8 +2171,8 @@ class TestCcResolution:
 				params=(("bpm", 120), ("amount", binding)),
 			),
 		))
-		cc_state = {(5, 1): 0}  # arbitrary channel
-		spec = subsample.transform.spec_from_process(process, cc_state=cc_state)
+		cc_omni = {1: 0}  # CC#1 = 0 (last-write-wins)
+		spec = subsample.transform.spec_from_process(process, cc_omni=cc_omni)
 		assert spec.steps[0].amount == 0.0  # CC 0 → min
 
 

@@ -152,7 +152,7 @@ class SimilarityMatrix:
 		                 Stored here so all vectors (reference and instrument)
 		                 are built consistently with the same weights.
 		_ref_vectors:   Precomputed reference vectors {name_upper: array}.
-		                Set once at construction; never mutated.
+		                Populated at construction; extended by add_reference().
 		_rankings:      Per-reference ranked lists {name_upper: [RankedMatch, ...]}.
 		                Always sorted descending by score.
 		_scores:        Score cache {sample_id: {name_upper: score}}.
