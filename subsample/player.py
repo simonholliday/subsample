@@ -950,6 +950,12 @@ class MidiPlayer:
 		# Loaded from the MIDI map YAML file by the caller (cli.py) via load_midi_map().
 		self._note_map: NoteMap = midi_map
 
+		# Most recently played variant per (channel, note).  Used as a fallback
+		# during MIDI map transitions: when a new variant is still processing,
+		# the old one plays instead of the unprocessed base — giving smooth
+		# transitions for gradual BPM or amount changes.
+		self._last_played: dict[tuple[int, int], subsample.transform.TransformResult] = {}
+
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
 		groups: list[tuple[int, int, int, subsample.query.Assignment, int]] = []
@@ -1311,10 +1317,25 @@ class MidiPlayer:
 						rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
+						self._last_played[(msg.channel, msg.note)] = variant
 						_log.debug(
 							"note %d (vel %d) → %r → %r (variant, %d step(s))  (%.2fs)",
 							msg.note, msg.velocity, assignment.name, record.name,
 							len(spec.steps), variant.duration,
+						)
+						return
+
+					# New variant not ready — try the previously played variant
+					# for this note (smooth transition during gradual param changes).
+					prev = self._last_played.get((msg.channel, msg.note))
+
+					if prev is not None and prev.key.sample_id == sample_id:
+						rendered = self._render_float(prev.audio, prev.level, msg.velocity, pan_gains, assignment.gain_db)
+						with self._voices_lock:
+							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
+						_log.debug(
+							"note %d (vel %d) → %r → %r (previous variant)  (%.2fs)",
+							msg.note, msg.velocity, assignment.name, record.name, prev.duration,
 						)
 						return
 
