@@ -548,9 +548,8 @@ def load_midi_map (
 	  process:  How to present it — ordered list of processors (repitch, beat_quantize, etc.).
 	  one_shot: Playback behaviour — true (default) ignores note_off.
 	  gain:     Level offset in dB (default 0.0).
-	  pan:      Stereo weights (default [50, 50] = centre).
-
-	Pan weights are normalised to constant-power gains: gain[i] = sqrt(w[i]/sum(w)).
+	  pan:      Channel weights defining a target layout (e.g. [50, 50] for stereo,
+	            [50, 50, 0, 0, 30, 30] for 5.1).  Omit for default routing.
 
 	reference predicates whose name is not in reference_names are skipped
 	with a WARNING — this prevents silent failures when using a map built
@@ -563,7 +562,6 @@ def load_midi_map (
 	Args:
 		path:             Path to the MIDI map YAML file.
 		reference_names:  Names from the loaded reference library (case-insensitive).
-		output_channels:  Number of output channels (default 2 = stereo).
 
 	Returns:
 		MidiMapResult containing the NoteMap, bank definitions, and bank channel.

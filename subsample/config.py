@@ -557,6 +557,9 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		watch_midi_map=bool(player_raw.get("watch_midi_map", False)),
 	)
 
+	if player.audio.channels is not None and player.audio.channels <= 0:
+		raise ValueError(f"player.audio.channels must be > 0 (got {player.audio.channels})")
+
 	detection = DetectionConfig(
 		snr_threshold_db=float(_require(detection_raw, "snr_threshold_db", "detection")),
 		hold_time=float(_require(detection_raw, "hold_time", "detection")),

@@ -213,6 +213,12 @@ def build_mix_matrix (
 		return _build_default_matrix(in_channels, out_channels)
 
 	target_ch = len(pan_weights)
+
+	if target_ch not in STANDARD_LAYOUTS:
+		raise ValueError(
+			f"pan_weights length {target_ch} does not match a standard layout "
+			f"({', '.join(str(k) for k in sorted(STANDARD_LAYOUTS))})"
+		)
 	total = float(numpy.sum(pan_weights))
 
 	if total == 0.0:

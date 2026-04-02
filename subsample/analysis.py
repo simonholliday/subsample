@@ -315,6 +315,17 @@ class AnalysisResult:
 	against log-frequency, then normalised from the empirical range."""
 
 
+# Zero-valued result for empty or degenerate input. Used by analyze() and
+# analyze_mono() early returns so the construction is not duplicated.
+_EMPTY_ANALYSIS_RESULT = AnalysisResult(
+	spectral_flatness=0.0, attack=0.0, release=0.0,
+	spectral_centroid=0.0, spectral_bandwidth=0.0,
+	zcr=0.0, harmonic_ratio=0.0, spectral_contrast=0.0,
+	voiced_fraction=0.0, log_attack_time=0.0, spectral_flux=0.0,
+	spectral_rolloff=0.0, spectral_slope=0.0,
+)
+
+
 @dataclasses.dataclass(frozen=True)
 class RhythmResult:
 
@@ -599,21 +610,7 @@ def analyze (
 	"""
 
 	if audio.shape[0] == 0:
-		return AnalysisResult(
-			spectral_flatness=0.0,
-			attack=0.0,
-			release=0.0,
-			spectral_centroid=0.0,
-			spectral_bandwidth=0.0,
-			zcr=0.0,
-			harmonic_ratio=0.0,
-			spectral_contrast=0.0,
-			voiced_fraction=0.0,
-			log_attack_time=0.0,
-			spectral_flux=0.0,
-			spectral_rolloff=0.0,
-			spectral_slope=0.0,
-		)
+		return _EMPTY_ANALYSIS_RESULT
 
 	mono = to_mono_float(audio, bit_depth)
 
@@ -651,21 +648,7 @@ def analyze_mono (
 	"""
 
 	if mono.shape[0] == 0:
-		return AnalysisResult(
-			spectral_flatness=0.0,
-			attack=0.0,
-			release=0.0,
-			spectral_centroid=0.0,
-			spectral_bandwidth=0.0,
-			zcr=0.0,
-			harmonic_ratio=0.0,
-			spectral_contrast=0.0,
-			voiced_fraction=0.0,
-			log_attack_time=0.0,
-			spectral_flux=0.0,
-			spectral_rolloff=0.0,
-			spectral_slope=0.0,
-		)
+		return _EMPTY_ANALYSIS_RESULT
 
 	# Clamp n_fft to the signal length for short recordings. librosa zero-pads
 	# when n_fft > len(signal), but emits a UserWarning. Clamping avoids the
