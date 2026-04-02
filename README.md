@@ -40,17 +40,31 @@ you lifting a finger.
   timemaps to lock samples to a target BPM with musical precision. Pad-quantize
   offers an alternative for speech: it snaps onsets to a beat grid by inserting
   silence rather than time-stretching, preserving natural timbre with no
-  artifacts.
+  artifacts. Both support an `amount` parameter (0.0-1.0) for partial
+  quantization - a looser, more natural feel.
 - **Real-time capture with zero-gap detection** - the input thread is never
   blocked waiting for analysis. Back-to-back sounds are captured reliably, even
   on USB audio.
 - **Pitch-aware** - tonal samples are automatically detected and mapped
   chromatically across a keyboard range, with background pitch-shifting at the
   highest available quality (Rubber Band offline finer mode).
+- **MIDI CC parameter control** - bind any numeric processor parameter to a MIDI
+  CC controller. Turn a knob to sweep filter cutoff, quantize amount, or
+  compression threshold in real time. Changes are debounced and new variants
+  processed in the background; the previous variant bridges the gap until the new
+  one is ready, giving smooth transitions for gradual parameter changes.
+- **Multichannel output** - supports any number of output channels (stereo, quad,
+  5.1, 7.1) with standard ITU-R BS.775 downmix and conservative upmix. Samples
+  of any channel count are automatically mapped to the output layout. Pan weights
+  define a target layout; if the output has fewer channels, standard downmix is
+  applied automatically.
+- **Bank switching** - declare multiple instrument directories in the MIDI map
+  and switch between them instantly via MIDI Program Change. Each bank has its
+  own library, similarity index, and transform cache.
 - **Import from any source** - pre-trimmed samples from commercial packs, field
   recordings, SDR radio captures, or any other source can be imported directly
   with automatic silence trimming, safety fades, and full analysis. Supports WAV,
-  BWF, FLAC, AIFF, OGG, and most other common audio formats.
+  FLAC, AIFF, OGG, MP3/MPEG, and most other common audio formats via libsndfile.
 - **Ready-to-play GM drums map** - 47 reference instruments define what each
   MIDI note should sound like. Your captured samples are automatically matched to
   the closest reference and routed to the corresponding note, with per-instrument
