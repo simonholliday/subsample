@@ -59,12 +59,23 @@
 #   process:   optional  How to present it (see PROCESS below)
 #   one_shot:  optional  true (default) = ignore note_off
 #   gain:      optional  Level offset in dB (default 0.0)
-#   pan:       optional  Stereo weights [L, R], default [50, 50] = centre
+#   pan:       optional  Channel weights (SMPTE order), default = identity routing
 #
 # PAN
-#   pan: [L, R]  (stereo; SMPTE channel order)
-#   Weights are normalised to constant-power gains: gain[i] = sqrt(w[i]/sum(w))
-#   So [50,50] = centre, [100,0] = hard left, [75,25] = left of centre.
+#   Pan weights define a target channel layout.  The number of weights
+#   determines the target (2 = stereo, 4 = quad, 6 = 5.1, 8 = 7.1).
+#   Constant-power normalisation is applied automatically.
+#   If the output device has fewer channels, standard ITU downmix is applied.
+#   If the output device has more channels, extra channels are silent.
+#
+#   pan: [50, 50]                        # Stereo centre
+#   pan: [100, 0]                        # Hard left (stereo)
+#   pan: [75, 25]                        # Left of centre (stereo)
+#   pan: [50, 50, 0, 0, 30, 30]         # 5.1: mostly front, some surround
+#   pan: [100]                           # Mono target
+#
+#   Omit pan entirely for default routing (identity for matching channel
+#   counts, ITU downmix for surround-to-stereo, conservative upmix otherwise).
 #
 # ===================================================================
 # SELECT — which sample to play

@@ -27,7 +27,7 @@ def _make_assignment (
 	repitch: bool = False,
 	beat_quantize: bool = False,
 	one_shot: bool = True,
-	pan_gains: typing.Optional[numpy.ndarray] = None,
+	pan_weights: typing.Optional[numpy.ndarray] = None,
 	gain_db: float = 0.0,
 ) -> subsample.query.Assignment:
 
@@ -61,16 +61,13 @@ def _make_assignment (
 
 	process = subsample.query.ProcessSpec(steps=tuple(steps))
 
-	if pan_gains is None:
-		pan_gains = numpy.array([0.7071068, 0.7071068], dtype=numpy.float32)
-
 	return subsample.query.Assignment(
 		name=name,
 		select=select,
 		process=process,
 		one_shot=one_shot,
 		gain_db=gain_db,
-		pan_gains=pan_gains,
+		pan_weights=pan_weights,
 	)
 
 
@@ -949,16 +946,15 @@ assignments:
       where:
         reference: BD0025
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2).note_map
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		asgn, _ = note_map[(9, 36)]
-		assert asgn.pan_gains.shape == (2,)
-		numpy.testing.assert_allclose(asgn.pan_gains, [1.0 / 2**0.5, 1.0 / 2**0.5], atol=1e-5)
+		# No pan specified → pan_weights is None (default routing).
+		assert asgn.pan_weights is None
 
-	def test_explicit_pan_constant_power (self, tmp_path: pathlib.Path) -> None:
-		"""Constant-power law: sum(gains**2) == 1.0 for any pan position."""
-		for weights in [[100, 0], [0, 100], [50, 50], [75, 25], [30, 70]]:
-			path = self._write_map(tmp_path, f"""
+	def test_explicit_pan_weights_stored (self, tmp_path: pathlib.Path) -> None:
+		"""Explicit pan weights are stored as raw values (normalisation at render time)."""
+		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick
     channel: 10
@@ -966,16 +962,15 @@ assignments:
     select:
       where:
         reference: BD0025
-    pan: {weights}
+    pan: [75, 25]
 """)
-			note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2).note_map
-			asgn, _ = note_map[(9, 36)]
-			total_power = float(numpy.sum(asgn.pan_gains ** 2))
-			numpy.testing.assert_allclose(total_power, 1.0, atol=1e-5,
-				err_msg=f"pan {weights} total power should be 1.0")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+		asgn, _ = note_map[(9, 36)]
+		assert asgn.pan_weights is not None
+		numpy.testing.assert_allclose(asgn.pan_weights, [75.0, 25.0], atol=1e-5)
 
 	def test_pan_hard_left (self, tmp_path: pathlib.Path) -> None:
-		"""pan: [100, 0] produces gain 1.0 on left, 0.0 on right."""
+		"""pan: [100, 0] stores raw weights."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick
@@ -986,12 +981,13 @@ assignments:
         reference: BD0025
     pan: [100, 0]
 """)
-		note_map = subsample.player.load_midi_map(path, ["BD0025"], output_channels=2).note_map
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 		asgn, _ = note_map[(9, 36)]
-		numpy.testing.assert_allclose(asgn.pan_gains, [1.0, 0.0], atol=1e-5)
+		assert asgn.pan_weights is not None
+		numpy.testing.assert_allclose(asgn.pan_weights, [100.0, 0.0], atol=1e-5)
 
-	def test_pan_wrong_channel_count_raises (self, tmp_path: pathlib.Path) -> None:
-		"""pan list length must match output_channels."""
+	def test_pan_negative_raises (self, tmp_path: pathlib.Path) -> None:
+		"""Negative pan weights raise ValueError."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick
@@ -1000,10 +996,10 @@ assignments:
     select:
       where:
         reference: BD0025
-    pan: [50, 50, 50]
+    pan: [50, -10]
 """)
 		with pytest.raises(ValueError, match="pan"):
-			subsample.player.load_midi_map(path, ["BD0025"], output_channels=2)
+			subsample.player.load_midi_map(path, ["BD0025"])
 
 	def test_repitch_all_notes_same_pick (self, tmp_path: pathlib.Path) -> None:
 		"""repitch in process: all notes share pick 1 (same sample, pitched per note)."""
@@ -1899,6 +1895,11 @@ class TestRenderFloatGainDb:
 		import subsample.analysis
 		return subsample.analysis.LevelResult(peak=peak, rms=rms)
 
+	def _centre_pan_matrix (self) -> numpy.ndarray:
+		"""Mono→stereo centre pan matrix."""
+		s = float(numpy.sqrt(0.5))
+		return numpy.array([[s], [s]], dtype=numpy.float32)
+
 	def test_zero_gain_db_has_no_effect (self) -> None:
 
 		"""gain_db=0.0 produces the same output as the default."""
@@ -1906,10 +1907,10 @@ class TestRenderFloatGainDb:
 		player = self._make_player()
 		audio = self._make_audio()
 		level = self._make_level()
-		pan = numpy.array([0.7071068, 0.7071068], dtype=numpy.float32)
+		mat = self._centre_pan_matrix()
 
-		result_default = player._render_float(audio, level, 100, pan)
-		result_zero    = player._render_float(audio, level, 100, pan, gain_db=0.0)
+		result_default = player._render_float(audio, level, 100, mat)
+		result_zero    = player._render_float(audio, level, 100, mat, gain_db=0.0)
 
 		numpy.testing.assert_array_equal(result_default, result_zero)
 
@@ -1920,12 +1921,11 @@ class TestRenderFloatGainDb:
 		player = self._make_player()
 		audio = self._make_audio()
 		level = self._make_level()
-		pan = numpy.array([0.7071068, 0.7071068], dtype=numpy.float32)
+		mat = self._centre_pan_matrix()
 
-		result_normal = player._render_float(audio, level, 100, pan, gain_db=0.0)
-		result_quiet  = player._render_float(audio, level, 100, pan, gain_db=-6.0)
+		result_normal = player._render_float(audio, level, 100, mat, gain_db=0.0)
+		result_quiet  = player._render_float(audio, level, 100, mat, gain_db=-6.0)
 
-		# -6 dB ≈ half the amplitude.
 		assert numpy.max(numpy.abs(result_quiet)) < numpy.max(numpy.abs(result_normal))
 
 	def test_positive_gain_db_increases_level (self) -> None:
@@ -1933,12 +1933,11 @@ class TestRenderFloatGainDb:
 		"""A positive gain_db produces louder output (clamped by anti-clip ceiling)."""
 
 		player = self._make_player()
-		# Use a quiet audio signal so positive gain has room before clipping.
 		audio = self._make_audio(value=0.1)
 		level = self._make_level(peak=0.1, rms=0.05)
-		pan = numpy.array([0.7071068, 0.7071068], dtype=numpy.float32)
+		mat = self._centre_pan_matrix()
 
-		result_normal = player._render_float(audio, level, 100, pan, gain_db=0.0)
-		result_loud   = player._render_float(audio, level, 100, pan, gain_db=6.0)
+		result_normal = player._render_float(audio, level, 100, mat, gain_db=0.0)
+		result_loud   = player._render_float(audio, level, 100, mat, gain_db=6.0)
 
 		assert numpy.max(numpy.abs(result_loud)) > numpy.max(numpy.abs(result_normal))

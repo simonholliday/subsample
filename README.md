@@ -71,8 +71,10 @@ Subsample listens continuously to a live audio input and captures every distinct
 sound event. An adaptive noise floor (exponential moving average) tracks the
 ambient level in real time, so it works equally well in a quiet studio and a
 noisy rehearsal space. Each captured sound is trimmed with smooth S-curve fades
-to avoid clicks. Stereo recordings are preserved end-to-end - a stereo
-microphone records and plays back in stereo without any manual setting.
+to avoid clicks. All channel formats are preserved end-to-end - a stereo microphone records
+and plays back in stereo, a quad recording keeps its four channels, and
+multichannel samples are automatically mapped to the output layout using
+standard ITU downmix coefficients.
 
 You can also feed it pre-recorded WAV files - they pass through the same
 detection pipeline, making it easy to build sample libraries from existing
@@ -416,7 +418,12 @@ pan: [75, 25]    # left of centre
 ```
 
 Channel order follows SMPTE: `[L, R]` for stereo; `[L, R, C, LFE, Ls, Rs]` for
-5.1. Multichannel output is planned - stereo is the current output format.
+5.1; `[L, R, C, LFE, BL, BR, SL, SR]` for 7.1. Set `player.audio.channels` in
+config to match your output device (default: stereo). Samples of any channel
+count are automatically mapped to the output layout using ITU-R BS.775 downmix
+coefficients (surround to stereo, etc.) or conservative upmix (stereo to 5.1
+uses front pair only). Pan weights define a target layout - if the output has
+fewer channels, standard downmix is applied automatically.
 
 ### Banks - switching instrument sets via MIDI
 
@@ -668,6 +675,7 @@ weights - is optional and rarely needs changing.
 | `player.audio.device` | `none` | Audio output device name for playback |
 | `player.audio.sample_rate` | auto | Output sample rate; defaults to recorder rate. Do not set higher than source. |
 | `player.audio.bit_depth` | auto | Output bit depth (16, 24, or 32); defaults to recorder bit depth |
+| `player.audio.channels` | `null` | Output channels (2=stereo, 6=5.1, 8=7.1); null defaults to stereo. SMPTE ordering |
 | `player.virtual_midi_port` | `none` | Name for a virtual MIDI input port; overrides `player.midi_device` |
 | `player.watch_midi_map` | `false` | Monitor the `midi_map` file for changes and reload assignments on save (see Live-coding) |
 | `detection.snr_threshold_db` | `12.0` | dB above ambient to trigger recording |
@@ -970,9 +978,6 @@ repository; audio files are local-only and .gitignored.
 
 - **Loop playback** - sustain loops for pads, drones, and textures that play
   continuously while a key is held.
-- **Multichannel output** - surround sound output beyond stereo, using SMPTE
-  channel ordering (5.1, 7.1). Pan weights already support arbitrary channel
-  counts; the output path needs to be extended.
 
 ### Sample management
 

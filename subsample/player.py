@@ -38,6 +38,7 @@ import pymididefs.notes
 import subsample.analysis
 import subsample.audio
 import subsample.bank
+import subsample.channel
 import subsample.cache
 import subsample.config
 import subsample.library
@@ -116,56 +117,41 @@ def _quantize_params (
 	return (bpm if bpm > 0 else None, grid)
 
 
-def _parse_pan_gains (weights_raw: typing.Any, output_channels: int, assignment_name: str) -> numpy.ndarray:
+def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing.Optional[numpy.ndarray]:
 
-	"""Parse pan weights from config and normalise to constant-power channel gains.
+	"""Parse pan weights from YAML into a raw weight array.
 
-	Pan weights are expressed as a list of non-negative values, one per output channel.
-	They are normalised so the summed power across all channels is 1.0:
-
-	    gain[i] = sqrt(weight[i] / sum(weights))
-
-	This gives constant-power panning: a centre pan [50, 50] produces the same
-	perceived loudness as a hard-left [100, 0], just distributed differently.
+	Pan weights define a target channel layout.  Their length determines the
+	target (2 = stereo, 6 = 5.1, etc.).  Constant-power normalisation is
+	applied later by channel.build_mix_matrix() when the actual output
+	channel count is known.
 
 	Args:
-		weights_raw:      Raw YAML value (list of numbers, or None for default).
-		output_channels:  Number of output channels (pan list length must match).
-		assignment_name:  Name for error messages.
+		weights_raw:     Raw YAML value (list of numbers, or None for default).
+		assignment_name: Name for error messages.
 
 	Returns:
-		float32 numpy array of shape (output_channels,) with constant-power gains.
+		float32 numpy array of weights, or None if not specified (default routing).
 
 	Raises:
-		ValueError: If the weights list has the wrong length or any negative value.
+		ValueError: If any weight is negative.
 	"""
 
 	if weights_raw is None:
-		# Default: equal weights across all channels.
-		weight_arr = numpy.ones(output_channels, dtype=numpy.float32)
-	else:
-		weights = list(weights_raw)
-		if len(weights) != output_channels:
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: pan has {len(weights)} value(s) "
-				f"but output has {output_channels} channel(s). "
-				f"Stereo example: [50, 50]  (L, R weights)"
-			)
-		weight_arr = numpy.array(weights, dtype=numpy.float32)
-		if numpy.any(weight_arr < 0):
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: pan weights must be >= 0"
-			)
+		return None
 
-	total = float(numpy.sum(weight_arr))
-	if total == 0.0:
-		# All-zero pan produces silence. Warn so the user can diagnose a mis-configured map.
+	weights = list(weights_raw)
+	weight_arr = numpy.array(weights, dtype=numpy.float32)
+
+	if numpy.any(weight_arr < 0):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan weights must be >= 0"
+		)
+
+	if float(numpy.sum(weight_arr)) == 0.0:
 		_log.warning("Assignment %r: all pan weights are zero — note will be silent", assignment_name)
-		return numpy.zeros(output_channels, dtype=numpy.float32)
 
-	# Constant-power normalisation: gain[i] = sqrt(weight[i] / total)
-	result: numpy.ndarray = numpy.sqrt(weight_arr / total).astype(numpy.float32)
-	return result
+	return weight_arr
 
 
 # Note name conversion — delegated to pymididefs.
@@ -548,7 +534,6 @@ def _resolve_path_references (
 def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
-	output_channels: int = 2,
 ) -> MidiMapResult:
 
 	"""Load a MIDI routing map from a YAML file.
@@ -674,7 +659,7 @@ def load_midi_map (
 
 		one_shot = bool(assignment_raw.get("one_shot", True))
 		gain_db  = float(assignment_raw.get("gain", 0.0))
-		pan_gains = _parse_pan_gains(assignment_raw.get("pan"), output_channels, name)
+		pan_weights = _parse_pan_weights(assignment_raw.get("pan"), name)
 
 		assignment = subsample.query.Assignment(
 			name=name,
@@ -682,7 +667,7 @@ def load_midi_map (
 			process=process,
 			one_shot=one_shot,
 			gain_db=gain_db,
-			pan_gains=pan_gains,
+			pan_weights=pan_weights,
 		)
 
 		# Per-note pick distribution:
@@ -989,6 +974,10 @@ class MidiPlayer:
 		# Throttle for CC INFO log — at most one per CC number per second.
 		self._cc_last_log: dict[int, float] = {}
 
+		# Mix matrix cache: (in_channels, pan_weights_tuple) → (out_ch, in_ch) matrix.
+		# Lazily populated by _get_mix_matrix(). Cleared on MIDI map reload.
+		self._mix_matrix_cache: dict[tuple[int, typing.Optional[tuple[float, ...]]], numpy.ndarray] = {}
+
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
 		groups: list[tuple[int, int, int, subsample.query.Assignment, int]] = []
@@ -1028,7 +1017,8 @@ class MidiPlayer:
 			if asgn.one_shot:
 				line += "  one-shot"
 
-			line += f"  pan=[{', '.join(f'{g:.2f}' for g in asgn.pan_gains)}]"
+			if asgn.pan_weights is not None:
+				line += f"  pan=[{', '.join(f'{g:.0f}' for g in asgn.pan_weights)}]"
 			lines.append(line)
 
 		_log.info(
@@ -1304,7 +1294,7 @@ class MidiPlayer:
 			return
 
 		assignment, pick = entry
-		pan_gains = assignment.pan_gains
+		pan_weights = assignment.pan_weights
 		one_shot  = assignment.one_shot
 
 		# ── Sample selection via query engine ─────────────────────────────
@@ -1387,7 +1377,8 @@ class MidiPlayer:
 					variant = eff_transform.get_variant(sample_id, spec)
 
 					if variant is not None:
-						rendered = self._render_float(variant.audio, variant.level, msg.velocity, pan_gains, assignment.gain_db)
+						mix_mat = self._get_mix_matrix(variant.audio.shape[1], pan_weights)
+						rendered = self._render_float(variant.audio, variant.level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 						self._last_played[(msg.channel, msg.note)] = variant
@@ -1403,7 +1394,8 @@ class MidiPlayer:
 					prev = self._last_played.get((msg.channel, msg.note))
 
 					if prev is not None and prev.key.sample_id == sample_id:
-						rendered = self._render_float(prev.audio, prev.level, msg.velocity, pan_gains, assignment.gain_db)
+						mix_mat = self._get_mix_matrix(prev.audio.shape[1], pan_weights)
+						rendered = self._render_float(prev.audio, prev.level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 						_log.debug(
@@ -1416,7 +1408,8 @@ class MidiPlayer:
 			base = eff_transform.get_base(sample_id)
 
 			if base is not None:
-				rendered = self._render_float(base.audio, base.level, msg.velocity, pan_gains, assignment.gain_db)
+				mix_mat = self._get_mix_matrix(base.audio.shape[1], pan_weights)
+				rendered = self._render_float(base.audio, base.level, msg.velocity, mix_mat, assignment.gain_db)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 				_log.debug(
@@ -1426,7 +1419,8 @@ class MidiPlayer:
 				return
 
 		# 4. Last resort: convert from int PCM on this trigger.
-		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity, pan_gains, assignment.gain_db)
+		mix_mat = self._get_mix_matrix(record.audio.shape[1] if record.audio is not None else 1, pan_weights)
+		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity, mix_mat, assignment.gain_db)
 
 		if original is None:
 			return
@@ -1443,28 +1437,23 @@ class MidiPlayer:
 		self,
 		record: subsample.library.SampleRecord,
 		velocity: int,
-		pan_gains: numpy.ndarray,
+		mix_matrix: numpy.ndarray,
 		gain_db: float = 0.0,
 	) -> typing.Optional[numpy.ndarray]:
 
-		"""Convert a SampleRecord to a gain-adjusted, panned output array.
+		"""Convert a SampleRecord to a gain-adjusted, channel-mapped output array.
 
-		Converts int PCM → float32 preserving channel count → applies gain and
-		pan → returns output-channel-count float32 array.  Returns None if the
-		record has no audio.
-
-		For transform variants (already float32 multi-channel), use
-		_render_float() directly to skip the int→float conversion.
+		Converts int PCM → float32 preserving all channels → applies gain and
+		channel mapping via mix_matrix → returns output-channel-count float32.
+		Returns None if the record has no audio.
 		"""
 
 		if record.audio is None:
 			return None
 
-		# Convert int PCM → float32, preserving all channels so that stereo
-		# recordings play back in stereo rather than being mixed to mono.
 		float_audio = subsample.transform._pcm_to_float32(record.audio, self._bit_depth)
 
-		return self._render_float(float_audio, record.level, velocity, pan_gains, gain_db)
+		return self._render_float(float_audio, record.level, velocity, mix_matrix, gain_db)
 
 	def update_assignments (self) -> None:
 
@@ -1706,6 +1695,7 @@ class MidiPlayer:
 		old_count = len(self._note_map)
 		self._note_map = new_map
 		self._mapped_ccs = _collect_mapped_ccs(new_map)
+		self._mix_matrix_cache.clear()
 		self.update_assignments()
 
 		_log.info(
@@ -1713,56 +1703,69 @@ class MidiPlayer:
 			len(new_map), old_count,
 		)
 
+	def _get_mix_matrix (self, in_channels: int, pan_weights: typing.Optional[numpy.ndarray]) -> numpy.ndarray:
+
+		"""Look up or build a mixing matrix for the given input channel count and pan weights.
+
+		Cached by (in_channels, pan_weights_tuple) so repeated triggers with
+		the same sample format and pan settings avoid rebuilding the matrix.
+		"""
+
+		key = (in_channels, tuple(pan_weights.tolist()) if pan_weights is not None else None)
+		cached = self._mix_matrix_cache.get(key)
+
+		if cached is not None:
+			return cached
+
+		mat = subsample.channel.build_mix_matrix(in_channels, self._output_channels, pan_weights)
+		self._mix_matrix_cache[key] = mat
+		return mat
+
 	def _render_float (
 		self,
 		audio: numpy.ndarray,
 		level: subsample.analysis.LevelResult,
 		velocity: int,
-		pan_gains: numpy.ndarray,
+		mix_matrix: numpy.ndarray,
 		gain_db: float = 0.0,
 	) -> numpy.ndarray:
 
-		"""Apply gain normalisation and pan to an output-channel-count float32 array.
+		"""Apply gain normalisation and channel mapping via mixing matrix.
 
-		Shared by both the original _render() path (mono from int PCM) and
-		the transform variant path (float32 multi-channel from TransformResult).
-
-		The input audio is first mixed to mono (all source channel counts are
-		supported), then expanded to the output channel count using the
-		constant-power pan_gains vector.
+		Maps input channels to output channels in a single matrix multiply,
+		preserving the original spatial content (stereo image, surround
+		positioning). ITU downmix or conservative upmix is baked into the
+		matrix by channel.build_mix_matrix().
 
 		Args:
-			audio:     float32, shape (n_frames, in_channels).  Any channel count.
-			level:     LevelResult for this audio (peak + rms), used for gain calc.
-			velocity:  MIDI velocity (0–127) from the triggering note_on message.
-			pan_gains: float32 array, shape (output_channels,).  Pre-computed
-			           constant-power gains, one per output channel.  See
-			           _parse_pan_gains() in load_midi_map().
-			gain_db:   Per-assignment level offset in dB (from Assignment.gain_db).
-			           Negative = quieter, positive = louder.
+			audio:      float32, shape (n_frames, in_channels).
+			level:      LevelResult for this audio (peak + rms), used for gain calc.
+			velocity:   MIDI velocity (0-127) from the triggering note_on message.
+			mix_matrix: float32 array, shape (output_channels, in_channels).
+			            Built by _get_mix_matrix() from channel.build_mix_matrix().
+			gain_db:    Per-assignment level offset in dB (from Assignment.gain_db).
 
 		Returns:
-			float32 array, shape (n_frames, output_channels), values in [-1.0, 1.0].
+			float32 array, shape (n_frames, output_channels).
 		"""
 
 		# --- Gain calculation ---
-		vel_scale = (velocity / 127.0) ** 2  # quadratic — more musical than linear
+		vel_scale = (velocity / 127.0) ** 2
 
-		# Normalise to target RMS so samples recorded at different levels sound
-		# balanced. Guard against silence (rms == 0) to avoid division by zero.
 		if level.rms > 0.0:
 			norm_gain = self._target_rms / level.rms
 		else:
 			norm_gain = 1.0
 
-		# Per-assignment level offset from the MIDI map.
 		gain_linear = 10.0 ** (gain_db / 20.0) if gain_db != 0.0 else 1.0
-
 		raw_gain = norm_gain * vel_scale * gain_linear
 
-		# Anti-clip ceiling: ensure gain × peak never exceeds full scale.
-		if level.peak > 0.0:
-			final_gain = min(raw_gain, 1.0 / level.peak)
+		# Anti-clip ceiling: account for the worst-case row sum of the mix
+		# matrix (e.g. a 5.1→stereo downmix sums FL + 0.707*FC + 0.707*BL).
+		max_row_sum = float(numpy.max(numpy.sum(numpy.abs(mix_matrix), axis=1)))
+
+		if level.peak > 0.0 and max_row_sum > 0.0:
+			final_gain = min(raw_gain, 1.0 / (level.peak * max_row_sum))
 		else:
 			final_gain = raw_gain
 
@@ -1774,18 +1777,6 @@ class MidiPlayer:
 
 		gained = audio * final_gain
 
-		# Mix input to mono.  All source formats (mono, stereo, multichannel)
-		# are reduced to a single channel before panning.  This is the correct
-		# approach: we pan the *sound*, not individual source channels.
-		mono: numpy.ndarray
-		if gained.shape[1] == 1:
-			mono = gained[:, 0]
-		else:
-			mono = typing.cast(numpy.ndarray, numpy.mean(gained, axis=1, dtype=numpy.float32))
-
-		# Expand mono to the output channel layout using constant-power pan gains.
-		# pan_gains shape: (output_channels,)
-		# mono shape:      (n_frames,)
-		# result shape:    (n_frames, output_channels)
-		result: numpy.ndarray = (mono[:, numpy.newaxis] * pan_gains[numpy.newaxis, :]).astype(numpy.float32)
+		# Channel mapping: (n_frames, in_ch) @ (in_ch, out_ch) = (n_frames, out_ch)
+		result: numpy.ndarray = (gained @ mix_matrix.T).astype(numpy.float32)
 		return result

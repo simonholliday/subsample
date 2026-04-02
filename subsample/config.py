@@ -70,6 +70,10 @@ class PlayerAudioConfig:
 	match the output device's native rate when it differs from the
 	recorder (e.g. recorder at 22050 Hz, output at 44100 Hz).  Variants
 	are resampled once at production time, not at trigger time."""
+	channels: typing.Optional[int] = None
+	"""Number of output channels.  None (the default) means stereo (2).
+	Set to 6 for 5.1, 8 for 7.1, or any value your device supports.
+	Channel ordering follows SMPTE: FL, FR, FC, LFE, BL, BR, SL, SR."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -541,6 +545,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			device=player_device,
 			bit_depth=player_bit_depth,
 			sample_rate=player_sample_rate,
+			channels=int(player_audio_raw["channels"]) if player_audio_raw.get("channels") is not None else None,
 		),
 		enabled=bool(player_raw.get("enabled", False)),
 		midi_device=player_midi_device,

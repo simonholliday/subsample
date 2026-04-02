@@ -20,7 +20,7 @@ ProcessSpec
 
 Assignment
     A compiled MIDI map entry combining SelectSpec, ProcessSpec, playback
-    flags (one_shot, gain_db), and output routing (pan_gains).
+    flags (one_shot, gain_db), and output routing (pan_weights).
 
 Query evaluation
 ----------------
@@ -288,9 +288,7 @@ class Assignment:
 	process:   ProcessSpec        = dataclasses.field(default_factory=ProcessSpec)
 	one_shot:  bool               = True
 	gain_db:   float              = 0.0
-	pan_gains: numpy.ndarray      = dataclasses.field(
-		default_factory=lambda: numpy.array([0.7071068, 0.7071068], dtype=numpy.float32),
-	)
+	pan_weights: typing.Optional[numpy.ndarray] = None
 	pick:      int                = 1
 
 
