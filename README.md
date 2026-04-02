@@ -963,14 +963,11 @@ repository; audio files are local-only and .gitignored.
 
 - **Mute groups** - notes in a named group silence each other when triggered.
   Classic use: closed hi-hat silences open hi-hat.
-- **Velocity layers** - different targets at different velocity ranges (pp/mp/ff
-  layers) for more expressive performance.
 - **Round-robin** - cycle through sample variants on repeated triggers to avoid
   the machine-gun effect on rapid notes.
+
 ### Playback and sound design
 
-- **Reverb and delay** - per-voice or per-bus spatial effects for shaping the
-  output without an external mixer.
 - **Loop playback** - sustain loops for pads, drones, and textures that play
   continuously while a key is held.
 - **Multichannel output** - surround sound output beyond stereo, using SMPTE
@@ -983,10 +980,6 @@ repository; audio files are local-only and .gitignored.
   transient detection, then add each slice to the library as a separate sample.
 - **Similar-to-this query** - "find more sounds like this one" by exposing the
   similarity engine as a user-facing search.
-- **Parallel startup re-analysis** - when the analysis version bumps, stale
-  sidecars are currently re-analysed sequentially; large libraries should use the
-  existing worker pool for parallel re-analysis.
-
 ### Additional select/process features
 
 - **Random selection** - `order_by: random` to pick a different sample on each
