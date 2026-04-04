@@ -19,32 +19,34 @@ you lifting a finger.
 
 ## What sets Subsample apart
 
+### No other sampler does this
+
 - **Automatic similarity-based MIDI assignment** - sounds are matched to your
   reference library and mapped to MIDI notes as they arrive. No manual
   drag-and-drop, no folder browsing, no per-pad assignment.
 - **Classification-free matching** - the same engine works for kicks and violins
   without training data, labels, or pre-defined categories. It is pure geometry:
   similar sounds cluster together naturally in a 58-dimensional feature space.
-- **17-processor DSP transform pipeline** - pitch-shift, time-stretch, reverse,
-  high/low/band-pass filter, saturate, compress, limit, gate, distort, reshape,
-  transient shaping, pad-quantize, vocoder (cross-synthesis), and HPSS
-  harmonic/percussive separation. Each processor runs per-sample in a background
-  worker pool - processed variants are ready before you press a key.
 - **Auto-adaptive processing** - processors derive their parameters from each
   sample's own analysis data. The compressor reads peak level, onset speed, and
   decay to set threshold, attack, and release. The gate sets its threshold from
   the noise floor. Transient shaping adapts from the crest factor. Envelope
   reshape tightens the tail based on decay character. Write `compress: true` or
   `gate: true` and the right settings are chosen for each sample automatically.
+
+### Deep processing
+
+- **17-processor DSP pipeline** - pitch-shift, time-stretch, reverse,
+  high/low/band-pass filter, saturate, compress, limit, gate, distort, reshape,
+  transient shaping, pad-quantize, vocoder (cross-synthesis), and HPSS
+  harmonic/percussive separation. Each processor runs per-sample in a background
+  worker pool - processed variants are ready before you press a key.
 - **Beat-aware processing** - beat-quantized time-stretching uses onset-aligned
   timemaps to lock samples to a target BPM with musical precision. Pad-quantize
   offers an alternative for speech: it snaps onsets to a beat grid by inserting
   silence rather than time-stretching, preserving natural timbre with no
   artifacts. Both support an `amount` parameter (0.0-1.0) for partial
   quantization - a looser, more natural feel.
-- **Real-time capture with zero-gap detection** - the input thread is never
-  blocked waiting for analysis. Back-to-back sounds are captured reliably, even
-  on USB audio.
 - **Pitch-aware** - tonal samples are automatically detected and mapped
   chromatically across a keyboard range, with background pitch-shifting at the
   highest available quality (Rubber Band offline finer mode).
@@ -53,6 +55,12 @@ you lifting a finger.
   compression threshold in real time. Changes are debounced and new variants
   processed in the background; the previous variant bridges the gap until the new
   one is ready, giving smooth transitions for gradual parameter changes.
+- **Real-time capture with zero-gap detection** - the input thread is never
+  blocked waiting for analysis. Back-to-back sounds are captured reliably, even
+  on USB audio.
+
+### Production-ready
+
 - **Multichannel output** - supports any number of output channels (stereo, quad,
   5.1, 7.1) with standard ITU-R BS.775 downmix and conservative upmix. Samples
   of any channel count are automatically mapped to the output layout. Pan weights
