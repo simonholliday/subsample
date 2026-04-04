@@ -162,3 +162,57 @@ class TestNormalizeMixMatrix:
 		mat = numpy.array([[1.0, 0.0], [0.0, 0.0]], dtype=numpy.float32)
 		normed = subsample.channel.normalize_mix_matrix(mat)
 		numpy.testing.assert_array_equal(normed[1], [0.0, 0.0])
+
+
+class TestRouteToDevice:
+
+	"""Tests for route_to_device() — physical output routing."""
+
+	def test_none_output_map_passthrough (self) -> None:
+		"""None output_map with matching row count returns matrix unchanged."""
+		mat = numpy.array([[1.0, 0.0], [0.0, 1.0]], dtype=numpy.float32)
+		result = subsample.channel.route_to_device(mat, 2, None)
+		numpy.testing.assert_array_equal(result, mat)
+
+	def test_none_output_map_pads_with_zeros (self) -> None:
+		"""None output_map pads with zero rows to reach device_channels."""
+		mat = numpy.array([[1.0, 0.0], [0.0, 1.0]], dtype=numpy.float32)
+		result = subsample.channel.route_to_device(mat, 8, None)
+		assert result.shape == (8, 2)
+		numpy.testing.assert_array_equal(result[:2, :], mat)
+		numpy.testing.assert_array_equal(result[2:, :], 0.0)
+
+	def test_stereo_to_outputs_3_4 (self) -> None:
+		"""Route stereo to device outputs 3-4 (0-indexed: 2, 3)."""
+		mat = numpy.array([[0.7, 0.3], [0.3, 0.7]], dtype=numpy.float32)
+		result = subsample.channel.route_to_device(mat, 8, (2, 3))
+		assert result.shape == (8, 2)
+		numpy.testing.assert_array_equal(result[2, :], mat[0, :])
+		numpy.testing.assert_array_equal(result[3, :], mat[1, :])
+		# All other rows are zero.
+		for row in [0, 1, 4, 5, 6, 7]:
+			numpy.testing.assert_array_equal(result[row, :], 0.0)
+
+	def test_identity_default_routing (self) -> None:
+		"""output_map (0, 1) on a 2-ch device equals the original matrix."""
+		mat = numpy.array([[1.0, 0.0], [0.0, 1.0]], dtype=numpy.float32)
+		result = subsample.channel.route_to_device(mat, 2, (0, 1))
+		numpy.testing.assert_array_equal(result, mat)
+
+	def test_out_of_range_raises (self) -> None:
+		"""Index >= device_channels raises ValueError."""
+		mat = numpy.array([[1.0], [0.0]], dtype=numpy.float32)
+		with pytest.raises(ValueError, match="out of range"):
+			subsample.channel.route_to_device(mat, 2, (0, 2))
+
+	def test_duplicate_indices_raises (self) -> None:
+		"""Duplicate indices raise ValueError."""
+		mat = numpy.array([[1.0], [0.0]], dtype=numpy.float32)
+		with pytest.raises(ValueError, match="duplicate"):
+			subsample.channel.route_to_device(mat, 4, (1, 1))
+
+	def test_length_mismatch_raises (self) -> None:
+		"""output_map length != matrix rows raises ValueError."""
+		mat = numpy.array([[1.0, 0.0], [0.0, 1.0]], dtype=numpy.float32)
+		with pytest.raises(ValueError, match="does not match"):
+			subsample.channel.route_to_device(mat, 8, (2, 3, 4))

@@ -251,3 +251,67 @@ def build_mix_matrix (
 	result[:target_ch, :] = weighted
 
 	return result
+
+
+# ---------------------------------------------------------------------------
+# Physical output routing
+# ---------------------------------------------------------------------------
+
+def route_to_device (
+	logical_matrix: numpy.ndarray,
+	device_channels: int,
+	output_map: typing.Optional[tuple[int, ...]] = None,
+) -> numpy.ndarray:
+
+	"""Embed a logical mixing matrix into a device-sized matrix.
+
+	Parameters
+	----------
+	logical_matrix:  (logical_out, in_ch) mixing matrix from build_mix_matrix().
+	device_channels: Total number of output channels on the audio device.
+	output_map:      0-indexed device channel indices for each logical output.
+	                 Length must equal logical_matrix.shape[0].
+	                 None = default routing (first N device channels).
+
+	Returns
+	-------
+	float32 array of shape (device_channels, in_ch).  Rows not targeted by
+	output_map are zero (silence on those physical outputs).
+	"""
+
+	logical_out, in_ch = logical_matrix.shape
+
+	if output_map is None:
+		if logical_out == device_channels:
+			return logical_matrix.astype(numpy.float32)
+		if logical_out > device_channels:
+			raise ValueError(
+				f"Logical output count ({logical_out}) exceeds device channels "
+				f"({device_channels}) — cannot route without an explicit output map"
+			)
+		result = numpy.zeros((device_channels, in_ch), dtype=numpy.float32)
+		result[:logical_out, :] = logical_matrix
+		return result
+
+	if len(output_map) != logical_out:
+		raise ValueError(
+			f"output_map length ({len(output_map)}) does not match logical "
+			f"output count ({logical_out})"
+		)
+
+	if len(set(output_map)) != len(output_map):
+		raise ValueError(f"output_map contains duplicate indices: {output_map}")
+
+	for idx in output_map:
+		if idx < 0 or idx >= device_channels:
+			raise ValueError(
+				f"output_map index {idx} is out of range for "
+				f"{device_channels}-channel device (valid: 0..{device_channels - 1})"
+			)
+
+	result = numpy.zeros((device_channels, in_ch), dtype=numpy.float32)
+
+	for logical_row, device_row in enumerate(output_map):
+		result[device_row, :] = logical_matrix[logical_row, :]
+
+	return result

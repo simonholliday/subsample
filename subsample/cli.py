@@ -536,6 +536,7 @@ def _start_player (
 			limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 			bank_manager=bank_manager,
 			target_bpm=cfg.transform.target_bpm,
+			output_channels=cfg.player.audio.channels,
 		)
 		player_cell[0] = player
 		player.update_pitched_assignments()
@@ -583,6 +584,7 @@ def _start_player (
 		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 		bank_manager=bank_manager,
 		target_bpm=cfg.transform.target_bpm,
+		output_channels=cfg.player.audio.channels,
 	)
 	player_cell[0] = player
 	player.update_pitched_assignments()

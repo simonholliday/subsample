@@ -60,6 +60,7 @@
 #   one_shot:  optional  true (default) = ignore note_off
 #   gain:      optional  Level offset in dB (default 0.0)
 #   pan:       optional  Channel weights (SMPTE order), default = identity routing
+#   output:    optional  Physical output channels (1-indexed), default = first N
 #
 # PAN
 #   Pan weights define a target channel layout.  The number of weights
@@ -76,6 +77,19 @@
 #
 #   Omit pan entirely for default routing (identity for matching channel
 #   counts, ITU downmix for surround-to-stereo, conservative upmix otherwise).
+#
+# OUTPUT ROUTING
+#   Routes the instrument's mix to specific physical outputs on the device.
+#   Numbers are 1-indexed, matching the labels on your audio interface.
+#   Length must match the pan target layout (or the source channel count
+#   when pan is omitted).
+#
+#   output: [1, 2]                       # Main monitors (default)
+#   output: [3, 4]                       # Route stereo to outputs 3-4
+#   output: [5, 6, 7, 8]                # Route quad to outputs 5-8
+#
+#   Requires player.audio.channels in config.yaml to match your device.
+#   Omit output entirely for default routing (outputs 1, 2, ..., N).
 #
 # ===================================================================
 # SELECT — which sample to play

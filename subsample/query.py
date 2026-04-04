@@ -288,8 +288,9 @@ class Assignment:
 	process:   ProcessSpec        = dataclasses.field(default_factory=ProcessSpec)
 	one_shot:  bool               = True
 	gain_db:   float              = 0.0
-	pan_weights: typing.Optional[numpy.ndarray] = None
-	pick:      int                = 1
+	pan_weights:    typing.Optional[numpy.ndarray]  = None
+	output_routing: typing.Optional[tuple[int, ...]] = None
+	pick:           int                              = 1
 
 
 # ---------------------------------------------------------------------------

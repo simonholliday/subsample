@@ -154,6 +154,63 @@ def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing
 	return weight_arr
 
 
+def _parse_output_routing (
+	raw: typing.Any,
+	assignment_name: str,
+	pan_weights: typing.Optional[numpy.ndarray],
+) -> typing.Optional[tuple[int, ...]]:
+
+	"""Parse output routing from YAML into a 0-indexed channel tuple.
+
+	The MIDI map uses 1-indexed output numbers (matching hardware labels).
+	This function converts to 0-indexed for internal use.  Device-range
+	validation is deferred to runtime (the device channel count is not
+	known at parse time).
+
+	Args:
+		raw:             Raw YAML value (list of ints, or None for default).
+		assignment_name: Name for error messages.
+		pan_weights:     Parsed pan weights (for length validation).
+
+	Returns:
+		Tuple of 0-indexed device channel indices, or None for default routing.
+
+	Raises:
+		ValueError: On invalid values, duplicates, or length mismatch with pan.
+	"""
+
+	if raw is None:
+		return None
+
+	channels = list(raw)
+
+	if not channels:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: output must be a non-empty list"
+		)
+
+	for ch in channels:
+		if not isinstance(ch, int) or ch < 1:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: output channels must be "
+				f"positive integers (1-indexed), got {ch!r}"
+			)
+
+	if len(set(channels)) != len(channels):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: output contains duplicate "
+			f"channels: {channels}"
+		)
+
+	if pan_weights is not None and len(channels) != len(pan_weights):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: output length ({len(channels)}) "
+			f"must match pan length ({len(pan_weights)})"
+		)
+
+	return tuple(ch - 1 for ch in channels)
+
+
 # Note name conversion — delegated to pymididefs.
 _midi_to_note_name = pymididefs.notes.note_to_name
 _parse_note_name = pymididefs.notes.name_to_note
@@ -657,7 +714,8 @@ def load_midi_map (
 
 		one_shot = bool(assignment_raw.get("one_shot", True))
 		gain_db  = float(assignment_raw.get("gain", 0.0))
-		pan_weights = _parse_pan_weights(assignment_raw.get("pan"), name)
+		pan_weights    = _parse_pan_weights(assignment_raw.get("pan"), name)
+		output_routing = _parse_output_routing(assignment_raw.get("output"), name, pan_weights)
 
 		assignment = subsample.query.Assignment(
 			name=name,
@@ -666,6 +724,7 @@ def load_midi_map (
 			one_shot=one_shot,
 			gain_db=gain_db,
 			pan_weights=pan_weights,
+			output_routing=output_routing,
 		)
 
 		# Per-note pick distribution:
@@ -877,6 +936,7 @@ class MidiPlayer:
 		limiter_ceiling_db: float = -0.1,
 		bank_manager: typing.Optional[subsample.bank.BankManager] = None,
 		target_bpm: float = 0.0,
+		output_channels: typing.Optional[int] = None,
 	) -> None:
 
 		self._device_name        = device_name
@@ -936,10 +996,11 @@ class MidiPlayer:
 		self._voices:      list[_Voice]  = []
 		self._voices_lock: threading.Lock = threading.Lock()
 
-		# Number of output channels.  Determines the shape of the mix buffer and
-		# must match the pa.open(channels=...) call in run().  Fixed at 2
-		# (stereo) for this phase; multichannel support raises this in future.
-		self._output_channels: int = 2
+		# Number of output channels.  Determines the shape of the mix buffer
+		# and must match the pa.open(channels=...) call in run().  Defaults
+		# to 2 (stereo); set via player.audio.channels in config for
+		# multi-channel interfaces.
+		self._output_channels: int = output_channels if output_channels is not None else 2
 
 		# Note routing map: (mido_channel, midi_note) → (Assignment, pick_position).
 		# Loaded from the MIDI map YAML file by the caller (cli.py) via load_midi_map().
@@ -972,9 +1033,10 @@ class MidiPlayer:
 		# Throttle for CC INFO log — at most one per CC number per second.
 		self._cc_last_log: dict[int, float] = {}
 
-		# Mix matrix cache: (in_channels, pan_weights_tuple) → (out_ch, in_ch) matrix.
+		# Mix matrix cache: (in_channels, pan_weights_tuple, output_routing) → matrix.
 		# Lazily populated by _get_mix_matrix(). Cleared on MIDI map reload.
-		self._mix_matrix_cache: dict[tuple[int, typing.Optional[tuple[float, ...]]], numpy.ndarray] = {}
+		_MixCacheKey = tuple[int, typing.Optional[tuple[float, ...]], typing.Optional[tuple[int, ...]]]
+		self._mix_matrix_cache: dict[_MixCacheKey, numpy.ndarray] = {}
 
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
@@ -1079,6 +1141,33 @@ class MidiPlayer:
 				output_device_index = subsample.audio.select_output_device(output_devices)
 		else:
 			output_device_index = subsample.audio.select_output_device(output_devices)
+
+		# Validate output routing indices against the resolved device channel count.
+		for (ch, note), (assignment, _pick) in self._note_map.items():
+			routing = assignment.output_routing
+			if routing is not None:
+				for idx in routing:
+					if idx >= self._output_channels:
+						_log.warning(
+							"Assignment %r (ch %d, note %d): output index %d exceeds "
+							"device channel count (%d) — using default routing",
+							assignment.name, ch, note, idx + 1, self._output_channels,
+						)
+						# Replace with None to fall back to default routing.
+						self._note_map[(ch, note)] = (
+							subsample.query.Assignment(
+								name=assignment.name,
+								select=assignment.select,
+								process=assignment.process,
+								one_shot=assignment.one_shot,
+								gain_db=assignment.gain_db,
+								pan_weights=assignment.pan_weights,
+								output_routing=None,
+								pick=assignment.pick,
+							),
+							_pick,
+						)
+						break
 
 		# Callback mode: PortAudio pulls audio from _audio_callback on its own
 		# high-priority thread. The MIDI loop runs independently and adds voices.
@@ -1292,8 +1381,9 @@ class MidiPlayer:
 			return
 
 		assignment, pick = entry
-		pan_weights = assignment.pan_weights
-		one_shot  = assignment.one_shot
+		pan_weights    = assignment.pan_weights
+		output_routing = assignment.output_routing
+		one_shot       = assignment.one_shot
 
 		# ── Sample selection via query engine ─────────────────────────────
 
@@ -1375,7 +1465,7 @@ class MidiPlayer:
 					variant = eff_transform.get_variant(sample_id, spec)
 
 					if variant is not None:
-						mix_mat = self._get_mix_matrix(variant.audio.shape[1], pan_weights)
+						mix_mat = self._get_mix_matrix(variant.audio.shape[1], pan_weights, output_routing)
 						rendered = self._render_float(variant.audio, variant.level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1392,7 +1482,7 @@ class MidiPlayer:
 					prev = self._last_played.get((msg.channel, msg.note))
 
 					if prev is not None and prev.key.sample_id == sample_id:
-						mix_mat = self._get_mix_matrix(prev.audio.shape[1], pan_weights)
+						mix_mat = self._get_mix_matrix(prev.audio.shape[1], pan_weights, output_routing)
 						rendered = self._render_float(prev.audio, prev.level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1406,7 +1496,7 @@ class MidiPlayer:
 			base = eff_transform.get_base(sample_id)
 
 			if base is not None:
-				mix_mat = self._get_mix_matrix(base.audio.shape[1], pan_weights)
+				mix_mat = self._get_mix_matrix(base.audio.shape[1], pan_weights, output_routing)
 				rendered = self._render_float(base.audio, base.level, msg.velocity, mix_mat, assignment.gain_db)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1417,7 +1507,7 @@ class MidiPlayer:
 				return
 
 		# 4. Last resort: convert from int PCM on this trigger.
-		mix_mat = self._get_mix_matrix(record.audio.shape[1] if record.audio is not None else 1, pan_weights)
+		mix_mat = self._get_mix_matrix(record.audio.shape[1] if record.audio is not None else 1, pan_weights, output_routing)
 		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity, mix_mat, assignment.gain_db)
 
 		if original is None:
@@ -1701,21 +1791,35 @@ class MidiPlayer:
 			len(new_map), old_count,
 		)
 
-	def _get_mix_matrix (self, in_channels: int, pan_weights: typing.Optional[numpy.ndarray]) -> numpy.ndarray:
+	def _get_mix_matrix (
+		self,
+		in_channels: int,
+		pan_weights: typing.Optional[numpy.ndarray],
+		output_routing: typing.Optional[tuple[int, ...]] = None,
+	) -> numpy.ndarray:
 
-		"""Look up or build a mixing matrix for the given input channel count and pan weights.
+		"""Look up or build a mixing matrix for the given input channel count, pan weights, and output routing.
 
-		Cached by (in_channels, pan_weights_tuple) so repeated triggers with
-		the same sample format and pan settings avoid rebuilding the matrix.
+		Cached by (in_channels, pan_weights_tuple, output_routing) so repeated
+		triggers with the same sample format and routing avoid rebuilding.
 		"""
 
-		key = (in_channels, tuple(pan_weights.tolist()) if pan_weights is not None else None)
+		key = (
+			in_channels,
+			tuple(pan_weights.tolist()) if pan_weights is not None else None,
+			output_routing,
+		)
 		cached = self._mix_matrix_cache.get(key)
 
 		if cached is not None:
 			return cached
 
-		mat = subsample.channel.build_mix_matrix(in_channels, self._output_channels, pan_weights)
+		if output_routing is not None:
+			logical = subsample.channel.build_mix_matrix(in_channels, len(output_routing), pan_weights)
+			mat = subsample.channel.route_to_device(logical, self._output_channels, output_routing)
+		else:
+			mat = subsample.channel.build_mix_matrix(in_channels, self._output_channels, pan_weights)
+
 		self._mix_matrix_cache[key] = mat
 		return mat
 

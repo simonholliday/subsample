@@ -57,7 +57,9 @@ you lifting a finger.
   5.1, 7.1) with standard ITU-R BS.775 downmix and conservative upmix. Samples
   of any channel count are automatically mapped to the output layout. Pan weights
   define a target layout; if the output has fewer channels, standard downmix is
-  applied automatically.
+  applied automatically. Per-instrument output routing lets you send different
+  instruments to different physical outputs on a multi-channel interface (e.g.
+  kick to outputs 1-2, snare to outputs 3-4) for separate external processing.
 - **Bank switching** - declare multiple instrument directories in the MIDI map
   and switch between them instantly via MIDI Program Change. Each bank has its
   own library, similarity index, and transform cache.
@@ -218,6 +220,7 @@ pre-mixed drum kit on first play — no manual configuration needed.
 | `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Stereo position as percentage weights e.g. `[50, 50]` = centre (default) |
+| `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
 
 ### Note syntax
 
@@ -438,6 +441,28 @@ count are automatically mapped to the output layout using ITU-R BS.775 downmix
 coefficients (surround to stereo, etc.) or conservative upmix (stereo to 5.1
 uses front pair only). Pan weights define a target layout - if the output has
 fewer channels, standard downmix is applied automatically.
+
+#### Output routing
+
+On a multi-channel interface you can route each instrument to specific physical
+outputs. Numbers are 1-indexed, matching the labels on your hardware:
+
+```yaml
+kick:
+  pan: [50, 50]
+  output: [1, 2]       # main monitors (default when omitted)
+
+snare:
+  pan: [50, 50]
+  output: [3, 4]       # separate outputs for external processing
+
+pad:
+  output: [5, 6]       # stereo sample sent to outputs 5-6
+```
+
+Set `player.audio.channels` in config to match your device (e.g. 8 for a
+Focusrite Scarlett 18i20). When `output` is omitted, instruments route to the
+first N outputs as before - stereo users see no change.
 
 ### Banks - switching instrument sets via MIDI
 

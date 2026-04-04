@@ -1941,3 +1941,54 @@ class TestRenderFloatGainDb:
 		result_loud   = player._render_float(audio, level, 100, mat, gain_db=6.0)
 
 		assert numpy.max(numpy.abs(result_loud)) > numpy.max(numpy.abs(result_normal))
+
+
+class TestParseOutputRouting:
+
+	"""Tests for _parse_output_routing — YAML output list to 0-indexed tuple."""
+
+	def test_basic_conversion (self) -> None:
+		"""1-indexed [3, 4] → 0-indexed (2, 3)."""
+		result = subsample.player._parse_output_routing([3, 4], "test", None)
+		assert result == (2, 3)
+
+	def test_none_returns_none (self) -> None:
+		"""Missing field returns None (default routing)."""
+		assert subsample.player._parse_output_routing(None, "test", None) is None
+
+	def test_single_output (self) -> None:
+		"""Single output [5] → (4,)."""
+		result = subsample.player._parse_output_routing([5], "test", None)
+		assert result == (4,)
+
+	def test_length_mismatch_with_pan (self) -> None:
+		"""output length != pan length raises ValueError."""
+		pan = numpy.array([50.0, 50.0], dtype=numpy.float32)
+		with pytest.raises(ValueError, match="must match pan length"):
+			subsample.player._parse_output_routing([1, 2, 3], "test", pan)
+
+	def test_matching_pan_length (self) -> None:
+		"""output length == pan length succeeds."""
+		pan = numpy.array([50.0, 50.0], dtype=numpy.float32)
+		result = subsample.player._parse_output_routing([3, 4], "test", pan)
+		assert result == (2, 3)
+
+	def test_zero_index_raises (self) -> None:
+		"""0 is invalid (1-indexed)."""
+		with pytest.raises(ValueError, match="positive integers"):
+			subsample.player._parse_output_routing([0, 1], "test", None)
+
+	def test_negative_raises (self) -> None:
+		"""Negative values are invalid."""
+		with pytest.raises(ValueError, match="positive integers"):
+			subsample.player._parse_output_routing([-1, 2], "test", None)
+
+	def test_duplicates_raise (self) -> None:
+		"""Duplicate channels raise ValueError."""
+		with pytest.raises(ValueError, match="duplicate"):
+			subsample.player._parse_output_routing([3, 3], "test", None)
+
+	def test_empty_list_raises (self) -> None:
+		"""Empty list raises ValueError."""
+		with pytest.raises(ValueError, match="non-empty"):
+			subsample.player._parse_output_routing([], "test", None)
