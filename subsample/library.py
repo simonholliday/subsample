@@ -606,7 +606,7 @@ def load_wav_audio (
 	for 32-bit). Returns None and logs a WARNING on any read error.
 
 	When target_sample_rate is set and differs from the file's native rate,
-	the audio is resampled via librosa (soxr_hq, broadcast quality) so that
+	the audio is resampled via librosa (soxr_hq quality) so that
 	in-memory audio is always at the output device rate.
 
 	Delegates to subsample.audio.read_audio_file() for the actual reading.
@@ -641,6 +641,7 @@ def load_wav_audio (
 			float_audio.T,
 			orig_sr=info.sample_rate,
 			target_sr=target_sample_rate,
+			res_type="soxr_hq",
 		).T.astype(numpy.float32)
 
 		# Convert back to original integer dtype.

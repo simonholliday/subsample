@@ -107,7 +107,7 @@ warnings.filterwarnings("ignore", message="Empty filters detected in mel frequen
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "12"
+ANALYSIS_VERSION: str = "13"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
