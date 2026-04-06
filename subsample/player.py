@@ -5,7 +5,7 @@ pattern from audio.py) and the MidiPlayer class which listens for MIDI events
 and triggers polyphonic audio playback.
 
 Mixing architecture: a PyAudio callback stream requests N frames at regular
-intervals. Each triggered note adds a _Voice (pre-rendered stereo float32
+intervals. Each triggered note adds a _Voice (pre-rendered multichannel float32
 audio + playback cursor) to a shared list. The callback sums all active
 voices into one output buffer, clips, converts to PCM bytes at the output
 bit depth, and returns them. The MIDI polling loop adds voices under a lock;
@@ -104,7 +104,8 @@ def _quantize_params (
 
 	# CcBinding means BPM will be resolved at note-on time — treat as "provided".
 	if isinstance(bpm_raw, subsample.query.CcBinding):
-		bpm = bpm_raw.default_value or config_bpm or 120.0
+		default = bpm_raw.default_value
+		bpm = default if default is not None and default > 0 else (config_bpm if config_bpm > 0 else 120.0)
 		grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16
 		return (bpm, grid)
 
@@ -252,13 +253,15 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 			# Try parsing as a bare integer first ("36"), then as a note name ("C3").
 			try:
 				n = int(item)
+			except ValueError:
+				n = None
+
+			if n is not None:
 				if not 0 <= n <= 127:
 					raise ValueError(
 						f"MIDI map assignment {assignment_name!r}: note {n} is outside [0, 127]"
 					)
 				return n
-			except ValueError:
-				pass
 
 			try:
 				return _parse_note_name(item)
@@ -484,9 +487,10 @@ def _resolve_path_references (
 	  - Directory predicates → all samples in the directory loaded into instrument library
 
 	Args:
-		note_map:      Note routing table: (mido_channel, midi_note) → (Assignment, pick).
-		matrices:      List of SimilarityMatrix (one per bank) to add references to.
-		instrument_lib: InstrumentLibrary to add path-based instruments to.
+		note_map:            Note routing table: (mido_channel, midi_note) → (Assignment, pick).
+		matrices:            List of SimilarityMatrix (one per bank) to add references to.
+		instrument_lib:      InstrumentLibrary to add path-based instruments to.
+		target_sample_rate:  When set, resample loaded audio to this rate.
 	"""
 
 	# Collect unique paths for references, instruments, and directories
@@ -769,9 +773,9 @@ class _Voice:
 
 	"""A single triggered sample being played back by the mix callback.
 
-	audio:     Pre-rendered stereo float32 array, shape (n_frames, 2), in
-	           [-1.0, 1.0]. Gain has already been applied. The callback reads
-	           from this array; it is never modified after creation.
+	audio:     Pre-rendered float32 array, shape (n_frames, output_channels),
+	           in [-1.0, 1.0]. Gain has already been applied. The callback
+	           reads from this array; it is never modified after creation.
 	note:      MIDI note number that triggered this voice — used to match
 	           note_off events in _handle_message().
 	channel:   MIDI channel (mido 0-indexed) that triggered this voice.
@@ -779,7 +783,7 @@ class _Voice:
 	           Voice is removed when position >= len(audio).
 	releasing: Set to True when a note_off arrives for this note+channel
 	           (only for non-one-shot voices).  The callback applies a short
-	           cosine fade-out over self._release_fade_frames frames, then retires.
+	           cosine fade-out over the player's _release_fade_frames frames, then retires.
 	one_shot:  When True, note_off events are ignored — the sample plays to
 	           natural completion.  Kicks, snares, and cymbals are one-shot;
 	           hi-hats are not (open hi-hat is silenced by the closed pedal).
@@ -1113,7 +1117,7 @@ class MidiPlayer:
 
 	def run (self) -> None:
 
-		"""Open MIDI input and a stereo callback output stream, then dispatch events.
+		"""Open MIDI input and a callback output stream, then dispatch events.
 
 		Blocks until shutdown_event is set. Both the MIDI port and the PyAudio
 		stream are closed in the finally block.
@@ -1143,6 +1147,9 @@ class MidiPlayer:
 			output_device_index = subsample.audio.select_output_device(output_devices)
 
 		# Validate output routing indices against the resolved device channel count.
+		# Collect replacements first to avoid mutating the dict during iteration.
+		routing_fixes: dict[tuple[int, int], tuple[subsample.query.Assignment, int]] = {}
+
 		for (ch, note), (assignment, _pick) in self._note_map.items():
 			routing = assignment.output_routing
 			if routing is not None:
@@ -1153,8 +1160,7 @@ class MidiPlayer:
 							"device channel count (%d) — using default routing",
 							assignment.name, ch, note, idx + 1, self._output_channels,
 						)
-						# Replace with None to fall back to default routing.
-						self._note_map[(ch, note)] = (
+						routing_fixes[(ch, note)] = (
 							subsample.query.Assignment(
 								name=assignment.name,
 								select=assignment.select,
@@ -1168,6 +1174,8 @@ class MidiPlayer:
 							_pick,
 						)
 						break
+
+		self._note_map.update(routing_fixes)
 
 		# Callback mode: PortAudio pulls audio from _audio_callback on its own
 		# high-priority thread. The MIDI loop runs independently and adds voices.
@@ -1225,11 +1233,12 @@ class MidiPlayer:
 		"""PyAudio output callback — mixes all active voices into one buffer.
 
 		Called by PortAudio on its high-priority audio thread at regular
-		intervals. Must return quickly: no logging, no I/O, no blocking.
+		intervals. Must return quickly and avoid blocking. Clipping detection
+		is logged at WARNING with per-second throttling.
 
 		Sums all active _Voice arrays into a float32 mix, clips to [-1, 1],
-		converts to int16, and returns the bytes. Finished voices (cursor past
-		end of audio) are removed from the list.
+		converts to PCM bytes at the output bit depth, and returns the bytes.
+		Finished voices (cursor past end of audio) are removed from the list.
 
 		Releasing voices (note_off received): a cosine fade-out is applied over
 		min(remaining, self._release_fade_frames) frames, then the voice is retired.

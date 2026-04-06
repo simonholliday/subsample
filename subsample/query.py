@@ -82,7 +82,7 @@ class WherePredicate:
 	max_pitch_hz:  typing.Optional[float] = None
 	reference:     typing.Optional[str]   = None
 	name:          typing.Optional[str]   = None
-	name_path:     typing.Optional[str]   = None  # Resolved absolute path for path-based name predicates
+	name_path:     typing.Optional[str]   = None  # Resolved absolute path; used by _resolve_path_references to load samples (not used in matches())
 	directory:     typing.Optional[str]   = None  # Resolved absolute path; filters to samples from this directory
 
 	def matches (self, record: "subsample.library.SampleRecord") -> bool:

@@ -113,8 +113,8 @@ How to add a new transform type
 import collections
 import concurrent.futures
 import dataclasses
-import math
 import hashlib
+import math
 import logging
 import os
 import pathlib
@@ -1132,7 +1132,7 @@ class TransformProcessor:
 
 	Mirrors the SampleProcessor pattern: enqueue() submits a job and returns
 	immediately.  Workers convert the source PCM to float32, apply the
-	registered transform chain in priority order, compute a LevelResult, and
+	registered transform chain in declaration order, compute a LevelResult, and
 	call on_complete.
 
 	Adding a new transform type
@@ -1296,11 +1296,17 @@ class TransformProcessor:
 			if record.audio is None:
 				return
 
+			# Compute the source audio hash once — used for both the disk cache
+			# read check and the write after DSP.
+			audio_md5: typing.Optional[str] = None
+
+			if record.audio is not None:
+				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+
 			# Check disk cache before doing expensive DSP.  This covers the
 			# startup pre-computation path (update_assignments → enqueue_pitch_range)
 			# which bypasses TransformManager.get_variant().
-			if self._disk_cache is not None and spec.steps:
-				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+			if self._disk_cache is not None and spec.steps and audio_md5 is not None:
 				disk_hit = self._disk_cache.get(audio_md5, spec, key)
 
 				if disk_hit is not None:
@@ -1324,7 +1330,7 @@ class TransformProcessor:
 			if actual_peak > 0.0:
 				audio = audio * (0.9 / actual_peak)
 
-			# Apply each step in priority order, dispatching via _HANDLERS.
+			# Apply each step in declaration order, dispatching via _HANDLERS.
 			# Handlers receive the original capture sample rate so all DSP
 			# operates at full resolution before the final downsample.
 			for step in spec.steps:
@@ -1365,9 +1371,8 @@ class TransformProcessor:
 			if (
 				self._disk_cache is not None
 				and spec.steps
-				and record.audio is not None
+				and audio_md5 is not None
 			):
-				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
 				self._disk_cache.put(audio_md5, spec, result)
 
 			if self._on_complete is not None:
@@ -1543,27 +1548,24 @@ class TransformManager:
 		if result is not None:
 			return result
 
+		record = self._instrument_library.get(sample_id)
+
 		# Check disk cache before enqueuing a (possibly expensive) recompute.
-		if self._disk_cache is not None:
-			record = self._instrument_library.get(sample_id)
+		if self._disk_cache is not None and record is not None and record.audio is not None:
+			audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+			disk_hit = self._disk_cache.get(audio_md5, spec, key)
 
-			if record is not None and record.audio is not None:
-				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
-				disk_hit = self._disk_cache.get(audio_md5, spec, key)
-
-				if disk_hit is not None:
-					self._cache.put(disk_hit)
-					_log.debug(
-						"Disk cache hit for sample %d (%d step(s))",
-						sample_id, len(spec.steps),
-					)
-					return disk_hit
+			if disk_hit is not None:
+				self._cache.put(disk_hit)
+				_log.debug(
+					"Disk cache hit for sample %d (%d step(s))",
+					sample_id, len(spec.steps),
+				)
+				return disk_hit
 
 		# Miss — enqueue for background computation.
-		if result is None:
-			record = self._instrument_library.get(sample_id)
-			if record is not None:
-				self._processor.enqueue(record, spec)
+		if record is not None:
+			self._processor.enqueue(record, spec)
 
 		return None
 
@@ -2113,6 +2115,7 @@ def _apply_filter (
 	else:
 		clamped = max(1.0, min(freq, nyquist - 1.0))
 
+		# Degenerate case: freq <= 1 Hz after clamping — filter is meaningless.
 		if clamped <= 1.0:
 			return audio
 
@@ -2822,26 +2825,16 @@ def _apply_reshape (
 
 		cursor = end
 
-		# Sustain region: constant at sustain level until release.
-		release_samples = max(1, int(release_ms * sample_rate / 1000.0))
-		release_start = max(cursor, n_frames - release_samples)
-		gain[cursor:release_start] = step.sustain
-	else:
-		# No explicit decay — sustain level applies from cursor onward.
-		if step.sustain < 1.0:
-			release_samples = max(1, int(release_ms * sample_rate / 1000.0))
-			release_start = max(cursor, n_frames - release_samples)
-			gain[cursor:release_start] = step.sustain
-		else:
-			release_samples = max(1, int(release_ms * sample_rate / 1000.0))
-			release_start = max(cursor, n_frames - release_samples)
-
-	# Release phase: fade from sustain level to 0.
+	# Sustain region: constant at sustain level until release.
 	release_samples = max(1, int(release_ms * sample_rate / 1000.0))
 	release_start = max(cursor, n_frames - release_samples)
 
+	if step.sustain < 1.0 or step.decay_ms is not None:
+		gain[cursor:release_start] = step.sustain
+
+	# Release phase: fade from current level to 0.
 	if release_start < n_frames:
-		start_level = gain[release_start] if release_start < n_frames else step.sustain
+		start_level = gain[release_start]
 		gain[release_start:] = numpy.linspace(
 			start_level, 0.0, n_frames - release_start,
 		)

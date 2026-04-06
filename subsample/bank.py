@@ -244,6 +244,7 @@ class BankManager:
 
 	@property
 	def bank_count (self) -> int:
+		"""Number of loaded banks."""
 		return len(self._banks)
 
 	# -- Switching ---------------------------------------------------------
@@ -307,6 +308,10 @@ class BankManager:
 		new_map: dict[int, Bank] = {}
 
 		for bank in banks:
+			if bank.program in new_map:
+				raise ValueError(
+					f"Duplicate program number {bank.program} in bank update"
+				)
 			new_map[bank.program] = bank
 
 		with self._lock:

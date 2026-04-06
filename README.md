@@ -938,9 +938,9 @@ python scripts/analyze_file.py samples/2026-03-17_14-32-01.wav
 Output:
 ```
 rhythm:   tempo=120.2bpm  beats=4  pulses=12  onsets=4
-spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001  zcr=0.120  harmonic=0.821  contrast=0.310  voiced=0.940  log_attack=0.000  flux=0.312
-pitch:    pitch=440.0Hz  chroma=A  pitch_conf=0.89
-level:    peak=0.8743 (-1.2dBFS)  rms=0.2341 (-12.6dBFS)
+spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001  zcr=0.120  harmonic=0.821  contrast=0.310  voiced=0.940  log_attack=0.000  flux=0.312  rolloff=0.451  slope=0.023
+pitch:    pitch=440.0Hz  chroma=A  pitch_conf=0.89  stability=0.120st  voiced_frames=86
+level:    peak -1.2dBFS  rms -12.6dBFS  crest 11.4dB  floor -42.3dBFS
 ```
 
 Spectral metrics (all [0, 1]):
@@ -955,15 +955,21 @@ Spectral metrics (all [0, 1]):
 - **voiced** - fraction of frames with detected pitch
 - **log_attack** - 0 = instant spectral onset, 1 = very slow
 - **flux** - 0 = static spectrum, 1 = rapidly evolving
+- **rolloff** - 0 = energy concentrated low, 1 = energy extends to Nyquist
+- **slope** - 0 = flat spectrum, 1 = steeply tilted
 
 Pitch data (raw values):
 - **pitch** - dominant fundamental frequency in Hz, or "none" for unpitched audio
 - **chroma** - dominant pitch class (C-B), or "none"
 - **pitch_conf** - pyin confidence [0, 1]; use with `voiced` to judge reliability
+- **stability** - pitch stability in semitones; lower = more stable
+- **voiced_frames** - number of frames with detected pitch
 
 Amplitude metadata:
-- **peak** - peak absolute amplitude [0, 1] with dBFS equivalent
-- **rms** - RMS loudness [0, 1] with dBFS equivalent; drives playback gain normalisation
+- **peak** - peak level in dBFS
+- **rms** - RMS loudness in dBFS; drives playback gain normalisation
+- **crest** - crest factor (peak-to-RMS ratio) in dB
+- **floor** - noise floor in dBFS (shown when detectable)
 
 Three MFCC timbre fingerprints are stored in the sidecar (used for similarity,
 not shown in script output): `mfcc` (mean, average timbre), `mfcc_delta`
