@@ -713,6 +713,7 @@ weights - is optional and rarely needs changing.
 
 | Setting | Default | Description |
 |---|---|---|
+| `max_memory_mb` | auto | Total cache memory budget. Auto-detect: min(25% of system RAM, 1024 MB). Split: 60% instruments, 35% transforms, 5% carrier |
 | `recorder.enabled` | `true` | Enable live audio capture; set to `false` to process files only |
 | `recorder.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
@@ -744,7 +745,7 @@ weights - is optional and rarely needs changing.
 | `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
-| `instrument.max_memory_mb` | `100.0` | Max audio memory for in-memory samples; oldest evicted (FIFO) when exceeded |
+| `instrument.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
 | `instrument.directory` | `samples/captures` | Directory of instrument samples to load at startup (overridden by `banks:` in the MIDI map when present) |
 | `instrument.clean_orphaned_sidecars` | `true` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
 | `instrument.watch` | `false` | Monitor `instrument.directory` (or each bank directory) at runtime for new samples arriving from a remote recorder instance (see Multi-machine setup) |
@@ -753,12 +754,12 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
 | `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack character |
 | `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
-| `transform.max_memory_mb` | `50.0` | Memory budget (MB) for transform variants (pitch-shifted + time-stretched) |
+| `transform.max_memory_mb` | auto | Memory budget (MB) for transform variants; overrides global split |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
 | `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantized to the target tempo |
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
 | `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |
-| `transform.max_disk_mb` | `500.0` | Max disk space (MB) for cached variant files; 0 disables. Oldest by mtime evicted when exceeded |
+| `transform.max_disk_mb` | auto | Max disk space (MB) for cached variant files; defaults to 3x memory budget. 0 disables |
 
 ## Output
 

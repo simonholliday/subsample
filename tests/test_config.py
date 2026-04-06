@@ -3,6 +3,7 @@
 import dataclasses
 import pathlib
 import textwrap
+import unittest.mock
 
 import pytest
 
@@ -80,9 +81,10 @@ class TestLoadDefault:
 
 	def test_default_instrument_values (self) -> None:
 		# TEST DEPENDENCY: config.yaml.default instrument section defaults
+		# instrument.max_memory_mb is derived from auto-detect (60% of global).
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.instrument.max_memory_mb == 100.0
+		assert cfg.instrument.max_memory_mb > 0
 		assert cfg.instrument.directory == "samples/captures"
 
 	def test_default_similarity_values (self) -> None:
@@ -769,3 +771,104 @@ class TestInputRouting:
 		"""Empty list raises ValueError."""
 		with pytest.raises(ValueError, match="non-empty"):
 			self._make_config(tmp_path, "input: []")
+
+
+class TestMemoryBudget:
+
+	"""Tests for the unified memory budget and auto-detect logic."""
+
+	def _make_config (self, tmp_path: pathlib.Path, extra: str) -> subsample.config.Config:
+		"""Helper: write a config.yaml with the given top-level extras."""
+		yaml_content = (
+			f"{extra}\n"
+			"recorder:\n"
+			"  audio:\n"
+			"    sample_rate: 44100\n"
+			"    bit_depth: 16\n"
+			"    chunk_size: 512\n"
+			"    channels: 1\n"
+			"  buffer:\n"
+			"    max_seconds: 10\n"
+			"detection:\n"
+			"  snr_threshold_db: 6\n"
+			"  hold_time: 0.5\n"
+			"  warmup_seconds: 2\n"
+			"  ema_alpha: 0.1\n"
+			"output:\n"
+			"  directory: /tmp/test\n"
+		)
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+		return subsample.config.load_config(config_file)
+
+	def test_explicit_global_splits_correctly (self, tmp_path: pathlib.Path) -> None:
+		"""max_memory_mb: 200 → instrument 120, transform 70, carrier 10."""
+		cfg = self._make_config(tmp_path, "max_memory_mb: 200")
+		assert cfg.instrument.max_memory_mb == pytest.approx(120.0)
+		assert cfg.transform.max_memory_mb == pytest.approx(70.0)
+		assert cfg.transform.carrier_memory_mb == pytest.approx(10.0)
+		assert cfg.transform.max_disk_mb == pytest.approx(600.0)
+
+	def test_per_cache_overrides_global (self, tmp_path: pathlib.Path) -> None:
+		"""Explicit per-cache values take precedence over global."""
+		cfg = self._make_config(
+			tmp_path,
+			"max_memory_mb: 200\n"
+			"instrument:\n"
+			"  max_memory_mb: 300\n",
+		)
+		assert cfg.instrument.max_memory_mb == 300.0
+		assert cfg.transform.max_memory_mb == pytest.approx(70.0)
+
+	def test_both_per_cache_ignores_global (self, tmp_path: pathlib.Path) -> None:
+		"""When both per-cache values are set, global budget is not applied."""
+		cfg = self._make_config(
+			tmp_path,
+			"max_memory_mb: 200\n"
+			"instrument:\n"
+			"  max_memory_mb: 300\n"
+			"transform:\n"
+			"  max_memory_mb: 80\n",
+		)
+		assert cfg.instrument.max_memory_mb == 300.0
+		assert cfg.transform.max_memory_mb == 80.0
+
+	def test_disk_override_wins (self, tmp_path: pathlib.Path) -> None:
+		"""Explicit max_disk_mb overrides the 3x global default."""
+		cfg = self._make_config(
+			tmp_path,
+			"max_memory_mb: 200\n"
+			"transform:\n"
+			"  max_disk_mb: 1000\n",
+		)
+		assert cfg.transform.max_disk_mb == 1000.0
+		# Transform memory still comes from global.
+		assert cfg.transform.max_memory_mb == pytest.approx(70.0)
+
+	@unittest.mock.patch("subsample.config._auto_detect_memory_mb", return_value=512.0)
+	def test_auto_detect_2gb_system (self, mock_detect: unittest.mock.MagicMock, tmp_path: pathlib.Path) -> None:
+		"""On a 2 GB system, auto-detect → 512 MB budget."""
+		cfg = self._make_config(tmp_path, "")
+		assert cfg.instrument.max_memory_mb == pytest.approx(512.0 * 0.60)
+		assert cfg.transform.max_memory_mb == pytest.approx(512.0 * 0.35)
+		assert cfg.transform.carrier_memory_mb == pytest.approx(512.0 * 0.05)
+		assert cfg.transform.max_disk_mb == pytest.approx(512.0 * 3.0)
+
+	@unittest.mock.patch("subsample.config._auto_detect_memory_mb", return_value=1024.0)
+	def test_auto_detect_16gb_system (self, mock_detect: unittest.mock.MagicMock, tmp_path: pathlib.Path) -> None:
+		"""On a 16 GB+ system, auto-detect → 1024 MB cap."""
+		cfg = self._make_config(tmp_path, "")
+		assert cfg.instrument.max_memory_mb == pytest.approx(1024.0 * 0.60)
+		assert cfg.transform.max_memory_mb == pytest.approx(1024.0 * 0.35)
+
+	def test_auto_detect_returns_positive (self) -> None:
+		"""_auto_detect_memory_mb returns a positive value on this system."""
+		result = subsample.config._auto_detect_memory_mb()
+		assert result > 0
+		assert result <= 1024.0
+
+	@unittest.mock.patch("os.sysconf", side_effect=AttributeError)
+	def test_auto_detect_fallback (self, mock_sysconf: unittest.mock.MagicMock) -> None:
+		"""When os.sysconf is unavailable, falls back to 160 MB."""
+		result = subsample.config._auto_detect_memory_mb()
+		assert result == 160.0

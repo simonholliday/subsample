@@ -978,7 +978,8 @@ class TestTransformConfig:
 
 	def test_default_transform_values (self) -> None:
 		cfg = subsample.config.load_config(self._DEFAULT_CONFIG_PATH)
-		assert cfg.transform.max_memory_mb       == 50.0
+		# max_memory_mb is derived from auto-detect (35% of global).
+		assert cfg.transform.max_memory_mb       > 0
 		assert cfg.transform.auto_pitch          is True
 		assert cfg.transform.target_bpm          == 0.0
 		assert cfg.transform.quantize_resolution == 16

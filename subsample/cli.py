@@ -639,6 +639,17 @@ def main () -> None:
 
 	cfg = subsample.config.load_config()
 
+	# Wire the carrier cache budget from the resolved config.
+	subsample.transform.set_carrier_cache_budget(
+		int(cfg.transform.carrier_memory_mb * 1024 * 1024)
+	)
+
+	_log.info(
+		"Memory budget: instrument %.0f MB, transform %.0f MB, carrier %.0f MB, disk %.0f MB",
+		cfg.instrument.max_memory_mb, cfg.transform.max_memory_mb,
+		cfg.transform.carrier_memory_mb, cfg.transform.max_disk_mb,
+	)
+
 	_print_banner(cfg)
 
 	# Reference library starts empty.  Path-based references declared in

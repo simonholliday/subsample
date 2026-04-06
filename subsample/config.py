@@ -9,6 +9,7 @@ mypy coverage.
 
 import dataclasses
 import logging
+import os
 import pathlib
 import typing
 
@@ -16,6 +17,31 @@ import yaml
 
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Memory auto-detection
+# ---------------------------------------------------------------------------
+
+_AUTO_DETECT_FALLBACK_MB: float = 160.0
+"""Fallback total budget when system RAM cannot be detected (100+50+10)."""
+
+
+def _auto_detect_memory_mb () -> float:
+
+	"""Return min(25% of total system RAM, 1024) in MB.
+
+	Uses os.sysconf on Linux/macOS.  Falls back to _AUTO_DETECT_FALLBACK_MB
+	on platforms where sysconf is unavailable.
+	"""
+
+	try:
+		total_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+		quarter_mb = (total_bytes / (1024 * 1024)) * 0.25
+		return min(quarter_mb, 1024.0)
+
+	except (ValueError, OSError, AttributeError):
+		return _AUTO_DETECT_FALLBACK_MB
 
 
 @dataclasses.dataclass(frozen=True)
@@ -287,6 +313,10 @@ class TransformConfig:
 	Oldest files (by modification time) are evicted when the budget is
 	exceeded.  At 44100 Hz float32 stereo, 500 MB ≈ 1500 seconds."""
 
+	carrier_memory_mb: float = 10.0
+	"""Memory budget (MB) for vocoder carrier file cache.  Derived from the
+	global memory budget (5%) when not overridden."""
+
 
 @dataclasses.dataclass(frozen=True)
 class Config:
@@ -294,6 +324,12 @@ class Config:
 	recorder: RecorderConfig
 	detection: DetectionConfig
 	output: OutputConfig
+	max_memory_mb: typing.Optional[float] = None
+	"""Total memory budget (MB) for all sample caches.
+	None = auto-detect: min(25% of total system RAM, 1024 MB).
+	When resolved, the budget is split automatically:
+	60% instruments, 35% transform variants, 5% carrier.
+	Overridden by explicit per-cache settings in instrument/transform sections."""
 	analysis: AnalysisConfig = dataclasses.field(default_factory=AnalysisConfig)
 	instrument: InstrumentConfig = dataclasses.field(default_factory=InstrumentConfig)
 	similarity: SimilarityConfig = dataclasses.field(default_factory=SimilarityConfig)
@@ -689,10 +725,38 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),
 	)
 
+	# Resolve the unified memory budget.  Per-cache overrides take precedence;
+	# when both instrument and transform have explicit values the global budget
+	# is unused.
+	instrument_explicit = "max_memory_mb" in instrument_raw
+	transform_explicit  = "max_memory_mb" in transform_raw
+	disk_explicit       = "max_disk_mb" in transform_raw
+
+	global_raw = raw.get("max_memory_mb")
+	global_budget: typing.Optional[float] = None
+
+	if not (instrument_explicit and transform_explicit):
+		global_budget = float(global_raw) if global_raw is not None else _auto_detect_memory_mb()
+
+		if not instrument_explicit:
+			instrument = dataclasses.replace(instrument, max_memory_mb=global_budget * 0.60)
+
+		if not transform_explicit:
+			transform = dataclasses.replace(transform, max_memory_mb=global_budget * 0.35)
+
+		if not disk_explicit:
+			transform = dataclasses.replace(transform, max_disk_mb=global_budget * 3.0)
+
+		transform = dataclasses.replace(transform, carrier_memory_mb=global_budget * 0.05)
+
+	elif global_raw is not None:
+		global_budget = float(global_raw)
+
 	return Config(
 		recorder=recorder,
 		detection=detection,
 		output=output,
+		max_memory_mb=global_budget,
 		analysis=analysis,
 		instrument=instrument,
 		similarity=similarity,

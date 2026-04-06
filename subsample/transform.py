@@ -3095,13 +3095,21 @@ def _apply_pad_quantize (
 
 # Module-level cache for carrier audio files.  Carriers are typically small
 # reference samples loaded once per session; caching avoids redundant disk I/O
-# when many variants use the same carrier.  FIFO eviction when the 10 MB
-# budget is exceeded (same pattern as InstrumentLibrary).
+# when many variants use the same carrier.  FIFO eviction when the budget
+# is exceeded (same pattern as InstrumentLibrary).
 _CARRIER_CACHE_MAX_BYTES: int = 10 * 1024 * 1024
 _carrier_cache: dict[str, numpy.ndarray] = {}
 _carrier_cache_order: collections.deque[str] = collections.deque()
 _carrier_cache_bytes: int = 0
 _carrier_cache_lock = threading.Lock()
+
+
+def set_carrier_cache_budget (max_bytes: int) -> None:
+
+	"""Set the carrier cache memory budget.  Called from cli.py after config is loaded."""
+
+	global _CARRIER_CACHE_MAX_BYTES
+	_CARRIER_CACHE_MAX_BYTES = max_bytes
 
 
 def _load_carrier (path: str, target_sr: int) -> numpy.ndarray:

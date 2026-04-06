@@ -8,6 +8,21 @@
 #   cp config.yaml.default config.yaml
 
 # ---------------------------------------------------------------------------
+# Memory budget — how much RAM Subsample may use for sample caches
+# ---------------------------------------------------------------------------
+# Subsample maintains three in-memory caches: instrument samples (raw PCM),
+# transform variants (processed float32 audio), and carrier files (vocoder).
+# The budget is split automatically: 60% instruments, 35% transforms, 5% carrier.
+#
+# max_memory_mb: null
+# null (default) = auto-detect from system RAM: min(25% of total, 1024 MB).
+# Examples:  2 GB Raspberry Pi → 512 MB.  16 GB+ workstation → 1024 MB.
+# Set explicitly to override, e.g.:  max_memory_mb: 500
+#
+# For fine-grained control, set individual cache budgets in the instrument
+# and transform sections below — these override the global split.
+
+# ---------------------------------------------------------------------------
 # recorder — real-time audio capture from an input device
 # ---------------------------------------------------------------------------
 # Set enabled: false to skip live recording and only process files given on
@@ -320,8 +335,7 @@ analysis:
 #   # limit is exceeded, oldest samples are evicted (FIFO) to make room for new
 #   # ones — newest captures are always kept, oldest are dropped. WAV files on
 #   # disk are never deleted. At 44100 Hz 16-bit mono, 100 MB ≈ 19 minutes.
-#   # Default: 100.0 MB. The instrument library is always active; this value
-#   # only controls how much audio is held in memory at once.
+#   # Overrides the global max_memory_mb split for instrument samples.
 #   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_instrument_values
 #
 #   directory: samples/captures
@@ -376,7 +390,8 @@ analysis:
 
 # transform:
 #   max_memory_mb: 50.0
-#   # Memory budget (MB) for derivative audio. Separate from instrument.max_memory_mb.
+#   # Memory budget (MB) for derivative audio.
+#   # Overrides the global max_memory_mb split for transform variants.
 #   # Eviction: parent-priority FIFO — all variants of the oldest parent are
 #   # evicted together so remaining sets stay complete and playable.
 #   # At 44100 Hz float32 stereo, 50 MB ≈ 150 seconds of derivative audio.
