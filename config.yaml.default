@@ -47,6 +47,17 @@ recorder:
     # microphone will record in stereo without any manual setting.
     # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
+    # input: null
+    # Physical input channels to record from (1-indexed, matching your interface
+    # labels).  Default: first N channels (where N = channels above).
+    # On a multi-channel interface, use this to select specific inputs:
+    #   input: [1, 2]       # main stereo pair
+    #   input: [3, 4]       # alternate stereo pair
+    #   input: [1, 3]       # non-contiguous inputs
+    # Length must match channels (or channels is inferred from length).
+    # When both channels and input are omitted and the device has 3+
+    # inputs, you will be prompted to choose.
+
     chunk_size: 512
     # Frames requested per PortAudio callback. PortAudio adapts internally to the
     # hardware period size, but aligning to it avoids redundant buffering.

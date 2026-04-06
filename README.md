@@ -98,7 +98,9 @@ noisy rehearsal space. Each captured sound is trimmed with smooth S-curve fades
 to avoid clicks. All channel formats are preserved end-to-end - a stereo microphone records
 and plays back in stereo, a quad recording keeps its four channels, and
 multichannel samples are automatically mapped to the output layout using
-standard ITU downmix coefficients.
+standard ITU downmix coefficients. On multi-channel interfaces (e.g. Focusrite
+Scarlett 18i20), `recorder.audio.input` selects which physical inputs to record
+from - for example `[3, 4]` records a stereo pair from inputs 3 and 4.
 
 You can also feed it pre-recorded WAV files - they pass through the same
 detection pipeline, making it easy to build sample libraries from existing
@@ -716,6 +718,7 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
 | `recorder.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
 | `recorder.audio.channels` | auto | 1 = mono, 2 = stereo. Omit (or `null`) to auto-detect from device |
+| `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |

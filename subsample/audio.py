@@ -248,13 +248,25 @@ class AudioReader:
 		)
 
 		self._bit_depth = audio_cfg.bit_depth
-		self._channels = audio_cfg.channels
 		self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self._QUEUE_MAX)
 		self._overflow_count: int = 0
 
+		# Input channel routing: when specific physical inputs are selected,
+		# we open the stream with enough channels to cover the highest index,
+		# then extract only the requested columns in read().
+		self._input_map: typing.Optional[tuple[int, ...]] = audio_cfg.input
+
+		if self._input_map is not None:
+			stream_channels = max(self._input_map) + 1
+		else:
+			stream_channels = audio_cfg.channels
+
+		self._stream_channels = stream_channels
+		self._channels = audio_cfg.channels
+
 		self._stream = pa.open(
 			format=get_pyaudio_format(audio_cfg.bit_depth),
-			channels=audio_cfg.channels,
+			channels=stream_channels,
 			rate=audio_cfg.sample_rate,
 			input=True,
 			input_device_index=device_index,
@@ -282,7 +294,13 @@ class AudioReader:
 		except queue.Empty:
 			return None
 
-		return unpack_audio(raw_bytes, self._bit_depth, self._channels)
+		chunk = unpack_audio(raw_bytes, self._bit_depth, self._stream_channels)
+
+		# Select only the requested physical inputs when input routing is active.
+		if self._input_map is not None:
+			chunk = chunk[:, list(self._input_map)]
+
+		return chunk
 
 	@property
 	def overflow_count (self) -> int:
@@ -352,6 +370,56 @@ def get_device_channels (pa: pyaudio.PyAudio, device_index: int) -> int:
 		)
 
 	return ch
+
+
+def select_input_channels (device_name: str, max_channels: int) -> tuple[int, ...]:
+
+	"""Prompt the user to choose which input channels to record from.
+
+	Called when both channels and input are omitted in config and the device
+	reports 3+ input channels (too many to silently use all).
+
+	Args:
+		device_name:  Display name of the audio device.
+		max_channels: Total number of input channels available.
+
+	Returns:
+		Tuple of 0-indexed channel indices.
+
+	Raises:
+		ValueError: If no valid channels are entered.
+	"""
+
+	print(f'\nAudio input device "{device_name}" has {max_channels} input channels.')
+	print("Which channels to record? (1-indexed, comma-separated, e.g. 1,2)")
+
+	raw = input("> ").strip()
+
+	if not raw:
+		raise ValueError("No input channels selected")
+
+	parts = [p.strip() for p in raw.split(",")]
+	selected: list[int] = []
+
+	for part in parts:
+		try:
+			n = int(part)
+		except ValueError:
+			raise ValueError(f"Invalid channel number: {part!r}") from None
+
+		if n < 1 or n > max_channels:
+			raise ValueError(
+				f"Channel {n} is out of range (device has inputs 1-{max_channels})"
+			)
+
+		if n - 1 in selected:
+			raise ValueError(f"Duplicate channel: {n}")
+
+		selected.append(n - 1)
+
+	print(f"Recording {len(selected)} channel(s) from input(s) {', '.join(str(s + 1) for s in selected)}")
+
+	return tuple(selected)
 
 
 def list_input_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:

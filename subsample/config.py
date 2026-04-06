@@ -31,6 +31,12 @@ class AudioConfig:
 
 	When set explicitly, `channels` is validated to be > 0 at config-load
 	time.  The auto-detect path validates after the device is opened.
+
+	`input` selects which physical input channels to record from on a
+	multi-channel interface (0-indexed internally, 1-indexed in YAML).
+	When set, the stream opens with enough channels to cover the highest
+	index, and only the requested columns are extracted.  When omitted,
+	the first `channels` inputs are used.
 	"""
 
 	sample_rate: int
@@ -38,6 +44,9 @@ class AudioConfig:
 	chunk_size: int
 	channels: typing.Optional[int] = None
 	"""Number of input channels to capture.  None = auto-detect from device."""
+	input: typing.Optional[tuple[int, ...]] = None
+	"""Physical input channels to record (0-indexed).  None = first N channels.
+	Set via 1-indexed list in config.yaml; converted at config-load time."""
 	device: typing.Optional[str] = None
 
 
@@ -441,11 +450,45 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	channels_raw = audio_raw.get("channels")
 	channels: typing.Optional[int] = int(channels_raw) if channels_raw is not None else None
 
+	# input is optional: 1-indexed list of physical input channels, converted
+	# to 0-indexed tuple.  None means use the first N channels.
+	input_raw = audio_raw.get("input")
+	input_channels: typing.Optional[tuple[int, ...]] = None
+
+	if input_raw is not None:
+		input_list = list(input_raw)
+
+		if not input_list:
+			raise ValueError("recorder.audio.input must be a non-empty list")
+
+		for ch in input_list:
+			if not isinstance(ch, int) or ch < 1:
+				raise ValueError(
+					f"recorder.audio.input channels must be positive integers "
+					f"(1-indexed), got {ch!r}"
+				)
+
+		if len(set(input_list)) != len(input_list):
+			raise ValueError(f"recorder.audio.input contains duplicates: {input_list}")
+
+		# Convert 1-indexed → 0-indexed.
+		input_channels = tuple(ch - 1 for ch in input_list)
+
+		# Infer channels from input length if not explicitly set.
+		if channels is None:
+			channels = len(input_channels)
+		elif channels != len(input_channels):
+			raise ValueError(
+				f"recorder.audio.channels ({channels}) does not match "
+				f"recorder.audio.input length ({len(input_channels)})"
+			)
+
 	audio = AudioConfig(
 		sample_rate=int(_require(audio_raw, "sample_rate", "recorder.audio")),
 		bit_depth=int(_require(audio_raw, "bit_depth", "recorder.audio")),
 		chunk_size=int(_require(audio_raw, "chunk_size", "recorder.audio")),
 		channels=channels,
+		input=input_channels,
 		device=device_raw,
 	)
 

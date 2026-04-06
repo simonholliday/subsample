@@ -421,3 +421,44 @@ class TestGetDeviceChannels:
 
 		with pytest.raises(ValueError, match="no input channels"):
 			subsample.audio.get_device_channels(pa, 0)
+
+
+class TestSelectInputChannels:
+
+	"""Tests for select_input_channels() interactive prompt."""
+
+	def test_basic_selection (self) -> None:
+		"""'1,2' on a 4-channel device returns (0, 1)."""
+		with unittest.mock.patch("builtins.input", return_value="1,2"):
+			result = subsample.audio.select_input_channels("Test Device", 4)
+		assert result == (0, 1)
+
+	def test_non_contiguous (self) -> None:
+		"""'1,3' selects channels 0 and 2."""
+		with unittest.mock.patch("builtins.input", return_value="1,3"):
+			result = subsample.audio.select_input_channels("Test Device", 8)
+		assert result == (0, 2)
+
+	def test_single_channel (self) -> None:
+		"""'5' selects channel 4."""
+		with unittest.mock.patch("builtins.input", return_value="5"):
+			result = subsample.audio.select_input_channels("Test Device", 8)
+		assert result == (4,)
+
+	def test_out_of_range_raises (self) -> None:
+		"""Channel number > max_channels raises ValueError."""
+		with unittest.mock.patch("builtins.input", return_value="5"):
+			with pytest.raises(ValueError, match="out of range"):
+				subsample.audio.select_input_channels("Test Device", 4)
+
+	def test_empty_input_raises (self) -> None:
+		"""Empty string raises ValueError."""
+		with unittest.mock.patch("builtins.input", return_value=""):
+			with pytest.raises(ValueError, match="No input"):
+				subsample.audio.select_input_channels("Test Device", 4)
+
+	def test_duplicate_raises (self) -> None:
+		"""Duplicate channel raises ValueError."""
+		with unittest.mock.patch("builtins.input", return_value="2,2"):
+			with pytest.raises(ValueError, match="Duplicate"):
+				subsample.audio.select_input_channels("Test Device", 4)

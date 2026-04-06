@@ -32,6 +32,7 @@ class TestLoadDefault:
 		assert cfg.recorder.audio.sample_rate == 44100
 		assert cfg.recorder.audio.bit_depth == 16
 		assert cfg.recorder.audio.channels == 1
+		assert cfg.recorder.audio.input is None
 		assert cfg.recorder.audio.chunk_size == 512
 
 	def test_default_buffer_values (self) -> None:
@@ -692,3 +693,79 @@ class TestConfigCascade:
 		cfg = subsample.config.load_config(config_file)
 
 		assert cfg.recorder.audio.channels is None
+
+
+class TestInputRouting:
+
+	"""Tests for recorder.audio.input channel routing."""
+
+	def _make_config (self, tmp_path: pathlib.Path, audio_extra: str) -> subsample.config.Config:
+		"""Helper: write a config.yaml with the given audio section extras."""
+		yaml_content = (
+			"recorder:\n"
+			"  audio:\n"
+			"    sample_rate: 44100\n"
+			"    bit_depth: 16\n"
+			"    chunk_size: 512\n"
+			f"    {audio_extra}\n"
+			"  buffer:\n"
+			"    max_seconds: 10\n"
+			"detection:\n"
+			"  snr_threshold_db: 6\n"
+			"  hold_time: 0.5\n"
+			"  warmup_seconds: 2\n"
+			"  ema_alpha: 0.1\n"
+			"output:\n"
+			"  directory: /tmp/test\n"
+		)
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml_content)
+		return subsample.config.load_config(config_file)
+
+	def test_input_parsed_and_converted (self, tmp_path: pathlib.Path) -> None:
+		"""1-indexed [3, 4] in YAML becomes 0-indexed (2, 3)."""
+		cfg = self._make_config(tmp_path, "input: [3, 4]\n    channels: 2")
+		assert cfg.recorder.audio.input == (2, 3)
+		assert cfg.recorder.audio.channels == 2
+
+	def test_input_infers_channels (self, tmp_path: pathlib.Path) -> None:
+		"""When channels is null, it is inferred from input length."""
+		cfg = self._make_config(tmp_path, "input: [1, 2, 5]\n    channels:")
+		assert cfg.recorder.audio.channels == 3
+		assert cfg.recorder.audio.input == (0, 1, 4)
+
+	def test_input_single_channel (self, tmp_path: pathlib.Path) -> None:
+		"""Single input selects one channel."""
+		cfg = self._make_config(tmp_path, "input: [5]\n    channels:")
+		assert cfg.recorder.audio.channels == 1
+		assert cfg.recorder.audio.input == (4,)
+
+	def test_input_none_by_default (self, tmp_path: pathlib.Path) -> None:
+		"""No input key → None."""
+		cfg = self._make_config(tmp_path, "channels: 1")
+		assert cfg.recorder.audio.input is None
+
+	def test_length_mismatch_raises (self, tmp_path: pathlib.Path) -> None:
+		"""input length != channels raises ValueError."""
+		with pytest.raises(ValueError, match="does not match"):
+			self._make_config(tmp_path, "input: [1, 2, 3]\n    channels: 2")
+
+	def test_duplicates_raise (self, tmp_path: pathlib.Path) -> None:
+		"""Duplicate channels raise ValueError."""
+		with pytest.raises(ValueError, match="duplicates"):
+			self._make_config(tmp_path, "input: [1, 1]")
+
+	def test_zero_raises (self, tmp_path: pathlib.Path) -> None:
+		"""0 is invalid (1-indexed)."""
+		with pytest.raises(ValueError, match="positive integers"):
+			self._make_config(tmp_path, "input: [0, 1]")
+
+	def test_negative_raises (self, tmp_path: pathlib.Path) -> None:
+		"""Negative values are invalid."""
+		with pytest.raises(ValueError, match="positive integers"):
+			self._make_config(tmp_path, "input: [-1, 2]")
+
+	def test_empty_raises (self, tmp_path: pathlib.Path) -> None:
+		"""Empty list raises ValueError."""
+		with pytest.raises(ValueError, match="non-empty"):
+			self._make_config(tmp_path, "input: []")

@@ -271,14 +271,39 @@ def _run_recorder (
 		else:
 			device_index = subsample.audio.select_device(devices)
 
-		# Resolve channel count: if not set in config, detect from the device.
-		# A stereo mic (e.g. Shure MV88+) reports maxInputChannels=2 and will
-		# automatically record and play back in stereo without any config change.
+		# Resolve channel count and input routing.
 		audio_cfg = cfg.recorder.audio
-		if audio_cfg.channels is None:
-			detected_channels = subsample.audio.get_device_channels(pa, device_index)
-			audio_cfg = dataclasses.replace(audio_cfg, channels=detected_channels)
-			_log.info("Auto-detected %d input channel(s) from device", detected_channels)
+		detected_channels = subsample.audio.get_device_channels(pa, device_index)
+
+		if audio_cfg.input is not None:
+			# Validate input indices against the device's actual channel count.
+			for idx in audio_cfg.input:
+				if idx >= detected_channels:
+					raise ValueError(
+						f"recorder.audio.input channel {idx + 1} exceeds device's "
+						f"{detected_channels} input channel(s)"
+					)
+
+			if audio_cfg.channels is None:
+				audio_cfg = dataclasses.replace(audio_cfg, channels=len(audio_cfg.input))
+
+		elif audio_cfg.channels is None:
+			# No explicit channels or input routing — auto-detect.
+			if detected_channels >= 3:
+				# Multi-channel device: prompt user to choose inputs.
+				device_info = pa.get_device_info_by_index(device_index)
+				selected = subsample.audio.select_input_channels(
+					str(device_info["name"]), detected_channels,
+				)
+				audio_cfg = dataclasses.replace(
+					audio_cfg,
+					channels=len(selected),
+					input=selected,
+				)
+			else:
+				# 1-2 channel device: use all channels.
+				audio_cfg = dataclasses.replace(audio_cfg, channels=detected_channels)
+				_log.info("Auto-detected %d input channel(s) from device", detected_channels)
 
 		reader = subsample.audio.AudioReader(pa, device_index, audio_cfg)
 
