@@ -46,7 +46,9 @@ you lifting a finger.
   offers an alternative for speech: it snaps onsets to a beat grid by inserting
   silence rather than time-stretching, preserving natural timbre with no
   artifacts. Both support an `amount` parameter (0.0-1.0) for partial
-  quantization - a looser, more natural feel.
+  quantization - a looser, more natural feel. The `segment` parameter enables
+  per-hit playback: cycle through detected segments with `round_robin`, pick
+  randomly with `random`, or map specific segments to specific notes by index.
 - **Pitch-aware** - tonal samples are automatically detected and mapped
   chromatically across a keyboard range, with background pitch-shifting at the
   highest available quality (Rubber Band offline finer mode).

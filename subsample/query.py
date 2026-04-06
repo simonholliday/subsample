@@ -290,6 +290,12 @@ class Assignment:
 	gain_db:   float              = 0.0
 	pan_weights:    typing.Optional[numpy.ndarray]  = None
 	output_routing: typing.Optional[tuple[int, ...]] = None
+	segment_mode:   typing.Union[str, int]             = ""
+	"""Segment playback mode for quantized samples.
+	"" = play entire merged audio (default).
+	"round_robin" = cycle through segments sequentially.
+	"random" = random segment each trigger.
+	int (1-indexed) = always play that specific segment."""
 	pick:           int                              = 1
 
 

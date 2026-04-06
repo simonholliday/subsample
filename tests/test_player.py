@@ -1992,3 +1992,108 @@ class TestParseOutputRouting:
 		"""Empty list raises ValueError."""
 		with pytest.raises(ValueError, match="non-empty"):
 			subsample.player._parse_output_routing([], "test", None)
+
+
+class TestSelectSegment:
+
+	"""Tests for _select_segment() — segment playback from quantized audio."""
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		"""Create a minimal MidiPlayer for testing segment selection."""
+		return subsample.player.MidiPlayer(
+			"",
+			threading.Event(),
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _make_audio_and_bounds (self) -> tuple[numpy.ndarray, tuple[tuple[int, int], ...]]:
+		"""Create test audio with 4 known segments."""
+		audio = numpy.random.randn(4000, 1).astype(numpy.float32) * 0.5
+		bounds = ((0, 1000), (1000, 2000), (2000, 3000), (3000, 4000))
+		return audio, bounds
+
+	def test_no_segment_mode_returns_full_audio (self) -> None:
+		"""Empty segment_mode returns the original audio unchanged."""
+		player = self._make_player()
+		audio, bounds = self._make_audio_and_bounds()
+		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
+
+		result_audio, result_level = player._select_segment(audio, level, bounds, "", 0, 60)
+
+		assert result_audio is audio
+		assert result_level is level
+
+	def test_no_bounds_returns_full_audio (self) -> None:
+		"""None segment_bounds returns the original audio unchanged."""
+		player = self._make_player()
+		audio = numpy.random.randn(1000, 1).astype(numpy.float32)
+		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
+
+		result_audio, result_level = player._select_segment(audio, level, None, "round_robin", 0, 60)
+
+		assert result_audio is audio
+		assert result_level is level
+
+	def test_numeric_index_selects_correct_segment (self) -> None:
+		"""Numeric segment mode (1-indexed) selects the right slice."""
+		player = self._make_player()
+		audio, bounds = self._make_audio_and_bounds()
+		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
+
+		result_audio, _ = player._select_segment(audio, level, bounds, 3, 0, 60)
+
+		assert result_audio.shape[0] == 1000
+		numpy.testing.assert_array_equal(result_audio, audio[2000:3000])
+
+	def test_numeric_index_clamped (self) -> None:
+		"""Index beyond segment count is clamped to last segment."""
+		player = self._make_player()
+		audio, bounds = self._make_audio_and_bounds()
+		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
+
+		result_audio, _ = player._select_segment(audio, level, bounds, 99, 0, 60)
+
+		numpy.testing.assert_array_equal(result_audio, audio[3000:4000])
+
+	def test_round_robin_cycles (self) -> None:
+		"""Round-robin advances through segments and wraps."""
+		player = self._make_player()
+		audio, bounds = self._make_audio_and_bounds()
+		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
+
+		results = []
+		for _ in range(6):
+			seg, _ = player._select_segment(audio, level, bounds, "round_robin", 0, 60)
+			results.append(seg.shape[0])
+
+		# 4 segments, 6 triggers: should cycle 0,1,2,3,0,1
+		assert results == [1000, 1000, 1000, 1000, 1000, 1000]
+		assert player._segment_counters[(0, 60)] == 6
+
+	def test_random_stays_in_bounds (self) -> None:
+		"""Random mode always selects a valid segment."""
+		player = self._make_player()
+		audio, bounds = self._make_audio_and_bounds()
+		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
+
+		for _ in range(20):
+			seg, _ = player._select_segment(audio, level, bounds, "random", 0, 60)
+			assert seg.shape[0] == 1000
+
+	def test_segment_mode_parsed_from_yaml_string (self) -> None:
+		"""segment: round_robin parsed correctly from YAML."""
+		step = subsample.query.ProcessorStep(name="pad_quantize", params=(("grid", 16), ("segment", "round_robin")))
+		process = subsample.query.ProcessSpec(steps=(step,))
+
+		assert step.get("segment", "") == "round_robin"
+
+	def test_segment_mode_parsed_from_yaml_int (self) -> None:
+		"""segment: 3 parsed correctly from YAML."""
+		step = subsample.query.ProcessorStep(name="pad_quantize", params=(("grid", 16), ("segment", 3)))
+		process = subsample.query.ProcessSpec(steps=(step,))
+
+		assert step.get("segment", "") == 3

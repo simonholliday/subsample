@@ -24,6 +24,7 @@ See midi-map.yaml.default for the format specification.
 import dataclasses
 import logging
 import pathlib
+import random
 import threading
 import time
 import typing
@@ -721,6 +722,25 @@ def load_midi_map (
 		pan_weights    = _parse_pan_weights(assignment_raw.get("pan"), name)
 		output_routing = _parse_output_routing(assignment_raw.get("output"), name, pan_weights)
 
+		# Extract segment playback mode from quantize step parameters.
+		segment_mode: typing.Union[str, int] = ""
+
+		for step in process.steps:
+			if step.name in ("beat_quantize", "pad_quantize"):
+				raw_seg = step.get("segment", "")
+
+				if isinstance(raw_seg, int) and raw_seg > 0:
+					segment_mode = raw_seg
+				elif isinstance(raw_seg, str) and raw_seg in ("round_robin", "random"):
+					segment_mode = raw_seg
+				elif raw_seg:
+					_log.warning(
+						"Assignment %r: invalid segment mode %r — using merged playback",
+						name, raw_seg,
+					)
+
+				break
+
 		assignment = subsample.query.Assignment(
 			name=name,
 			select=select_specs,
@@ -729,6 +749,7 @@ def load_midi_map (
 			gain_db=gain_db,
 			pan_weights=pan_weights,
 			output_routing=output_routing,
+			segment_mode=segment_mode,
 		)
 
 		# Per-note pick distribution:
@@ -1042,6 +1063,10 @@ class MidiPlayer:
 		_MixCacheKey = tuple[int, typing.Optional[tuple[float, ...]], typing.Optional[tuple[int, ...]]]
 		self._mix_matrix_cache: dict[_MixCacheKey, numpy.ndarray] = {}
 
+		# Per-note segment counter for round-robin segment playback.
+		# Cleared on MIDI map reload and bank switch.
+		self._segment_counters: dict[tuple[int, int], int] = {}
+
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
 		groups: list[tuple[int, int, int, subsample.query.Assignment, int]] = []
@@ -1342,6 +1367,7 @@ class MidiPlayer:
 			if bm.bank_channel_mido == -1 or msg.channel == bm.bank_channel_mido:
 				if bm.switch_to(msg.program):
 					self._last_played.clear()
+					self._segment_counters.clear()
 					self.update_assignments()
 			return
 
@@ -1474,8 +1500,12 @@ class MidiPlayer:
 					variant = eff_transform.get_variant(sample_id, spec)
 
 					if variant is not None:
-						mix_mat = self._get_mix_matrix(variant.audio.shape[1], pan_weights, output_routing)
-						rendered = self._render_float(variant.audio, variant.level, msg.velocity, mix_mat, assignment.gain_db)
+						seg_audio, seg_level = self._select_segment(
+							variant.audio, variant.level, variant.segment_bounds,
+							assignment.segment_mode, msg.channel, msg.note,
+						)
+						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing)
+						rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 						self._last_played[(msg.channel, msg.note)] = variant
@@ -1491,8 +1521,12 @@ class MidiPlayer:
 					prev = self._last_played.get((msg.channel, msg.note))
 
 					if prev is not None and prev.key.sample_id == sample_id:
-						mix_mat = self._get_mix_matrix(prev.audio.shape[1], pan_weights, output_routing)
-						rendered = self._render_float(prev.audio, prev.level, msg.velocity, mix_mat, assignment.gain_db)
+						seg_audio, seg_level = self._select_segment(
+							prev.audio, prev.level, prev.segment_bounds,
+							assignment.segment_mode, msg.channel, msg.note,
+						)
+						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing)
+						rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 						_log.debug(
@@ -1505,8 +1539,12 @@ class MidiPlayer:
 			base = eff_transform.get_base(sample_id)
 
 			if base is not None:
-				mix_mat = self._get_mix_matrix(base.audio.shape[1], pan_weights, output_routing)
-				rendered = self._render_float(base.audio, base.level, msg.velocity, mix_mat, assignment.gain_db)
+				seg_audio, seg_level = self._select_segment(
+					base.audio, base.level, base.segment_bounds,
+					assignment.segment_mode, msg.channel, msg.note,
+				)
+				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing)
+				rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
 				_log.debug(
@@ -1793,12 +1831,55 @@ class MidiPlayer:
 		self._note_map = new_map
 		self._mapped_ccs = _collect_mapped_ccs(new_map)
 		self._mix_matrix_cache.clear()
+		self._segment_counters.clear()
 		self.update_assignments()
 
 		_log.info(
 			"MIDI map reloaded: %d note(s) (was %d)",
 			len(new_map), old_count,
 		)
+
+	def _select_segment (
+		self,
+		audio: numpy.ndarray,
+		level: subsample.analysis.LevelResult,
+		segment_bounds: typing.Optional[tuple[tuple[int, int], ...]],
+		segment_mode: typing.Union[str, int],
+		channel: int,
+		note: int,
+	) -> tuple[numpy.ndarray, subsample.analysis.LevelResult]:
+
+		"""Select a segment from quantized audio, or return the full audio.
+
+		When segment_mode is active and bounds are available, slices the audio
+		to a single segment and recomputes the level.  Otherwise returns the
+		original audio and level unchanged.
+		"""
+
+		if not segment_mode or segment_bounds is None or not segment_bounds:
+			return audio, level
+
+		if isinstance(segment_mode, int):
+			idx = max(0, min(segment_mode - 1, len(segment_bounds) - 1))
+		elif segment_mode == "round_robin":
+			key = (channel, note)
+			counter = self._segment_counters.get(key, 0)
+			idx = counter % len(segment_bounds)
+			self._segment_counters[key] = counter + 1
+		elif segment_mode == "random":
+			idx = random.randint(0, len(segment_bounds) - 1)
+		else:
+			return audio, level
+
+		start, end = segment_bounds[idx]
+		segment_audio = audio[start:end]
+		mono = numpy.asarray(
+			numpy.mean(segment_audio, axis=1, dtype=numpy.float32)
+			if segment_audio.shape[1] > 1 else segment_audio[:, 0]
+		)
+		seg_level = subsample.analysis.compute_level(mono)
+
+		return segment_audio, seg_level
 
 	def _get_mix_matrix (
 		self,

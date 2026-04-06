@@ -137,6 +137,12 @@ import subsample.query
 
 _log = logging.getLogger(__name__)
 
+# Thread-local storage for passing segment bounds from quantize handlers
+# back to _execute() without changing the handler return signature.
+# Each worker thread has its own .bounds attribute (set by the handler,
+# read and cleared by _execute).
+_segment_bounds_local = threading.local()
+
 # ---------------------------------------------------------------------------
 # Transform step dataclasses
 # ---------------------------------------------------------------------------
@@ -610,6 +616,11 @@ class TransformResult:
 	audio:    numpy.ndarray
 	duration: float
 	level:    subsample.analysis.LevelResult
+	segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = None
+	"""Frame ranges for individual segments within the merged audio.
+	Each entry is (start_frame, end_frame).  None when no quantize step
+	was applied.  Used for per-segment playback (round-robin, random, or
+	fixed index) — the player slices audio[start:end] for zero-copy access."""
 
 # ---------------------------------------------------------------------------
 # TransformCache
@@ -874,17 +885,22 @@ class TransformCache:
 # VariantDiskCache
 # ---------------------------------------------------------------------------
 
-# Binary file format for cached variants:
-#   Magic  (4 bytes): b"SSV1"
-#   Channels (2 bytes, uint16, little-endian)
-#   Sample rate (4 bytes, uint32, little-endian)
-#   Frame count (4 bytes, uint32, little-endian)
-#   Peak (4 bytes, float32, little-endian)
-#   RMS (4 bytes, float32, little-endian)
-#   Reserved (10 bytes, zero)
+# Binary file format for cached variants (SSV2, backward-compatible with SSV1):
+#   Header (32 bytes):
+#     Magic        (4 bytes): b"SSV2" (reader also accepts b"SSV1")
+#     Channels     (2 bytes, uint16, little-endian)
+#     Sample rate  (4 bytes, uint32, little-endian)
+#     Frame count  (4 bytes, uint32, little-endian)
+#     Peak         (4 bytes, float32, little-endian)
+#     RMS          (4 bytes, float32, little-endian)
+#     Reserved     (10 bytes, zero)
 #   Body: n_frames * channels * 4 bytes of float32, little-endian
+#   Footer (optional, SSV2 only — present when segment_count > 0):
+#     Segment count  (4 bytes, uint32 LE)
+#     Bounds         (segment_count * 8 bytes: start uint32 LE + end uint32 LE)
 
-_VARIANT_MAGIC = b"SSV1"
+_VARIANT_MAGIC    = b"SSV2"
+_VARIANT_MAGIC_V1 = b"SSV1"
 _VARIANT_HEADER_FORMAT = "<4sHIIff10x"
 _VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
 
@@ -976,7 +992,7 @@ class VariantDiskCache:
 					_VARIANT_HEADER_FORMAT, header,
 				)
 
-				if magic != _VARIANT_MAGIC:
+				if magic not in (_VARIANT_MAGIC, _VARIANT_MAGIC_V1):
 					_log.warning("Variant cache: bad magic in %s — deleting", path.name)
 					path.unlink(missing_ok=True)
 					return None
@@ -993,6 +1009,23 @@ class VariantDiskCache:
 					path.unlink(missing_ok=True)
 					return None
 
+				# Read optional segment bounds footer (SSV2 only).
+				segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = None
+				footer = f.read()
+
+				if footer:
+					seg_count = struct.unpack_from("<I", footer, 0)[0]
+
+					if len(footer) >= 4 + seg_count * 8:
+						bounds_list: list[tuple[int, int]] = []
+
+						for j in range(seg_count):
+							offset = 4 + j * 8
+							s, e = struct.unpack_from("<II", footer, offset)
+							bounds_list.append((s, e))
+
+						segment_bounds = tuple(bounds_list)
+
 			audio = numpy.frombuffer(body, dtype=numpy.float32).reshape(n_frames, channels)
 
 			# Touch mtime so recently-used files survive FIFO eviction.
@@ -1001,7 +1034,10 @@ class VariantDiskCache:
 			level    = subsample.analysis.LevelResult(peak=peak, rms=rms)
 			duration = n_frames / sample_rate
 
-			return TransformResult(key=key, audio=audio, duration=duration, level=level)
+			return TransformResult(
+				key=key, audio=audio, duration=duration, level=level,
+				segment_bounds=segment_bounds,
+			)
 
 		except OSError as exc:
 			_log.warning("Variant cache: read error for %s: %s", path.name, exc)
@@ -1047,6 +1083,14 @@ class VariantDiskCache:
 				with os.fdopen(fd, "wb") as f:
 					f.write(header)
 					f.write(audio.tobytes())
+
+					# Write optional segment bounds footer.
+					if result.segment_bounds is not None:
+						f.write(struct.pack("<I", len(result.segment_bounds)))
+
+						for seg_start, seg_end in result.segment_bounds:
+							f.write(struct.pack("<II", seg_start, seg_end))
+
 				os.replace(tmp_path, str(path))
 			except BaseException:
 				try:
@@ -1345,6 +1389,12 @@ class TransformProcessor:
 
 				audio = handler(audio, self._sample_rate, record, step)
 
+			# Capture segment bounds set by quantize handlers (thread-local).
+			segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = getattr(
+				_segment_bounds_local, "bounds", None,
+			)
+			_segment_bounds_local.bounds = None
+
 			# Resample to the output device rate AFTER all DSP steps.
 			# Placing the resample here means librosa's anti-alias filter
 			# catches any above-Nyquist content generated by DSP (distortion
@@ -1360,12 +1410,22 @@ class TransformProcessor:
 					res_type="soxr_vhq",
 				).T.astype(numpy.float32)
 
+				# Scale segment bounds to match the resampled frame count.
+				if segment_bounds is not None:
+					ratio = self._output_sample_rate / self._sample_rate
+					segment_bounds = tuple(
+						(int(s * ratio), int(e * ratio)) for s, e in segment_bounds
+					)
+
 			# Compute level from the mono mix, consistent with how SampleRecord.level
 			# was originally computed (analysis.compute_level operates on mono float32).
 			level    = subsample.analysis.compute_level(_mix_to_mono(audio))
 			duration = audio.shape[0] / self._output_sample_rate
 
-			result = TransformResult(key=key, audio=audio, duration=duration, level=level)
+			result = TransformResult(
+				key=key, audio=audio, duration=duration, level=level,
+				segment_bounds=segment_bounds,
+			)
 
 			# Write to disk cache (skip base variants — they're cheap to recompute).
 			if (
@@ -2038,6 +2098,16 @@ def _apply_time_stretch (
 	# in analysis._refine_onsets_to_attacks) gives ~0.7 ms precision, far
 	# tighter than any frame-level detector.  Rubber Band's --detector-perc
 	# flag is R2-only and irrelevant here (we use R3 via --fine).
+
+	# Compute segment bounds in the stretched output for per-segment playback.
+	bounds: list[tuple[int, int]] = []
+
+	for i in range(len(onset_tgt)):
+		seg_start = onset_tgt[i]
+		seg_end = onset_tgt[i + 1] if i + 1 < len(onset_tgt) else target_length
+		bounds.append((seg_start, seg_end))
+
+	_segment_bounds_local.bounds = tuple(bounds)
 
 	return pyrubberband.timemap_stretch(  # type: ignore[no-any-return]
 		audio, sample_rate, time_map, rbargs={"--fine": "", "--smoothing": ""},
@@ -3047,6 +3117,7 @@ def _apply_pad_quantize (
 
 	# Pre-allocate zero-filled output (zeros = silence in the gaps).
 	output = numpy.zeros((output_length, n_channels), dtype=numpy.float32)
+	bounds: list[tuple[int, int]] = []
 
 	for i in range(len(seg_starts)):
 		src_start = seg_starts[i]
@@ -3085,6 +3156,10 @@ def _apply_pad_quantize (
 			end = output_length
 
 		output[tgt:end] = segment
+		bounds.append((tgt, end))
+
+	# Store segment bounds for _execute() to capture via thread-local.
+	_segment_bounds_local.bounds = tuple(bounds)
 
 	return output
 

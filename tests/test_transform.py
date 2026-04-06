@@ -3409,3 +3409,93 @@ class TestVocoder:
 			subsample.transform._carrier_cache_bytes = 0
 
 
+
+class TestSSV2DiskCache:
+
+	"""Tests for SSV2 disk cache format with segment bounds."""
+
+	def _make_result (
+		self,
+		segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = None,
+	) -> subsample.transform.TransformResult:
+		"""Create a test TransformResult with optional segment bounds."""
+		audio = numpy.random.RandomState(42).uniform(-0.5, 0.5, (4410, 2)).astype(numpy.float32)
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=60),),
+		)
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
+		return subsample.transform.TransformResult(
+			key=key, audio=audio, duration=0.1, level=level,
+			segment_bounds=segment_bounds,
+		)
+
+	def test_roundtrip_with_bounds (self, tmp_path: pathlib.Path) -> None:
+		"""Write then read back preserves segment bounds."""
+		bounds = ((0, 1000), (1500, 2500), (3000, 4410))
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result(segment_bounds=bounds)
+
+		cache.put("test_md5", result.key.spec, result)
+		loaded = cache.get("test_md5", result.key.spec, result.key)
+
+		assert loaded is not None
+		assert loaded.segment_bounds == bounds
+		numpy.testing.assert_array_equal(loaded.audio, result.audio)
+
+	def test_roundtrip_without_bounds (self, tmp_path: pathlib.Path) -> None:
+		"""Write then read back with no bounds produces None."""
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result(segment_bounds=None)
+
+		cache.put("test_md5_none", result.key.spec, result)
+		loaded = cache.get("test_md5_none", result.key.spec, result.key)
+
+		assert loaded is not None
+		assert loaded.segment_bounds is None
+
+	def test_reads_legacy_ssv1 (self, tmp_path: pathlib.Path) -> None:
+		"""Reader accepts old SSV1 files with segment_bounds = None."""
+		import struct
+
+		audio = numpy.random.RandomState(42).uniform(-0.5, 0.5, (100, 1)).astype(numpy.float32)
+		header = struct.pack("<4sHIIff10x", b"SSV1", 1, 44100, 100, 0.5, 0.2)
+
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=60),),
+		)
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+
+		hex_digest = subsample.transform.variant_cache_key("legacy_md5", spec, 44100)
+		path = tmp_path / f"{hex_digest}.variant"
+		path.write_bytes(header + audio.tobytes())
+
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		loaded = cache.get("legacy_md5", spec, key)
+
+		assert loaded is not None
+		assert loaded.segment_bounds is None
+		numpy.testing.assert_array_equal(loaded.audio, audio)
+
+	def test_bounds_values_are_correct (self, tmp_path: pathlib.Path) -> None:
+		"""Each bound (start, end) has start < end and is within range."""
+		bounds = ((0, 1000), (1500, 2500), (3000, 4410))
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result(segment_bounds=bounds)
+		cache.put("validate_md5", result.key.spec, result)
+		loaded = cache.get("validate_md5", result.key.spec, result.key)
+
+		assert loaded is not None
+		assert loaded.segment_bounds is not None
+
+		for start, end in loaded.segment_bounds:
+			assert start < end
+			assert end <= loaded.audio.shape[0]

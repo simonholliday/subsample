@@ -155,6 +155,27 @@
 #   pad_quantize: { grid: 16 }            Silence-pad onsets to session target_bpm
 #   pad_quantize: { bpm: 120, grid: 8 }  Silence-pad to specific BPM and grid
 #   pad_quantize: { grid: 8, amount: 0.75 }  Partial quantize for looser feel
+#
+# SEGMENT PLAYBACK
+#   By default, quantized audio plays as one merged result.  The segment
+#   parameter selects individual segments (detected onsets) instead:
+#
+#   pad_quantize: { grid: 16, segment: round_robin }  Cycle through segments
+#   pad_quantize: { grid: 16, segment: random }       Random segment each hit
+#   pad_quantize: { grid: 16, segment: 3 }            Always play segment 3
+#
+#   Use numeric indices to map specific hits from a loop to different notes:
+#
+#     - name: Kick from loop
+#       notes: 36
+#       process:
+#         - pad_quantize: { grid: 16, segment: 1 }
+#
+#     - name: Snare from loop
+#       notes: 38
+#       process:
+#         - pad_quantize: { grid: 16, segment: 3 }
+#
 #   filter_low: { freq: 500 }            Low-pass filter (default 16 kHz)
 #   filter_high: { freq: 200 }           High-pass filter (default 80 Hz)
 #   filter_band: { freq: 800, q: 1.4 }  Band-pass filter (default 1 kHz, Q 0.7)
