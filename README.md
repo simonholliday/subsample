@@ -571,11 +571,13 @@ is never blocked:
 ### End-to-end 32-bit float
 
 Every audio sample is converted to float32 immediately after capture and stays in
-that format through every stage - analysis, normalisation, pitch shifting, gain
-staging, polyphonic mixing. The only integer conversion is a single pack to the
-hardware's native bit depth at the output. This is the same internal format used
-by professional DAWs, and means that peak-normalising a quiet recording or
-pitch-shifting it across two octaves introduces no measurable quality loss.
+that format between pipeline stages - analysis, normalisation, pitch shifting,
+gain staging, polyphonic mixing. Precision-sensitive operations (IIR filters,
+compressor/gate envelope followers, gain curve generation) promote to float64
+internally and return float32. The only integer conversion is a single pack to
+the hardware's native bit depth at the output. This approach matches professional
+DAW practice, and means that peak-normalising a quiet recording or pitch-shifting
+it across two octaves introduces no measurable quality loss.
 
 ### Non-blocking capture
 
@@ -1040,6 +1042,12 @@ repository; audio files are local-only and .gitignored.
 - **Random selection** - `order_by: random` to pick a different sample on each
   trigger.
 
+### Monitoring
+
+- **Web dashboard** - a lightweight local web UI showing active bank, loaded
+  samples, CC state, voice activity, and transform queue progress. Read-only
+  visibility into what the engine is doing, without requiring a terminal.
+
 ## Architecture
 
 Subsample is built around three concurrent pipelines that interact through
@@ -1127,8 +1135,9 @@ PyAudio callback (PortAudio high-priority thread)
     → float32_to_pcm_bytes(mixed, output_bit_depth)  → int16/24/32 bytes to hardware
 ```
 
-All mixing happens in float32 - the only integer conversion is the final output
-packing. Multiple simultaneous voices are summed correctly regardless of the
+All mixing happens in float32; precision-sensitive DSP (IIR filters, envelope
+followers) promotes to float64 internally. The only integer conversion is the
+final output packing. Multiple simultaneous voices are summed correctly regardless of the
 output device's bit depth.
 
 ## Requirements

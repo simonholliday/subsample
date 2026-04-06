@@ -2132,7 +2132,8 @@ def _apply_filter (
 			output="sos",
 		)
 
-	return scipy.signal.sosfilt(sos, audio, axis=0).astype(numpy.float32)
+	# Promote to float64 for IIR numerical stability; return as float32.
+	return scipy.signal.sosfilt(sos, audio.astype(numpy.float64), axis=0).astype(numpy.float32)
 
 
 def _apply_low_pass (
@@ -2711,7 +2712,7 @@ def _apply_distort (
 		sos = scipy.signal.butter(2, cutoff_hz, btype="lowpass", fs=sample_rate, output="sos")
 
 		for ch in range(wet.shape[1]):
-			wet[:, ch] = scipy.signal.sosfilt(sos, wet[:, ch]).astype(numpy.float32)
+			wet[:, ch] = scipy.signal.sosfilt(sos, wet[:, ch].astype(numpy.float64)).astype(numpy.float32)
 
 	# Dry/wet blend.
 	if step.mix < 1.0:
@@ -3242,7 +3243,7 @@ def _extract_envelope (signal: numpy.ndarray, sample_rate: int) -> numpy.ndarray
 	# Smooth with a one-pole lowpass at ~50 Hz.
 	cutoff = min(50.0, sample_rate / 4.0)
 	sos = scipy.signal.butter(2, cutoff, btype="low", fs=sample_rate, output="sos")
-	envelope = scipy.signal.sosfiltfilt(sos, envelope).astype(numpy.float32)
+	envelope = scipy.signal.sosfiltfilt(sos, envelope.astype(numpy.float64)).astype(numpy.float32)
 
 	return envelope
 
@@ -3304,8 +3305,8 @@ def _apply_vocoder (
 
 		for b in range(n_bands):
 			# Filter modulator and carrier through corresponding bands.
-			mod_band = scipy.signal.sosfiltfilt(mod_filters[b], mod_signal).astype(numpy.float32)
-			car_band = scipy.signal.sosfiltfilt(car_filters[b], carrier).astype(numpy.float32)
+			mod_band = scipy.signal.sosfiltfilt(mod_filters[b], mod_signal.astype(numpy.float64)).astype(numpy.float32)
+			car_band = scipy.signal.sosfiltfilt(car_filters[b], carrier.astype(numpy.float64)).astype(numpy.float32)
 
 			# Extract modulator envelope and apply to carrier band.
 			env = _extract_envelope(mod_band, sample_rate)
