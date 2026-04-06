@@ -1125,6 +1125,8 @@ class VariantDiskCache:
 			# Sort oldest first.
 			entries.sort()
 
+			evicted = 0
+
 			for _mtime, size, filepath in entries:
 				if total <= self._max_bytes:
 					break
@@ -1132,13 +1134,9 @@ class VariantDiskCache:
 				try:
 					os.unlink(filepath)
 					total -= size
+					evicted += 1
 				except OSError:
 					pass
-
-			evicted = sum(1 for _ in entries) - sum(
-				1 for e in os.scandir(self._directory)
-				if e.name.endswith(".variant") and e.is_file()
-			)
 
 			if evicted > 0:
 				_log.info(
@@ -2096,8 +2094,7 @@ def _apply_time_stretch (
 	# detection is bypassed entirely — our two-stage onset pipeline
 	# (librosa spectral flux → sample-accurate amplitude-envelope refinement
 	# in analysis._refine_onsets_to_attacks) gives ~0.7 ms precision, far
-	# tighter than any frame-level detector.  Rubber Band's --detector-perc
-	# flag is R2-only and irrelevant here (we use R3 via --fine).
+	# tighter than any frame-level detector.
 
 	# Compute segment bounds in the stretched output for per-segment playback.
 	bounds: list[tuple[int, int]] = []
@@ -2659,18 +2656,20 @@ def _apply_gate (
 
 		raw_gain = held_gain
 
-	# One-pole ballistics (same model as compressor).
-	alpha_a = 1.0 - math.exp(-1.0 / (attack_ms  * sample_rate / 1000.0)) if attack_ms  > 0.0 else 1.0
-	alpha_r = 1.0 - math.exp(-1.0 / (release_ms * sample_rate / 1000.0)) if release_ms > 0.0 else 1.0
+	# One-pole ballistics (same convention as compressor: alpha ≈ 1.0 for slow).
+	attack_s  = max(attack_ms / 1000.0, 1e-6)
+	release_s = max(release_ms / 1000.0, 1e-6)
+	alpha_a = math.exp(-1.0 / (sample_rate * attack_s))
+	alpha_r = math.exp(-1.0 / (sample_rate * release_s))
 
 	smoothed = numpy.empty(n_frames, dtype=numpy.float64)
 	smoothed[0] = raw_gain[0]
 
 	for i in range(1, n_frames):
 		if raw_gain[i] > smoothed[i - 1]:
-			smoothed[i] = alpha_a * raw_gain[i] + (1.0 - alpha_a) * smoothed[i - 1]
+			smoothed[i] = alpha_a * smoothed[i - 1] + (1.0 - alpha_a) * raw_gain[i]
 		else:
-			smoothed[i] = alpha_r * raw_gain[i] + (1.0 - alpha_r) * smoothed[i - 1]
+			smoothed[i] = alpha_r * smoothed[i - 1] + (1.0 - alpha_r) * raw_gain[i]
 
 	# Lookahead: delay the audio relative to the gain envelope.
 	lookahead_samples = int(lookahead_ms * sample_rate / 1000.0)

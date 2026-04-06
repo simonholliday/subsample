@@ -45,11 +45,15 @@ Timbre metrics (TimbreResult) — timbral fingerprints, NOT normalised:
   mfcc_delta         — 13 mean delta-MFCC coefficients (first-order temporal difference)
   mfcc_onset         — 13 onset-weighted MFCC coefficients (exponential decay from attack)
 
-Level metrics (LevelResult) — amplitude measurements, NOT used for similarity:
+Level metrics (LevelResult) — amplitude measurements for playback gain staging:
 
   peak               — peak absolute amplitude in [0, 1] (max(|signal|) on float32 mono)
   rms                — RMS amplitude in [0, 1] (sqrt(mean(signal²)) on float32 mono)
-  Used at playback time to normalise levels across samples recorded at different volumes.
+  crest_factor       — peak-to-RMS ratio (linear); measures transient peakiness
+  crest_factor_db    — crest factor in decibels: 20 * log10(crest_factor)
+  noise_floor        — 5th percentile frame-level RMS; ambient noise level in [0, 1]
+  peak and rms drive playback gain normalisation. crest_factor is also included in the
+  similarity vector as the 14th element of the spectral group (see similarity.py).
 
 Band energy metrics (BandEnergyResult) — per-band energy distribution, used for similarity:
 

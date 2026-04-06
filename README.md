@@ -791,9 +791,11 @@ the same path to get a persistent library that grows on disk across sessions.
 ## Instrument sample library
 
 Every recording is automatically added to an in-memory instrument library
-alongside its full analysis data. A configurable memory cap (default 100 MB)
-prevents unbounded growth; the oldest samples are evicted when a new one would
-exceed the limit. WAV files on disk are never deleted.
+alongside its full analysis data. A configurable memory cap prevents unbounded
+growth; the oldest samples are evicted when a new one would exceed the limit.
+The budget is auto-detected by default (60% of the global memory allocation -
+see `max_memory_mb` in the configuration table) and can be overridden via
+`instrument.max_memory_mb`. WAV files on disk are never deleted.
 
 ### Persistent library across sessions
 

@@ -24,7 +24,7 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _AUTO_DETECT_FALLBACK_MB: float = 160.0
-"""Fallback total budget when system RAM cannot be detected (100+50+10)."""
+"""Fallback total budget when system RAM cannot be detected (96+56+8 at 60/35/5 split)."""
 
 
 def _auto_detect_memory_mb () -> float:
@@ -687,11 +687,11 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	similarity_raw: dict[str, typing.Any] = raw.get("similarity", {})
 	similarity = SimilarityConfig(
-		weight_spectral     = float(similarity_raw.get("weight_spectral",      1.0)),
-		weight_timbre       = float(similarity_raw.get("weight_timbre",        1.0)),
-		weight_timbre_delta = float(similarity_raw.get("weight_timbre_delta",  0.5)),
-		weight_timbre_onset = float(similarity_raw.get("weight_timbre_onset",  1.0)),
-		weight_band_energy  = float(similarity_raw.get("weight_band_energy",   1.0)),
+		weight_spectral=float(similarity_raw.get("weight_spectral", 1.0)),
+		weight_timbre=float(similarity_raw.get("weight_timbre", 1.0)),
+		weight_timbre_delta=float(similarity_raw.get("weight_timbre_delta", 0.5)),
+		weight_timbre_onset=float(similarity_raw.get("weight_timbre_onset", 1.0)),
+		weight_band_energy=float(similarity_raw.get("weight_band_energy", 1.0)),
 	)
 
 	for name, value in [
