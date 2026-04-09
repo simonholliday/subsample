@@ -259,18 +259,25 @@ class InstrumentConfig:
 	intentionally allowed to exist as sidecar-only (no audio required)."""
 
 	watch: bool = False
-	"""When True, monitor instrument.directory at runtime for new samples
-	arriving as WAV + .analysis.json sidecar pairs and hot-load them into
-	the live instrument library without restarting.
+	"""When True, monitor instrument.directory at runtime for new audio
+	files and hot-load them into the live instrument library without
+	restarting.
 
-	Designed for multi-instance setups: a recorder on one machine writes
-	samples to a shared directory (network drive, Dropbox, etc.) and a
-	player on another machine picks them up automatically as they arrive.
+	Two detection paths run in parallel:
 
-	Requires instrument.directory to be set and player.enabled to be True.
-	Only reacts to complete samples — the sidecar's arrival signals that
-	both the WAV and analysis are ready (the recorder writes WAV first,
-	sidecar second)."""
+	1. Sidecar path — watches for .analysis.json sidecar files (fastest:
+	   the sidecar signals that both the WAV and analysis are ready).
+	2. Audio file path — watches for audio files (.wav, .flac, .aiff,
+	   .ogg, .mp3) from any source.  After a grace period to let a
+	   sidecar arrive (in case the source is another subsample instance),
+	   checks file-size stability, runs the full analysis pipeline,
+	   writes a sidecar, and loads the sample.
+
+	Works with multi-instance setups (recorder on one machine, player on
+	another via a shared directory) and with audio files from any external
+	application.
+
+	Requires instrument.directory to be set and player.enabled to be True."""
 
 
 @dataclasses.dataclass(frozen=True)

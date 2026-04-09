@@ -1,7 +1,5 @@
 # Subsample
 
-*A combine harvester for sound.*
-
 Subsample is an automatic sample harvester, analyser, and MIDI instrument. Point
 a microphone at the world and it captures, analyses, processes, and organises
 every usable sound into a playable, mix-ready MIDI instrument - automatically, in
@@ -750,7 +748,7 @@ weights - is optional and rarely needs changing.
 | `instrument.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
 | `instrument.directory` | `samples/captures` | Directory of instrument samples to load at startup (overridden by `banks:` in the MIDI map when present) |
 | `instrument.clean_orphaned_sidecars` | `true` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
-| `instrument.watch` | `false` | Monitor `instrument.directory` (or each bank directory) at runtime for new samples arriving from a remote recorder instance (see Multi-machine setup) |
+| `instrument.watch` | `false` | Monitor `instrument.directory` (or each bank directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio (see Watching for new samples) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
@@ -812,6 +810,34 @@ As new recordings arrive they are written to disk and added to memory in one ste
 The memory cap keeps only the most recent window of captures in RAM; the full
 archive on disk is unaffected.
 
+### Watching for new samples
+
+Set `instrument.watch: true` to monitor the instrument directory for new audio
+files at runtime and load them without restarting. The watcher detects audio
+files from any source — another Subsample instance, a DAW, an SDR recorder, a
+script, or any other application that writes audio to the watched directory.
+
+Two detection paths run in parallel:
+
+1. **Sidecar path** — watches for `.analysis.json` sidecar files (fastest).
+   When a sidecar appears, its corresponding audio file is loaded immediately
+   without re-analysing. This is the path taken when the source is another
+   Subsample instance, which always writes the WAV first and the sidecar second.
+
+2. **Audio file path** — watches for audio files (`.wav`, `.flac`, `.aiff`,
+   `.ogg`, `.mp3`) from any source. After a short grace period to see if a
+   sidecar follows (in case the source is Subsample), checks that the file is
+   no longer being written (file-size stability), runs the full analysis
+   pipeline, writes a sidecar, and loads the sample.
+
+The audio file path handles the common case where another application writes
+an audio file without any sidecar. The file-size stability check ensures that
+long recordings still being written are not loaded prematurely — the watcher
+waits until the file size stops changing before attempting to read it.
+
+Supported audio formats: WAV, FLAC, AIFF, OGG, MP3/MPEG (anything supported
+by libsndfile).
+
 ### Multi-machine setup (remote recorder + player)
 
 Subsample can be split across two machines: one captures and analyses audio, the
@@ -858,10 +884,15 @@ directly without re-analysing. The sidecar's arrival is used as the ready signal
 because the recorder always writes the WAV first — a sidecar appearing means both
 files are present and complete.
 
+Audio files from non-Subsample sources (no sidecar) are also detected
+automatically. After a brief grace period, the player analyses the file, writes
+a sidecar for next time, and loads the sample into memory.
+
 New samples become available for MIDI playback within a second or two of the
 sidecar landing on disk (a short debounce window to accommodate network sync
-tools). If the WAV has not yet arrived, the player retries a few times before
-logging a warning; that sample will be picked up on the next restart.
+tools), or within about 10 seconds for audio files without sidecars (debounce +
+grace period + analysis). If the WAV has not yet arrived or is still being
+written, the player retries automatically.
 
 ## Live-coding the MIDI map
 

@@ -355,12 +355,13 @@ analysis:
 #   # intentionally allowed to exist without their audio file.
 #
 #   watch: false
-#   # When true, monitor instrument.directory at runtime for new samples
-#   # (WAV + .analysis.json sidecar pairs) arriving from another subsample
-#   # instance and hot-load them without restarting. Designed for multi-
-#   # instance setups: a recorder on one machine writes to a shared/synced
-#   # directory (network drive, Dropbox) and a player elsewhere picks them
-#   # up automatically. Requires instrument.directory and player.enabled.
+#   # When true, monitor instrument.directory at runtime for new audio files
+#   # and hot-load them without restarting. Detects audio files from any
+#   # source — another subsample instance (via sidecar), a DAW, or any
+#   # application that writes WAV/FLAC/AIFF/OGG/MP3 files. Files without
+#   # sidecars are auto-analyzed after a brief grace period and file-size
+#   # stability check (to handle files still being written).
+#   # Requires instrument.directory and player.enabled.
 #   #
 #   # Persistent library pattern — set this to the same path as output.directory:
 #   #

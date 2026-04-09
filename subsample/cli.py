@@ -872,8 +872,14 @@ def main () -> None:
 			for bank in bank_manager.all_banks():
 				_bank = bank  # capture for closure
 
-				known = {
+				known_sc = {
 					(fp.parent / (fp.name + ".analysis.json")).resolve()
+					for r in _bank.instrument_library.samples()
+					if (fp := r.filepath) is not None
+				}
+
+				known_au = {
+					fp.resolve()
 					for r in _bank.instrument_library.samples()
 					if (fp := r.filepath) is not None
 				}
@@ -887,9 +893,10 @@ def main () -> None:
 
 				watcher = subsample.watcher.InstrumentWatcher(
 					directory=_bank.directory,
-					known_sidecars=known,
+					known_sidecars=known_sc,
 					on_sample_loaded=_make_bank_callback(_bank),
 					target_sample_rate=output_sample_rate,
+					known_audio=known_au,
 				)
 				watcher.start()
 				instrument_watchers.append(watcher)
@@ -899,6 +906,12 @@ def main () -> None:
 		else:
 			known_sidecars: set[pathlib.Path] = {
 				(fp.parent / (fp.name + ".analysis.json")).resolve()
+				for r in instrument_library.samples()
+				if (fp := r.filepath) is not None
+			}
+
+			known_audio_paths: set[pathlib.Path] = {
+				fp.resolve()
 				for r in instrument_library.samples()
 				if (fp := r.filepath) is not None
 			}
@@ -913,6 +926,7 @@ def main () -> None:
 				known_sidecars=known_sidecars,
 				on_sample_loaded=_on_watched_sample,
 				target_sample_rate=output_sample_rate,
+				known_audio=known_audio_paths,
 			)
 			watcher.start()
 			instrument_watchers.append(watcher)
