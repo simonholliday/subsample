@@ -29,6 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+osc = ["python-osc"]
 dev = [
 	"mypy>=1.9",
 	"pytest>=8.0",

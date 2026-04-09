@@ -36,10 +36,12 @@ import yaml
 import subsample.analysis
 import subsample.audio
 import subsample.bank
+import subsample.cache
 import subsample.buffer
 import subsample.config
 import subsample.detector
 import subsample.library
+import subsample.osc
 import subsample.player
 import subsample.recorder
 import subsample.similarity
@@ -230,6 +232,7 @@ def _run_recorder (
 	store_audio: bool,
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]] = None,
+	osc_sender: typing.Optional[typing.Any] = None,
 ) -> None:
 
 	"""Set up an audio input device and run the real-time capture loop.
@@ -252,6 +255,8 @@ def _run_recorder (
 		player_cell:        Single-element list holding the active MidiPlayer, or None.
 		                    Forwarded to _make_on_complete so pitched assignments are
 		                    updated when the best match changes.
+		osc_sender:         Optional OscEventSender; when provided, the on_complete
+		                    callback is wrapped to also send /sample/captured events.
 	"""
 
 	pa = subsample.audio.create_pyaudio()
@@ -327,14 +332,36 @@ def _run_recorder (
 		max_recording_frames=max_frames,
 	)
 
+	on_complete_callback = _make_on_complete(
+		reference_library, instrument_library, analysis_params,
+		similarity_matrix, store_audio, transform_manager,
+		player_cell=player_cell,
+	)
+
+	# OSC sender wrapping for the on_complete callback (recorder path).
+	if osc_sender is not None:
+		_original_on_complete = on_complete_callback
+
+		def on_complete_callback_osc (
+			filepath: pathlib.Path,
+			spectral: subsample.analysis.AnalysisResult,
+			rhythm: subsample.analysis.RhythmResult,
+			pitch: subsample.analysis.PitchResult,
+			timbre: subsample.analysis.TimbreResult,
+			level: subsample.analysis.LevelResult,
+			band_energy: subsample.analysis.BandEnergyResult,
+			duration: float,
+			audio: numpy.ndarray,
+		) -> None:
+			_original_on_complete(filepath, spectral, rhythm, pitch, timbre, level, band_energy, duration, audio)
+			osc_sender.on_complete(filepath, spectral, rhythm, pitch, timbre, level, band_energy, duration, audio)
+
+		on_complete_callback = on_complete_callback_osc
+
 	writer = subsample.recorder.SampleProcessor(
 		cfg,
 		analysis_params,
-		on_complete=_make_on_complete(
-			reference_library, instrument_library, analysis_params,
-			similarity_matrix, store_audio, transform_manager,
-			player_cell=player_cell,
-		),
+		on_complete=on_complete_callback,
 	)
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
@@ -652,6 +679,19 @@ def main () -> None:
 
 	_print_banner(cfg)
 
+	# --- OSC sender ---
+	# Created once and shared across the recorder on_complete callback and
+	# the directory watcher callbacks.  None when OSC is disabled or the
+	# python-osc dependency is missing.
+	_osc_sender: typing.Any = None
+
+	if cfg.osc.enabled:
+		try:
+			_osc_sender = subsample.osc.OscEventSender(cfg.osc.send_host, cfg.osc.send_port)
+			print(f"  OSC sender   : sending to {cfg.osc.send_host}:{cfg.osc.send_port}")
+		except ImportError:
+			_log.warning("OSC enabled but python-osc not installed. pip install subsample[osc]")
+
 	# Reference library starts empty.  Path-based references declared in
 	# the MIDI map are loaded later by _resolve_path_references() during
 	# player startup, which adds them to the similarity matrix dynamically.
@@ -833,6 +873,7 @@ def main () -> None:
 				analysis_params, similarity_matrix,
 				shutdown_event, cfg.player.enabled,
 				transform_manager, _player_cell,
+				_osc_sender,
 			),
 			name="recorder",
 		))
@@ -889,6 +930,10 @@ def main () -> None:
 						_log.info("Watcher [%s]: new sample — %s (%.2fs)", b.name, record.name, record.duration)
 						_integrate_sample(record, b.instrument_library, b.similarity_matrix,
 						                  b.transform_manager, _player_cell)
+
+						if _osc_sender is not None:
+							_osc_sender.on_sample_loaded(record)
+
 					return cb
 
 				watcher = subsample.watcher.InstrumentWatcher(
@@ -920,6 +965,9 @@ def main () -> None:
 				_log.info("Watcher: new sample arrived — %s (%.2fs)", record.name, record.duration)
 				_integrate_sample(record, instrument_library, similarity_matrix,
 				                  transform_manager, _player_cell)
+
+				if _osc_sender is not None:
+					_osc_sender.on_sample_loaded(record)
 
 			watcher = subsample.watcher.InstrumentWatcher(
 				directory=pathlib.Path(cfg.instrument.directory),
@@ -974,6 +1022,67 @@ def main () -> None:
 		midi_map_watcher.start()
 		print(f"  MIDI map     : watching {cfg.player.midi_map} for changes")
 
+	# --- OSC receiver ---
+	# Listens for /sample/import messages and triggers file import.
+	osc_receiver: typing.Any = None
+
+	if cfg.osc.enabled and cfg.osc.receive_enabled:
+		try:
+			def _on_osc_import (file_path_str: str) -> None:
+				"""Handle a /sample/import OSC message by analyzing and loading the file."""
+
+				file_path = pathlib.Path(file_path_str)
+
+				if not file_path.is_file():
+					_log.warning("OSC /sample/import: file not found: %s", file_path)
+					return
+
+				result = subsample.cache.load_or_analyze(file_path)
+
+				if result is None:
+					_log.warning("OSC /sample/import: analysis failed: %s", file_path)
+					return
+
+				spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+
+				audio = subsample.library.load_wav_audio(file_path, output_sample_rate)
+
+				if audio is None:
+					_log.warning("OSC /sample/import: could not read audio: %s", file_path)
+					return
+
+				record = subsample.library.SampleRecord(
+					sample_id   = subsample.library.allocate_id(),
+					name        = file_path.stem,
+					spectral    = spectral,
+					rhythm      = rhythm,
+					pitch       = pitch,
+					timbre      = timbre,
+					level       = level,
+					band_energy = band_energy,
+					params      = params,
+					duration    = duration,
+					audio       = audio,
+					filepath    = file_path,
+				)
+
+				_integrate_sample(record, instrument_library, similarity_matrix,
+				                  transform_manager, _player_cell)
+
+				if _osc_sender is not None:
+					_osc_sender.on_sample_loaded(record)
+
+			osc_receiver = subsample.osc.OscReceiver(
+				port=cfg.osc.receive_port,
+				on_import=_on_osc_import,
+				shutdown_event=shutdown_event,
+			)
+			osc_receiver.start()
+			print(f"  OSC receiver : listening on port {cfg.osc.receive_port}")
+
+		except ImportError:
+			_log.warning("OSC receive enabled but python-osc not installed. pip install subsample[osc]")
+
 	for t in threads:
 		t.start()
 
@@ -995,6 +1104,9 @@ def main () -> None:
 
 	if midi_map_watcher is not None:
 		midi_map_watcher.stop()
+
+	if osc_receiver is not None:
+		osc_receiver.stop()
 
 	# Drain any in-flight transform workers before exiting.
 	if bank_manager is not None:

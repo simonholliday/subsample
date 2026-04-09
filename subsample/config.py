@@ -326,6 +326,37 @@ class TransformConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class OscConfig:
+
+	"""OSC (Open Sound Control) event forwarding configuration.
+
+	When enabled, Subsample sends sample events to OSC-compatible apps
+	(sequencers, visualisers, etc.) and optionally receives file import
+	requests from other OSC-compatible apps.
+
+	Requires the optional ``python-osc`` dependency:
+	``pip install subsample[osc]``
+	"""
+
+	enabled: bool = False
+	"""Master switch for OSC integration.  When False, no sender or
+	receiver is created regardless of other settings."""
+
+	send_host: str = "127.0.0.1"
+	"""Destination host for outgoing OSC messages."""
+
+	send_port: int = 9000
+	"""Destination UDP port for outgoing OSC messages."""
+
+	receive_enabled: bool = False
+	"""When True (and enabled is True), start an OSC receiver that
+	listens for /sample/import messages to trigger file import."""
+
+	receive_port: int = 9002
+	"""UDP port the OSC receiver listens on."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
 
 	recorder: RecorderConfig
@@ -342,6 +373,7 @@ class Config:
 	similarity: SimilarityConfig = dataclasses.field(default_factory=SimilarityConfig)
 	player: PlayerConfig = dataclasses.field(default_factory=PlayerConfig)
 	transform: TransformConfig = dataclasses.field(default_factory=TransformConfig)
+	osc: OscConfig = dataclasses.field(default_factory=OscConfig)
 
 
 def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
@@ -759,6 +791,16 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	elif global_raw is not None:
 		global_budget = float(global_raw)
 
+	# --- OSC ---
+	osc_raw: dict[str, typing.Any] = raw.get("osc", {})
+	osc = OscConfig(
+		enabled=bool(osc_raw.get("enabled", False)),
+		send_host=str(osc_raw.get("send_host", "127.0.0.1")),
+		send_port=int(osc_raw.get("send_port", 9000)),
+		receive_enabled=bool(osc_raw.get("receive_enabled", False)),
+		receive_port=int(osc_raw.get("receive_port", 9002)),
+	)
+
 	return Config(
 		recorder=recorder,
 		detection=detection,
@@ -769,4 +811,5 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		similarity=similarity,
 		player=player,
 		transform=transform,
+		osc=osc,
 	)

@@ -10,6 +10,7 @@ beat-quantize, pad-quantize, gate, compress, filter, distort, reshape, vocoder,
 and more). Tonal samples are pitch-shifted across the full assigned note range;
 samples with sufficient rhythmic content are beat-quantized and time-stretched
 to a target tempo. All variants are produced in the background using Rubber
-Band's offline finer engine for highest quality.
+Band's offline finer engine for highest quality. Optional OSC integration sends
+sample events to and receives import requests from other OSC-compatible apps.
 """
 

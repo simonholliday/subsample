@@ -23,6 +23,26 @@
 # and transform sections below — these override the global split.
 
 # ---------------------------------------------------------------------------
+# osc — send sample events and receive file import requests via OSC
+# ---------------------------------------------------------------------------
+# OSC (Open Sound Control) integration for communicating with other apps.
+# Requires the optional python-osc dependency: pip install subsample[osc]
+#
+# Sender: forwards /sample/captured and /sample/loaded events when samples
+# are recorded or loaded — so sequencers, visualisers, or other audio tools
+# can react to sample characteristics (pitch, tempo, timbre).
+#
+# Receiver: listens for /sample/import messages containing a file path —
+# triggers analysis and import of the specified audio file into the library.
+
+# osc:
+#   enabled: false
+#   send_host: "127.0.0.1"
+#   send_port: 9000
+#   receive_enabled: false
+#   receive_port: 9002
+
+# ---------------------------------------------------------------------------
 # recorder — real-time audio capture from an input device
 # ---------------------------------------------------------------------------
 # Set enabled: false to skip live recording and only process files given on

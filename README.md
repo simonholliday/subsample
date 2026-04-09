@@ -86,6 +86,11 @@ you lifting a finger.
   reproducible, no GUI required.
 - **Headless** - runs on anything from a Raspberry Pi to a studio rack server.
   Drive it from a DAW, hardware controller, or Python sequencer over MIDI.
+- **OSC integration** - sends `/sample/captured` and `/sample/loaded` events
+  when samples are recorded or loaded, so OSC-compatible apps (sequencers,
+  visualisers, other audio tools) can react to sample characteristics in real
+  time. Optionally receives `/sample/import` messages to trigger file import
+  from other apps. Requires `pip install subsample[osc]`.
 
 ## How it works
 
@@ -760,6 +765,11 @@ weights - is optional and rarely needs changing.
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
 | `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |
 | `transform.max_disk_mb` | auto | Max disk space (MB) for cached variant files; defaults to 3x memory budget. 0 disables |
+| `osc.enabled` | `false` | Enable OSC integration (send sample events, optionally receive import requests). Requires `pip install subsample[osc]` |
+| `osc.send_host` | `127.0.0.1` | Destination host for outgoing `/sample/captured` and `/sample/loaded` messages |
+| `osc.send_port` | `9000` | Destination UDP port for outgoing OSC messages |
+| `osc.receive_enabled` | `false` | Listen for `/sample/import` messages to trigger file import from other apps |
+| `osc.receive_port` | `9002` | UDP port the OSC receiver listens on |
 
 ## Output
 
