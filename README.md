@@ -114,7 +114,7 @@ you focus on playing.
   for talking to sequencers and visualisers, and a ready-to-play GM drums map
   that turns any sample collection into a coherent, pre-mixed drum kit on
   first play.
-- **Pairs with Subsequence.** Subsample is one half of a fully open-source
+- **Pairs with Subsequence.** Subsample is one part of a fully open-source
   generative sampler workstation - its sister project
   [Subsequence](https://github.com/simonholliday/subsequence) is a Python
   MIDI sequencer. Subsequence drives the patterns; Subsample provides the
@@ -1099,8 +1099,9 @@ or bird detector that wants its captures to become MIDI-playable instruments.
 [Subsequence](https://github.com/simonholliday/subsequence) is a sister
 project: a generative MIDI sequencer and algorithmic composition engine for
 Python with rock-solid timing (typical pulse jitter < 5 μs on Linux).
-Together, the two form a fully open-source generative sampler workstation -
-Subsequence drives the patterns, Subsample provides the sounds.
+Together, they form part of a fully open-source generative sampler
+workstation - Subsequence drives the patterns, Subsample provides the
+sounds.
 
 The two communicate over standard MIDI. The simplest setup is to give
 Subsample a named [virtual MIDI port](#virtual-midi) and have Subsequence send

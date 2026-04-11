@@ -9,6 +9,7 @@ build/
 # Config (user-specific files; midi-map.yaml.default is tracked)
 config.yaml
 midi-map.yaml
+midi-map-*.yaml
 
 # Logs
 *.log
