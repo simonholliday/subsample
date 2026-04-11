@@ -1,10 +1,17 @@
 # Subsample
 
-Subsample is an automatic sample harvester, analyser, and MIDI instrument. Point
-a microphone at the world and it captures, analyses, processes, and organises
-every usable sound into a playable, mix-ready MIDI instrument - automatically, in
-real time. Import existing sample packs or field recordings and they receive the
-same treatment.
+**Cross-platform open-source Python live sampler, automatic drum-kit builder,
+and MIDI sample instrument.** Point a microphone at the world (or feed in
+field recordings, sample packs, or radio captures) and Subsample captures,
+trims, analyses, and routes every distinct sound into a playable, mix-ready
+MIDI instrument, automatically, in real time. Workflows that normally require
+expensive hardware samplers, sample-pack organiser plugins, or hours of manual
+chopping and tagging happen continuously in the background.
+
+Build a custom drum kit from your favourite vinyl. Turn a walk through the
+woods into a playable instrument. Slice and re-tempo a breakbeat. Feed a pile
+of unsorted samples in and watch them organise themselves. All four are the
+same workflow.
 
 Traditional samplers - hardware or software - require you to manually record,
 chop, name, categorise, and map every sample by hand. Subsample automates the
@@ -12,85 +19,135 @@ entire pipeline: it detects individual sounds from a live audio stream or
 pre-recorded files, builds a 58-element acoustic fingerprint for each one,
 assigns them to MIDI notes based on how they sound, and runs a per-sample DSP
 processing chain that adapts its parameters from the audio content itself. A
-chaotic environment becomes an organised, mix-ready sample instrument - without
-you lifting a finger.
+chaotic environment becomes an organised, mix-ready sample instrument while
+you focus on playing.
 
-## What sets Subsample apart
 
-### No other sampler does this
+## Contents
 
-- **Automatic similarity-based MIDI assignment** - sounds are matched to your
-  reference library and mapped to MIDI notes as they arrive. No manual
-  drag-and-drop, no folder browsing, no per-pad assignment.
-- **Classification-free matching** - the same engine works for kicks and violins
-  without training data, labels, or pre-defined categories. It is pure geometry:
-  similar sounds cluster together naturally in a 58-dimensional feature space.
-- **Auto-adaptive processing** - processors derive their parameters from each
-  sample's own analysis data. The compressor reads peak level, onset speed, and
-  decay to set threshold, attack, and release. The gate sets its threshold from
-  the noise floor. Transient shaping adapts from the crest factor. Envelope
-  reshape tightens the tail based on decay character. Write `compress: true` or
-  `gate: true` and the right settings are chosen for each sample automatically.
+- **1. Getting Started**
+  - [Why Subsample?](#why-subsample)
+  - [At a glance](#at-a-glance)
+  - [Quick start](#quick-start)
+- **2. Concepts**
+  - [How it works](#how-it-works)
+  - [MIDI map](#midi-map)
+  - [Similarity engine](#similarity-engine)
+  - [Transforms](#transforms)
+- **3. Configuration & Operation**
+  - [Configuration](#configuration)
+  - [Output](#output)
+  - [Instrument sample library](#instrument-sample-library)
+  - [Reference sample library](#reference-sample-library)
+  - [Live-coding the MIDI map](#live-coding-the-midi-map)
+- **4. Integration**
+  - [Virtual MIDI](#virtual-midi)
+  - [OSC integration](#osc-integration)
+  - [Works with Subsequence](#works-with-subsequence)
+- **5. Project Info**
+  - [Performance](#performance)
+  - [Scripts](#scripts)
+  - [Roadmap](#roadmap)
+  - [Architecture](#architecture)
+  - [Requirements](#requirements)
+  - [Tests](#tests)
+  - [Type Checking](#type-checking)
+  - [Dependencies and Credits](#dependencies-and-credits)
+  - [About the Author](#about-the-author)
+  - [License](#license)
+  - [Commercial licensing](#commercial-licensing)
 
-### Deep processing
 
-- **17-processor DSP pipeline** - pitch-shift, time-stretch, reverse,
-  high/low/band-pass filter, saturate, compress, limit, gate, distort, reshape,
-  transient shaping, pad-quantize, vocoder (cross-synthesis), and HPSS
-  harmonic/percussive separation. Each processor runs per-sample in a background
-  worker pool - processed variants are ready before you press a key.
-- **Beat-aware processing** - beat-quantized time-stretching uses onset-aligned
-  timemaps to lock samples to a target BPM with musical precision. Pad-quantize
-  offers an alternative for speech: it snaps onsets to a beat grid by inserting
-  silence rather than time-stretching, preserving natural timbre with no
-  artifacts. Both support an `amount` parameter (0.0-1.0) for partial
-  quantization - a looser, more natural feel. The `segment` parameter enables
-  per-hit playback: cycle through detected segments with `round_robin`, pick
-  randomly with `random`, or map specific segments to specific notes by index.
-- **Pitch-aware** - tonal samples are automatically detected and mapped
-  chromatically across a keyboard range, with background pitch-shifting at the
-  highest available quality (Rubber Band offline finer mode).
-- **MIDI CC parameter control** - bind any numeric processor parameter to a MIDI
-  CC controller. Turn a knob to sweep filter cutoff, quantize amount, or
-  compression threshold in real time. Changes are debounced and new variants
-  processed in the background; the previous variant bridges the gap until the new
-  one is ready, giving smooth transitions for gradual parameter changes.
-- **Real-time capture with zero-gap detection** - the input thread is never
-  blocked waiting for analysis. Back-to-back sounds are captured reliably, even
-  on USB audio.
+## Why Subsample?
 
-### Production-ready
+- **A studio sampler that builds itself.** Drop samples in (or record them
+  live) and Subsample maps them to MIDI notes, processes them through an
+  adaptive DSP chain, and presents a playable, mix-ready instrument with no
+  manual chopping, naming, or mapping. Free, open-source, and runs anywhere
+  CPython 3.12 does - from a Raspberry Pi in the rehearsal room to a studio
+  Mac or Linux rack server.
+- **Automatic similarity-based sample organisation.** A 58-dimensional
+  acoustic fingerprint matches kicks to kick pads, snares to snare pads,
+  hi-hats to hi-hat pads - no labels, no training data, no manual tagging.
+  The same engine handles tonal samples without special treatment, and works
+  equally well on a chaotic Splice library or a fresh field-recording session.
+- **Real-time live sampling.** Point a microphone at the world and Subsample
+  captures, trims, analyses, and adds every distinct sound event to your
+  instrument library as it happens. Adaptive noise floor tracking works in
+  noisy rehearsal rooms as well as quiet studios; back-to-back sounds are
+  captured reliably with zero-gap detection.
+- **Beat slicer and auto-quantize for loops.** Detected onsets in long samples
+  are individually placed on a beat grid using onset-aligned timemaps - loops
+  snap to your target BPM with musical precision. A pad-quantize mode
+  preserves natural timbre by inserting silence between hits instead of
+  time-stretching. Per-hit segment playback: cycle through hits with
+  `round_robin`, pick randomly with `random`, or map specific segments to
+  specific notes by index.
+- **Pitched and percussive in one engine.** Tonal samples are auto-detected by
+  a seven-criterion stability gate and pitch-shifted across the keyboard range
+  at the highest available quality (Rubber Band offline finer mode). Drums,
+  melodic, and effect samples share one library and one workflow.
+- **17-processor DSP chain with intelligent defaults.** Compression, gating,
+  transient shaping, filters, distortion, saturation, vocoder cross-synthesis,
+  beat-quantize, pitch-shift, time-stretch, reverse, envelope reshape, and
+  HPSS harmonic/percussive separation. Every parameter auto-adapts to each
+  sample's analysis data - write `compress: true` and the right threshold,
+  attack, and release are derived from the audio. Variants are pre-rendered
+  in a background worker pool and ready before you press a key.
+- **Sweep anything with a knob.** Bind any numeric parameter - filter cutoff,
+  beat-quantize amount, distortion drive, compression threshold - to a MIDI
+  CC controller. Variants are re-rendered in the background between knob
+  positions and bridged smoothly, so you can play with parameters that aren't
+  normally automatable on samplers at all.
+- **Multichannel in, multichannel out.** Records from any subset of physical
+  inputs on a multi-channel interface (e.g. inputs 3-4 of a Focusrite Scarlett
+  18i20). Routes individual instruments to specific outputs (kick to outputs
+  1-2, snare to outputs 3-4) for separate external processing. Standard
+  ITU-R BS.775 downmix and conservative upmix for stereo, quad, 5.1, and 7.1.
+- **Headless and config-driven.** Everything is YAML - version-controllable,
+  reproducible, no GUI required. Runs equally well on a studio Mac, a
+  Raspberry Pi in the rehearsal room, or a rack server. Drive it from any
+  DAW, hardware controller, or sequencer over standard MIDI.
+- **Plays nicely with the rest of your studio.** Standard MIDI input from any
+  DAW or hardware controller, [virtual MIDI](#virtual-midi) ports for
+  software-only routing on the same machine, [OSC integration](#osc-integration)
+  for talking to sequencers and visualisers, and a ready-to-play GM drums map
+  that turns any sample collection into a coherent, pre-mixed drum kit on
+  first play.
+- **Pairs with Subsequence.** Subsample is one half of a fully open-source
+  generative sampler workstation - its sister project
+  [Subsequence](https://github.com/simonholliday/subsequence) is a Python
+  MIDI sequencer. Subsequence drives the patterns; Subsample provides the
+  sounds. Each works independently - see [Works with Subsequence](#works-with-subsequence).
 
-- **Multichannel output** - supports any number of output channels (stereo, quad,
-  5.1, 7.1) with standard ITU-R BS.775 downmix and conservative upmix. Samples
-  of any channel count are automatically mapped to the output layout. Pan weights
-  define a target layout; if the output has fewer channels, standard downmix is
-  applied automatically. Per-instrument output routing lets you send different
-  instruments to different physical outputs on a multi-channel interface (e.g.
-  kick to outputs 1-2, snare to outputs 3-4) for separate external processing.
-- **Bank switching** - declare multiple instrument directories in the MIDI map
-  and switch between them instantly via MIDI Program Change. Each bank has its
-  own library, similarity index, and transform cache.
-- **Import from any source** - pre-trimmed samples from commercial packs, field
-  recordings, SDR radio captures, or any other source can be imported directly
-  with automatic silence trimming, safety fades, and full analysis. Supports WAV,
-  FLAC, AIFF, OGG, MP3/MPEG, and most other common audio formats via libsndfile.
-- **Ready-to-play GM drums map** - 47 reference instruments define what each
-  MIDI note should sound like. Your captured samples are automatically matched to
-  the closest reference and routed to the corresponding note, with per-instrument
-  filtering, adaptive compression on transient sounds, audience-perspective
-  panning, and gain balancing already configured. No samples are included - the
-  map is a template that organises whatever you feed it.
-- **Config-driven** - everything is YAML. MIDI routing, similarity weights,
-  detection tuning, processing chains, output format. Version-controllable,
-  reproducible, no GUI required.
-- **Headless** - runs on anything from a Raspberry Pi to a studio rack server.
-  Drive it from a DAW, hardware controller, or Python sequencer over MIDI.
-- **OSC integration** - sends `/sample/captured` and `/sample/loaded` events
-  when samples are recorded or loaded, so OSC-compatible apps (sequencers,
-  visualisers, other audio tools) can react to sample characteristics in real
-  time. Optionally receives `/sample/import` messages to trigger file import
-  from other apps. Requires `pip install subsample[osc]`.
+
+## At a glance
+
+| | |
+|---|---|
+| **Live capture** | Adaptive noise floor, zero-gap back-to-back detection, S-curve fades |
+| **Analysis** | 58 dimensions across 5 feature groups; cached `.analysis.json` sidecars |
+| **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
+| **DSP processors** | 17 (filter, comp, gate, distort, saturate, reshape, transient, HPSS, vocoder, repitch, beat-quantize, pad-quantize, ...) |
+| **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
+| **Pitch shifting** | Rubber Band offline finer (highest available quality), pre-rendered |
+| **Time stretch** | Beat-quantized with onset-aligned timemaps, partial-quantize amount, pad-quantize alternative for speech |
+| **Segment playback** | Per-hit round-robin, random, or indexed - for sliced loops |
+| **MIDI input** | Hardware port, named virtual port, or both |
+| **MIDI control** | Note on/off, Program Change for banks, CC binding for any numeric parameter |
+| **OSC** | Sender + receiver (optional dependency) |
+| **Audio formats in** | WAV, BWF, FLAC, AIFF, OGG, MP3/MPEG (libsndfile) |
+| **Channels** | Mono through 7.1, ITU-R BS.775 downmix, conservative upmix, per-instrument output routing |
+| **Audio precision** | End-to-end 32-bit float pipeline, 64-bit DSP for IIR filters and envelope followers |
+| **Latency** | Pre-rendered variants - playback is a memory copy into the mix buffer |
+| **Library mgmt** | Memory-bounded with FIFO eviction, persistent disk cache for variants, hot-loading from watched directories |
+| **Live-coding** | Edit the MIDI map YAML and assignments reload on save |
+| **Bank switching** | Multiple instrument directories swappable via MIDI Program Change |
+| **GM drums** | Ready-to-play map of 47 GM percussion instruments with researched mix chain |
+| **Configuration** | YAML, version-controllable, headless, no GUI |
+| **Platform** | Linux, macOS, Windows (via WSL), Raspberry Pi - anywhere CPython 3.12 runs |
+| **License** | AGPL-3.0 (commercial licensing on request) |
+
 
 ## How it works
 
@@ -100,12 +157,14 @@ Subsample listens continuously to a live audio input and captures every distinct
 sound event. An adaptive noise floor (exponential moving average) tracks the
 ambient level in real time, so it works equally well in a quiet studio and a
 noisy rehearsal space. Each captured sound is trimmed with smooth S-curve fades
-to avoid clicks. All channel formats are preserved end-to-end - a stereo microphone records
-and plays back in stereo, a quad recording keeps its four channels, and
+to avoid clicks.
+
+All channel formats are preserved end-to-end - a stereo microphone records and
+plays back in stereo, a quad recording keeps its four channels, and
 multichannel samples are automatically mapped to the output layout using
 standard ITU downmix coefficients. On multi-channel interfaces (e.g. Focusrite
-Scarlett 18i20), `recorder.audio.input` selects which physical inputs to record
-from - for example `[3, 4]` records a stereo pair from inputs 3 and 4.
+Scarlett 18i20), `recorder.audio.input` selects which physical inputs to
+record from - for example `[3, 4]` records a stereo pair from inputs 3 and 4.
 
 You can also feed it pre-recorded WAV files - they pass through the same
 detection pipeline, making it easy to build sample libraries from existing
@@ -199,7 +258,7 @@ Two maps are included:
 Copy either file as your starting point. Each map lists **assignments** -
 mapping one or more MIDI notes on a given channel to sample targets.
 
-### The GM drums map — instant professional drum kit
+### The GM drums map - instant professional drum kit
 
 `midi-map-gm-drums.yaml` covers all 47 standard GM percussion notes (35-81).
 Point it at your instrument directory and every MIDI drum note automatically
@@ -221,7 +280,7 @@ finds the closest matching sample and plays it through a professional mix chain:
   together without any one instrument dominating
 
 The result: a new user with a collection of recorded samples hears a coherent,
-pre-mixed drum kit on first play — no manual configuration needed.
+pre-mixed drum kit on first play - no manual configuration needed.
 
 ### Assignment fields
 
@@ -369,7 +428,7 @@ Available processors:
 | `transient: true` | amount (auto) | Transient enhancement/taming via HPSS rebalancing. Auto-adapts from crest factor: peaky samples are tamed, dull samples enhanced. |
 | `vocoder: { carrier: reference }` | carrier (required), bands (24), depth (1.0), formant_shift (0) | Channel vocoder cross-synthesis. Imposes the sample's spectral envelope onto a carrier signal. `carrier: reference` uses this note's reference sample; or specify a file path. |
 
-All three filters can be used without parameters — they default to classic
+All three filters can be used without parameters - they default to classic
 console channel-strip values:
 
 ```yaml
@@ -388,16 +447,16 @@ The compressor and limiter share the same DSP back-end (Giannoulis et al.
 feed-forward design with soft knee and look-ahead). `compress: true` adapts to
 each sample automatically using the analysis data:
 
-- **threshold** — set 6 dB below the sample's peak level (always engages)
-- **attack** — slow for percussive samples (lets the transient punch through),
+- **threshold** - set 6 dB below the sample's peak level (always engages)
+- **attack** - slow for percussive samples (lets the transient punch through),
   fast for gradual onsets (no transient to protect)
-- **release** — short for quick-decay samples (recovers before the next hit),
+- **release** - short for quick-decay samples (recovers before the next hit),
   long for sustained sounds (avoids pumping)
 
 ```yaml
 process:
   - compress: true                                        # adapts to each sample
-  - compress: { threshold: -30, ratio: 10, attack: 0.5 } # explicit — squash + raise tail
+  - compress: { threshold: -30, ratio: 10, attack: 0.5 } # explicit - squash + raise tail
   - compress: { attack: 5 }                               # explicit attack, rest auto
   - limit: true                                           # brickwall at -1 dBFS
 ```
@@ -644,7 +703,7 @@ Samples with detected rhythmic content can be time-stretched to a target tempo
 using the `beat_quantize` processor in a MIDI map assignment. Detected attacks are
 snapped to a quantized beat grid and the entire mapping is applied in a single
 pass using Rubber Band's offline finer engine. Time-stretch variants are produced
-on-demand when an assignment requests them — no global startup cost.
+on-demand when an assignment requests them - no global startup cost.
 
 ### Attack-accurate onset detection
 
@@ -704,7 +763,7 @@ and channel count. Detected segments are saved to the output directory.
 
 Subsample always loads `config.yaml.default` as the base, then deep-merges
 your `config.yaml` on top. Your config only needs the settings you want to
-change — everything else is inherited from the defaults automatically.
+change - everything else is inherited from the defaults automatically.
 
 The most common overrides:
 
@@ -824,17 +883,17 @@ archive on disk is unaffected.
 
 Set `instrument.watch: true` to monitor the instrument directory for new audio
 files at runtime and load them without restarting. The watcher detects audio
-files from any source — another Subsample instance, a DAW, an SDR recorder, a
+files from any source - another Subsample instance, a DAW, an SDR recorder, a
 script, or any other application that writes audio to the watched directory.
 
 Two detection paths run in parallel:
 
-1. **Sidecar path** — watches for `.analysis.json` sidecar files (fastest).
+1. **Sidecar path** - watches for `.analysis.json` sidecar files (fastest).
    When a sidecar appears, its corresponding audio file is loaded immediately
    without re-analysing. This is the path taken when the source is another
    Subsample instance, which always writes the WAV first and the sidecar second.
 
-2. **Audio file path** — watches for audio files (`.wav`, `.flac`, `.aiff`,
+2. **Audio file path** - watches for audio files (`.wav`, `.flac`, `.aiff`,
    `.ogg`, `.mp3`) from any source. After a short grace period to see if a
    sidecar follows (in case the source is Subsample), checks that the file is
    no longer being written (file-size stability), runs the full analysis
@@ -842,7 +901,7 @@ Two detection paths run in parallel:
 
 The audio file path handles the common case where another application writes
 an audio file without any sidecar. The file-size stability check ensures that
-long recordings still being written are not loaded prematurely — the watcher
+long recordings still being written are not loaded prematurely - the watcher
 waits until the file size stops changing before attempting to read it.
 
 Supported audio formats: WAV, FLAC, AIFF, OGG, MP3/MPEG (anything supported
@@ -853,7 +912,7 @@ by libsndfile).
 Subsample can be split across two machines: one captures and analyses audio, the
 other plays it back via MIDI. The two machines share a directory (network drive,
 Dropbox, or any folder sync tool). The recorder writes samples there; the player
-watches the same directory and loads new samples as they arrive — no restart
+watches the same directory and loads new samples as they arrive - no restart
 required.
 
 This separation is useful when the recording and playback environments are
@@ -891,7 +950,7 @@ The recorder writes each detected sample as a WAV file plus an `.analysis.json`
 sidecar containing the pre-computed feature data. The player monitors the shared
 directory for new sidecar files; when one arrives, it loads the sample pair
 directly without re-analysing. The sidecar's arrival is used as the ready signal
-because the recorder always writes the WAV first — a sidecar appearing means both
+because the recorder always writes the WAV first - a sidecar appearing means both
 files are present and complete.
 
 Audio files from non-Subsample sources (no sidecar) are also detected
@@ -907,7 +966,7 @@ written, the player retries automatically.
 ## Live-coding the MIDI map
 
 You can edit the MIDI routing map while the player is running and have changes
-take effect immediately — no restart required. Set `player.watch_midi_map: true`
+take effect immediately - no restart required. Set `player.watch_midi_map: true`
 and point `player.midi_map` at your working copy:
 
 ```yaml
@@ -919,7 +978,7 @@ player:
 
 When you save the file, Subsample re-parses it and swaps the active note map
 within about half a second. If the YAML has a syntax error, the current map is
-kept and a warning is logged — playback is never interrupted. Rapid saves from
+kept and a warning is logged - playback is never interrupted. Rapid saves from
 text editors are debounced into a single reload.
 
 ## Reference sample library
@@ -975,6 +1034,99 @@ while Subsample is running. Overrides `player.midi_device`.
 > on lower-powered hardware. If you experience dropouts, reduce
 > `recorder.audio.chunk_size`, lower the sequencer's buffer size, or disable the
 > recorder (`recorder.enabled: false`) to run Subsample in playback-only mode.
+
+## OSC integration
+
+Subsample can send and receive [OSC (Open Sound Control)](https://opensoundcontrol.stanford.edu/)
+messages, so it can talk to sequencers, visualisers, custom scripts, or any
+other OSC-compatible application. OSC support is an optional extra: install it
+with
+
+```bash
+pip install -e ".[osc]"
+```
+
+then enable it in `config.yaml`:
+
+```yaml
+osc:
+  enabled: true
+  send_host: "127.0.0.1"
+  send_port: 9000
+  receive_enabled: true
+  receive_port: 9002
+```
+
+### Outgoing messages
+
+When `osc.enabled` is true, Subsample sends two events:
+
+| Address | When | Arguments |
+|---|---|---|
+| `/sample/captured` | A new live recording has been analysed | `filepath:str, duration:float, pitch_hz:float, pitch_class:int, tempo_bpm:float, onset_count:int` |
+| `/sample/loaded` | A sample has been added to the instrument library (live capture, hot-load, or OSC import) | `name:str, duration:float, pitch_hz:float, pitch_class:int` |
+
+`pitch_class` is `0..11` for tonal samples (C=0, C#=1, ..., B=11) or `-1`
+when no stable pitch is detected. `pitch_hz` is `0.0` when unpitched.
+
+### Incoming messages
+
+When `osc.receive_enabled` is also true, Subsample listens on
+`osc.receive_port` for one address:
+
+| Address | Effect | Arguments |
+|---|---|---|
+| `/sample/import` | Read the file at the given path, run the full analysis pipeline, and add it to the instrument library | `file_path:str` |
+
+This is more targeted than the directory watcher and lets external applications
+push specific files into the library on demand - for example, a radio scanner
+or bird detector that wants its captures to become MIDI-playable instruments.
+
+### Use cases
+
+- **Drive a sequencer from incoming sounds.** A Subsequence pattern can react
+  when Subsample captures a snare-like sound, triggering a fill or changing
+  density.
+- **Visualise the library in real time.** A TouchDesigner or Processing patch
+  subscribed to `/sample/loaded` can show new samples as they arrive, mapped
+  by pitch, tempo, or duration.
+- **Cross-app sample handoff.** Any other tool that produces audio files can
+  push them into Subsample with a single `/sample/import` message - no shared
+  filesystem watching required.
+
+## Works with Subsequence
+
+[Subsequence](https://github.com/simonholliday/subsequence) is a sister
+project: a generative MIDI sequencer and algorithmic composition engine for
+Python with rock-solid timing (typical pulse jitter < 5 μs on Linux).
+Together, the two form a fully open-source generative sampler workstation -
+Subsequence drives the patterns, Subsample provides the sounds.
+
+The two communicate over standard MIDI. The simplest setup is to give
+Subsample a named [virtual MIDI port](#virtual-midi) and have Subsequence send
+to it - no hardware MIDI cabling required, no audio routing on the host:
+
+```yaml
+# config.yaml
+player:
+  enabled: true
+  virtual_midi_port: "Subsample Virtual MIDI"
+```
+
+From the sequencer side, Subsample's port appears as a MIDI output
+destination while Subsample is running - Subsequence connects with
+`composition.midi_output("Subsample Virtual MIDI")`, no special configuration
+needed.
+
+For richer integration, enable [OSC](#osc-integration) on both sides.
+Subsample will forward `/sample/captured` and `/sample/loaded` events to a
+Subsequence OSC listener, so a pattern can respond musically to incoming
+samples - trigger a fill when a snare-like sound arrives, raise pattern
+density when a busy loop is captured, or update a visualiser. Subsequence can
+also send `/sample/import` messages back to Subsample to push specific files
+into its library.
+
+Each project is independently useful and has no dependency on the other.
 
 ## Scripts
 
@@ -1078,8 +1230,10 @@ repository; audio files are local-only and .gitignored.
 
 - **Mute groups** - notes in a named group silence each other when triggered.
   Classic use: closed hi-hat silences open hi-hat.
-- **Round-robin** - cycle through sample variants on repeated triggers to avoid
-  the machine-gun effect on rapid notes.
+- **Per-trigger sample variation** - cycle through alternative samples on
+  repeated triggers to avoid the machine-gun effect on rapid notes. (Distinct
+  from the existing per-hit segment round-robin, which cycles through detected
+  hits inside a single sliced loop.)
 
 ### Playback and sound design
 
@@ -1092,6 +1246,7 @@ repository; audio files are local-only and .gitignored.
   transient detection, then add each slice to the library as a separate sample.
 - **Similar-to-this query** - "find more sounds like this one" by exposing the
   similarity engine as a user-facing search.
+
 ### Additional select/process features
 
 - **Random selection** - `order_by: random` to pick a different sample on each
@@ -1200,6 +1355,13 @@ output device's bit depth.
 - Python 3.12+
 - PortAudio (required by PyAudio - `apt install portaudio19-dev` or `brew install portaudio`)
 - Rubber Band (required by pyrubberband - `apt install rubberband-cli` or `brew install rubberband`)
+
+**Windows users:** install and run Subsample inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)
+(Windows Subsystem for Linux). This gives you a real Linux environment where
+the `apt` instructions above just work. Audio devices need to be exposed to
+WSL - see the [WSL audio guide](https://learn.microsoft.com/en-us/windows/wsl/connect-usb)
+for USB passthrough or use a network audio bridge if your interface supports
+one. Subsample is not currently tested against native Windows Python.
 
 ## Tests
 
