@@ -741,6 +741,17 @@ time.
 ## Quick start
 
 ```bash
+# Install system dependencies (PortAudio + Rubber Band)
+# Debian/Ubuntu:
+sudo apt install portaudio19-dev rubberband-cli
+# macOS:
+brew install portaudio rubberband
+
+# Clone and install
+git clone https://github.com/simonholliday/subsample.git
+cd subsample
+pip install -e .
+
 # Copy the default config and adjust to taste
 cp config.yaml.default config.yaml
 
