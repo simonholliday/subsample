@@ -752,16 +752,18 @@ git clone https://github.com/simonholliday/subsample.git
 cd subsample
 pip install -e .
 
-# Copy the default config and adjust to taste
-cp config.yaml.default config.yaml
-
-# Stream from a live audio input device
+# Run with built-in defaults (no config file needed)
 subsample
 
 # Or process audio files through the detection pipeline
 subsample recording.wav                # Single file
 subsample ./recordings/*.wav           # Multiple files (glob expansion)
 ```
+
+Subsample works out of the box with sensible defaults from `config.yaml.default`.
+To customise, create a `config.yaml` containing only the settings you want to
+override - everything else is inherited automatically. See
+[Configuration](#configuration) for details.
 
 **Live capture mode:** Subsample lists available audio input devices and lets you
 choose one (or auto-selects if only one is present). It calibrates ambient noise
@@ -838,7 +840,7 @@ weights - is optional and rarely needs changing.
 | `osc.enabled` | `false` | Enable OSC integration (send sample events, optionally receive import requests). Requires `pip install subsample[osc]` |
 | `osc.send_host` | `127.0.0.1` | Destination host for outgoing `/sample/captured` and `/sample/loaded` messages |
 | `osc.send_port` | `9000` | Destination UDP port for outgoing OSC messages |
-| `osc.receive_enabled` | `false` | Listen for `/sample/import` messages to trigger file import from other apps |
+| `osc.receive_enabled` | `false` | Listen for `/sample/import` messages to load audio files into the in-memory library from other apps (reads in place, does not copy) |
 | `osc.receive_port` | `9002` | UDP port the OSC receiver listens on |
 
 ## Output
@@ -1087,10 +1089,10 @@ When `osc.receive_enabled` is also true, Subsample listens on
 
 | Address | Effect | Arguments |
 |---|---|---|
-| `/sample/import` | Read the file at the given path, run the full analysis pipeline, and add it to the instrument library | `file_path:str` |
+| `/sample/import` | Read the file at the given path, analyse it, and load it into the in-memory instrument library for immediate playback. The file is read in place - it is not copied or moved. The sample is available until the next restart; for persistence, place the file in `instrument.directory` instead (or as well). | `file_path:str` |
 
 This is more targeted than the directory watcher and lets external applications
-push specific files into the library on demand - for example, a radio scanner
+load specific files into the library on demand - for example, a radio scanner
 or bird detector that wants its captures to become MIDI-playable instruments.
 
 ### Use cases

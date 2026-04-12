@@ -1,8 +1,10 @@
 """OSC (Open Sound Control) sender and receiver for inter-app communication.
 
 Sends sample events when recordings are captured or library samples are loaded,
-and optionally receives /sample/import messages to trigger file import from
-other OSC-compatible applications.
+and optionally receives /sample/import messages to load audio files into the
+in-memory instrument library from other OSC-compatible applications.  Files
+are read in place (not copied); the sample is available for playback until
+the next restart.
 
 Requires the optional ``python-osc`` dependency::
 

@@ -1029,7 +1029,12 @@ def main () -> None:
 	if cfg.osc.enabled and cfg.osc.receive_enabled:
 		try:
 			def _on_osc_import (file_path_str: str) -> None:
-				"""Handle a /sample/import OSC message by analyzing and loading the file."""
+				"""Handle a /sample/import OSC message.
+
+				Reads and analyses the file in place (does not copy), then
+				loads it into the in-memory instrument library for immediate
+				playback.  The sample is available until the next restart.
+				"""
 
 				file_path = pathlib.Path(file_path_str)
 
