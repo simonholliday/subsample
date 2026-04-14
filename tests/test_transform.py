@@ -3412,13 +3412,14 @@ class TestVocoder:
 
 class TestSSV2DiskCache:
 
-	"""Tests for SSV2 disk cache format with segment bounds."""
+	"""Tests for SSV2 disk cache format with segment bounds and energy profile."""
 
 	def _make_result (
 		self,
 		segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = None,
+		energy_profile: typing.Optional[subsample.transform.GridEnergyProfile] = None,
 	) -> subsample.transform.TransformResult:
-		"""Create a test TransformResult with optional segment bounds."""
+		"""Create a test TransformResult with optional segment bounds and energy profile."""
 		audio = numpy.random.RandomState(42).uniform(-0.5, 0.5, (4410, 2)).astype(numpy.float32)
 		spec = subsample.transform.TransformSpec(
 			steps=(subsample.transform.PitchShift(target_midi_note=60),),
@@ -3428,6 +3429,7 @@ class TestSSV2DiskCache:
 		return subsample.transform.TransformResult(
 			key=key, audio=audio, duration=0.1, level=level,
 			segment_bounds=segment_bounds,
+			energy_profile=energy_profile,
 		)
 
 	def test_roundtrip_with_bounds (self, tmp_path: pathlib.Path) -> None:
@@ -3499,3 +3501,227 @@ class TestSSV2DiskCache:
 		for start, end in loaded.segment_bounds:
 			assert start < end
 			assert end <= loaded.audio.shape[0]
+
+	def test_roundtrip_with_energy_profile (self, tmp_path: pathlib.Path) -> None:
+
+		"""Write then read back preserves energy profile alongside segment bounds."""
+
+		bounds = ((0, 1000), (1500, 2500), (3000, 4410))
+		profile = subsample.transform.GridEnergyProfile(
+			bpm=120.0, resolution=16, energy=(1.0, 0.5, 0.0, 0.3),
+		)
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result(segment_bounds=bounds, energy_profile=profile)
+		cache.put("ep_md5", result.key.spec, result)
+		loaded = cache.get("ep_md5", result.key.spec, result.key)
+
+		assert loaded is not None
+		assert loaded.segment_bounds == bounds
+		assert loaded.energy_profile is not None
+		assert loaded.energy_profile.bpm == pytest.approx(120.0)
+		assert loaded.energy_profile.resolution == 16
+		assert loaded.energy_profile.energy == pytest.approx((1.0, 0.5, 0.0, 0.3))
+
+	def test_roundtrip_without_energy_profile (self, tmp_path: pathlib.Path) -> None:
+
+		"""Write then read with no profile produces energy_profile = None."""
+
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result(energy_profile=None)
+		cache.put("no_ep_md5", result.key.spec, result)
+		loaded = cache.get("no_ep_md5", result.key.spec, result.key)
+
+		assert loaded is not None
+		assert loaded.energy_profile is None
+
+	def test_energy_profile_without_segment_bounds (self, tmp_path: pathlib.Path) -> None:
+
+		"""Energy profile round-trips when segment_bounds is None (seg_count=0 sentinel)."""
+
+		profile = subsample.transform.GridEnergyProfile(
+			bpm=90.0, resolution=8, energy=(0.8, 1.0, 0.0, 0.0, 0.6),
+		)
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result(segment_bounds=None, energy_profile=profile)
+		cache.put("ep_no_bounds_md5", result.key.spec, result)
+		loaded = cache.get("ep_no_bounds_md5", result.key.spec, result.key)
+
+		assert loaded is not None
+		assert loaded.segment_bounds is None
+		assert loaded.energy_profile is not None
+		assert loaded.energy_profile.bpm == pytest.approx(90.0)
+		assert loaded.energy_profile.resolution == 8
+		assert loaded.energy_profile.energy == pytest.approx((0.8, 1.0, 0.0, 0.0, 0.6))
+
+	def test_old_format_no_energy_profile (self, tmp_path: pathlib.Path) -> None:
+
+		"""SSV2 files written before energy profile support read back with None."""
+
+		import struct
+
+		audio = numpy.random.RandomState(42).uniform(-0.5, 0.5, (100, 1)).astype(numpy.float32)
+		header = struct.pack("<4sHIIff10x", b"SSV2", 1, 44100, 100, 0.5, 0.2)
+
+		# Write segment bounds but no ENRG section (old writer behaviour).
+		bounds_footer = struct.pack("<I", 2)                # seg_count = 2
+		bounds_footer += struct.pack("<II", 0, 50)          # segment 1
+		bounds_footer += struct.pack("<II", 50, 100)        # segment 2
+
+		spec = subsample.transform.TransformSpec(
+			steps=(subsample.transform.PitchShift(target_midi_note=60),),
+		)
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+
+		hex_digest = subsample.transform.variant_cache_key("old_fmt_md5", spec, 44100)
+		path = tmp_path / f"{hex_digest}.variant"
+		path.write_bytes(header + audio.tobytes() + bounds_footer)
+
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		loaded = cache.get("old_fmt_md5", spec, key)
+
+		assert loaded is not None
+		assert loaded.segment_bounds == ((0, 50), (50, 100))
+		assert loaded.energy_profile is None
+
+
+# ---------------------------------------------------------------------------
+# TestGridEnergyProfile
+# ---------------------------------------------------------------------------
+
+class TestGridEnergyProfile:
+
+	"""Tests for _compute_grid_energy_profile()."""
+
+	def test_basic_energy_distribution (self) -> None:
+
+		"""First half loud, second half silent → first slots energised, last zero."""
+
+		sr = 44100
+		n_frames = sr  # 1 second
+
+		# First half: sine wave.  Second half: silence.
+		t = numpy.linspace(0, numpy.pi * 2 * 440, n_frames // 2, dtype=numpy.float32)
+		loud = numpy.sin(t) * 0.5
+		silent = numpy.zeros(n_frames - n_frames // 2, dtype=numpy.float32)
+		mono = numpy.concatenate([loud, silent])
+		audio = mono.reshape(-1, 1)
+
+		profile = subsample.transform._compute_grid_energy_profile(
+			audio, sr, bpm=120.0, resolution=8,
+		)
+
+		assert profile.bpm == 120.0
+		assert profile.resolution == 8
+
+		# At 120 BPM, resolution 8: grid_interval = 0.25s → 4 slots in 1s.
+		assert len(profile.energy) == 4
+
+		# Max is 1.0 (normalised).
+		assert max(profile.energy) == pytest.approx(1.0)
+
+		# First two slots (0-0.25s, 0.25-0.5s) should be energised.
+		assert profile.energy[0] > 0.5
+		assert profile.energy[1] > 0.5
+
+		# Last two slots (0.5-0.75s, 0.75-1.0s) should be near zero.
+		assert profile.energy[2] < 0.01
+		assert profile.energy[3] < 0.01
+
+	def test_single_slot (self) -> None:
+
+		"""Audio shorter than one grid interval → single slot [1.0]."""
+
+		sr = 44100
+		# 10ms of audio, grid interval at 120 BPM / res 16 = 31.25ms.
+		n_frames = int(sr * 0.01)
+		audio = numpy.ones((n_frames, 1), dtype=numpy.float32) * 0.5
+
+		profile = subsample.transform._compute_grid_energy_profile(
+			audio, sr, bpm=120.0, resolution=16,
+		)
+
+		assert len(profile.energy) == 1
+		assert profile.energy[0] == pytest.approx(1.0)
+
+	def test_all_silent (self) -> None:
+
+		"""All-zero audio → all slots are 0.0."""
+
+		sr = 44100
+		audio = numpy.zeros((sr, 1), dtype=numpy.float32)
+
+		profile = subsample.transform._compute_grid_energy_profile(
+			audio, sr, bpm=120.0, resolution=8,
+		)
+
+		for val in profile.energy:
+			assert val == pytest.approx(0.0)
+
+	def test_uniform_energy (self) -> None:
+
+		"""Constant-amplitude audio → all slots approximately equal (1.0)."""
+
+		sr = 44100
+		audio = numpy.full((sr, 1), 0.3, dtype=numpy.float32)
+
+		profile = subsample.transform._compute_grid_energy_profile(
+			audio, sr, bpm=120.0, resolution=8,
+		)
+
+		for val in profile.energy:
+			assert val == pytest.approx(1.0, abs=0.01)
+
+	def test_stereo_audio (self) -> None:
+
+		"""Multi-channel audio is mixed to mono before computation."""
+
+		sr = 44100
+		left  = numpy.ones((sr, 1), dtype=numpy.float32) * 0.4
+		right = numpy.ones((sr, 1), dtype=numpy.float32) * 0.2
+		audio = numpy.concatenate([left, right], axis=1)
+
+		profile = subsample.transform._compute_grid_energy_profile(
+			audio, sr, bpm=120.0, resolution=8,
+		)
+
+		# All slots should be uniform after mono mix.
+		for val in profile.energy:
+			assert val == pytest.approx(1.0, abs=0.01)
+
+	def test_pad_quantize_pattern (self) -> None:
+
+		"""Simulates a pad-quantized pattern: energy at slots 0, 2, 5 only."""
+
+		sr = 44100
+		# 120 BPM, resolution 16 → grid_interval = 0.125s = 5512 frames.
+		slot_frames = int(0.125 * sr)
+		n_slots = 8
+		audio = numpy.zeros((slot_frames * n_slots, 1), dtype=numpy.float32)
+
+		# Place energy at slots 0, 2, 5.
+		for slot_idx in [0, 2, 5]:
+			start = slot_idx * slot_frames
+			end = start + slot_frames
+			audio[start:end, 0] = 0.5
+
+		profile = subsample.transform._compute_grid_energy_profile(
+			audio, sr, bpm=120.0, resolution=16,
+		)
+
+		assert len(profile.energy) == 8
+		assert profile.energy[0] == pytest.approx(1.0)
+		assert profile.energy[1] == pytest.approx(0.0)
+		assert profile.energy[2] == pytest.approx(1.0)
+		assert profile.energy[3] == pytest.approx(0.0)
+		assert profile.energy[4] == pytest.approx(0.0)
+		assert profile.energy[5] == pytest.approx(1.0)
+		assert profile.energy[6] == pytest.approx(0.0)
+		assert profile.energy[7] == pytest.approx(0.0)

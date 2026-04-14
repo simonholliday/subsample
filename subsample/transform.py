@@ -585,6 +585,34 @@ class TransformKey:
 	spec: TransformSpec
 
 # ---------------------------------------------------------------------------
+# GridEnergyProfile
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class GridEnergyProfile:
+
+	"""Per-grid-slot RMS energy for a quantized sample, normalized to [0, 1].
+
+	Computed after the full transform chain (including filters, compression,
+	resampling) so the profile reflects the final audio as heard.  The
+	loudest slot is always 1.0; silent slots are 0.0.
+
+	Use case: find complementary samples whose energy profiles fill each
+	other's gaps — like Tetris pieces on a beat grid.
+	"""
+
+	bpm: float
+	"""Target BPM used for grid computation."""
+
+	resolution: int
+	"""Grid subdivision: 4 = quarter, 8 = eighth, 16 = sixteenth."""
+
+	energy: tuple[float, ...]
+	"""Normalized RMS energy per grid slot.  Length = number of grid slots
+	that fit within the sample duration."""
+
+
+# ---------------------------------------------------------------------------
 # TransformResult
 # ---------------------------------------------------------------------------
 
@@ -621,6 +649,10 @@ class TransformResult:
 	Each entry is (start_frame, end_frame).  None when no quantize step
 	was applied.  Used for per-segment playback (round-robin, random, or
 	fixed index) — the player slices audio[start:end] for zero-copy access."""
+
+	energy_profile: typing.Optional[GridEnergyProfile] = None
+	"""Per-grid-slot RMS energy normalized to [0, 1].  None when no quantize
+	step (TimeStretch or PadQuantize) was applied.  See GridEnergyProfile."""
 
 # ---------------------------------------------------------------------------
 # TransformCache
@@ -1009,22 +1041,49 @@ class VariantDiskCache:
 					path.unlink(missing_ok=True)
 					return None
 
-				# Read optional segment bounds footer (SSV2 only).
+				# Read footer: segment bounds + optional energy profile.
 				segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = None
+				energy_profile: typing.Optional[GridEnergyProfile] = None
 				footer = f.read()
+				cursor = 0
 
 				if footer:
-					seg_count = struct.unpack_from("<I", footer, 0)[0]
 
-					if len(footer) >= 4 + seg_count * 8:
-						bounds_list: list[tuple[int, int]] = []
+					# Section 1: segment bounds.
+					if len(footer) >= cursor + 4:
+						seg_count = struct.unpack_from("<I", footer, cursor)[0]
+						cursor += 4
 
-						for j in range(seg_count):
-							offset = 4 + j * 8
-							s, e = struct.unpack_from("<II", footer, offset)
-							bounds_list.append((s, e))
+						if seg_count > 0 and len(footer) >= cursor + seg_count * 8:
+							bounds_list: list[tuple[int, int]] = []
 
-						segment_bounds = tuple(bounds_list)
+							for j in range(seg_count):
+								s, e = struct.unpack_from("<II", footer, cursor)
+								cursor += 8
+								bounds_list.append((s, e))
+
+							segment_bounds = tuple(bounds_list)
+
+					# Section 2: energy profile (ENRG marker).
+					if (
+						len(footer) >= cursor + 4
+						and footer[cursor : cursor + 4] == b"ENRG"
+					):
+						cursor += 4
+
+						if len(footer) >= cursor + 8:
+							ep_bpm, ep_res, ep_slots = struct.unpack_from("<fHH", footer, cursor)
+							cursor += 8
+
+							if len(footer) >= cursor + ep_slots * 4:
+								energy_values = struct.unpack_from(
+									f"<{ep_slots}f", footer, cursor,
+								)
+								energy_profile = GridEnergyProfile(
+									bpm=ep_bpm,
+									resolution=ep_res,
+									energy=tuple(float(v) for v in energy_values),
+								)
 
 			audio = numpy.frombuffer(body, dtype=numpy.float32).reshape(n_frames, channels)
 
@@ -1037,6 +1096,7 @@ class VariantDiskCache:
 			return TransformResult(
 				key=key, audio=audio, duration=duration, level=level,
 				segment_bounds=segment_bounds,
+				energy_profile=energy_profile,
 			)
 
 		except OSError as exc:
@@ -1084,12 +1144,28 @@ class VariantDiskCache:
 					f.write(header)
 					f.write(audio.tobytes())
 
-					# Write optional segment bounds footer.
+					# Footer section 1: segment bounds.
+					# Always write the count (even when 0) so the energy
+					# profile section has a consistent offset.
 					if result.segment_bounds is not None:
 						f.write(struct.pack("<I", len(result.segment_bounds)))
 
 						for seg_start, seg_end in result.segment_bounds:
 							f.write(struct.pack("<II", seg_start, seg_end))
+					else:
+						f.write(struct.pack("<I", 0))
+
+					# Footer section 2: grid energy profile.
+					if result.energy_profile is not None:
+						profile = result.energy_profile
+						f.write(b"ENRG")
+						f.write(struct.pack(
+							"<fHH",
+							profile.bpm, profile.resolution, len(profile.energy),
+						))
+
+						for val in profile.energy:
+							f.write(struct.pack("<f", val))
 
 				os.replace(tmp_path, str(path))
 			except BaseException:
@@ -1420,9 +1496,27 @@ class TransformProcessor:
 			level    = subsample.analysis.compute_level(_mix_to_mono(audio))
 			duration = audio.shape[0] / self._output_sample_rate
 
+			# Compute grid energy profile if a quantize step was applied.
+			energy_profile: typing.Optional[GridEnergyProfile] = None
+
+			for step in spec.steps:
+				if isinstance(step, (TimeStretch, PadQuantize)):
+					energy_profile = _compute_grid_energy_profile(
+						audio, self._output_sample_rate,
+						step.target_bpm, step.resolution,
+					)
+
+					_log.info(
+						"Grid energy: sample %d  bpm=%.1f  res=%d  slots=%d  %s",
+						key.sample_id, step.target_bpm, step.resolution,
+						len(energy_profile.energy),
+						"[" + ", ".join(f"{e:.2f}" for e in energy_profile.energy) + "]",
+					)
+
 			result = TransformResult(
 				key=key, audio=audio, duration=duration, level=level,
 				segment_bounds=segment_bounds,
+				energy_profile=energy_profile,
 			)
 
 			# Write to disk cache (skip base variants — they're cheap to recompute).
@@ -1806,6 +1900,58 @@ def _mix_to_mono (audio: numpy.ndarray) -> numpy.ndarray:
 		return audio[:, 0]
 
 	return numpy.mean(audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]
+
+
+def _compute_grid_energy_profile (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	bpm:         float,
+	resolution:  int,
+) -> GridEnergyProfile:
+
+	"""Compute per-grid-slot RMS energy from final audio, normalized to [0, 1].
+
+	Divides the audio into regular grid-interval-sized windows and measures
+	the RMS energy in each.  The loudest slot is normalized to 1.0.
+
+	Args:
+		audio:       Shape (n_frames, channels), float32.
+		sample_rate: Sample rate of the audio.
+		bpm:         Target BPM for grid spacing.
+		resolution:  Grid subdivision (4, 8, 16, etc.).
+
+	Returns:
+		GridEnergyProfile with one energy value per grid slot.
+	"""
+
+	mono = _mix_to_mono(audio)
+	n_frames = len(mono)
+
+	grid_interval = 60.0 / bpm / (resolution / 4.0)
+	slot_frames = max(1, int(grid_interval * sample_rate))
+	slot_count = max(1, n_frames // slot_frames)
+
+	energies: list[float] = []
+
+	for i in range(slot_count):
+		start = i * slot_frames
+		end = min(start + slot_frames, n_frames)
+
+		segment = mono[start:end]
+		rms = float(numpy.sqrt(numpy.mean(segment.astype(numpy.float64) ** 2)))
+		energies.append(rms)
+
+	# Normalize so the loudest slot = 1.0.
+	max_energy = max(energies)
+
+	if max_energy > 0.0:
+		energies = [e / max_energy for e in energies]
+
+	return GridEnergyProfile(
+		bpm=bpm,
+		resolution=resolution,
+		energy=tuple(energies),
+	)
 
 
 def _apply_pitch (

@@ -697,7 +697,9 @@ they survive restarts. Each variant is stored as a single binary file named by a
 SHA-256 hash of the source audio, transform chain, output sample rate, and
 analysis version - any change to any of these produces a different key, so stale
 cache hits are impossible. Recently-used files are kept warm (LRU by modification
-time); oldest files are evicted when the disk budget is exceeded.
+time); oldest files are evicted when the disk budget is exceeded. Quantized
+variants also store a grid energy profile - per-grid-slot RMS energy normalized
+to [0, 1] - alongside the audio, enabling future complementary pattern matching.
 
 Samples with detected rhythmic content can be time-stretched to a target tempo
 using the `beat_quantize` processor in a MIDI map assignment. Detected attacks are
