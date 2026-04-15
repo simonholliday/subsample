@@ -78,6 +78,21 @@ class OscEventSender:
 		except Exception:
 			_log.warning("OSC send failed for /sample/captured (%s)", filepath.name, exc_info=True)
 
+	def on_sample_captured_event (self, **kwargs: typing.Any) -> None:
+
+		"""Event handler for sample_captured — unpacks kwargs to on_complete().
+
+		Used as the event subscription target so the event emitter's
+		**kwargs dispatch is compatible with on_complete()'s positional
+		signature.
+		"""
+
+		self.on_complete(
+			kwargs["filepath"], kwargs["spectral"], kwargs["rhythm"],
+			kwargs["pitch"], kwargs["timbre"], kwargs["level"],
+			kwargs["band_energy"], kwargs["duration"], kwargs["audio"],
+		)
+
 	def on_sample_loaded (self, record: subsample.library.SampleRecord) -> None:
 
 		"""Send /sample/loaded when a sample is added to the instrument library."""
@@ -91,6 +106,17 @@ class OscEventSender:
 			])
 		except Exception:
 			_log.warning("OSC send failed for /sample/loaded (%s)", record.name, exc_info=True)
+
+	def on_sample_loaded_event (self, **kwargs: typing.Any) -> None:
+
+		"""Event handler for sample_loaded — unpacks kwargs to on_sample_loaded().
+
+		Used as the event subscription target so the event emitter's
+		**kwargs dispatch is compatible with on_sample_loaded()'s positional
+		signature.
+		"""
+
+		self.on_sample_loaded(kwargs["record"])
 
 
 class OscReceiver:

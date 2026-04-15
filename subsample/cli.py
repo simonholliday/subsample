@@ -40,6 +40,7 @@ import subsample.cache
 import subsample.buffer
 import subsample.config
 import subsample.detector
+import subsample.events
 import subsample.library
 import subsample.osc
 import subsample.player
@@ -232,7 +233,7 @@ def _run_recorder (
 	store_audio: bool,
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]] = None,
-	osc_sender: typing.Optional[typing.Any] = None,
+	app_events: typing.Optional[subsample.events.EventEmitter] = None,
 ) -> None:
 
 	"""Set up an audio input device and run the real-time capture loop.
@@ -255,8 +256,8 @@ def _run_recorder (
 		player_cell:        Single-element list holding the active MidiPlayer, or None.
 		                    Forwarded to _make_on_complete so pitched assignments are
 		                    updated when the best match changes.
-		osc_sender:         Optional OscEventSender; when provided, the on_complete
-		                    callback is wrapped to also send /sample/captured events.
+		app_events:         Optional event emitter; forwarded to _make_on_complete
+		                    so sample_captured and sample_loaded events are emitted.
 	"""
 
 	pa = subsample.audio.create_pyaudio()
@@ -336,27 +337,8 @@ def _run_recorder (
 		reference_library, instrument_library, analysis_params,
 		similarity_matrix, store_audio, transform_manager,
 		player_cell=player_cell,
+		app_events=app_events,
 	)
-
-	# OSC sender wrapping for the on_complete callback (recorder path).
-	if osc_sender is not None:
-		_original_on_complete = on_complete_callback
-
-		def on_complete_callback_osc (
-			filepath: pathlib.Path,
-			spectral: subsample.analysis.AnalysisResult,
-			rhythm: subsample.analysis.RhythmResult,
-			pitch: subsample.analysis.PitchResult,
-			timbre: subsample.analysis.TimbreResult,
-			level: subsample.analysis.LevelResult,
-			band_energy: subsample.analysis.BandEnergyResult,
-			duration: float,
-			audio: numpy.ndarray,
-		) -> None:
-			_original_on_complete(filepath, spectral, rhythm, pitch, timbre, level, band_energy, duration, audio)
-			osc_sender.on_complete(filepath, spectral, rhythm, pitch, timbre, level, band_energy, duration, audio)
-
-		on_complete_callback = on_complete_callback_osc
 
 	writer = subsample.recorder.SampleProcessor(
 		cfg,
@@ -679,15 +661,16 @@ def main () -> None:
 
 	_print_banner(cfg)
 
-	# --- OSC sender ---
-	# Created once and shared across the recorder on_complete callback and
-	# the directory watcher callbacks.  None when OSC is disabled or the
-	# python-osc dependency is missing.
-	_osc_sender: typing.Any = None
+	# --- Application event emitter ---
+	# Integrations (OSC sender, Supervisor dashboard, etc.) subscribe here
+	# instead of being manually wired into each callback chain.
+	app_events = subsample.events.EventEmitter()
 
 	if cfg.osc.enabled:
 		try:
 			_osc_sender = subsample.osc.OscEventSender(cfg.osc.send_host, cfg.osc.send_port)
+			app_events.on("sample_captured", _osc_sender.on_sample_captured_event)
+			app_events.on("sample_loaded", _osc_sender.on_sample_loaded_event)
 			print(f"  OSC sender   : sending to {cfg.osc.send_host}:{cfg.osc.send_port}")
 		except ImportError:
 			_log.warning("OSC enabled but python-osc not installed. pip install subsample[osc]")
@@ -873,7 +856,7 @@ def main () -> None:
 				analysis_params, similarity_matrix,
 				shutdown_event, cfg.player.enabled,
 				transform_manager, _player_cell,
-				_osc_sender,
+				app_events,
 			),
 			name="recorder",
 		))
@@ -929,10 +912,7 @@ def main () -> None:
 					def cb (record: subsample.library.SampleRecord) -> None:
 						_log.info("Watcher [%s]: new sample — %s (%.2fs)", b.name, record.name, record.duration)
 						_integrate_sample(record, b.instrument_library, b.similarity_matrix,
-						                  b.transform_manager, _player_cell)
-
-						if _osc_sender is not None:
-							_osc_sender.on_sample_loaded(record)
+						                  b.transform_manager, _player_cell, app_events)
 
 					return cb
 
@@ -964,10 +944,7 @@ def main () -> None:
 			def _on_watched_sample (record: subsample.library.SampleRecord) -> None:
 				_log.info("Watcher: new sample arrived — %s (%.2fs)", record.name, record.duration)
 				_integrate_sample(record, instrument_library, similarity_matrix,
-				                  transform_manager, _player_cell)
-
-				if _osc_sender is not None:
-					_osc_sender.on_sample_loaded(record)
+				                  transform_manager, _player_cell, app_events)
 
 			watcher = subsample.watcher.InstrumentWatcher(
 				directory=pathlib.Path(cfg.instrument.directory),
@@ -1072,10 +1049,7 @@ def main () -> None:
 				)
 
 				_integrate_sample(record, instrument_library, similarity_matrix,
-				                  transform_manager, _player_cell)
-
-				if _osc_sender is not None:
-					_osc_sender.on_sample_loaded(record)
+				                  transform_manager, _player_cell, app_events)
 
 			osc_receiver = subsample.osc.OscReceiver(
 				port=cfg.osc.receive_port,
@@ -1159,6 +1133,7 @@ def _integrate_sample (
 	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
 	transform_manager: typing.Optional[subsample.transform.TransformManager],
 	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]],
+	app_events: typing.Optional[subsample.events.EventEmitter] = None,
 ) -> None:
 
 	"""Add a new sample to all live subsystems.
@@ -1167,7 +1142,8 @@ def _integrate_sample (
 	watcher whenever a new sample is ready. Adds the record to the instrument
 	library (evicting the oldest if over the memory limit), updates the
 	similarity matrix, notifies the transform pipeline to produce variants,
-	and triggers a pitched-assignment update on the active player.
+	triggers a pitched-assignment update on the active player, and emits
+	a ``sample_loaded`` event for integrations (OSC sender, Supervisor).
 
 	Thread-safe: each subsystem uses an internal lock. The multi-step
 	sequence (library → similarity → transforms → player) is not atomic
@@ -1202,6 +1178,9 @@ def _integrate_sample (
 	if player_cell is not None and player_cell[0] is not None:
 		player_cell[0].update_pitched_assignments()
 
+	if app_events is not None:
+		app_events.emit("sample_loaded", record=record)
+
 
 def _make_on_complete (
 	reference_library: typing.Optional[subsample.library.ReferenceLibrary],
@@ -1211,14 +1190,16 @@ def _make_on_complete (
 	store_audio: bool,
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]] = None,
+	app_events: typing.Optional[subsample.events.EventEmitter] = None,
 ) -> subsample.recorder._OnCompleteCallback:
 
 	"""Return the on_complete callback for the live-capture SampleProcessor.
 
 	The returned callback runs on the writer thread and must not block.
 	It logs the analysis result, adds the recording to the instrument
-	library, updates the similarity matrix, and notifies the transform
-	pipeline so derivative variants can be produced in the background.
+	library, updates the similarity matrix, notifies the transform
+	pipeline so derivative variants can be produced in the background,
+	and emits ``sample_captured`` for integrations (OSC sender, Supervisor).
 
 	Args:
 		store_audio:       When True, build a SampleRecord (with PCM audio) and
@@ -1232,6 +1213,8 @@ def _make_on_complete (
 		                   When provided, update_pitched_assignments() is called after
 		                   each new sample is added to the similarity matrix so pitched
 		                   keyboard assignments pre-compute variants for the new best match.
+		app_events:        Optional event emitter; when provided, ``sample_captured``
+		                   is emitted after each recording is integrated.
 	"""
 
 	def on_complete (
@@ -1275,6 +1258,14 @@ def _make_on_complete (
 		)
 
 		_integrate_sample(record, instrument_library, similarity_matrix,
-		                  transform_manager, player_cell)
+		                  transform_manager, player_cell, app_events)
+
+		if app_events is not None:
+			app_events.emit(
+				"sample_captured",
+				filepath=filepath, spectral=spectral, rhythm=rhythm,
+				pitch=pitch, timbre=timbre, level=level,
+				band_energy=band_energy, duration=duration, audio=audio,
+			)
 
 	return on_complete

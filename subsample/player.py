@@ -42,6 +42,7 @@ import subsample.bank
 import subsample.channel
 import subsample.cache
 import subsample.config
+import subsample.events
 import subsample.library
 import subsample.query
 import subsample.similarity
@@ -1037,6 +1038,10 @@ class MidiPlayer:
 		# transitions for gradual BPM or amount changes.
 		self._last_played: dict[tuple[int, int], subsample.transform.TransformResult] = {}
 
+		# Event emitter for integrations (Supervisor dashboard, etc.).
+		# Currently emits 'cc' on control_change messages.
+		self.events = subsample.events.EventEmitter()
+
 		# MIDI CC state: (mido_channel, cc_number) → current value (0–127).
 		# Updated on every control_change message; read at note-on time by
 		# spec_from_process() to resolve CcBinding parameters.
@@ -1376,6 +1381,7 @@ class MidiPlayer:
 		if msg.type == "control_change":
 			self._cc_state[(msg.channel, msg.control)] = msg.value
 			self._cc_omni[msg.control] = msg.value
+			self.events.emit("cc", channel=msg.channel, cc_number=msg.control, value=msg.value)
 
 			if msg.control in self._mapped_ccs:
 				_log.debug(

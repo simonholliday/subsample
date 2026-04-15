@@ -139,6 +139,58 @@ class TestOscEventSender:
 		assert args[1][2] == 0.0   # pitch_hz
 		assert args[1][3] == -1    # pitch_class
 
+	def test_on_sample_captured_event_unpacks_kwargs (self) -> None:
+		"""on_sample_captured_event() unpacks kwargs and calls on_complete()."""
+
+		sender = subsample.osc.OscEventSender("127.0.0.1", 9000)
+		sender._client = unittest.mock.MagicMock()
+
+		filepath = pathlib.Path("/tmp/test.wav")
+		spectral = tests.helpers._make_spectral()
+		rhythm = tests.helpers._make_rhythm()
+		pitch = tests.helpers._make_pitch()
+		timbre = tests.helpers._make_timbre()
+		level = tests.helpers._make_level()
+		band_energy = tests.helpers._make_band_energy()
+		duration = 2.0
+		audio = numpy.zeros((1024, 1), dtype=numpy.int16)
+
+		sender.on_sample_captured_event(
+			filepath=filepath, spectral=spectral, rhythm=rhythm,
+			pitch=pitch, timbre=timbre, level=level,
+			band_energy=band_energy, duration=duration, audio=audio,
+		)
+
+		sender._client.send_message.assert_called_once()
+		args = sender._client.send_message.call_args[0]
+		assert args[0] == "/sample/captured"
+
+	def test_on_sample_loaded_event_unpacks_kwargs (self) -> None:
+		"""on_sample_loaded_event() unpacks kwargs and calls on_sample_loaded()."""
+
+		sender = subsample.osc.OscEventSender("127.0.0.1", 9000)
+		sender._client = unittest.mock.MagicMock()
+
+		record = subsample.library.SampleRecord(
+			sample_id   = 1,
+			name        = "test",
+			spectral    = tests.helpers._make_spectral(),
+			rhythm      = tests.helpers._make_rhythm(),
+			pitch       = tests.helpers._make_pitch(),
+			timbre      = tests.helpers._make_timbre(),
+			level       = tests.helpers._make_level(),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = tests.helpers._make_params(),
+			duration    = 1.0,
+		)
+
+		sender.on_sample_loaded_event(record=record)
+
+		sender._client.send_message.assert_called_once()
+		args = sender._client.send_message.call_args[0]
+		assert args[0] == "/sample/loaded"
+		assert args[1][0] == "test"
+
 
 # ---------------------------------------------------------------------------
 # OscReceiver tests
