@@ -905,3 +905,128 @@ class TestSupervisorConfig:
 
 		assert cfg.supervisor.enabled is True
 		assert cfg.supervisor.port == 8888
+
+
+class TestAmbisonicConfig:
+
+	def test_default_config_has_ambisonic_disabled (self) -> None:
+		"""Default config produces AmbisonicConfig with basic decoder, no rotation."""
+
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert isinstance(cfg.ambisonic, subsample.config.AmbisonicConfig)
+		assert cfg.ambisonic.decoder       == "basic"
+		assert cfg.ambisonic.yaw_degrees   == 0.0
+		assert cfg.ambisonic.pitch_degrees == 0.0
+		assert cfg.ambisonic.roll_degrees  == 0.0
+		assert cfg.ambisonic.max_order     == 1
+
+		# Default recorder.audio.ambisonic_format is None.
+		assert cfg.recorder.audio.ambisonic_format is None
+
+	def test_explicit_ambisonic_yaml_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""Explicit ambisonic section + ambisonic_format field are parsed."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    channels: 4\n"
+				"    ambisonic_format: a_nt_sf1\n"
+				"\nambisonic:\n"
+				"  decoder: max_re\n"
+				"  yaw_degrees: 30.0\n"
+				"  pitch_degrees: -10.0\n"
+				"  roll_degrees: 5.0\n"
+			)
+
+		cfg = subsample.config.load_config(user_config)
+
+		assert cfg.recorder.audio.ambisonic_format == "a_nt_sf1"
+		assert cfg.recorder.audio.channels         == 4
+		assert cfg.ambisonic.decoder               == "max_re"
+		assert cfg.ambisonic.yaw_degrees           == 30.0
+		assert cfg.ambisonic.pitch_degrees         == -10.0
+		assert cfg.ambisonic.roll_degrees          == 5.0
+
+	def test_invalid_ambisonic_format_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""An unknown ambisonic_format raises a clear ValueError."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    channels: 4\n"
+				"    ambisonic_format: not_a_format\n"
+			)
+
+		with pytest.raises(ValueError, match="ambisonic_format"):
+			subsample.config.load_config(user_config)
+
+	def test_ambisonic_format_requires_four_channels (self, tmp_path: pathlib.Path) -> None:
+		"""Setting ambisonic_format with channels != 4 raises ValueError."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    channels: 2\n"
+				"    ambisonic_format: a_generic\n"
+			)
+
+		with pytest.raises(ValueError, match="requires 4 input channels"):
+			subsample.config.load_config(user_config)
+
+	def test_invalid_decoder_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""Unknown ambisonic.decoder value raises ValueError."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nambisonic:\n"
+				"  decoder: telepathy\n"
+			)
+
+		with pytest.raises(ValueError, match="ambisonic.decoder"):
+			subsample.config.load_config(user_config)
+
+	def test_higher_max_order_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""max_order > 1 raises ValueError (higher orders not yet implemented)."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nambisonic:\n"
+				"  max_order: 2\n"
+			)
+
+		with pytest.raises(ValueError, match="max_order must be 1"):
+			subsample.config.load_config(user_config)

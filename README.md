@@ -104,6 +104,9 @@ you focus on playing.
   18i20). Routes individual instruments to specific outputs (kick to outputs
   1-2, snare to outputs 3-4) for separate external processing. Standard
   ITU-R BS.775 downmix and conservative upmix for stereo, quad, 5.1, and 7.1.
+  First-order ambisonic capture from tetrahedral mics (Rode NT-SF1,
+  generic A-format, or pre-encoded B-format FuMA/AmbiX) with decoder and
+  rotation at playback time - see [Ambisonic](#ambisonic-capture).
 - **Headless and config-driven.** Everything is YAML - version-controllable,
   reproducible, no GUI required. Runs equally well on a studio Mac, a
   Raspberry Pi in the rehearsal room, or a rack server. Drive it from any
@@ -541,6 +544,54 @@ Set `player.audio.channels` in config to match your device (e.g. 8 for a
 Focusrite Scarlett 18i20). When `output` is omitted, instruments route to the
 first N outputs as before - stereo users see no change.
 
+### Ambisonic capture
+
+Four-capsule tetrahedral mics (such as the Rode NT-SF1) and pre-encoded
+B-format files are supported as first-order ambisonic content. Samples are
+converted to canonical AmbiX B-format (channel order W, Y, Z, X; SN3D) at
+capture time and decoded at playback time through a virtual speaker array
+sized to match `player.audio.channels` (mono, stereo, quad, 5.1, or 7.1).
+
+Enable ambisonic capture in `config.yaml`:
+
+```yaml
+recorder:
+  audio:
+    channels: 4
+    ambisonic_format: a_nt_sf1   # or a_generic, b_fuma, b_ambix
+
+ambisonic:
+  decoder: basic                  # basic | max_re | inphase
+  yaw_degrees: 0.0                # rotate before decoding
+  pitch_degrees: 0.0
+  roll_degrees: 0.0
+```
+
+Format options:
+
+- `a_nt_sf1` - Rode NT-SF1 A-format. Applies a capsule-matching HF shelf
+  pre-matrix and a post-matrix HF shelf on X/Y/Z to compensate for
+  capsule-spacing loss. Best choice for this mic.
+- `a_generic` - Generic tetrahedral A-format with the standard Gerzon
+  matrix, capsule order FLU/FRD/BLD/BRU. No capsule calibration applied.
+- `b_fuma` - Pre-encoded B-format in FuMA order (W, X, Y, Z), MaxN.
+  Reordered and renormalised to AmbiX on read.
+- `b_ambix` - Pre-encoded B-format already in AmbiX order - stored
+  unchanged.
+
+Decoder choice affects the spatial character: `basic` has sharp lobes and
+the best low-frequency behaviour, `max_re` trades some front-energy for
+tighter localisation in the sweet spot, and `inphase` has the softest
+lobes and works best when listening from off-axis positions. Rotation
+(yaw/pitch/roll) is applied before the decoder and is project-wide - all
+ambisonic samples rotate together.
+
+Analysis runs on the W (omnidirectional) channel only, so spectral and
+rhythmic fingerprints reflect the sound-field sum rather than a
+directionally biased mix. Pad-quantize and beat-quantize work on
+ambisonic samples using Rubber Band's phase-coherent multichannel engine
+- inter-channel relationships survive time-stretching within tolerance.
+
 ### Banks - switching instrument sets via MIDI
 
 The MIDI map can optionally declare multiple instrument directories ("banks")
@@ -851,6 +902,12 @@ weights - is optional and rarely needs changing.
 | `osc.send_port` | `9000` | Destination UDP port for outgoing OSC messages |
 | `osc.receive_enabled` | `false` | Listen for `/sample/import` messages to load audio files into the in-memory library from other apps (reads in place, does not copy) |
 | `osc.receive_port` | `9002` | UDP port the OSC receiver listens on |
+| `recorder.audio.ambisonic_format` | `null` | Enable ambisonic capture. One of `a_nt_sf1`, `a_generic`, `b_fuma`, `b_ambix`; requires `channels: 4`. Converts capture to canonical AmbiX B-format on disk (see [Ambisonic capture](#ambisonic-capture)) |
+| `ambisonic.decoder` | `basic` | Decoder weight mode: `basic` (flat velocity), `max_re` (tighter lobes, best HF), or `inphase` (softest lobes, no back-lobes) |
+| `ambisonic.yaw_degrees` | `0.0` | Yaw rotation (degrees) applied to the B-format signal before decoding |
+| `ambisonic.pitch_degrees` | `0.0` | Pitch rotation (degrees) applied to the B-format signal before decoding |
+| `ambisonic.roll_degrees` | `0.0` | Roll rotation (degrees) applied to the B-format signal before decoding |
+| `ambisonic.max_order` | `1` | Reserved for future higher-order support; currently must be 1 |
 
 ## Output
 

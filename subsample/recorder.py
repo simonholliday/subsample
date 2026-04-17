@@ -31,12 +31,42 @@ import wave
 
 import numpy
 
+import subsample.ambisonic
 import subsample.analysis
 import subsample.cache
 import subsample.config
 
 
 _log = logging.getLogger(__name__)
+
+
+def _pcm_float_to_int (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
+
+	"""Inverse of analysis.to_mono_float — float32 in [-1, 1] → capture-format PCM.
+
+	The output dtype matches what the recorder's capture path produces: int16
+	for 16-bit, and int32 for 24-bit (left-shifted by 8) and native 32-bit.
+	Values are clipped to the full-scale range before conversion so an
+	out-of-range float does not wrap around to a negative integer.
+	"""
+
+	divisor = 32768.0 if bit_depth == 16 else 2147483648.0
+	max_int = int(divisor) - 1
+	min_int = -int(divisor)
+
+	clipped = numpy.clip(audio, -1.0, 1.0 - 1.0 / divisor)
+	scaled  = numpy.rint(clipped * divisor).astype(numpy.int64)
+	scaled  = numpy.clip(scaled, min_int, max_int)
+
+	target_dtype: numpy.dtype[typing.Any] = numpy.dtype(numpy.int16) if bit_depth == 16 else numpy.dtype(numpy.int32)
+
+	# For 24-bit, the caller stores values left-shifted by 8 bits inside int32.
+	# to_mono_float divides by 2^31 (full int32 range) to recover the [-1, 1]
+	# float value, so multiplying back by 2^31 and rounding produces the same
+	# left-shifted int32 representation the rest of the pipeline expects.
+
+	result: numpy.ndarray = scaled.astype(target_dtype)
+	return result
 
 
 def _compute_worker_count () -> int:
@@ -283,11 +313,43 @@ class SampleProcessor:
 				req.bit_depth if req.bit_depth is not None
 				else self._cfg.recorder.audio.bit_depth
 			)
+			effective_sample_rate = (
+				req.sample_rate if req.sample_rate is not None
+				else self._cfg.recorder.audio.sample_rate
+			)
+
+			# Ambisonic capture: convert the 4-channel PCM to canonical AmbiX
+			# B-format before storage and analysis.  Downstream the WAV file on
+			# disk is B-format (channel order W, Y, Z, X; SN3D) and analysis
+			# feeds on the W channel (index 0) so the spectral/rhythm/pitch
+			# fingerprint reflects the omnidirectional sum of the sound field
+			# rather than a directionally biased mix of the velocity channels.
+			ambisonic_format = self._cfg.recorder.audio.ambisonic_format
+			analysis_channel_index: typing.Optional[int]
+			channel_format_tag: str
+
+			if ambisonic_format is not None:
+				audio_float = req.audio.astype(numpy.float32) / (
+					32768.0 if effective_bit_depth == 16 else 2147483648.0
+				)
+				b_format_float = subsample.ambisonic.process_capture(
+					audio_float, ambisonic_format, sample_rate=effective_sample_rate,
+				)
+				req = dataclasses.replace(
+					req, audio=_pcm_float_to_int(b_format_float, effective_bit_depth),
+				)
+				analysis_channel_index = 0
+				channel_format_tag      = "b_format_ambix"
+			else:
+				analysis_channel_index = None
+				channel_format_tag      = "pcm"
 
 			# Convert once; all analyses operate on the same mono float array.
 			# analyze_all() shares the pyin computation between spectral and pitch
 			# analysis, avoiding running it twice (~200-300 ms saving per recording).
-			mono = subsample.analysis.to_mono_float(req.audio, effective_bit_depth)
+			mono = subsample.analysis.to_mono_float(
+				req.audio, effective_bit_depth, channel_index=analysis_channel_index,
+			)
 
 			result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
 				mono,
@@ -308,6 +370,7 @@ class SampleProcessor:
 				filename_base=req.filename_base,
 				sample_rate=req.sample_rate,
 				bit_depth=req.bit_depth,
+				channel_format=channel_format_tag,
 			)
 
 			if self._on_complete is not None and write_result is not None:
@@ -330,6 +393,7 @@ class SampleProcessor:
 		filename_base: typing.Optional[str] = None,
 		sample_rate: typing.Optional[int] = None,
 		bit_depth: typing.Optional[int] = None,
+		channel_format: str = "pcm",
 	) -> tuple[pathlib.Path, float] | None:
 
 		"""Write a single audio segment to a WAV file and save its analysis sidecar.
@@ -414,19 +478,20 @@ class SampleProcessor:
 		# Persist analysis alongside the WAV so future reads (e.g. reference
 		# file loading on startup) can skip re-analysis when nothing changes.
 		subsample.cache.save_cache(
-			audio_path  = filepath,
-			audio_md5   = audio_md5,
-			params      = self._analysis_params,
-			spectral    = result,
-			rhythm      = rhythm,
-			pitch       = pitch,
-			timbre      = timbre,
-			duration    = duration,
-			level       = level,
-			band_energy = band_energy,
-			bit_depth   = effective_bit_depth,
-			channels    = n_channels,
-			captured_at = timestamp.isoformat(),
+			audio_path     = filepath,
+			audio_md5      = audio_md5,
+			params         = self._analysis_params,
+			spectral       = result,
+			rhythm         = rhythm,
+			pitch          = pitch,
+			timbre         = timbre,
+			duration       = duration,
+			level          = level,
+			band_energy    = band_energy,
+			bit_depth      = effective_bit_depth,
+			channels       = n_channels,
+			captured_at    = timestamp.isoformat(),
+			channel_format = channel_format,
 		)
 
 		return filepath, duration

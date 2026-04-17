@@ -575,6 +575,7 @@ def _start_player (
 			bank_manager=bank_manager,
 			target_bpm=cfg.transform.target_bpm,
 			output_channels=cfg.player.audio.channels,
+			ambisonic_config=cfg.ambisonic,
 		)
 		player_cell[0] = player
 
@@ -627,6 +628,7 @@ def _start_player (
 		bank_manager=bank_manager,
 		target_bpm=cfg.transform.target_bpm,
 		output_channels=cfg.player.audio.channels,
+		ambisonic_config=cfg.ambisonic,
 	)
 	player_cell[0] = player
 
@@ -1062,7 +1064,7 @@ def main () -> None:
 					_log.warning("OSC /sample/import: analysis failed: %s", file_path)
 					return
 
-				spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+				spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
 				audio = subsample.library.load_wav_audio(file_path, output_sample_rate)
 
@@ -1071,18 +1073,19 @@ def main () -> None:
 					return
 
 				record = subsample.library.SampleRecord(
-					sample_id   = subsample.library.allocate_id(),
-					name        = file_path.stem,
-					spectral    = spectral,
-					rhythm      = rhythm,
-					pitch       = pitch,
-					timbre      = timbre,
-					level       = level,
-					band_energy = band_energy,
-					params      = params,
-					duration    = duration,
-					audio       = audio,
-					filepath    = file_path,
+					sample_id      = subsample.library.allocate_id(),
+					name           = file_path.stem,
+					spectral       = spectral,
+					rhythm         = rhythm,
+					pitch          = pitch,
+					timbre         = timbre,
+					level          = level,
+					band_energy    = band_energy,
+					params         = params,
+					duration       = duration,
+					audio          = audio,
+					filepath       = file_path,
+					channel_format = channel_format,
 				)
 
 				_integrate_sample(record, instrument_library, similarity_matrix,

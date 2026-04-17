@@ -77,7 +77,7 @@ class TestSaveAndLoadRoundTrip:
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		r_spectral, r_rhythm, r_pitch, r_timbre, r_params, r_duration, r_level, r_band_energy = result
+		r_spectral, r_rhythm, r_pitch, r_timbre, r_params, r_duration, r_level, r_band_energy, r_channel_format = result
 
 		assert r_spectral == spectral
 		assert r_pitch    == pitch
@@ -144,7 +144,7 @@ class TestCacheInvalidation:
 
 		# Re-analysis should succeed and return a valid result tuple
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 		assert isinstance(spectral, subsample.analysis.AnalysisResult)
 
 	def test_version_mismatch_logs_info (
@@ -186,7 +186,7 @@ class TestCacheInvalidation:
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 		assert isinstance(spectral, subsample.analysis.AnalysisResult)
 
 	def test_md5_mismatch_logs_info (
@@ -395,7 +395,7 @@ class TestBandEnergyCache:
 
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
-		*_, r_band_energy = result
+		*_, r_band_energy, _r_channel_format = result
 
 		assert isinstance(r_band_energy, subsample.analysis.BandEnergyResult)
 		assert len(r_band_energy.energy_fractions) == 4
@@ -430,7 +430,7 @@ class TestBandEnergyCache:
 
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
-		*_, r_band_energy = result
+		*_, r_band_energy, _r_channel_format = result
 
 		assert isinstance(r_band_energy, subsample.analysis.BandEnergyResult)
 		assert all(v == 0.0 for v in r_band_energy.energy_fractions)
@@ -453,7 +453,7 @@ class TestLoadOrAnalyze:
 
 		result = subsample.cache.load_or_analyze(wav_path)
 		assert result is not None
-		assert len(result) == 8  # 8-tuple
+		assert len(result) == 9  # spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format
 		assert sidecar.exists()
 
 	def test_returns_cached_on_second_call (self, tmp_path: pathlib.Path) -> None:

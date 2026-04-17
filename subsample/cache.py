@@ -42,6 +42,9 @@ _CACHE_SUFFIX: str = ".analysis.json"
 _MD5_CHUNK_BYTES: int = 65536
 
 # Return type shared by load_cache() and load_sidecar().
+# Trailing channel_format is "pcm" for standard samples, or a B-format tag
+# (e.g. "b_format_ambix") for ambisonic samples.  Sidecars written before
+# this field existed default to "pcm" on load.
 _LoadResult = tuple[
 	subsample.analysis.AnalysisResult,
 	subsample.analysis.RhythmResult,
@@ -51,6 +54,7 @@ _LoadResult = tuple[
 	float,
 	subsample.analysis.LevelResult,
 	subsample.analysis.BandEnergyResult,
+	str,
 ]
 
 
@@ -105,6 +109,7 @@ def save_cache (
 	bit_depth: int = 16,
 	channels: int = 1,
 	captured_at: typing.Optional[str] = None,
+	channel_format: str = "pcm",
 ) -> None:
 
 	"""Write analysis results to a JSON sidecar file.
@@ -146,6 +151,7 @@ def save_cache (
 		audio_md5, params, spectral, rhythm, pitch, timbre, duration,
 		effective_level, effective_band_energy,
 		bit_depth=bit_depth, channels=channels, captured_at=captured_at,
+		channel_format=channel_format,
 	)
 	json_str = json.dumps(payload, indent=2)
 
@@ -286,7 +292,7 @@ def _reanalyze_and_save (
 	except OSError as exc:
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
 
-	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
+	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy, "pcm")
 
 
 def load_or_analyze (audio_path: pathlib.Path) -> _LoadResult | None:
@@ -418,12 +424,13 @@ def _deserialize_payload (
 		# where a key is absent despite a matching version (e.g. manual editing).
 		level       = _deserialize_level(payload.get("level", {}))
 		band_energy = _deserialize_band_energy(payload.get("band_energy", {}))
+		channel_format = str(payload.get("channel_format", "pcm"))
 
 	except (KeyError, TypeError, ValueError) as exc:
 		_log.warning("Ignoring corrupt %s: %s", label, exc)
 		return None
 
-	return spectral, rhythm, pitch, timbre, params, duration, level, band_energy
+	return spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format
 
 
 def _serialize (
@@ -439,6 +446,7 @@ def _serialize (
 	bit_depth: int = 16,
 	channels: int = 1,
 	captured_at: typing.Optional[str] = None,
+	channel_format: str = "pcm",
 ) -> dict[str, typing.Any]:
 
 	"""Build the JSON-serializable dict from analysis results."""
@@ -470,6 +478,7 @@ def _serialize (
 		"sample_rate":      params.sample_rate,
 		"bit_depth":        bit_depth,
 		"channels":         channels,
+		"channel_format":   channel_format,
 		"duration":         duration,
 		"captured_at":      captured_at,
 		"params":           params_dict,

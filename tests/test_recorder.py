@@ -360,3 +360,89 @@ class TestSampleProcessorQueueDepth:
 		assert any("drained" in m for m in info_messages), (
 			f"Expected a 'queue drained' INFO; got: {info_messages}"
 		)
+
+
+def _make_ambisonic_config (output_dir: pathlib.Path, ambisonic_format: str) -> subsample.config.Config:
+	"""Like _make_config but with 4 channels and an ambisonic_format set."""
+	return subsample.config.Config(
+		recorder=subsample.config.RecorderConfig(
+			audio=subsample.config.AudioConfig(
+				sample_rate=44100, bit_depth=16, channels=4, chunk_size=512,
+				ambisonic_format=ambisonic_format,
+			),
+			buffer=subsample.config.BufferConfig(max_seconds=10),
+		),
+		detection=subsample.config.DetectionConfig(
+			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
+			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,
+		),
+		output=subsample.config.OutputConfig(
+			directory=str(output_dir),
+			filename_format="%Y-%m-%d_%H-%M-%S",
+		),
+	)
+
+
+class TestAmbisonicCapture:
+
+	"""Capture-path tests for ambisonic_format recording."""
+
+	def test_a_generic_capture_stores_four_channel_b_format_wav (self) -> None:
+		"""4-channel A-format capture stores a 4-channel WAV tagged b_format_ambix."""
+		import json
+
+		import subsample.cache
+
+		# White noise on each capsule — small amplitude so the A→B matrix
+		# multiplication (coefficients of ±0.5) stays well within int16 range.
+		rng = numpy.random.RandomState(42)
+		audio = (rng.randn(4410, 4) * 2000.0).astype(numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_ambisonic_config(out_dir, "a_generic")
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+
+			writer.enqueue(audio, datetime.datetime.now(), filename_base="ambi_test")
+			writer.flush()
+			writer.shutdown()
+
+			wav_files = list(out_dir.glob("*.wav"))
+			assert len(wav_files) == 1
+			wav_path = wav_files[0]
+
+			with wave.open(str(wav_path), "rb") as wf:
+				assert wf.getnchannels() == 4
+
+			# Sidecar should tag this sample as b_format_ambix.
+			sidecar = subsample.cache.cache_path(wav_path)
+			assert sidecar.exists()
+			payload = json.loads(sidecar.read_text())
+			assert payload["channel_format"] == "b_format_ambix"
+
+	def test_b_ambix_pass_through_preserves_audio_bits (self) -> None:
+		"""Pre-encoded B-format AmbiX should round-trip with at most 1 LSB drift."""
+
+		rng = numpy.random.RandomState(7)
+		audio = (rng.randn(4410, 4) * 1000.0).astype(numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_ambisonic_config(out_dir, "b_ambix")
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+
+			writer.enqueue(audio, datetime.datetime.now(), filename_base="passthrough")
+			writer.flush()
+			writer.shutdown()
+
+			wav_files = list(out_dir.glob("*.wav"))
+			assert len(wav_files) == 1
+
+			with wave.open(str(wav_files[0]), "rb") as wf:
+				assert wf.getnchannels() == 4
+				n_frames = wf.getnframes()
+				raw = wf.readframes(n_frames)
+
+			stored = numpy.frombuffer(raw, dtype=numpy.int16).reshape(n_frames, 4)
+			# Float round-trip allows at most ±1 LSB drift per sample.
+			numpy.testing.assert_allclose(stored, audio, atol=1)

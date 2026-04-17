@@ -109,7 +109,7 @@ class TestLoadSidecar:
 		sidecar = _write_sidecar(tmp_path, "kick")
 		result = subsample.cache.load_sidecar(sidecar)
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 		assert spectral.attack == pytest.approx(0.2)
 		assert duration == pytest.approx(1.0)
 

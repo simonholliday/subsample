@@ -55,6 +55,47 @@
 #   receive_port: 9002
 
 # ---------------------------------------------------------------------------
+# ambisonic — first-order B-format (AmbiX) rotation and decoding
+# ---------------------------------------------------------------------------
+# Controls how ambisonic samples are rotated and decoded at playback time.
+# Only applies when recorder.audio.ambisonic_format is set (see below) so
+# samples are stored as AmbiX B-format (channel order W, Y, Z, X; SN3D
+# normalisation).  First order only for now; `max_order` is reserved.
+#
+# The decoder maps the 4-channel B-format to the output layout (mono, stereo,
+# quad, 5.1, or 7.1) via a virtual speaker array.  Rotation is applied before
+# the decoder so you can re-orient the whole sound field — useful when the
+# mic wasn't facing "forward" at capture time, or when you want to rotate the
+# image for creative effect.
+
+# ambisonic:
+#   decoder: basic
+#   # Decoder weight mode:
+#   # - basic:   flat velocity weights.  Sharp front lobes, best low-frequency
+#   #            behaviour; some anti-phase back-radiation for widely-spaced
+#   #            speaker pairs.
+#   # - max_re:  Max-rE weighting (1/√3 for first order).  Narrower lobes, best
+#   #            high-frequency localisation and perceptual sweet-spot accuracy.
+#   # - inphase: In-phase / cardioid weighting.  Softest lobes, no back-lobes,
+#   #            wider image — robust for listening far from the sweet spot.
+#
+#   yaw_degrees: 0.0
+#   # Rotation about the up axis.  Positive spins the sound field
+#   # counter-clockwise as seen from above (sounds at +X front rotate toward
+#   # +Y left).
+#
+#   pitch_degrees: 0.0
+#   # Rotation about the left axis (+Y).  Positive tilts the nose down —
+#   # front sounds rotate toward below.
+#
+#   roll_degrees: 0.0
+#   # Rotation about the front axis (+X).  Positive tilts the head right —
+#   # sounds on the left rotate toward above.
+#
+#   max_order: 1
+#   # Reserved for future higher-order support.  Must be 1 for now.
+
+# ---------------------------------------------------------------------------
 # recorder — real-time audio capture from an input device
 # ---------------------------------------------------------------------------
 # Set enabled: false to skip live recording and only process files given on
@@ -112,6 +153,26 @@ recorder:
     # Larger (1024, 2048): higher latency, fewer callbacks (less overhead). Default 512 is
     # optimal for USB audio devices with typical ALSA period sizes.
     # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+
+    # ambisonic_format: null
+    # When set, the four input channels are treated as ambisonic and converted
+    # to first-order AmbiX B-format (channel order W, Y, Z, X; SN3D) at capture
+    # time.  Requires channels: 4.  See the top-level `ambisonic:` section for
+    # playback-side rotation and decoder settings.
+    #
+    # Supported values:
+    #   a_generic : Generic tetrahedral A-format with capsule order
+    #               FLU (front-left-up), FRD (front-right-down),
+    #               BLD (back-left-down), BRU (back-right-up).
+    #               No capsule EQ applied — matrix conversion only.
+    #   a_nt_sf1  : Rode NT-SF1 A-format.  Same capsule order as generic
+    #               plus a capsule-matching HF shelf (pre-matrix) and a
+    #               post-matrix HF shelf on X/Y/Z to compensate for
+    #               capsule-spacing loss.  Best choice for the NT-SF1.
+    #   b_fuma    : Pre-encoded B-format in FuMA order (W, X, Y, Z) with
+    #               MaxN normalisation — reordered and renormalised to AmbiX.
+    #   b_ambix   : Pre-encoded B-format already in AmbiX order — stored as-is.
+    #   null or "": Ambisonic processing disabled (default).
 
   buffer:
     max_seconds: 60

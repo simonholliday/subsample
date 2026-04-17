@@ -74,6 +74,14 @@ class AudioConfig:
 	"""Physical input channels to record (0-indexed).  None = first N channels.
 	Set via 1-indexed list in config.yaml; converted at config-load time."""
 	device: typing.Optional[str] = None
+	ambisonic_format: typing.Optional[str] = None
+	"""When set, the four input channels are processed as ambisonic content
+	and stored as first-order AmbiX B-format.  Supported values: "a_generic"
+	(generic tetrahedral A-format, capsule order FLU/FRD/BLD/BRU), "a_nt_sf1"
+	(Rode NT-SF1 A-format with capsule matching EQ and HF shelf), "b_fuma"
+	(pre-encoded FuMA B-format, reordered/renormalised to AmbiX), "b_ambix"
+	(pre-encoded AmbiX B-format, stored as-is).  None disables ambisonic
+	processing entirely — the default."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -378,6 +386,41 @@ class SupervisorConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class AmbisonicConfig:
+
+	"""Project-wide ambisonic decoding and orientation settings.
+
+	Applied at playback time to samples stored as first-order B-format
+	AmbiX.  Rotation (yaw/pitch/roll) and decoder type are project-wide —
+	all ambisonic samples decode through the same matrix.  Per-sample or
+	per-assignment overrides are intentionally out of scope for now.
+	"""
+
+	decoder: str = "basic"
+	"""Decoder weight mode: "basic" (flat velocity weights, sharp lobes,
+	best LF behaviour), "max_re" (narrower front lobe via Max-rE gains,
+	best HF localisation), or "inphase" (softest lobes, no anti-phase
+	back-radiation — best for listening far from the sweet spot)."""
+
+	yaw_degrees: float = 0.0
+	"""Yaw rotation applied to B-format signals before decoding.  Positive
+	rotates the sound field counter-clockwise seen from above (i.e. sounds
+	originally at +X front move toward +Y left)."""
+
+	pitch_degrees: float = 0.0
+	"""Pitch rotation about the +Y (left) axis.  Positive tilts the nose
+	downward — a +X front sound moves toward -Z down."""
+
+	roll_degrees: float = 0.0
+	"""Roll rotation about the +X (front) axis.  Positive tilts the head
+	right — a +Y left sound moves toward +Z up."""
+
+	max_order: int = 1
+	"""Reserved for future higher-order support.  Must be 1 — only
+	first-order B-format is currently implemented."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
 
 	recorder: RecorderConfig
@@ -396,6 +439,7 @@ class Config:
 	transform: TransformConfig = dataclasses.field(default_factory=TransformConfig)
 	osc: OscConfig = dataclasses.field(default_factory=OscConfig)
 	supervisor: SupervisorConfig = dataclasses.field(default_factory=SupervisorConfig)
+	ambisonic: AmbisonicConfig = dataclasses.field(default_factory=AmbisonicConfig)
 
 
 def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
@@ -580,6 +624,24 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 				f"recorder.audio.input length ({len(input_channels)})"
 			)
 
+	ambisonic_format_raw = audio_raw.get("ambisonic_format")
+	ambisonic_format: typing.Optional[str]
+	if ambisonic_format_raw in (None, ""):
+		ambisonic_format = None
+	elif isinstance(ambisonic_format_raw, str):
+		import subsample.ambisonic
+		if ambisonic_format_raw not in subsample.ambisonic.SUPPORTED_AMBISONIC_FORMATS:
+			raise ValueError(
+				f"recorder.audio.ambisonic_format {ambisonic_format_raw!r} is not supported.  "
+				f"Valid values: {sorted(subsample.ambisonic.SUPPORTED_AMBISONIC_FORMATS)} or null/empty string to disable."
+			)
+		ambisonic_format = ambisonic_format_raw
+	else:
+		raise ValueError(
+			f"recorder.audio.ambisonic_format must be a string or null "
+			f"(got {type(ambisonic_format_raw).__name__}: {ambisonic_format_raw!r})"
+		)
+
 	audio = AudioConfig(
 		sample_rate=int(_require(audio_raw, "sample_rate", "recorder.audio")),
 		bit_depth=int(_require(audio_raw, "bit_depth", "recorder.audio")),
@@ -587,7 +649,15 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		channels=channels,
 		input=input_channels,
 		device=device_raw,
+		ambisonic_format=ambisonic_format,
 	)
+
+	# Ambisonic capture requires exactly 4 channels.
+	if ambisonic_format is not None and channels not in (None, 4):
+		raise ValueError(
+			f"recorder.audio.ambisonic_format={ambisonic_format!r} requires 4 input "
+			f"channels; got channels={channels}."
+		)
 
 	if audio.bit_depth not in {16, 24, 32}:
 		raise ValueError(
@@ -830,6 +900,33 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		port=int(supervisor_raw.get("port", 9003)),
 	)
 
+	# --- Ambisonic ---
+	ambisonic_raw: dict[str, typing.Any] = raw.get("ambisonic", {})
+	import subsample.ambisonic
+	ambi_decoder = str(ambisonic_raw.get("decoder", "basic"))
+
+	if ambi_decoder not in subsample.ambisonic.SUPPORTED_DECODER_TYPES:
+		raise ValueError(
+			f"ambisonic.decoder {ambi_decoder!r} is not supported.  "
+			f"Valid values: {sorted(subsample.ambisonic.SUPPORTED_DECODER_TYPES)}."
+		)
+
+	ambi_max_order = int(ambisonic_raw.get("max_order", 1))
+
+	if ambi_max_order != subsample.ambisonic.AMBISONIC_ORDER_SUPPORTED:
+		raise ValueError(
+			f"ambisonic.max_order must be 1 (got {ambi_max_order}); higher orders "
+			"are reserved for future implementation."
+		)
+
+	ambisonic = AmbisonicConfig(
+		decoder       = ambi_decoder,
+		yaw_degrees   = float(ambisonic_raw.get("yaw_degrees",   0.0)),
+		pitch_degrees = float(ambisonic_raw.get("pitch_degrees", 0.0)),
+		roll_degrees  = float(ambisonic_raw.get("roll_degrees",  0.0)),
+		max_order     = ambi_max_order,
+	)
+
 	return Config(
 		recorder=recorder,
 		detection=detection,
@@ -842,4 +939,5 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		transform=transform,
 		osc=osc,
 		supervisor=supervisor,
+		ambisonic=ambisonic,
 	)

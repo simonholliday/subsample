@@ -196,7 +196,7 @@ class InstrumentWatcher:
 			self._schedule_retry(sidecar_path, attempt, reason="sidecar not readable")
 			return
 
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
 		# Derive audio file path: strip .analysis.json suffix to get the WAV name.
 		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
@@ -219,18 +219,19 @@ class InstrumentWatcher:
 			return
 
 		record = subsample.library.SampleRecord(
-			sample_id   = subsample.library.allocate_id(),
-			name        = pathlib.Path(audio_name).stem,
-			spectral    = spectral,
-			rhythm      = rhythm,
-			pitch       = pitch,
-			timbre      = timbre,
-			level       = level,
-			band_energy = band_energy,
-			params      = params,
-			duration    = duration,
-			audio       = audio,
-			filepath    = audio_path,
+			sample_id      = subsample.library.allocate_id(),
+			name           = pathlib.Path(audio_name).stem,
+			spectral       = spectral,
+			rhythm         = rhythm,
+			pitch          = pitch,
+			timbre         = timbre,
+			level          = level,
+			band_energy    = band_energy,
+			params         = params,
+			duration       = duration,
+			audio          = audio,
+			filepath       = audio_path,
+			channel_format = channel_format,
 		)
 
 		self._on_sample_loaded(record)
@@ -426,7 +427,7 @@ class InstrumentWatcher:
 			)
 			return
 
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
 		audio = subsample.library.load_wav_audio(audio_path, self._target_sample_rate)
 
@@ -438,18 +439,19 @@ class InstrumentWatcher:
 			return
 
 		record = subsample.library.SampleRecord(
-			sample_id   = subsample.library.allocate_id(),
-			name        = audio_path.stem,
-			spectral    = spectral,
-			rhythm      = rhythm,
-			pitch       = pitch,
-			timbre      = timbre,
-			level       = level,
-			band_energy = band_energy,
-			params      = params,
-			duration    = duration,
-			audio       = audio,
-			filepath    = audio_path,
+			sample_id      = subsample.library.allocate_id(),
+			name           = audio_path.stem,
+			spectral       = spectral,
+			rhythm         = rhythm,
+			pitch          = pitch,
+			timbre         = timbre,
+			level          = level,
+			band_energy    = band_energy,
+			params         = params,
+			duration       = duration,
+			audio          = audio,
+			filepath       = audio_path,
+			channel_format = channel_format,
 		)
 
 		self._on_sample_loaded(record)

@@ -1323,6 +1323,55 @@ class TestTimeStretchHandler:
 		fade_len = int(subsample.transform._CROP_FADE_IN_SECONDS * sr)
 		assert result[fade_len, 0] > 0.5, f"Audio not at full level after fade: {result[fade_len, 0]}"
 
+	def test_beat_quantize_preserves_bformat_inter_channel_ratios (self) -> None:
+
+		"""Beat-quantize on a 4-channel B-format sample preserves inter-channel energy ratios.
+
+		Rubber Band's R3 engine (selected via --fine) processes multichannel
+		input phase-coherently, so the directional encoding of an ambisonic
+		signal should survive a time-stretch within a small tolerance.  We
+		construct a B-format sample where each channel carries the same
+		impulse train at fixed relative amplitudes (W: 1.0, Y: 0.6, Z: 0.2,
+		X: 0.8), stretch it, and verify the post-stretch energy ratios
+		between channels are within 0.5 dB of the pre-stretch ratios.
+		"""
+
+		sr = 44100
+		n_frames = int(1.0 * sr)
+		audio = numpy.zeros((n_frames, 4), dtype=numpy.float32)
+
+		amplitudes = numpy.array([1.0, 0.6, 0.2, 0.8], dtype=numpy.float32)
+
+		for onset_sec in (0.0, 0.25, 0.5, 0.75):
+			idx = int(onset_sec * sr)
+			audio[idx:idx + 50, :] = amplitudes
+
+		record = _make_record(
+			audio=numpy.zeros((n_frames, 4), dtype=numpy.int16),
+			tempo_bpm=120.0,
+			onset_times=(0.0, 0.25, 0.5, 0.75),
+		)
+
+		step   = subsample.transform.TimeStretch(target_bpm=95.0, resolution=16)
+		result = subsample.transform._apply_time_stretch(audio, sr, record, step)
+
+		assert result.shape[1] == 4
+
+		original_energy = numpy.sum(audio   ** 2, axis=0)
+		stretched_energy = numpy.sum(result ** 2, axis=0)
+
+		# Per-channel energy ratio relative to the W channel should be
+		# preserved within 0.5 dB.  W itself is the reference, so its ratio
+		# is 1.0 in both pre and post.
+		for ch in range(1, 4):
+			orig_ratio = stretched_energy[ch] / stretched_energy[0]
+			src_ratio  = original_energy[ch]  / original_energy[0]
+			delta_db   = 10.0 * numpy.log10(orig_ratio / src_ratio)
+			assert abs(delta_db) < 0.5, (
+				f"Channel {ch}: inter-channel energy ratio drifted by {delta_db:.2f} dB "
+				f"(orig ratio={src_ratio:.3f}, stretched={orig_ratio:.3f})"
+			)
+
 
 # ---------------------------------------------------------------------------
 # TestOnSampleAdded — no global time-stretch auto-enqueue

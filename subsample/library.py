@@ -86,6 +86,12 @@ class SampleRecord:
 		           samples where only metadata is needed.
 		filepath:  Path to the WAV file on disk, if known. None for in-memory-only
 		           samples not yet (or never) written to disk.
+		channel_format: Tag describing how the audio channels should be
+		           interpreted.  "pcm" (default) means standard multichannel
+		           PCM — mono, stereo, 5.1, etc. — routed directly through the
+		           mix matrix.  "b_format_ambix" means first-order ambisonic
+		           B-format (channel order W, Y, Z, X; SN3D) — the player
+		           applies a decoder and rotation matrix before mix routing.
 	"""
 
 	sample_id:   int
@@ -100,6 +106,7 @@ class SampleRecord:
 	duration:    float
 	audio:       typing.Optional[numpy.ndarray] = None
 	filepath:    typing.Optional[pathlib.Path]  = None
+	channel_format: str = "pcm"
 
 
 class ReferenceLibrary:
@@ -353,24 +360,25 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 		if result is None:
 			continue
 
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
 		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
 		name = pathlib.Path(audio_name).stem
 
 		records.append(SampleRecord(
-			sample_id   = allocate_id(),
-			name        = name,
-			spectral    = spectral,
-			rhythm      = rhythm,
-			pitch       = pitch,
-			timbre      = timbre,
-			level       = level,
-			band_energy = band_energy,
-			params      = params,
-			duration    = duration,
-			audio       = None,
-			filepath    = None,
+			sample_id      = allocate_id(),
+			name           = name,
+			spectral       = spectral,
+			rhythm         = rhythm,
+			pitch          = pitch,
+			timbre         = timbre,
+			level          = level,
+			band_energy    = band_energy,
+			params         = params,
+			duration       = duration,
+			audio          = None,
+			filepath       = None,
+			channel_format = channel_format,
 		))
 
 	_log.info("Loaded %d reference sample(s) from %s", len(records), directory)
@@ -399,6 +407,7 @@ class _LoadedSample:
 	name:        str
 	audio_path:  pathlib.Path
 	audio:       typing.Optional[numpy.ndarray]
+	channel_format: str = "pcm"
 
 
 def _load_one_sample (
@@ -433,7 +442,7 @@ def _load_one_sample (
 	if result is None:
 		return None
 
-	spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
 	audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
 	audio_path = sidecar_path.parent / audio_name
@@ -481,6 +490,7 @@ def _load_one_sample (
 		spectral=spectral, rhythm=rhythm, pitch=pitch, timbre=timbre,
 		level=level, band_energy=band_energy, params=params, duration=duration,
 		name=name, audio_path=audio_path, audio=audio,
+		channel_format=channel_format,
 	)
 
 
@@ -572,18 +582,19 @@ def load_instrument_library (
 			continue
 
 		record = SampleRecord(
-			sample_id   = allocate_id(),
-			name        = loaded_sample.name,
-			spectral    = loaded_sample.spectral,
-			rhythm      = loaded_sample.rhythm,
-			pitch       = loaded_sample.pitch,
-			timbre      = loaded_sample.timbre,
-			level       = loaded_sample.level,
-			band_energy = loaded_sample.band_energy,
-			params      = loaded_sample.params,
-			duration    = loaded_sample.duration,
-			audio       = loaded_sample.audio,
-			filepath    = loaded_sample.audio_path,
+			sample_id      = allocate_id(),
+			name           = loaded_sample.name,
+			spectral       = loaded_sample.spectral,
+			rhythm         = loaded_sample.rhythm,
+			pitch          = loaded_sample.pitch,
+			timbre         = loaded_sample.timbre,
+			level          = loaded_sample.level,
+			band_energy    = loaded_sample.band_energy,
+			params         = loaded_sample.params,
+			duration       = loaded_sample.duration,
+			audio          = loaded_sample.audio,
+			filepath       = loaded_sample.audio_path,
+			channel_format = loaded_sample.channel_format,
 		)
 
 		lib.add(record)

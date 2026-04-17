@@ -36,6 +36,7 @@ import soundfile  # type: ignore[import-untyped]
 import yaml
 
 import pymididefs.notes
+import subsample.ambisonic
 import subsample.analysis
 import subsample.audio
 import subsample.bank
@@ -419,21 +420,22 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 		)
 		return None
 
-	spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
 	return subsample.library.SampleRecord(
-		sample_id   = subsample.library.allocate_id(),
-		name        = str(path.resolve()),
-		spectral    = spectral,
-		rhythm      = rhythm,
-		pitch       = pitch,
-		timbre      = timbre,
-		level       = level,
-		band_energy = band_energy,
-		params      = params,
-		duration    = duration,
-		audio       = None,
-		filepath    = path if path.exists() else None,
+		sample_id      = subsample.library.allocate_id(),
+		name           = str(path.resolve()),
+		spectral       = spectral,
+		rhythm         = rhythm,
+		pitch          = pitch,
+		timbre         = timbre,
+		level          = level,
+		band_energy    = band_energy,
+		params         = params,
+		duration       = duration,
+		audio          = None,
+		filepath       = path if path.exists() else None,
+		channel_format = channel_format,
 	)
 
 
@@ -473,7 +475,7 @@ def _load_instrument_from_path (
 		)
 		return None
 
-	spectral, rhythm, pitch, timbre, params, duration, level, band_energy = result
+	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
 	# Load the audio data, resampling to the output rate if needed.
 	audio = subsample.library.load_wav_audio(path, target_sample_rate)
@@ -485,18 +487,19 @@ def _load_instrument_from_path (
 		return None
 
 	return subsample.library.SampleRecord(
-		sample_id   = subsample.library.allocate_id(),
-		name        = name,
-		spectral    = spectral,
-		rhythm      = rhythm,
-		pitch       = pitch,
-		timbre      = timbre,
-		level       = level,
-		band_energy = band_energy,
-		params      = params,
-		duration    = duration,
-		audio       = audio,
-		filepath    = path,
+		sample_id      = subsample.library.allocate_id(),
+		name           = name,
+		spectral       = spectral,
+		rhythm         = rhythm,
+		pitch          = pitch,
+		timbre         = timbre,
+		level          = level,
+		band_energy    = band_energy,
+		params         = params,
+		duration       = duration,
+		audio          = audio,
+		filepath       = path,
+		channel_format = channel_format,
 	)
 
 
@@ -1015,6 +1018,7 @@ class MidiPlayer:
 		bank_manager: typing.Optional[subsample.bank.BankManager] = None,
 		target_bpm: float = 0.0,
 		output_channels: typing.Optional[int] = None,
+		ambisonic_config: typing.Optional[subsample.config.AmbisonicConfig] = None,
 	) -> None:
 
 		self._device_name        = device_name
@@ -1115,9 +1119,18 @@ class MidiPlayer:
 		# Throttle for CC INFO log — at most one per CC number per second.
 		self._cc_last_log: dict[int, float] = {}
 
-		# Mix matrix cache: (in_channels, pan_weights_tuple, output_routing) → matrix.
-		# Lazily populated by _get_mix_matrix(). Cleared on MIDI map reload.
-		_MixCacheKey = tuple[int, typing.Optional[tuple[float, ...]], typing.Optional[tuple[int, ...]]]
+		# Project-wide ambisonic decoder/rotation settings.  When None, the
+		# player treats any ambisonic-tagged sample the same as raw multichannel
+		# PCM (the decoder matrix is not built and the sample plays through the
+		# default mix matrix).
+		self._ambisonic_config = ambisonic_config
+
+		# Mix matrix cache: (in_channels, pan_weights_tuple, output_routing,
+		# channel_format) → matrix.  channel_format is included so ambisonic
+		# decode matrices do not collide with raw-PCM routing for the same
+		# 4-channel input shape.  Lazily populated by _get_mix_matrix();
+		# cleared on MIDI map reload.
+		_MixCacheKey = tuple[int, typing.Optional[tuple[float, ...]], typing.Optional[tuple[int, ...]], str]
 		self._mix_matrix_cache: dict[_MixCacheKey, numpy.ndarray] = {}
 
 		# Per-note segment counter for round-robin segment playback.
@@ -1569,7 +1582,7 @@ class MidiPlayer:
 							variant.audio, variant.level, variant.segment_bounds,
 							assignment.segment_mode, msg.channel, msg.note,
 						)
-						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing)
+						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format)
 						rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1590,7 +1603,7 @@ class MidiPlayer:
 							prev.audio, prev.level, prev.segment_bounds,
 							assignment.segment_mode, msg.channel, msg.note,
 						)
-						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing)
+						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format)
 						rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1608,7 +1621,7 @@ class MidiPlayer:
 					base.audio, base.level, base.segment_bounds,
 					assignment.segment_mode, msg.channel, msg.note,
 				)
-				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing)
+				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format)
 				rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1619,7 +1632,7 @@ class MidiPlayer:
 				return
 
 		# 4. Last resort: convert from int PCM on this trigger.
-		mix_mat = self._get_mix_matrix(record.audio.shape[1] if record.audio is not None else 1, pan_weights, output_routing)
+		mix_mat = self._get_mix_matrix(record.audio.shape[1] if record.audio is not None else 1, pan_weights, output_routing, record.channel_format)
 		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity, mix_mat, assignment.gain_db)
 
 		if original is None:
@@ -1957,25 +1970,60 @@ class MidiPlayer:
 		in_channels: int,
 		pan_weights: typing.Optional[numpy.ndarray],
 		output_routing: typing.Optional[tuple[int, ...]] = None,
+		channel_format: str = "pcm",
 	) -> numpy.ndarray:
 
 		"""Look up or build a mixing matrix for the given input channel count, pan weights, and output routing.
 
-		Cached by (in_channels, pan_weights_tuple, output_routing) so repeated
-		triggers with the same sample format and routing avoid rebuilding.
+		For raw PCM samples (channel_format="pcm"), the matrix is built by
+		channel.build_mix_matrix() as usual.  For ambisonic B-format samples
+		(channel_format="b_format_ambix"), the matrix is instead the product
+		of the project-wide rotation and decoder — so the same matmul in the
+		render path decodes 4-channel B-format to the output layout.
+
+		Cached by (in_channels, pan_weights_tuple, output_routing,
+		channel_format).
 		"""
 
 		key = (
 			in_channels,
 			tuple(pan_weights.tolist()) if pan_weights is not None else None,
 			output_routing,
+			channel_format,
 		)
 		cached = self._mix_matrix_cache.get(key)
 
 		if cached is not None:
 			return cached
 
-		if output_routing is not None:
+		if channel_format == "b_format_ambix" and self._ambisonic_config is not None:
+			logical_out_ch = len(output_routing) if output_routing is not None else self._output_channels
+
+			if logical_out_ch in subsample.ambisonic.SUPPORTED_DECODER_OUT_CHANNELS and in_channels == 4:
+				decoder = subsample.ambisonic.combined_decode_matrix(
+					order        = 1,
+					out_channels = logical_out_ch,
+					decoder_type = self._ambisonic_config.decoder,
+					yaw_deg      = self._ambisonic_config.yaw_degrees,
+					pitch_deg    = self._ambisonic_config.pitch_degrees,
+					roll_deg     = self._ambisonic_config.roll_degrees,
+				)
+				if output_routing is not None:
+					mat = subsample.channel.route_to_device(decoder, self._output_channels, output_routing)
+				elif logical_out_ch == self._output_channels:
+					mat = decoder
+				else:
+					mat = subsample.channel.route_to_device(decoder, self._output_channels, None)
+			else:
+				# Unsupported combination (non-standard output channel count
+				# or wrong input channel count): fall back to plain routing.
+				if output_routing is not None:
+					logical = subsample.channel.build_mix_matrix(in_channels, len(output_routing), pan_weights)
+					mat = subsample.channel.route_to_device(logical, self._output_channels, output_routing)
+				else:
+					mat = subsample.channel.build_mix_matrix(in_channels, self._output_channels, pan_weights)
+
+		elif output_routing is not None:
 			logical = subsample.channel.build_mix_matrix(in_channels, len(output_routing), pan_weights)
 			mat = subsample.channel.route_to_device(logical, self._output_channels, output_routing)
 		else:

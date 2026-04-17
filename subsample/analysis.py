@@ -68,6 +68,7 @@ Band energy metrics (BandEnergyResult) — per-band energy distribution, used fo
 
 import dataclasses
 import math
+import typing
 import warnings
 
 import librosa
@@ -1639,17 +1640,27 @@ def _run_pyin (mono: numpy.ndarray, params: AnalysisParams) -> _PYINResult | Non
 	)
 
 
-def to_mono_float (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
+def to_mono_float (
+	audio: numpy.ndarray,
+	bit_depth: int,
+	channel_index: typing.Optional[int] = None,
+) -> numpy.ndarray:
 
 	"""Convert integer PCM to a normalised float32 mono array.
 
 	Normalises to [-1.0, 1.0] using the full-scale range for the bit depth.
-	Stereo (or higher) inputs are mixed down by averaging channels. The result
-	can be passed directly to analyze_mono() and analyze_rhythm().
+
+	By default stereo (or higher) inputs are mixed down by averaging channels.
+	When ``channel_index`` is provided, that single channel is returned
+	instead — used e.g. for ambisonic B-format samples where analysis should
+	consume only the W (omni) channel at index 0, not the spatially encoded
+	mix of all four channels.
 
 	Args:
-		audio:     Shape (n_frames, channels), integer dtype.
-		bit_depth: 16, 24, or 32.
+		audio:         Shape (n_frames, channels), integer dtype.
+		bit_depth:     16, 24, or 32.
+		channel_index: When set, extract this channel only (0-indexed).
+		               Otherwise, average all channels.
 
 	Returns:
 		Shape (n_frames,), dtype float32.
@@ -1660,6 +1671,9 @@ def to_mono_float (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
 	divisor: float = 32768.0 if bit_depth == 16 else 2147483648.0
 
 	float_audio = audio.astype(numpy.float32) / divisor
+
+	if channel_index is not None:
+		return float_audio[:, channel_index]
 
 	if float_audio.shape[1] == 1:
 		return float_audio[:, 0]
