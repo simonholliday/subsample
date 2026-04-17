@@ -10,7 +10,12 @@ beat-quantize, pad-quantize, gate, compress, filter, distort, reshape, vocoder,
 and more). Tonal samples are pitch-shifted across the full assigned note range;
 samples with sufficient rhythmic content are beat-quantized and time-stretched
 to a target tempo. All variants are produced in the background using Rubber
-Band's offline finer engine for highest quality. Optional OSC integration sends
-sample events to and receives import requests from other OSC-compatible apps.
+Band's offline finer engine for highest quality. First-order ambisonic capture
+is supported for tetrahedral mics (e.g. Rode NT-SF1) and pre-encoded FuMA/AmbiX
+files; samples are stored as canonical AmbiX B-format and decoded at playback
+time with project-wide rotation. Optional OSC integration sends sample events
+to and receives import requests from other OSC-compatible apps. An optional
+Supervisor WebSocket dashboard broadcasts live state (MIDI activity, library
+contents, recorder status) for in-browser monitoring.
 """
 

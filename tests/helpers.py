@@ -15,15 +15,24 @@ import subsample.analysis
 import subsample.cache
 
 
-def _make_wav (path: pathlib.Path, n_frames: int = 2048, sample_rate: int = 44100) -> None:
+def _make_wav (
+	path: pathlib.Path,
+	n_frames: int = 2048,
+	sample_rate: int = 44100,
+	n_channels: int = 1,
+) -> None:
 
-	"""Write a minimal mono 16-bit WAV file to path."""
+	"""Write a minimal 16-bit WAV file to path.
+
+	Defaults to mono; pass n_channels=4 for tests that need an ambisonic-sized
+	(W, Y, Z, X) stub with all-zero samples.
+	"""
 
 	with wave.open(str(path), "wb") as wf:
-		wf.setnchannels(1)
+		wf.setnchannels(n_channels)
 		wf.setsampwidth(2)
 		wf.setframerate(sample_rate)
-		data = numpy.zeros(n_frames, dtype=numpy.int16)
+		data = numpy.zeros(n_frames * n_channels, dtype=numpy.int16)
 		wf.writeframes(data.tobytes())
 
 

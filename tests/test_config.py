@@ -992,7 +992,30 @@ class TestAmbisonicConfig:
 				"    ambisonic_format: a_generic\n"
 			)
 
-		with pytest.raises(ValueError, match="requires 4 input channels"):
+		with pytest.raises(ValueError, match="channels: 4"):
+			subsample.config.load_config(user_config)
+
+	def test_ambisonic_format_requires_explicit_channels (self, tmp_path: pathlib.Path) -> None:
+		"""Setting ambisonic_format with channels: null (auto-detect) raises
+		ValueError — the mismatch must be caught at config-load time, not
+		deferred to the first capture on a worker thread.
+		"""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    channels: null\n"
+				"    ambisonic_format: a_generic\n"
+			)
+
+		with pytest.raises(ValueError, match="auto-detect is not accepted"):
 			subsample.config.load_config(user_config)
 
 	def test_invalid_decoder_rejected (self, tmp_path: pathlib.Path) -> None:

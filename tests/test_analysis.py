@@ -1513,6 +1513,36 @@ class TestToMonoFloat:
 		assert result.shape == (1,)
 		assert abs(float(result[0]) - 1.0) < 1e-6
 
+	def test_channel_index_extracts_single_channel (self) -> None:
+
+		"""channel_index=k returns only that channel rather than averaging.
+
+		Needed for ambisonic B-format where analysis must use only W (ACN 0)
+		and ignore the directional X/Y/Z channels.
+		"""
+
+		# Four distinct channels — channel k holds value k * 8000 in the first
+		# frame, zero in the second.  Shape (2 frames, 4 channels).
+		audio = numpy.array([
+			[0, 8000, 16000, 24000],
+			[0,    0,     0,     0],
+		], dtype=numpy.int32)
+
+		for k, expected in enumerate((0.0, 8000.0 / 32768.0, 16000.0 / 32768.0, 24000.0 / 32768.0)):
+			result = subsample.analysis.to_mono_float(audio, bit_depth=16, channel_index=k)
+			assert result.shape == (2,)
+			assert result.dtype == numpy.float32
+			assert abs(float(result[0]) - expected) < 1e-4, f"channel {k} frame 0"
+			assert float(result[1]) == 0.0
+
+	def test_channel_index_none_preserves_averaging (self) -> None:
+
+		"""channel_index=None (the default) keeps the historical averaging behaviour."""
+
+		audio = numpy.array([[32767, -32767]], dtype=numpy.int32)
+		result = subsample.analysis.to_mono_float(audio, bit_depth=16, channel_index=None)
+		assert abs(float(result[0])) < 1e-4
+
 
 # ---------------------------------------------------------------------------
 # _refine_onsets_to_attacks

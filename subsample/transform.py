@@ -127,7 +127,7 @@ import librosa
 import numpy
 import pyrubberband
 import scipy.signal
-import soundfile  # type: ignore[import-untyped]
+import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 import pymididefs.notes
 
@@ -1899,7 +1899,7 @@ def _mix_to_mono (audio: numpy.ndarray) -> numpy.ndarray:
 	if audio.shape[1] == 1:
 		return audio[:, 0]
 
-	return numpy.mean(audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]
+	return numpy.mean(audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]  # numpy.mean with axis+dtype overload resolves to scalar in mypy; actual return is ndarray
 
 
 def _compute_grid_energy_profile (
@@ -1991,7 +1991,7 @@ def _apply_pitch (
 	source_midi = float(librosa.hz_to_midi(record.pitch.dominant_pitch_hz))
 	n_steps     = float(step.target_midi_note) - source_midi
 
-	return pyrubberband.pitch_shift(  # type: ignore[no-any-return]
+	return pyrubberband.pitch_shift(  # type: ignore[no-any-return]  # pyrubberband ships no stubs
 		audio,
 		sample_rate,
 		n_steps,
@@ -2163,7 +2163,7 @@ def _apply_time_stretch (
 
 	# Single-hit or no-onset samples: simple global stretch.
 	if len(attack_times) < 2:
-		return pyrubberband.time_stretch(  # type: ignore[no-any-return]
+		return pyrubberband.time_stretch(  # type: ignore[no-any-return]  # pyrubberband ships no stubs
 			audio, sample_rate, 1.0 / duration_ratio, rbargs={"--fine": "", "--smoothing": ""},
 		)
 
@@ -2252,7 +2252,7 @@ def _apply_time_stretch (
 
 	_segment_bounds_local.bounds = tuple(bounds)
 
-	return pyrubberband.timemap_stretch(  # type: ignore[no-any-return]
+	return pyrubberband.timemap_stretch(  # type: ignore[no-any-return]  # pyrubberband ships no stubs
 		audio, sample_rate, time_map, rbargs={"--fine": "", "--smoothing": ""},
 	)
 
@@ -2337,9 +2337,9 @@ def _apply_filter (
 	# Design the filter.
 
 	if resonance_db <= 0.0:
-		sos = scipy.signal.butter(2, wn, btype=btype, fs=sample_rate, output="sos")  # type: ignore[call-overload]
+		sos = scipy.signal.butter(2, wn, btype=btype, fs=sample_rate, output="sos")  # type: ignore[call-overload]  # scipy.signal overload resolution does not recognise the Literal fs/btype/output combo used here
 	else:
-		sos = scipy.signal.iirfilter(  # type: ignore[call-overload]
+		sos = scipy.signal.iirfilter(  # type: ignore[call-overload]  # scipy.signal overload resolution does not recognise the Literal fs/btype/ftype/output combo used here
 			2, wn,
 			rp=resonance_db,
 			btype=btype,

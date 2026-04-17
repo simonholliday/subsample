@@ -512,3 +512,68 @@ class TestV11SidecarBackwardCompat:
 		assert level.crest_factor == 0.0
 		assert level.crest_factor_db == 0.0
 		assert level.noise_floor == 0.0
+
+
+class TestReanalyzePreservesChannelFormat:
+
+	"""Stale-sidecar re-analysis must preserve the original channel_format tag.
+
+	Without this, ambisonic samples would be silently downgraded to "pcm"
+	on an ANALYSIS_VERSION bump — the W-channel-only analysis path would
+	be skipped, and the player would build a normal mix matrix instead of
+	decoding the B-format through the ambisonic decoder matrix.
+	"""
+
+	def test_ambisonic_tag_survives_version_mismatch (self, tmp_path: pathlib.Path) -> None:
+		"""A b_format_ambix sidecar with a stale analysis_version is re-analysed
+		*and* re-tagged b_format_ambix rather than downgraded to pcm.
+		"""
+		wav = tmp_path / "ambi.wav"
+		tests.helpers._make_wav(wav, n_channels=4)
+		md5 = subsample.cache.compute_audio_md5(wav)
+
+		subsample.cache.save_cache(
+			wav, md5, tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+			channels=4, channel_format="b_format_ambix",
+		)
+
+		# Corrupt the analysis_version so load_cache triggers re-analysis.
+		sidecar = subsample.cache.cache_path(wav)
+		data = json.loads(sidecar.read_text())
+		data["analysis_version"] = "0"
+		sidecar.write_text(json.dumps(data), encoding="utf-8")
+
+		result = subsample.cache.load_cache(wav)
+		assert result is not None
+		*_, channel_format = result
+		assert channel_format == "b_format_ambix"
+
+		# New sidecar on disk should also carry the preserved tag.
+		new_payload = json.loads(sidecar.read_text())
+		assert new_payload["channel_format"] == "b_format_ambix"
+
+	def test_pcm_tag_survives_version_mismatch (self, tmp_path: pathlib.Path) -> None:
+		"""Regression guard: non-ambisonic samples still re-analyse as pcm."""
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+		md5 = subsample.cache.compute_audio_md5(wav)
+
+		subsample.cache.save_cache(
+			wav, md5, tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+		)
+
+		sidecar = subsample.cache.cache_path(wav)
+		data = json.loads(sidecar.read_text())
+		data["analysis_version"] = "0"
+		sidecar.write_text(json.dumps(data), encoding="utf-8")
+
+		result = subsample.cache.load_cache(wav)
+		assert result is not None
+		*_, channel_format = result
+		assert channel_format == "pcm"

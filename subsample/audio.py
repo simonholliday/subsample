@@ -96,7 +96,7 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 
 	# Fallback: soundfile (libsndfile) handles FLAC, AIFF, OGG, and more.
 	try:
-		import soundfile  # type: ignore[import-untyped]
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		data, sample_rate = soundfile.read(str(path), dtype="int16", always_2d=True)
 		audio = numpy.ascontiguousarray(data)

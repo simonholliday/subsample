@@ -169,20 +169,6 @@ def _build_default_matrix (in_ch: int, out_ch: int) -> numpy.ndarray:
 	return numpy.eye(out_ch, in_ch, dtype=numpy.float32)
 
 
-def normalize_mix_matrix (matrix: numpy.ndarray) -> numpy.ndarray:
-
-	"""Constant-power normalise each output row.
-
-	Scales each row so that the sum of squared coefficients equals 1.0.
-	Rows that are all-zero are left unchanged.
-	"""
-
-	row_power = numpy.sum(matrix ** 2, axis=1, keepdims=True)
-	row_power = numpy.where(row_power > 0.0, row_power, 1.0)
-
-	return (matrix / numpy.sqrt(row_power)).astype(numpy.float32)
-
-
 def build_mix_matrix (
 	in_channels:  int,
 	out_channels: int,

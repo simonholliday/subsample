@@ -146,24 +146,6 @@ class TestBuildMixMatrix:
 		assert mat.dtype == numpy.float32
 
 
-class TestNormalizeMixMatrix:
-
-	def test_constant_power (self) -> None:
-		"""Each row's sum of squared coefficients should be 1.0 after normalisation."""
-		mat = numpy.array([[1.0, 0.5], [0.5, 1.0]], dtype=numpy.float32)
-		normed = subsample.channel.normalize_mix_matrix(mat)
-
-		for row in range(normed.shape[0]):
-			power = float(numpy.sum(normed[row] ** 2))
-			assert power == pytest.approx(1.0, abs=1e-5)
-
-	def test_zero_row_unchanged (self) -> None:
-		"""All-zero rows are not normalised (avoids division by zero)."""
-		mat = numpy.array([[1.0, 0.0], [0.0, 0.0]], dtype=numpy.float32)
-		normed = subsample.channel.normalize_mix_matrix(mat)
-		numpy.testing.assert_array_equal(normed[1], [0.0, 0.0])
-
-
 class TestRouteToDevice:
 
 	"""Tests for route_to_device() — physical output routing."""

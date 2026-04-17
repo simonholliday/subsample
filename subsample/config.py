@@ -652,11 +652,17 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		ambisonic_format=ambisonic_format,
 	)
 
-	# Ambisonic capture requires exactly 4 channels.
-	if ambisonic_format is not None and channels not in (None, 4):
+	# Ambisonic capture requires exactly 4 channels.  Rejecting None (auto-
+	# detect) at config-load time is deliberate: if a user's device reported
+	# anything other than 4 channels, the failure would otherwise surface
+	# deep inside a worker thread on the first capture, with only a stack
+	# trace to go on.  Requiring an explicit channels: 4 catches the
+	# mismatch at startup with a clear message.
+	if ambisonic_format is not None and channels != 4:
 		raise ValueError(
-			f"recorder.audio.ambisonic_format={ambisonic_format!r} requires 4 input "
-			f"channels; got channels={channels}."
+			f"recorder.audio.ambisonic_format={ambisonic_format!r} requires "
+			f"recorder.audio.channels: 4 (set explicitly; auto-detect is not "
+			f"accepted for ambisonic capture).  Got channels={channels}."
 		)
 
 	if audio.bit_depth not in {16, 24, 32}:

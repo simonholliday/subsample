@@ -209,11 +209,21 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 	if payload is None:
 		return None
 
+	# Preserve the channel_format tag across stale-sidecar re-analysis.
+	# Without this, ambisonic samples would be silently downgraded to
+	# "pcm" on an ANALYSIS_VERSION bump — their W channel would no longer
+	# be the analysis source, and the player would skip the decoder.
+	prior_channel_format = str(payload.get("channel_format", "pcm"))
+
 	# Version check — must come before the MD5 check (cheaper).
 	# When stale, re-analyze and overwrite the sidecar immediately.
 	cached_version = payload.get("analysis_version")
 	if cached_version != subsample.analysis.ANALYSIS_VERSION:
-		return _reanalyze_and_save(audio_path, cached_version=cached_version)
+		return _reanalyze_and_save(
+			audio_path,
+			cached_version=cached_version,
+			channel_format=prior_channel_format,
+		)
 
 	# MD5 check — reads the audio file; done after version check to skip
 	# disk I/O when the version alone invalidates the cache.
@@ -224,10 +234,10 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 	try:
 		current_md5 = compute_audio_md5(audio_path)
 	except OSError:
-		return _reanalyze_and_save(audio_path)
+		return _reanalyze_and_save(audio_path, channel_format=prior_channel_format)
 
 	if cached_md5 is not None and cached_md5 != current_md5:
-		return _reanalyze_and_save(audio_path)
+		return _reanalyze_and_save(audio_path, channel_format=prior_channel_format)
 
 	return _deserialize_payload(payload, sidecar.name)
 
@@ -236,6 +246,7 @@ def _reanalyze_and_save (
 	audio_path: pathlib.Path,
 	cached_version: typing.Optional[str] = None,
 	silent: bool = False,
+	channel_format: str = "pcm",
 ) -> _LoadResult | None:
 
 	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
@@ -253,10 +264,14 @@ def _reanalyze_and_save (
 		                old → new version transition so the cause is clear.
 		silent:         When True, suppress the INFO log message (caller already
 		                logged its own message).
+		channel_format: Preserved from the stale sidecar so ambisonic samples
+		                are re-analysed from the W channel (ACN 0) only and
+		                remain tagged "b_format_ambix".  Defaults to "pcm" for
+		                callers that create a sidecar from scratch.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
-		on success, None on error.
+		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
+		channel_format) on success, None on error.
 	"""
 
 	if not silent:
@@ -274,7 +289,13 @@ def _reanalyze_and_save (
 		_log.warning("Could not read %s for re-analysis: %s", audio_path.name, exc)
 		return None
 
-	mono = subsample.analysis.to_mono_float(file_info.audio, file_info.bit_depth)
+	# Ambisonic samples analyse only the W (omni) channel — ACN 0 in AmbiX.
+	# Non-ambisonic samples keep the historical channel-average behaviour.
+	channel_index = 0 if channel_format.startswith("b_format_") else None
+
+	mono = subsample.analysis.to_mono_float(
+		file_info.audio, file_info.bit_depth, channel_index=channel_index,
+	)
 	params = subsample.analysis.compute_params(file_info.sample_rate)
 	duration = len(mono) / file_info.sample_rate
 
@@ -288,11 +309,12 @@ def _reanalyze_and_save (
 			audio_path, audio_md5, params, spectral, rhythm, pitch, timbre,
 			duration, level, band_energy,
 			bit_depth=file_info.bit_depth, channels=file_info.channels,
+			channel_format=channel_format,
 		)
 	except OSError as exc:
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
 
-	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy, "pcm")
+	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format)
 
 
 def load_or_analyze (audio_path: pathlib.Path) -> _LoadResult | None:

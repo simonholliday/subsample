@@ -32,7 +32,7 @@ import typing
 import mido
 import numpy
 import pyaudio
-import soundfile  # type: ignore[import-untyped]
+import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 import yaml
 
 import pymididefs.notes
@@ -1130,8 +1130,21 @@ class MidiPlayer:
 		# decode matrices do not collide with raw-PCM routing for the same
 		# 4-channel input shape.  Lazily populated by _get_mix_matrix();
 		# cleared on MIDI map reload.
+		#
+		# _mix_matrix_lock serialises the dict across threads:
+		#   - the MIDI dispatch thread reads and writes entries in
+		#     _get_mix_matrix() during note_on handling;
+		#   - the midi-map-watcher thread calls reload_midi_map() which
+		#     calls .clear() here.
+		# Without the lock a get → build → set sequence on the MIDI thread
+		# could interleave with a clear() on the watcher thread.  The
+		# failure mode is benign (the cache key is independent of the note
+		# map so a surviving entry is still correct for its inputs) but
+		# the explicit lock removes the ambiguity and matches the locking
+		# discipline used for _voices_lock and _cc_debounce_lock.
 		_MixCacheKey = tuple[int, typing.Optional[tuple[float, ...]], typing.Optional[tuple[int, ...]], str]
 		self._mix_matrix_cache: dict[_MixCacheKey, numpy.ndarray] = {}
+		self._mix_matrix_lock:  threading.Lock                    = threading.Lock()
 
 		# Per-note segment counter for round-robin segment playback.
 		# Cleared on MIDI map reload and bank switch.
@@ -1914,7 +1927,8 @@ class MidiPlayer:
 		old_count = len(self._note_map)
 		self._note_map = new_map
 		self._mapped_ccs = _collect_mapped_ccs(new_map)
-		self._mix_matrix_cache.clear()
+		with self._mix_matrix_lock:
+			self._mix_matrix_cache.clear()
 		self._segment_counters.clear()
 		self.update_assignments()
 
@@ -1991,46 +2005,48 @@ class MidiPlayer:
 			output_routing,
 			channel_format,
 		)
-		cached = self._mix_matrix_cache.get(key)
 
-		if cached is not None:
-			return cached
+		with self._mix_matrix_lock:
+			cached = self._mix_matrix_cache.get(key)
 
-		if channel_format == "b_format_ambix" and self._ambisonic_config is not None:
-			logical_out_ch = len(output_routing) if output_routing is not None else self._output_channels
+			if cached is not None:
+				return cached
 
-			if logical_out_ch in subsample.ambisonic.SUPPORTED_DECODER_OUT_CHANNELS and in_channels == 4:
-				decoder = subsample.ambisonic.combined_decode_matrix(
-					order        = 1,
-					out_channels = logical_out_ch,
-					decoder_type = self._ambisonic_config.decoder,
-					yaw_deg      = self._ambisonic_config.yaw_degrees,
-					pitch_deg    = self._ambisonic_config.pitch_degrees,
-					roll_deg     = self._ambisonic_config.roll_degrees,
-				)
-				if output_routing is not None:
-					mat = subsample.channel.route_to_device(decoder, self._output_channels, output_routing)
-				elif logical_out_ch == self._output_channels:
-					mat = decoder
+			if channel_format == "b_format_ambix" and self._ambisonic_config is not None:
+				logical_out_ch = len(output_routing) if output_routing is not None else self._output_channels
+
+				if logical_out_ch in subsample.ambisonic.SUPPORTED_DECODER_OUT_CHANNELS and in_channels == 4:
+					decoder = subsample.ambisonic.combined_decode_matrix(
+						order        = 1,
+						out_channels = logical_out_ch,
+						decoder_type = self._ambisonic_config.decoder,
+						yaw_deg      = self._ambisonic_config.yaw_degrees,
+						pitch_deg    = self._ambisonic_config.pitch_degrees,
+						roll_deg     = self._ambisonic_config.roll_degrees,
+					)
+					if output_routing is not None:
+						mat = subsample.channel.route_to_device(decoder, self._output_channels, output_routing)
+					elif logical_out_ch == self._output_channels:
+						mat = decoder
+					else:
+						mat = subsample.channel.route_to_device(decoder, self._output_channels, None)
 				else:
-					mat = subsample.channel.route_to_device(decoder, self._output_channels, None)
+					# Unsupported combination (non-standard output channel count
+					# or wrong input channel count): fall back to plain routing.
+					if output_routing is not None:
+						logical = subsample.channel.build_mix_matrix(in_channels, len(output_routing), pan_weights)
+						mat = subsample.channel.route_to_device(logical, self._output_channels, output_routing)
+					else:
+						mat = subsample.channel.build_mix_matrix(in_channels, self._output_channels, pan_weights)
+
+			elif output_routing is not None:
+				logical = subsample.channel.build_mix_matrix(in_channels, len(output_routing), pan_weights)
+				mat = subsample.channel.route_to_device(logical, self._output_channels, output_routing)
 			else:
-				# Unsupported combination (non-standard output channel count
-				# or wrong input channel count): fall back to plain routing.
-				if output_routing is not None:
-					logical = subsample.channel.build_mix_matrix(in_channels, len(output_routing), pan_weights)
-					mat = subsample.channel.route_to_device(logical, self._output_channels, output_routing)
-				else:
-					mat = subsample.channel.build_mix_matrix(in_channels, self._output_channels, pan_weights)
+				mat = subsample.channel.build_mix_matrix(in_channels, self._output_channels, pan_weights)
 
-		elif output_routing is not None:
-			logical = subsample.channel.build_mix_matrix(in_channels, len(output_routing), pan_weights)
-			mat = subsample.channel.route_to_device(logical, self._output_channels, output_routing)
-		else:
-			mat = subsample.channel.build_mix_matrix(in_channels, self._output_channels, pan_weights)
-
-		self._mix_matrix_cache[key] = mat
-		return mat
+			self._mix_matrix_cache[key] = mat
+			return mat
 
 	def _render_float (
 		self,
