@@ -110,6 +110,10 @@
 #   pitched                       true = has stable pitch; false = not pitched
 #   min_tempo / max_tempo         float BPM
 #   min_pitch / max_pitch         float Hz or note name (e.g. C3)
+#   min_quantized_beats           float beats — length of the assignment's
+#   max_quantized_beats           beat_quantize/pad_quantize output (non-integer
+#                                 values accepted).  Samples with no variant yet
+#                                 computed are excluded.
 #   reference                     string — similarity match against a named
 #                                 reference sample
 #   name                          string — exact filename stem match
@@ -123,6 +127,10 @@
 #   onsets_asc / onsets_desc       by onset count
 #   tempo_asc / tempo_desc        by detected BPM
 #   loudest / quietest            by RMS level
+#   quantized_beats_asc /         by the beat length of the assignment's
+#   quantized_beats_desc          beat_quantize/pad_quantize output.  Samples
+#                                 with no variant sort to the end in both
+#                                 directions.
 #
 # PICK
 #

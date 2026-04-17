@@ -333,15 +333,18 @@ All `where` predicates must pass (AND logic). Available predicates:
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
 | `min_tempo` / `max_tempo` | float (BPM) | Filter by detected tempo |
 | `min_pitch` / `max_pitch` | Hz or note name | Filter by detected frequency |
+| `min_quantized_beats` / `max_quantized_beats` | float (beats) | Filter by the beat length of the assignment's `beat_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded. Non-integer values accepted. |
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
 | `name` | string or path | Exact filename stem match, or path to a specific WAV |
 | `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Banks vs directory predicate](#banks-vs-directory-predicate)) |
 
 Available `order_by` values: `newest`, `oldest`, `similarity` (requires
 `reference`), `duration_asc`, `duration_desc`, `pitch_asc`, `pitch_desc`,
-`onsets_asc`, `onsets_desc`, `tempo_asc`, `tempo_desc`, `loudest`, `quietest`.
+`onsets_asc`, `onsets_desc`, `tempo_asc`, `tempo_desc`, `loudest`, `quietest`,
+`quantized_beats_asc`, `quantized_beats_desc`.
 Default: `newest`. When `reference` is in `where` and no explicit `order_by` is
-given, defaults to `similarity`.
+given, defaults to `similarity`. For `quantized_beats_asc`/`quantized_beats_desc`,
+samples without a computed variant sort to the end in both directions.
 
 `pick` is 1-indexed. Default: 1 (first match). For multi-note assignments
 without explicit `pick`, each note gets the next position (rank distribution) -
@@ -746,6 +749,8 @@ time.
 # Install system dependencies (PortAudio + Rubber Band)
 # Debian/Ubuntu:
 sudo apt install portaudio19-dev rubberband-cli
+# Fedora/RHEL:
+sudo dnf install portaudio-devel rubberband
 # macOS:
 brew install portaudio rubberband
 
@@ -839,6 +844,8 @@ weights - is optional and rarely needs changing.
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
 | `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |
 | `transform.max_disk_mb` | auto | Max disk space (MB) for cached variant files; defaults to 3x memory budget. 0 disables |
+| `supervisor.enabled` | `false` | Enable the Supervisor web dashboard (broadcasts state via WebSocket for live monitoring). Requires `pip install subsample[supervisor]` |
+| `supervisor.port` | `9003` | WebSocket port the Supervisor server listens on |
 | `osc.enabled` | `false` | Enable OSC integration (send sample events, optionally receive import requests). Requires `pip install subsample[osc]` |
 | `osc.send_host` | `127.0.0.1` | Destination host for outgoing `/sample/captured` and `/sample/loaded` messages |
 | `osc.send_port` | `9000` | Destination UDP port for outgoing OSC messages |
@@ -1369,8 +1376,8 @@ output device's bit depth.
 ## Requirements
 
 - Python 3.12+
-- PortAudio (required by PyAudio - `apt install portaudio19-dev` or `brew install portaudio`)
-- Rubber Band (required by pyrubberband - `apt install rubberband-cli` or `brew install rubberband`)
+- PortAudio (required by PyAudio - `apt install portaudio19-dev`, `dnf install portaudio-devel`, or `brew install portaudio`)
+- Rubber Band (required by pyrubberband - `apt install rubberband-cli`, `dnf install rubberband`, or `brew install rubberband`)
 
 **Windows users:** install and run Subsample inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)
 (Windows Subsystem for Linux). This gives you a real Linux environment where

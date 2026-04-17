@@ -357,6 +357,27 @@ class OscConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class SupervisorConfig:
+
+	"""Supervisor web dashboard configuration.
+
+	When enabled, Subsample broadcasts its state via WebSocket to the
+	Supervisor dashboard.  The dashboard renders live panels showing
+	MIDI activity, library contents, and recorder status.
+
+	Requires the optional ``supervisor`` dependency:
+	``pip install subsample[supervisor]``
+	"""
+
+	enabled: bool = False
+	"""Master switch for the Supervisor dashboard.  When False, no
+	WebSocket server is started."""
+
+	port: int = 9003
+	"""WebSocket port the Supervisor server listens on."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
 
 	recorder: RecorderConfig
@@ -374,6 +395,7 @@ class Config:
 	player: PlayerConfig = dataclasses.field(default_factory=PlayerConfig)
 	transform: TransformConfig = dataclasses.field(default_factory=TransformConfig)
 	osc: OscConfig = dataclasses.field(default_factory=OscConfig)
+	supervisor: SupervisorConfig = dataclasses.field(default_factory=SupervisorConfig)
 
 
 def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
@@ -801,6 +823,13 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		receive_port=int(osc_raw.get("receive_port", 9002)),
 	)
 
+	# --- Supervisor ---
+	supervisor_raw: dict[str, typing.Any] = raw.get("supervisor", {})
+	supervisor = SupervisorConfig(
+		enabled=bool(supervisor_raw.get("enabled", False)),
+		port=int(supervisor_raw.get("port", 9003)),
+	)
+
 	return Config(
 		recorder=recorder,
 		detection=detection,
@@ -812,4 +841,5 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		player=player,
 		transform=transform,
 		osc=osc,
+		supervisor=supervisor,
 	)

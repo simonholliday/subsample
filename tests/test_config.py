@@ -872,3 +872,36 @@ class TestMemoryBudget:
 		"""When os.sysconf is unavailable, falls back to 160 MB."""
 		result = subsample.config._auto_detect_memory_mb()
 		assert result == 160.0
+
+
+class TestSupervisorConfig:
+
+	def test_default_config_has_supervisor_disabled (self) -> None:
+		"""Default config produces SupervisorConfig with enabled=False."""
+
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert isinstance(cfg.supervisor, subsample.config.SupervisorConfig)
+		assert cfg.supervisor.enabled is False
+		assert cfg.supervisor.port == 9003
+
+	def test_explicit_supervisor_yaml_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""Explicit supervisor YAML section is parsed correctly."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nsupervisor:\n"
+				"  enabled: true\n"
+				"  port: 8888\n"
+			)
+
+		cfg = subsample.config.load_config(user_config)
+
+		assert cfg.supervisor.enabled is True
+		assert cfg.supervisor.port == 8888

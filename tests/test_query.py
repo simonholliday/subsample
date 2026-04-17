@@ -275,6 +275,142 @@ class TestQuery:
 
 
 # ---------------------------------------------------------------------------
+# quantized_beats filter and ordering
+# ---------------------------------------------------------------------------
+
+class TestQuantizedBeats:
+
+	"""Filter and order samples by their quantized beat count.
+
+	The beats_resolver callable maps sample_id -> beats (float) or None.
+	Tests use a mock resolver; real resolvers come from TransformManager
+	via the GridEnergyProfile on cached variants.
+	"""
+
+	def _samples (self) -> list[subsample.library.SampleRecord]:
+
+		"""Four samples with distinct IDs for resolver lookup."""
+
+		return [
+			_make_record(sample_id=1, name="two-beats"),
+			_make_record(sample_id=2, name="four-beats"),
+			_make_record(sample_id=3, name="eight-beats"),
+			_make_record(sample_id=4, name="no-variant"),
+		]
+
+	def _resolver (self) -> typing.Callable[[int], typing.Optional[float]]:
+
+		"""Return a resolver mapping ids 1/2/3 to beats; id 4 has no variant."""
+
+		mapping = {1: 2.0, 2: 4.0, 3: 8.0}
+		return lambda sid: mapping.get(sid)
+
+	def test_min_quantized_beats_filter (self) -> None:
+
+		"""min_quantized_beats excludes samples below the threshold."""
+
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(min_quantized_beats=4.0),
+		)
+		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
+
+		ids = {r.sample_id for r in result}
+		assert ids == {2, 3}   # 4.0 and 8.0 pass; 2.0 and None excluded
+
+	def test_max_quantized_beats_filter (self) -> None:
+
+		"""max_quantized_beats excludes samples above the threshold."""
+
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(max_quantized_beats=4.0),
+		)
+		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
+
+		ids = {r.sample_id for r in result}
+		assert ids == {1, 2}   # 2.0 and 4.0 pass; 8.0 and None excluded
+
+	def test_quantized_beats_range (self) -> None:
+
+		"""Combined min and max select the middle sample only."""
+
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(
+				min_quantized_beats=3.0,
+				max_quantized_beats=5.0,
+			),
+		)
+		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
+
+		assert [r.sample_id for r in result] == [2]
+
+	def test_quantized_beats_missing_variant_excluded (self) -> None:
+
+		"""Samples whose resolver returns None are excluded from min/max filters."""
+
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(min_quantized_beats=0.0),
+		)
+		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
+
+		ids = {r.sample_id for r in result}
+		assert 4 not in ids                 # no-variant excluded
+		assert ids == {1, 2, 3}
+
+	def test_quantized_beats_no_resolver_excluded (self) -> None:
+
+		"""Without a resolver, quantized_beats filters exclude everything."""
+
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(min_quantized_beats=1.0),
+		)
+		result = subsample.query.query(spec, self._samples(), beats_resolver=None)
+
+		assert result == []
+
+	def test_order_by_quantized_beats_asc (self) -> None:
+
+		"""quantized_beats_asc orders smallest first; None goes to the end."""
+
+		spec = subsample.query.SelectSpec(order_by="quantized_beats_asc")
+		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
+
+		ids = [r.sample_id for r in result]
+		assert ids[:3] == [1, 2, 3]         # 2.0, 4.0, 8.0
+		assert ids[3] == 4                  # None sorts last
+
+	def test_order_by_quantized_beats_desc (self) -> None:
+
+		"""quantized_beats_desc orders largest first; None still goes to the end."""
+
+		spec = subsample.query.SelectSpec(order_by="quantized_beats_desc")
+		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
+
+		ids = [r.sample_id for r in result]
+		assert ids[:3] == [3, 2, 1]         # 8.0, 4.0, 2.0
+		assert ids[3] == 4                  # None sorts last, both directions
+
+	def test_non_integer_beats (self) -> None:
+
+		"""Fractional beat counts filter and order correctly."""
+
+		mapping = {1: 3.75, 2: 3.5, 3: 4.25}
+		resolver = lambda sid: mapping.get(sid)
+
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(min_quantized_beats=3.6),
+			order_by="quantized_beats_asc",
+		)
+		samples = [
+			_make_record(sample_id=1, name="a"),
+			_make_record(sample_id=2, name="b"),
+			_make_record(sample_id=3, name="c"),
+		]
+		result = subsample.query.query(spec, samples, beats_resolver=resolver)
+
+		assert [r.sample_id for r in result] == [1, 3]   # 3.75 and 4.25
+
+
+# ---------------------------------------------------------------------------
 # parse_select
 # ---------------------------------------------------------------------------
 
@@ -303,6 +439,19 @@ class TestParseSelect:
 		assert len(specs) == 2
 		assert specs[0].where.name == "my-kick"
 		assert specs[1].where.reference == "BD0025"
+
+	def test_quantized_beats_yaml_parsed (self) -> None:
+
+		"""min_quantized_beats and max_quantized_beats are parsed as floats."""
+
+		raw = {
+			"where": {"min_quantized_beats": 2, "max_quantized_beats": 4.5},
+			"order_by": "quantized_beats_desc",
+		}
+		specs = subsample.query.parse_select(raw, "test")
+		assert specs[0].where.min_quantized_beats == 2.0
+		assert specs[0].where.max_quantized_beats == 4.5
+		assert specs[0].order_by == "quantized_beats_desc"
 
 	def test_defaults (self) -> None:
 

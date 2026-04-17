@@ -120,6 +120,58 @@ def _quantize_params (
 	return (bpm if bpm > 0 else None, grid)
 
 
+def _build_beats_resolver (
+	process: subsample.query.ProcessSpec,
+	transform_manager: typing.Optional[subsample.transform.TransformManager],
+	session_bpm: float,
+) -> typing.Optional[typing.Callable[[int], typing.Optional[float]]]:
+
+	"""Build a callable that returns the quantized beat count for a sample.
+
+	Inspects the assignment's process spec for a ``beat_quantize`` or
+	``pad_quantize`` step and extracts the effective BPM and grid.  The
+	returned callable looks up the matching variant via the transform
+	manager and reads the ``GridEnergyProfile`` length to derive the
+	number of beats as ``len(energy) * 4 / resolution``.
+
+	Returns None (not a callable) when no valid quantize step is present,
+	no transform manager is available, or the effective BPM is 0.
+	"""
+
+	if transform_manager is None:
+		return None
+
+	# Determine which quantize step (if any) applies.
+	step: typing.Union[subsample.transform.TimeStretch, subsample.transform.PadQuantize]
+
+	if process.has_beat_quantize():
+		bpm, grid = _quantize_params(process, "beat_quantize", session_bpm)
+		if bpm is None or bpm <= 0:
+			return None
+		step = subsample.transform.TimeStretch(target_bpm=float(bpm), resolution=int(grid))
+	elif process.has_pad_quantize():
+		bpm, grid = _quantize_params(process, "pad_quantize", session_bpm)
+		if bpm is None or bpm <= 0:
+			return None
+		step = subsample.transform.PadQuantize(target_bpm=float(bpm), resolution=int(grid))
+	elif session_bpm > 0:
+		# Fall back to session-level beat_quantize.
+		step = subsample.transform.TimeStretch(target_bpm=float(session_bpm), resolution=16)
+	else:
+		return None
+
+	spec = subsample.transform.TransformSpec(steps=(step,))
+
+	def _resolver (sample_id: int) -> typing.Optional[float]:
+		result = transform_manager.get_variant(sample_id, spec)
+		if result is None or result.energy_profile is None:
+			return None
+		profile = result.energy_profile
+		return len(profile.energy) * 4.0 / profile.resolution
+
+	return _resolver
+
+
 def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing.Optional[numpy.ndarray]:
 
 	"""Parse pan weights from YAML into a raw weight array.
@@ -1430,12 +1482,19 @@ class MidiPlayer:
 
 		eff_library    = self._effective_instrument_library
 		eff_similarity = self._effective_similarity_matrix
+		eff_transform  = self._effective_transform_manager
 		all_samples    = eff_library.samples()
 		sample_id: typing.Optional[int] = None
 
+		beats_resolver = _build_beats_resolver(
+			assignment.process, eff_transform, self._target_bpm,
+		)
+
 		for select_spec in assignment.select:
 
-			ranked = subsample.query.query(select_spec, all_samples, eff_similarity)
+			ranked = subsample.query.query(
+				select_spec, all_samples, eff_similarity, beats_resolver,
+			)
 
 			if ranked:
 				# pick is 1-indexed; clamp to available range, fall back to rank 0.
@@ -1653,8 +1712,14 @@ class MidiPlayer:
 			# Resolve the full ranked list via the query engine.
 			ranked: list[subsample.library.SampleRecord] = []
 
+			beats_resolver = _build_beats_resolver(
+				asgn.process, eff_transform, self._target_bpm,
+			)
+
 			for select_spec in asgn.select:
-				ranked = subsample.query.query(select_spec, all_samples, eff_similarity)
+				ranked = subsample.query.query(
+					select_spec, all_samples, eff_similarity, beats_resolver,
+				)
 
 				if ranked:
 					break

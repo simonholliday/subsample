@@ -481,6 +481,7 @@ def _start_player (
 	player_cell: list[typing.Optional[subsample.player.MidiPlayer]],
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	bank_manager: typing.Optional[subsample.bank.BankManager] = None,
+	sv_cell: typing.Optional[list[typing.Any]] = None,
 ) -> None:
 
 	"""Select a MIDI input device (or create a virtual port), then run the player.
@@ -503,6 +504,9 @@ def _start_player (
 		                    playback when provided.
 		bank_manager:       Optional bank manager for multi-bank switching via MIDI
 		                    Program Change.
+		sv_cell:            Single-element list holding the Supervisor instance, or None.
+		                    When present, the player's CC events are subscribed after
+		                    the player is created.
 	"""
 
 	# Load the MIDI routing map.  Requires an explicit path in config —
@@ -573,6 +577,10 @@ def _start_player (
 			output_channels=cfg.player.audio.channels,
 		)
 		player_cell[0] = player
+
+		if sv_cell is not None and sv_cell[0] is not None:
+			player.events.on("cc", sv_cell[0]._on_cc)
+
 		player.update_pitched_assignments()
 		try:
 			player.run()
@@ -621,6 +629,10 @@ def _start_player (
 		output_channels=cfg.player.audio.channels,
 	)
 	player_cell[0] = player
+
+	if sv_cell is not None and sv_cell[0] is not None:
+		player.events.on("cc", sv_cell[0]._on_cc)
+
 	player.update_pitched_assignments()
 	try:
 		player.run()
@@ -848,6 +860,31 @@ def main () -> None:
 	# _start_player sets this before calling player.run().
 	_player_cell: list[typing.Optional[subsample.player.MidiPlayer]] = [None]
 
+	# --- Supervisor dashboard ---
+	# Broadcasts state via WebSocket.  Created before threads start so
+	# sample events can be subscribed immediately.  The player reference
+	# is resolved lazily via _player_cell (the player is created on a
+	# separate thread).  CC subscription happens inside _start_player
+	# after the player exists.
+	_sv_cell: list[typing.Any] = [None]
+
+	if cfg.supervisor.enabled:
+		try:
+			import supervisor.app.subsample as _sv_module
+			_sv_cell[0] = _sv_module.SubsampleSupervisor(
+				player=_player_cell,
+				instrument_library=instrument_library,
+				recorder_processor=None,
+				cfg=cfg,
+				port=cfg.supervisor.port,
+			)
+			app_events.on("sample_captured", _sv_cell[0].on_sample_captured)
+			app_events.on("sample_loaded", _sv_cell[0].on_sample_loaded)
+			_sv_cell[0].start_threaded()
+			print(f"  Supervisor   : ws://localhost:{cfg.supervisor.port}")
+		except ImportError:
+			_log.warning("Supervisor enabled but not installed. pip install subsample[supervisor]")
+
 	if cfg.recorder.enabled:
 		threads.append(threading.Thread(
 			target=_run_recorder,
@@ -873,7 +910,7 @@ def main () -> None:
 				args=(
 					cfg, shutdown_event, instrument_library,
 					similarity_matrix, reference_library, _player_cell,
-					transform_manager, bank_manager,
+					transform_manager, bank_manager, _sv_cell,
 				),
 				name="player",
 			))
@@ -1086,6 +1123,9 @@ def main () -> None:
 
 	if osc_receiver is not None:
 		osc_receiver.stop()
+
+	if _sv_cell[0] is not None:
+		_sv_cell[0].stop_threaded()
 
 	# Drain any in-flight transform workers before exiting.
 	if bank_manager is not None:

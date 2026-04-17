@@ -80,12 +80,18 @@ class WherePredicate:
 	max_tempo:     typing.Optional[float] = None
 	min_pitch_hz:  typing.Optional[float] = None
 	max_pitch_hz:  typing.Optional[float] = None
+	min_quantized_beats: typing.Optional[float] = None
+	max_quantized_beats: typing.Optional[float] = None
 	reference:     typing.Optional[str]   = None
 	name:          typing.Optional[str]   = None
 	name_path:     typing.Optional[str]   = None  # Resolved absolute path; used by _resolve_path_references to load samples (not used in matches())
 	directory:     typing.Optional[str]   = None  # Resolved absolute path; filters to samples from this directory
 
-	def matches (self, record: "subsample.library.SampleRecord") -> bool:
+	def matches (
+		self,
+		record: "subsample.library.SampleRecord",
+		beats_resolver: typing.Optional[typing.Callable[[int], typing.Optional[float]]] = None,
+	) -> bool:
 
 		"""Return True if the record passes all active filter predicates."""
 
@@ -120,6 +126,18 @@ class WherePredicate:
 
 		if self.max_pitch_hz is not None and record.pitch.dominant_pitch_hz > self.max_pitch_hz:
 			return False
+
+		if self.min_quantized_beats is not None or self.max_quantized_beats is not None:
+			beats = beats_resolver(record.sample_id) if beats_resolver is not None else None
+
+			if beats is None:
+				return False
+
+			if self.min_quantized_beats is not None and beats < self.min_quantized_beats:
+				return False
+
+			if self.max_quantized_beats is not None and beats > self.max_quantized_beats:
+				return False
 
 		if self.name is not None and record.name != self.name:
 			return False
@@ -163,7 +181,13 @@ _ORDER_BY_KEYS: dict[str, tuple[typing.Callable[["subsample.library.SampleRecord
 	"quietest":      (lambda r: r.level.rms, False),
 }
 
-VALID_ORDER_BY: frozenset[str] = frozenset(_ORDER_BY_KEYS.keys() | {"similarity"})
+VALID_ORDER_BY: frozenset[str] = frozenset(
+	_ORDER_BY_KEYS.keys() | {"similarity", "quantized_beats_asc", "quantized_beats_desc"}
+)
+"""`similarity` is handled in query() using the SimilarityMatrix.
+`quantized_beats_asc`/`quantized_beats_desc` are handled in query() using
+the beats_resolver callable — records whose resolver returns None are
+sorted to the end for both directions."""
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +331,7 @@ def query (
 	select_spec:       SelectSpec,
 	samples:           list["subsample.library.SampleRecord"],
 	similarity_matrix: typing.Optional["subsample.similarity.SimilarityMatrix"] = None,
+	beats_resolver:    typing.Optional[typing.Callable[[int], typing.Optional[float]]] = None,
 ) -> list["subsample.library.SampleRecord"]:
 
 	"""Evaluate a SelectSpec against a list of samples.
@@ -325,6 +350,11 @@ def query (
 		samples:           All instrument samples (from InstrumentLibrary.samples()).
 		similarity_matrix: Required when ``where.reference`` is set and
 		                   ``order_by`` is ``"similarity"``.
+		beats_resolver:    Callable returning the quantized beat count for a
+		                   given sample_id, or None when no variant/profile is
+		                   available.  Required when ``where`` uses
+		                   ``min_quantized_beats``/``max_quantized_beats`` or
+		                   ``order_by`` is ``quantized_beats_asc``/``_desc``.
 
 	Returns:
 		List of matching SampleRecord objects, ordered by the requested key.
@@ -349,13 +379,35 @@ def query (
 		for match in ranked:
 			record = by_id.get(match.sample_id)
 
-			if record is not None and where.matches(record):
+			if record is not None and where.matches(record, beats_resolver):
 				result.append(record)
 
 		return result
 
 	# General case: filter → sort.
-	filtered = [r for r in samples if where.matches(r)]
+	filtered = [r for r in samples if where.matches(r, beats_resolver)]
+
+	# quantized_beats ordering uses the resolver.  Records with no beat count
+	# (None) sort to the end regardless of direction — they are treated as
+	# "unknown" rather than "zero".
+	if select_spec.order_by in ("quantized_beats_asc", "quantized_beats_desc"):
+		reverse = select_spec.order_by == "quantized_beats_desc"
+
+		if beats_resolver is None:
+			# Without a resolver the ordering is meaningless; leave unsorted.
+			return filtered
+
+		def _beats_key (r: "subsample.library.SampleRecord") -> tuple[int, float]:
+			beats = beats_resolver(r.sample_id)
+			# (1, 0.0) for None sorts after (0, value) in both asc and desc —
+			# because we flip only within the "known" group by using -beats
+			# for desc on the float key, not on the sentinel.
+			if beats is None:
+				return (1, 0.0)
+			return (0, -beats if reverse else beats)
+
+		filtered.sort(key=_beats_key)
+		return filtered
 
 	order_entry = _ORDER_BY_KEYS.get(select_spec.order_by)
 
@@ -416,6 +468,9 @@ def _parse_where (
 				kwargs[key + "_hz"] = hz
 			else:
 				kwargs[key + "_hz"] = float(value)
+
+		elif key in ("min_quantized_beats", "max_quantized_beats"):
+			kwargs[key] = float(value)
 
 		elif key == "reference":
 			ref = str(value)

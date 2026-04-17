@@ -23,6 +23,18 @@
 # and transform sections below — these override the global split.
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# supervisor — live web dashboard via WebSocket
+# ---------------------------------------------------------------------------
+# Broadcasts state (MIDI activity, library contents, recorder status) to
+# the Supervisor dashboard for live monitoring in a browser.
+# Requires: pip install subsample[supervisor]
+
+# supervisor:
+#   enabled: false
+#   port: 9003
+
+# ---------------------------------------------------------------------------
 # osc — send sample events and receive file import requests via OSC
 # ---------------------------------------------------------------------------
 # OSC (Open Sound Control) integration for communicating with other apps.
