@@ -1053,3 +1053,144 @@ class TestAmbisonicConfig:
 
 		with pytest.raises(ValueError, match="max_order must be 1"):
 			subsample.config.load_config(user_config)
+
+
+class TestAudioFormatConfig:
+
+	"""Tests for recorder.audio.audio_format parsing and validation."""
+
+	def test_default_is_wav (self) -> None:
+		"""With no override, audio_format resolves to 'wav'."""
+
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert cfg.recorder.audio.audio_format == "wav"
+
+	def test_explicit_flac_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""Setting audio_format: flac in YAML is parsed correctly."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    bit_depth: 16\n"
+				"    audio_format: flac\n"
+			)
+
+		cfg = subsample.config.load_config(user_config)
+
+		assert cfg.recorder.audio.audio_format == "flac"
+
+	def test_case_insensitive (self, tmp_path: pathlib.Path) -> None:
+		"""Uppercase values are normalised to lowercase."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    bit_depth: 16\n"
+				"    audio_format: FLAC\n"
+			)
+
+		cfg = subsample.config.load_config(user_config)
+
+		assert cfg.recorder.audio.audio_format == "flac"
+
+	def test_invalid_value_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""Anything other than wav/flac raises ValueError."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    audio_format: mp3\n"
+			)
+
+		with pytest.raises(ValueError, match="audio_format"):
+			subsample.config.load_config(user_config)
+
+	def test_flac_with_32bit_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""audio_format: flac combined with bit_depth: 32 is rejected at
+		config-load time.  FLAC's stable subtypes only cover 16/24-bit;
+		surfacing the mismatch here prevents a worker-thread failure on
+		the first capture.
+		"""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    bit_depth: 32\n"
+				"    audio_format: flac\n"
+			)
+
+		with pytest.raises(ValueError, match="bit_depth of 16 or 24"):
+			subsample.config.load_config(user_config)
+
+	def test_flac_with_16bit_accepted (self, tmp_path: pathlib.Path) -> None:
+		"""audio_format: flac with bit_depth: 16 is a valid combination."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    bit_depth: 16\n"
+				"    audio_format: flac\n"
+			)
+
+		cfg = subsample.config.load_config(user_config)
+
+		assert cfg.recorder.audio.audio_format == "flac"
+		assert cfg.recorder.audio.bit_depth    == 16
+
+	def test_flac_with_24bit_accepted (self, tmp_path: pathlib.Path) -> None:
+		"""audio_format: flac with bit_depth: 24 is a valid combination."""
+
+		import shutil
+
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(
+				"\nrecorder:\n"
+				"  audio:\n"
+				"    bit_depth: 24\n"
+				"    audio_format: flac\n"
+			)
+
+		cfg = subsample.config.load_config(user_config)
+
+		assert cfg.recorder.audio.audio_format == "flac"
+		assert cfg.recorder.audio.bit_depth    == 24

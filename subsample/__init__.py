@@ -10,7 +10,9 @@ beat-quantize, pad-quantize, gate, compress, filter, distort, reshape, vocoder,
 and more). Tonal samples are pitch-shifted across the full assigned note range;
 samples with sufficient rhythmic content are beat-quantized and time-stretched
 to a target tempo. All variants are produced in the background using Rubber
-Band's offline finer engine for highest quality. First-order ambisonic capture
+Band's offline finer engine for highest quality. Captured samples are stored
+as uncompressed WAV by default; flipping `audio_format: flac` writes lossless
+FLAC instead (~40-60% smaller at 16/24-bit). First-order ambisonic capture
 is supported for tetrahedral mics (e.g. Rode NT-SF1) and pre-encoded FuMA/AmbiX
 files; samples are stored as canonical AmbiX B-format and decoded at playback
 time with project-wide rotation. Optional OSC integration sends sample events

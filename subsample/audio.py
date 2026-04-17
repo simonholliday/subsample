@@ -95,16 +95,36 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 		pass  # Not a WAV file — fall through to soundfile.
 
 	# Fallback: soundfile (libsndfile) handles FLAC, AIFF, OGG, and more.
+	#
+	# Pick an input dtype that preserves the file's native bit depth:
+	#  - PCM_24 files are decoded as int32 with the 24-bit value in the
+	#    upper 3 bytes (matches unpack_audio's 24-bit convention); the
+	#    bit_depth we return is 24 so downstream code treats it correctly.
+	#  - PCM_32 / FLOAT files are decoded as int32 at full scale.
+	#  - Everything else (PCM_16, PCM_S8, compressed formats) is decoded
+	#    as int16.
+	# Without this, a 24-bit FLAC written by the recorder and later read
+	# back would be silently truncated to 16-bit.
 	try:
 		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
-		data, sample_rate = soundfile.read(str(path), dtype="int16", always_2d=True)
+		sf_info = soundfile.info(str(path))
+		subtype = (sf_info.subtype or "").upper()
+
+		if subtype in ("PCM_24", "PCM_32", "FLOAT"):
+			read_dtype = "int32"
+			bit_depth  = 24 if subtype == "PCM_24" else 32
+		else:
+			read_dtype = "int16"
+			bit_depth  = 16
+
+		data, sample_rate = soundfile.read(str(path), dtype=read_dtype, always_2d=True)
 		audio = numpy.ascontiguousarray(data)
 
 		return AudioFileInfo(
 			audio       = audio,
 			sample_rate = sample_rate,
-			bit_depth   = 16,
+			bit_depth   = bit_depth,
 			channels    = audio.shape[1],
 		)
 

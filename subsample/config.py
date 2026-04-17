@@ -74,6 +74,14 @@ class AudioConfig:
 	"""Physical input channels to record (0-indexed).  None = first N channels.
 	Set via 1-indexed list in config.yaml; converted at config-load time."""
 	device: typing.Optional[str] = None
+	audio_format: str = "wav"
+	"""Output container for captured and imported samples.  "wav" (default)
+	writes uncompressed PCM and supports 16/24/32-bit.  "flac" writes
+	lossless compressed audio (~40–60% smaller) and supports 16/24-bit;
+	per-file fallback to WAV fires transparently when a 32-bit source is
+	imported so no precision is lost.  Live capture under audio_format=flac
+	is validated at startup — combining it with bit_depth=32 is rejected
+	with a clear message rather than failing later on the first capture."""
 	ambisonic_format: typing.Optional[str] = None
 	"""When set, the four input channels are processed as ambisonic content
 	and stored as first-order AmbiX B-format.  Supported values: "a_generic"
@@ -642,6 +650,19 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"(got {type(ambisonic_format_raw).__name__}: {ambisonic_format_raw!r})"
 		)
 
+	audio_format_raw = audio_raw.get("audio_format", "wav")
+	if not isinstance(audio_format_raw, str):
+		raise ValueError(
+			f"recorder.audio.audio_format must be a string "
+			f"(got {type(audio_format_raw).__name__}: {audio_format_raw!r})"
+		)
+	audio_format = audio_format_raw.lower()
+	if audio_format not in {"wav", "flac"}:
+		raise ValueError(
+			f"recorder.audio.audio_format {audio_format_raw!r} is not supported.  "
+			f"Valid values: 'wav', 'flac'."
+		)
+
 	audio = AudioConfig(
 		sample_rate=int(_require(audio_raw, "sample_rate", "recorder.audio")),
 		bit_depth=int(_require(audio_raw, "bit_depth", "recorder.audio")),
@@ -649,6 +670,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		channels=channels,
 		input=input_channels,
 		device=device_raw,
+		audio_format=audio_format,
 		ambisonic_format=ambisonic_format,
 	)
 
@@ -670,6 +692,18 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"Unsupported bit_depth {audio.bit_depth}. "
 			"Supported values: 16, 24, 32"
 		)
+
+	# FLAC only covers 16/24-bit in libsndfile's stable subtypes.  Reject
+	# the combination at config-load time so the user sees the mismatch at
+	# startup rather than at the first capture.  File imports with a 32-bit
+	# source are handled separately by the per-request fallback in
+	# recorder._write_audio_file (writes .wav per file).
+	if audio.audio_format == "flac" and audio.bit_depth == 32:
+		raise ValueError(
+			"recorder.audio.audio_format='flac' requires recorder.audio.bit_depth "
+			"of 16 or 24.  Set audio_format='wav' for 32-bit live capture."
+		)
+
 	if audio.sample_rate <= 0:
 		raise ValueError(f"recorder.audio.sample_rate must be > 0 (got {audio.sample_rate})")
 	if audio.channels is not None and audio.channels <= 0:

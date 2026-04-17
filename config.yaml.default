@@ -154,6 +154,17 @@ recorder:
     # optimal for USB audio devices with typical ALSA period sizes.
     # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
+    # audio_format: wav
+    # Output container for captured and imported samples.
+    #   wav  = uncompressed PCM (default; supports 16/24/32-bit).
+    #   flac = lossless compressed, ~40-60% smaller (supports 16/24-bit).
+    # With `flac` selected, 32-bit inputs are written as `.wav` per file
+    # rather than rejected — a mixed library is normal and expected.  Live
+    # captures under `flac` + bit_depth: 32 are rejected at startup so the
+    # mismatch surfaces with a clear message rather than mid-capture.
+    # Existing WAV samples in your library continue to load unchanged
+    # regardless of this setting.
+
     # ambisonic_format: null
     # When set, the four input channels are treated as ambisonic and converted
     # to first-order AmbiX B-format (channel order W, Y, Z, X; SN3D) at capture

@@ -107,6 +107,10 @@ you focus on playing.
   First-order ambisonic capture from tetrahedral mics (Rode NT-SF1,
   generic A-format, or pre-encoded B-format FuMA/AmbiX) with decoder and
   rotation at playback time - see [Ambisonic](#ambisonic-capture).
+- **WAV or lossless FLAC storage.** Opt into FLAC (`audio_format: flac`) to
+  shrink your sample library by ~40-60% with zero quality loss. Existing
+  WAV samples continue to load unchanged alongside any new FLAC captures -
+  see [Storage format](#storage-format).
 - **Headless and config-driven.** Everything is YAML - version-controllable,
   reproducible, no GUI required. Runs equally well on a studio Mac, a
   Raspberry Pi in the rehearsal room, or a rack server. Drive it from any
@@ -856,6 +860,7 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.channels` | auto | 1 = mono, 2 = stereo. Omit (or `null`) to auto-detect from device |
 | `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
+| `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, ~40-60% smaller, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
 | `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit |
@@ -911,8 +916,11 @@ weights - is optional and rarely needs changing.
 
 ## Output
 
-Recordings are saved as uncompressed 16, 24, or 32-bit WAV files (depending on
-`recorder.audio.bit_depth`) in the configured output directory.
+Recordings are saved as 16, 24, or 32-bit audio files (depending on
+`recorder.audio.bit_depth`) in the configured output directory.  Container
+format is controlled by `recorder.audio.audio_format` — `wav` (uncompressed,
+the default) or `flac` (lossless compressed, see [Storage format](#storage-format)
+below).
 
 **Live capture mode** - filenames from the datetime the recording ended:
 
@@ -933,6 +941,35 @@ samples/
 
 Both modes write to the same output directory. Point `instrument.directory` at
 the same path to get a persistent library that grows on disk across sessions.
+
+### Storage format
+
+`recorder.audio.audio_format` decides whether new captures land as `.wav` or
+`.flac`:
+
+- `wav` (default) - uncompressed PCM.  Works at 16, 24, or 32-bit.
+- `flac` - lossless compressed (around 40-60% smaller on typical material,
+  decoded audio is bit-identical).  Works at 16 or 24-bit.
+
+**The rule when formats don't quite line up:**
+
+| Capture scenario | Extension written |
+|---|---|
+| `audio_format: wav`, any bit depth | `.wav` |
+| `audio_format: flac`, live capture at 16 or 24-bit | `.flac` |
+| `audio_format: flac`, 32-bit source (e.g. imported file) | `.wav` for that file, with an INFO log explaining why |
+| `audio_format: flac` combined with `bit_depth: 32` (live capture) | Rejected at startup — set one or the other |
+
+So if you flip `audio_format: flac` and then process a mix of 16/24-bit and
+32-bit source files, you'll see a mix of `.flac` and `.wav` in your output
+directory.  This is correct behaviour: the 32-bit fallback preserves full
+precision rather than silently truncating.  Live captures share one bit
+depth per session, so they stay consistent within a run.
+
+**Existing libraries.** Upgrading to a subsample build with FLAC support does
+not touch your existing `.wav` samples — they continue to load unchanged.
+No migration, no bulk conversion.  FLAC only affects what gets written for
+*new* captures once you flip the flag.
 
 ## Instrument sample library
 

@@ -462,3 +462,54 @@ class TestSelectInputChannels:
 		with unittest.mock.patch("builtins.input", return_value="2,2"):
 			with pytest.raises(ValueError, match="Duplicate"):
 				subsample.audio.select_input_channels("Test Device", 4)
+
+
+class TestFlacReadPrecision:
+
+	"""read_audio_file must preserve the native bit depth of FLAC files.
+
+	Regression guard for the soundfile-fallback path: previously it forced
+	dtype=int16 unconditionally, which would truncate a 24-bit FLAC's
+	lower 8 bits on readback.  Now the dtype and the returned bit_depth
+	are selected from soundfile.info().subtype.
+	"""
+
+	def test_24bit_flac_preserves_full_precision (self, tmp_path: pathlib.Path) -> None:
+		"""Writing 24-bit-worth of int32 samples to FLAC and reading back
+		recovers the same values in the upper 24 bits.
+		"""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		# Three hand-picked 24-bit values covering full positive, full
+		# negative, and an off-centre value with non-zero low bits in the
+		# 24-bit representation.  Stored int32 = 24-bit value << 8.
+		samples_24 = [0x7FFFFF, -0x800000, 0x123456]
+		audio = numpy.array([[v << 8] for v in samples_24], dtype=numpy.int32)
+
+		flac_path = tmp_path / "precision.flac"
+		soundfile.write(str(flac_path), audio, 44100, subtype="PCM_24", format="FLAC")
+
+		info = subsample.audio.read_audio_file(flac_path)
+
+		assert info.bit_depth == 24
+		assert info.audio.dtype == numpy.int32
+
+		# The upper 24 bits should match the original values.  Shift back
+		# down and compare; libsndfile's encoder leaves the bottom 8 bits
+		# zero on decode.
+		recovered = info.audio[:, 0] >> 8
+		assert list(recovered) == samples_24
+
+	def test_16bit_flac_returns_int16 (self, tmp_path: pathlib.Path) -> None:
+		"""A 16-bit FLAC reads back as int16 with bit_depth 16."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		samples = numpy.array([[1000], [-1000], [32767], [-32768]], dtype=numpy.int16)
+		flac_path = tmp_path / "sixteen.flac"
+		soundfile.write(str(flac_path), samples, 44100, subtype="PCM_16", format="FLAC")
+
+		info = subsample.audio.read_audio_file(flac_path)
+
+		assert info.bit_depth == 16
+		assert info.audio.dtype == numpy.int16
+		numpy.testing.assert_array_equal(info.audio, samples)

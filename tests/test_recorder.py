@@ -446,3 +446,173 @@ class TestAmbisonicCapture:
 			stored = numpy.frombuffer(raw, dtype=numpy.int16).reshape(n_frames, 4)
 			# Float round-trip allows at most ±1 LSB drift per sample.
 			numpy.testing.assert_allclose(stored, audio, atol=1)
+
+
+def _make_flac_config (
+	output_dir: pathlib.Path,
+	*,
+	bit_depth: int = 16,
+	channels: int = 1,
+) -> subsample.config.Config:
+	"""Like _make_config but with audio_format='flac' and configurable bit depth."""
+	return subsample.config.Config(
+		recorder=subsample.config.RecorderConfig(
+			audio=subsample.config.AudioConfig(
+				sample_rate=44100, bit_depth=bit_depth, channels=channels, chunk_size=512,
+				audio_format="flac",
+			),
+			buffer=subsample.config.BufferConfig(max_seconds=10),
+		),
+		detection=subsample.config.DetectionConfig(
+			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
+			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,
+		),
+		output=subsample.config.OutputConfig(
+			directory=str(output_dir),
+			filename_format="%Y-%m-%d_%H-%M-%S",
+		),
+	)
+
+
+class TestFlacCapture:
+
+	"""Capture-path tests for audio_format='flac'."""
+
+	def test_flac_16bit_mono_roundtrip (self) -> None:
+		"""audio_format='flac' at 16-bit writes a .flac file whose audio
+		decodes back to the original samples bit-identically.
+		"""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		rng = numpy.random.RandomState(0)
+		audio = (rng.randn(4410, 1) * 5000.0).astype(numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_flac_config(out_dir, bit_depth=16, channels=1)
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+
+			writer.enqueue(audio, datetime.datetime.now(), filename_base="flac_mono")
+			writer.flush()
+			writer.shutdown()
+
+			flac_files = list(out_dir.glob("*.flac"))
+			wav_files  = list(out_dir.glob("*.wav"))
+			assert len(flac_files) == 1
+			assert len(wav_files)  == 0
+
+			data, sr = soundfile.read(str(flac_files[0]), dtype="int16", always_2d=True)
+			assert sr == 44100
+			numpy.testing.assert_array_equal(data, audio)
+
+	def test_flac_24bit_multichannel_preserves_precision (self) -> None:
+		"""24-bit 4-channel FLAC round-trip preserves the upper 24 bits of
+		every channel.  Covers the ambisonic-shape (4-channel) path.
+		"""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		rng = numpy.random.RandomState(1)
+		# 24-bit values stored as int32 left-shifted by 8.  Keep amplitudes
+		# modest so peaks don't saturate.
+		audio = ((rng.randn(4410, 4) * 2_000_000).astype(numpy.int32) << 8)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_flac_config(out_dir, bit_depth=24, channels=4)
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+
+			writer.enqueue(audio, datetime.datetime.now(), filename_base="flac_multi")
+			writer.flush()
+			writer.shutdown()
+
+			flac_files = list(out_dir.glob("*.flac"))
+			assert len(flac_files) == 1
+
+			data, sr = soundfile.read(str(flac_files[0]), dtype="int32", always_2d=True)
+			assert sr == 44100
+			assert data.shape == (4410, 4)
+			# Compare top 24 bits (libsndfile clears the padding LSB byte).
+			numpy.testing.assert_array_equal(data >> 8, audio >> 8)
+
+	def test_flac_config_with_32bit_input_falls_back_to_wav (
+		self, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A 32-bit file import under audio_format='flac' writes .wav for
+		that file with an INFO log explaining why — FLAC can't hold 32-bit
+		so the per-file fallback preserves full precision.
+
+		Set up: config declares 16-bit FLAC live capture (valid), but a
+		file import arrives with req.bit_depth=32 overriding per request.
+		"""
+		rng = numpy.random.RandomState(2)
+		audio = (rng.randn(4410, 1) * 1_000_000).astype(numpy.int32)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_flac_config(out_dir, bit_depth=16, channels=1)
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+
+			with caplog.at_level(logging.INFO, logger="subsample.recorder"):
+				writer.enqueue(
+					audio,
+					datetime.datetime.now(),
+					filename_base="bit32_source",
+					bit_depth=32,
+				)
+				writer.flush()
+			writer.shutdown()
+
+			wav_files  = list(out_dir.glob("*.wav"))
+			flac_files = list(out_dir.glob("*.flac"))
+			assert len(wav_files)  == 1, "32-bit input should fall back to .wav"
+			assert len(flac_files) == 0, "no .flac should be written for 32-bit input"
+
+		# The per-file fallback logs INFO so the user is not surprised by
+		# a lone .wav among their .flac library.
+		messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
+		assert any("cannot hold 32-bit" in m for m in messages), (
+			f"Expected a fallback INFO log; got: {messages}"
+		)
+
+	def test_mixed_format_library_loads (self) -> None:
+		"""A library containing both .wav and .flac samples (with their
+		sidecars) loads cleanly — the read path is format-agnostic via
+		audio.read_audio_file.
+		"""
+		import json
+
+		rng = numpy.random.RandomState(3)
+		wav_audio  = (rng.randn(4410, 1) * 5000.0).astype(numpy.int16)
+		flac_audio = (rng.randn(4410, 1) * 5000.0).astype(numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+
+			# Capture one .wav
+			cfg_wav = _make_config(out_dir)
+			writer = subsample.recorder.SampleProcessor(cfg_wav, tests.helpers._make_params())
+			writer.enqueue(wav_audio, datetime.datetime.now(), filename_base="a_sample")
+			writer.flush()
+			writer.shutdown()
+
+			# Capture one .flac
+			cfg_flac = _make_flac_config(out_dir, bit_depth=16, channels=1)
+			writer = subsample.recorder.SampleProcessor(cfg_flac, tests.helpers._make_params())
+			writer.enqueue(flac_audio, datetime.datetime.now(), filename_base="b_sample")
+			writer.flush()
+			writer.shutdown()
+
+			# Confirm both audio files and both sidecars exist.
+			assert (out_dir / "a_sample.wav").exists()
+			assert (out_dir / "a_sample.wav.analysis.json").exists()
+			assert (out_dir / "b_sample.flac").exists()
+			assert (out_dir / "b_sample.flac.analysis.json").exists()
+
+			# Sidecar glob should find both (format-agnostic).
+			sidecars = sorted(out_dir.glob("*.analysis.json"))
+			assert len(sidecars) == 2
+
+			# Each sidecar deserialises cleanly.
+			for sidecar in sidecars:
+				payload = json.loads(sidecar.read_text())
+				assert "channel_format" in payload

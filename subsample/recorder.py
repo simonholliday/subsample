@@ -30,6 +30,7 @@ import typing
 import wave
 
 import numpy
+import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 import subsample.ambisonic
 import subsample.analysis
@@ -38,6 +39,14 @@ import subsample.config
 
 
 _log = logging.getLogger(__name__)
+
+
+# FLAC compression level passed to soundfile.write().  python-soundfile's
+# [0.0, 1.0] float maps to libsndfile's 0-8 integer levels via
+# floor(value * 8).  0.75 = FLAC level 6 — the measured sweet spot:
+# near-maximum compression at materially lower encode CPU than level 8.
+# Leaving it at None would fall back to libsndfile's level 5 default.
+_FLAC_COMPRESSION_LEVEL: float = 0.75
 
 
 def _pcm_float_to_int (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
@@ -365,7 +374,7 @@ class SampleProcessor:
 					20.0 * math.log10(level.peak),
 				)
 
-			write_result = self._write_wav(
+			write_result = self._write_audio_file(
 				req.audio, req.timestamp, rhythm, result, pitch, timbre, level, band_energy,
 				filename_base=req.filename_base,
 				sample_rate=req.sample_rate,
@@ -380,7 +389,7 @@ class SampleProcessor:
 		except Exception as exc:
 			_log.error("Failed to process recording: %s — WAV may be intact", exc, exc_info=True)
 
-	def _write_wav (
+	def _write_audio_file (
 		self,
 		audio: numpy.ndarray,
 		timestamp: datetime.datetime,
@@ -396,10 +405,21 @@ class SampleProcessor:
 		channel_format: str = "pcm",
 	) -> tuple[pathlib.Path, float] | None:
 
-		"""Write a single audio segment to a WAV file and save its analysis sidecar.
+		"""Write a single audio segment to disk and save its analysis sidecar.
 
-		If the target file already exists, it is overwritten (with INFO-level logging).
-		If a filesystem error occurs during write, an ERROR is logged and None is returned.
+		Extension and encoder are chosen from the configured audio_format
+		(``wav`` or ``flac``) and the effective bit depth:
+
+		- ``audio_format=wav``  → always ``.wav`` (16/24/32-bit PCM).
+		- ``audio_format=flac`` → ``.flac`` for 16/24-bit; ``.wav`` for
+		  32-bit inputs (libsndfile's stable FLAC subtypes don't cover
+		  PCM_32).  The fallback is per-file: live capture is already
+		  validated at config-load time, so this only triggers for file
+		  imports whose source is 32-bit.  An INFO log explains the
+		  fallback so the user isn't surprised by a mixed library.
+
+		If the target file already exists, it is overwritten (with INFO-
+		level logging).  On filesystem error, logs ERROR and returns None.
 
 		Returns (filepath, duration_seconds), or None on write failure.
 
@@ -414,8 +434,11 @@ class SampleProcessor:
 			level:         Peak and RMS amplitude of the recording.
 			filename_base: If provided, used as the filename stem instead of the
 			               timestamp format. Collision handling still applies.
-			sample_rate:   Sample rate for the WAV header. Defaults to config value.
-			bit_depth:     Bit depth for WAV writing. Defaults to config value.
+			sample_rate:   Sample rate for writing. Defaults to config value.
+			bit_depth:     Bit depth for writing. Defaults to config value.
+			channel_format: "pcm" or "b_format_ambix"; passed through to the
+			                sidecar so the player knows whether to apply the
+			                ambisonic decoder on playback.
 		"""
 
 		# Resolve effective format values; per-request overrides take precedence.
@@ -427,12 +450,29 @@ class SampleProcessor:
 			bit_depth if bit_depth is not None
 			else self._cfg.recorder.audio.bit_depth
 		)
+		configured_format = self._cfg.recorder.audio.audio_format
+
+		# Per-file format decision.  FLAC's stable subtypes only cover
+		# 16/24-bit, so 32-bit inputs fall back to WAV — a silent truncate
+		# would lose precision and a hard reject would make mixed-source
+		# libraries unusable.
+		if configured_format == "flac" and effective_bit_depth == 32:
+			effective_format = "wav"
+			fallback_message: typing.Optional[str] = (
+				"audio_format=flac cannot hold 32-bit; wrote .wav instead "
+				"to preserve full precision"
+			)
+		else:
+			effective_format = configured_format
+			fallback_message = None
+
+		extension = ".flac" if effective_format == "flac" else ".wav"
 
 		fname_base = (
 			filename_base if filename_base is not None
 			else _format_filename(timestamp, self._cfg.output.filename_format)
 		)
-		filepath = self._output_dir / (fname_base + ".wav")
+		filepath = self._output_dir / (fname_base + extension)
 
 		# Ensure the array is 2-D (n_frames, channels) before writing
 		if audio.ndim == 1:
@@ -440,43 +480,51 @@ class SampleProcessor:
 
 		n_channels = audio.shape[1]
 
-		# 24-bit audio is stored internally as left-shifted int32; recover the
-		# original 3-byte values before writing. The sample_width must be set
-		# to 3 explicitly - bit_depth // 8 = 3 only by coincidence for 24-bit,
-		# but the intent is clearer stated directly.
-		if effective_bit_depth == 24:
-			sample_width = 3
-			frame_bytes = _pack_int24(audio)
-		else:
-			sample_width = effective_bit_depth // 8
-			frame_bytes = audio.tobytes()
+		# Map our internal dtype conventions to libsndfile subtypes:
+		#  - 16-bit int16              → PCM_16
+		#  - 24-bit int32 (<< 8)       → PCM_24 (soundfile keeps the upper
+		#                                3 bytes; our LSB padding is zero)
+		#  - 32-bit int32              → PCM_32
+		_SUBTYPE_BY_BIT_DEPTH: dict[int, str] = {16: "PCM_16", 24: "PCM_24", 32: "PCM_32"}
+		subtype = _SUBTYPE_BY_BIT_DEPTH[effective_bit_depth]
 
-		# Build the complete WAV in memory so we can compute the MD5 from the
-		# in-memory bytes rather than re-reading the file from disk after writing.
+		# Build the complete file in memory so we can MD5 the exact bytes
+		# that hit disk, then do a single atomic write.  soundfile accepts
+		# any file-like object for the `file` argument.
 		buf = io.BytesIO()
-		with wave.open(buf, "wb") as wf:
-			wf.setnchannels(n_channels)
-			wf.setsampwidth(sample_width)
-			wf.setframerate(effective_sample_rate)
-			wf.writeframes(frame_bytes)
-		wav_bytes = buf.getvalue()
-		audio_md5 = hashlib.md5(wav_bytes).hexdigest()
+		write_kwargs: dict[str, typing.Any] = {
+			"samplerate": effective_sample_rate,
+			"subtype":    subtype,
+			"format":     "FLAC" if effective_format == "flac" else "WAV",
+		}
+
+		if effective_format == "flac":
+			write_kwargs["compression_level"] = _FLAC_COMPRESSION_LEVEL
+
+		soundfile.write(buf, audio, **write_kwargs)
+
+		file_bytes = buf.getvalue()
+		audio_md5  = hashlib.md5(file_bytes).hexdigest()
 
 		try:
 			if filepath.exists():
 				_log.info("Overwriting: %s", filepath.name)
-			filepath.write_bytes(wav_bytes)
+			filepath.write_bytes(file_bytes)
 		except OSError as exc:
 			_log.error("Failed to write %s: %s", filepath.name, exc)
 			return None
+
+		if fallback_message is not None:
+			_log.info("%s: %s", filepath.name, fallback_message)
 
 		n_frames = audio.shape[0]
 		duration = n_frames / effective_sample_rate
 
 		_log.debug("Stored: %s  frames=%d", filepath.name, n_frames)
 
-		# Persist analysis alongside the WAV so future reads (e.g. reference
-		# file loading on startup) can skip re-analysis when nothing changes.
+		# Persist analysis alongside the audio file so future reads (e.g.
+		# reference file loading on startup) can skip re-analysis when
+		# nothing changes.
 		subsample.cache.save_cache(
 			audio_path     = filepath,
 			audio_md5      = audio_md5,
