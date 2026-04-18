@@ -652,6 +652,7 @@ def _resolve_path_references (
 def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
+	strict: bool = True,
 ) -> MidiMapResult:
 
 	"""Load a MIDI routing map from a YAML file.
@@ -680,6 +681,9 @@ def load_midi_map (
 	Args:
 		path:             Path to the MIDI map YAML file.
 		reference_names:  Names from the loaded reference library (case-insensitive).
+		strict:           When True (default), unknown where-predicate keys and
+		                  unknown processor names raise ValueError at parse time.
+		                  When False, they are logged as warnings and ignored.
 
 	Returns:
 		MidiMapResult containing the NoteMap, bank definitions, and bank channel.
@@ -692,6 +696,7 @@ def load_midi_map (
 	if not path.exists():
 		raise FileNotFoundError(f"MIDI map not found: {path}")
 
+	subsample.query.set_strict_mode(strict)
 	midi_map_dir = path.parent
 
 	with path.open(encoding="utf-8") as fh:
@@ -723,7 +728,7 @@ def load_midi_map (
 	reference_set = {name.upper() for name in reference_names}
 	note_map: NoteMap = {}
 
-	for assignment_raw in raw["assignments"]:
+	for assignment_index, assignment_raw in enumerate(raw["assignments"], start=1):
 		name = assignment_raw.get("name", "<unnamed>")
 
 		# Channel: user-facing 1-16 → mido 0-indexed.
@@ -732,7 +737,13 @@ def load_midi_map (
 		if channel_raw is None:
 			raise ValueError(f"MIDI map assignment {name!r}: missing 'channel'")
 
-		mido_channel = int(channel_raw) - 1
+		try:
+			mido_channel = int(channel_raw) - 1
+		except (TypeError, ValueError) as exc:
+			raise ValueError(
+				f"MIDI map assignment {name!r} (#{assignment_index}): "
+				f"invalid 'channel' value {channel_raw!r} — {exc}"
+			) from exc
 
 		notes_raw = assignment_raw.get("notes")
 
@@ -774,7 +785,15 @@ def load_midi_map (
 		process = subsample.query.parse_process(assignment_raw.get("process"), name)
 
 		one_shot = bool(assignment_raw.get("one_shot", True))
-		gain_db  = float(assignment_raw.get("gain", 0.0))
+
+		try:
+			gain_db = float(assignment_raw.get("gain", 0.0))
+		except (TypeError, ValueError) as exc:
+			raise ValueError(
+				f"MIDI map assignment {name!r} (#{assignment_index}): "
+				f"invalid 'gain' value {assignment_raw.get('gain')!r} — {exc}"
+			) from exc
+
 		pan_weights    = _parse_pan_weights(assignment_raw.get("pan"), name)
 		output_routing = _parse_output_routing(assignment_raw.get("output"), name, pan_weights)
 

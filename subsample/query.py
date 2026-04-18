@@ -123,6 +123,88 @@ _NUMERIC_FIELDS: tuple[str, ...] = (
 _VALID_OPERATORS: frozenset[str] = frozenset({"gte", "lte", "gt", "lt", "eq"})
 
 
+# Strict-mode flag.  When True (default), unknown keys in `where:` and
+# unknown processor names in `process:` raise ValueError at parse time.
+# When False, they are logged as warnings and silently ignored — the
+# historical behaviour, retained as an opt-out for users on older maps.
+# Toggled via set_strict_mode(); the player reads the config flag
+# `player.midi_map.strict` at startup.
+_STRICT_MODE: bool = True
+
+
+def set_strict_mode (strict: bool) -> None:
+	"""Enable or disable strict unknown-key / unknown-processor rejection.
+
+	Strict mode (the default) raises ValueError on unknown YAML keys — this
+	catches typos that would otherwise silently match every sample.  The
+	lenient path is provided only for compatibility with older MIDI map
+	files that may carry keys the parser no longer recognises."""
+	global _STRICT_MODE
+	_STRICT_MODE = strict
+
+
+# Valid processor names — kept in lockstep with the dispatch ladder in
+# subsample.transform.spec_from_process().  Used by parse_process() to
+# reject unknown names at parse time when strict mode is enabled.
+_VALID_PROCESSOR_NAMES: frozenset[str] = frozenset({
+	"repitch",
+	"beat_quantize",
+	"pad_quantize",
+	"filter_low",
+	"filter_high",
+	"filter_band",
+	"reverse",
+	"saturate",
+	"compress",
+	"limit",
+	"hpss",
+	"hpss_harmonic",    # legacy; translated to hpss {keep: harmonic}
+	"hpss_percussive",  # legacy; translated to hpss {keep: percussive}
+	"gate",
+	"distort",
+	"reshape",
+	"transient",
+	"vocoder",
+})
+
+
+# Per-processor legacy parameter renames.  Shape: (processor_name,
+# legacy_param) → new_param.  Applied by parse_process() when building
+# the ProcessorStep's params tuple — the spec_from_process() dispatch
+# only ever sees the new names.
+#
+# Each entry is a rename motivated by A1 in the language review:
+# `amount` meant four different things depending on the processor.
+# The new names are unit-indicative (drive/gain in dB, strength as a
+# 0-1 fraction) so `amount` no longer has to be context-disambiguated.
+_LEGACY_PROCESSOR_PARAMS: dict[tuple[str, str], str] = {
+	("saturate",      "amount"): "drive",     # dB
+	("transient",     "amount"): "gain",      # dB (signed)
+	("beat_quantize", "amount"): "strength",  # 0-1 fraction
+	("pad_quantize",  "amount"): "strength",  # 0-1 fraction
+	# `bpm` → `tempo` (C2): property name matches the where-predicate.
+	("beat_quantize", "bpm"):    "tempo",
+	("pad_quantize",  "bpm"):    "tempo",
+}
+
+
+# Non-range where-predicate keys.  Numeric keys (new-form + legacy) are
+# defined later in the file; _valid_where_keys() combines both into one
+# frozenset at call time.
+_NON_RANGE_WHERE_KEYS: frozenset[str] = frozenset(
+	{"pitched", "reference", "name", "path", "directory"}
+)
+
+
+def _valid_where_keys () -> frozenset[str]:
+	"""All accepted keys inside a `where:` block, including legacy aliases."""
+	return frozenset(
+		_NON_RANGE_WHERE_KEYS
+		| _NUMERIC_YAML_KEYS.keys()
+		| _LEGACY_WHERE_KEYS.keys()
+	)
+
+
 @dataclasses.dataclass(frozen=True)
 class WherePredicate:
 
@@ -764,7 +846,12 @@ def _parse_where (
 
 		# Non-range predicates — unchanged parsing.
 		if key == "pitched":
-			other_kwargs["pitched"] = bool(value)
+			if not isinstance(value, bool):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: 'pitched' "
+					f"must be true or false (got {value!r})"
+				)
+			other_kwargs["pitched"] = value
 
 		elif key == "reference":
 			ref = str(value)
@@ -774,17 +861,45 @@ def _parse_where (
 				other_kwargs["reference"] = ref
 
 		elif key == "name":
+			if "name" in other_kwargs or "name_path" in other_kwargs:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: 'name' and "
+					f"'path' are mutually exclusive within a single where "
+					f"block — use one, not both."
+				)
 			raw_name = str(value)
 			if is_path_like(raw_name):
+				# Legacy behaviour: a path-like `name:` value is treated as
+				# an implicit path reference.  Preserved indefinitely; new
+				# YAML should use the explicit `path:` key instead.
 				other_kwargs["name"]      = pathlib.Path(raw_name).stem
 				other_kwargs["name_path"] = str((midi_map_dir / raw_name).resolve())
 			else:
 				other_kwargs["name"] = raw_name
 
+		elif key == "path":
+			# Explicit path reference: load this exact WAV and match only it.
+			# Preferred over the legacy `name: path/to/file` form.
+			if "name" in other_kwargs or "name_path" in other_kwargs:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: 'name' and "
+					f"'path' are mutually exclusive within a single where "
+					f"block — use one, not both."
+				)
+			raw_path = str(value)
+			other_kwargs["name"]      = pathlib.Path(raw_path).stem
+			other_kwargs["name_path"] = str((midi_map_dir / raw_path).resolve())
+
 		elif key == "directory":
 			other_kwargs["directory"] = str((midi_map_dir / str(value)).resolve())
 
 		else:
+			if _STRICT_MODE:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: unknown "
+					f"where-predicate key {key!r}.  Valid keys: "
+					f"{', '.join(sorted(_valid_where_keys()))}."
+				)
 			_log.warning(
 				"MIDI map assignment %r: unknown where predicate %r — ignored",
 				assignment_name, key,
@@ -975,11 +1090,16 @@ def _parse_select_spec (
 		# No explicit order.  Default to similarity when a reference is set
 		# (preserves the historical auto-default), otherwise leave the tuple
 		# empty and let query() apply its newest-first default.
-		order = (
-			(OrderClause(by="similarity", dir="desc"),)
-			if where.reference is not None
-			else ()
-		)
+		if where.reference is not None:
+			order = (OrderClause(by="similarity", dir="desc"),)
+			_log.info(
+				"MIDI map assignment %r: auto-selected order "
+				"[{by: similarity, dir: desc}] because 'where.reference' "
+				"is set and no 'order' was given",
+				assignment_name,
+			)
+		else:
+			order = ()
 
 	# Validate every scorer name up-front so errors surface at startup, not
 	# at trigger time.  Use _valid_order_names() so newly-registered scorers
@@ -1060,10 +1180,31 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 
 	steps: list[ProcessorStep] = []
 
+	def _check_processor_name (name: str) -> None:
+		if _STRICT_MODE and name not in _VALID_PROCESSOR_NAMES:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: unknown processor "
+				f"{name!r}.  Valid processors: "
+				f"{', '.join(sorted(_VALID_PROCESSOR_NAMES))}."
+			)
+
+	def _translate_legacy_processor (step: ProcessorStep) -> ProcessorStep:
+		"""Canonicalise legacy processor names into the new form.
+
+		Currently handles `hpss_harmonic` / `hpss_percussive` → `hpss` with
+		`keep:` param (C1 in the language review).  Other legacy names pass
+		through unchanged."""
+		if step.name == "hpss_harmonic":
+			return ProcessorStep(name="hpss", params=(("keep", "harmonic"),))
+		if step.name == "hpss_percussive":
+			return ProcessorStep(name="hpss", params=(("keep", "percussive"),))
+		return step
+
 	for entry in raw:
 
 		if isinstance(entry, str):
-			steps.append(ProcessorStep(name=entry))
+			_check_processor_name(entry)
+			steps.append(_translate_legacy_processor(ProcessorStep(name=entry)))
 
 		elif isinstance(entry, dict):
 
@@ -1075,19 +1216,40 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 
 			proc_name = next(iter(entry))
 			proc_value = entry[proc_name]
+			_check_processor_name(str(proc_name))
 
 			if isinstance(proc_value, bool) or proc_value is None:
 				# e.g. "repitch: true" or "repitch:"
-				steps.append(ProcessorStep(name=str(proc_name)))
+				steps.append(_translate_legacy_processor(ProcessorStep(name=str(proc_name))))
 
 			elif isinstance(proc_value, dict):
 				# e.g. "beat_quantize: { grid: 16, bpm: 120 }"
 				# Param values that are dicts with a "cc" key become CcBindings.
 				resolved_params: list[tuple[str, typing.Any]] = []
+				seen_params: set[str] = set()
 
 				for k, v in proc_value.items():
+					# Translate legacy param aliases (e.g. saturate.amount → drive).
+					k_str = str(k)
+					canonical = _LEGACY_PROCESSOR_PARAMS.get(
+						(str(proc_name), k_str), k_str,
+					)
+
+					if canonical in seen_params:
+						# Both "amount" (legacy) and "drive" (new) on one step
+						# — reject loudly.  The legacy shim is a pure alias,
+						# not a cumulative binding.
+						raise ValueError(
+							f"MIDI map assignment {assignment_name!r}: "
+							f"processor {str(proc_name)!r} has duplicate "
+							f"parameter {canonical!r} (possibly from mixing "
+							f"legacy and new-form names) — use one, not both."
+						)
+
+					seen_params.add(canonical)
+
 					if isinstance(v, dict) and "cc" in v:
-						resolved_params.append((str(k), CcBinding(
+						resolved_params.append((canonical, CcBinding(
 							cc=int(v["cc"]),
 							min_val=float(v.get("min", 0.0)),
 							max_val=float(v.get("max", 1.0)),
@@ -1095,10 +1257,12 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 							channel=int(v["channel"]) if "channel" in v else None,
 						)))
 					else:
-						resolved_params.append((str(k), v))
+						resolved_params.append((canonical, v))
 
 				frozen_params = tuple(resolved_params)
-				steps.append(ProcessorStep(name=str(proc_name), params=frozen_params))
+				steps.append(_translate_legacy_processor(
+					ProcessorStep(name=str(proc_name), params=frozen_params),
+				))
 
 			else:
 				raise ValueError(

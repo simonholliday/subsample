@@ -188,6 +188,16 @@ class PlayerConfig:
 
 	Requires midi_map to be set."""
 
+	strict_midi_map: bool = True
+	"""When True (default), unknown keys in `where:` blocks and unknown
+	processor names in `process:` blocks raise a parse error with the list
+	of valid options.  Strict mode catches typos early — e.g. a mistyped
+	`duratoin: 1.0` that would otherwise silently match every sample.
+
+	Set to False to restore the historical lenient behaviour where unknown
+	keys are logged as warnings and ignored.  Useful when loading older
+	MIDI map files that carry keys the parser no longer recognises."""
+
 
 @dataclasses.dataclass(frozen=True)
 class DetectionConfig:
@@ -813,6 +823,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		limiter_ceiling_db=player_limiter_ceiling_db,
 		midi_map=player_raw.get("midi_map"),
 		watch_midi_map=bool(player_raw.get("watch_midi_map", False)),
+		strict_midi_map=bool(player_raw.get("strict_midi_map", True)),
 	)
 
 	if player.audio.channels is not None and player.audio.channels <= 0:

@@ -1,5 +1,6 @@
 """Tests for subsample/query.py — sample query engine and MIDI map parser."""
 
+import pathlib
 import typing
 
 import numpy
@@ -570,12 +571,13 @@ class TestParseProcess:
 		assert spec.steps[0].params == ()
 
 	def test_beat_quantize_with_params (self) -> None:
-
+		"""YAML `bpm:` translates to canonical `tempo:` in the step params."""
 		raw = [{"beat_quantize": {"grid": 16, "bpm": 120}}]
 		spec = subsample.query.parse_process(raw, "test")
 		assert spec.steps[0].name == "beat_quantize"
 		assert spec.steps[0].get("grid") == 16
-		assert spec.steps[0].get("bpm") == 120
+		assert spec.steps[0].get("tempo") == 120
+		assert spec.steps[0].get("bpm") is None  # legacy key was renamed
 
 	def test_multiple_processors (self) -> None:
 
@@ -594,6 +596,86 @@ class TestParseProcess:
 		spec = subsample.query.parse_process([{"beat_quantize": {"grid": 8}}], "test")
 		assert spec.has_beat_quantize()
 		assert not spec.has_repitch()
+
+	def test_unknown_processor_strict_raises (self) -> None:
+		"""Strict mode (default): unknown processor name raises ValueError."""
+		subsample.query.set_strict_mode(True)
+		try:
+			with pytest.raises(ValueError, match="unknown processor 'nonsense'"):
+				subsample.query.parse_process([{"nonsense": True}], "test")
+		finally:
+			subsample.query.set_strict_mode(True)  # restore default
+
+	def test_unknown_processor_lenient_passes (self) -> None:
+		"""Lenient mode: unknown processor name parses through; spec_from_process
+		will log a warning and skip it at build time."""
+		subsample.query.set_strict_mode(False)
+		try:
+			spec = subsample.query.parse_process([{"nonsense": True}], "test")
+			assert len(spec.steps) == 1
+			assert spec.steps[0].name == "nonsense"
+		finally:
+			subsample.query.set_strict_mode(True)
+
+	def test_unknown_processor_bare_string_strict_raises (self) -> None:
+		"""Bare-string process entry is also validated."""
+		subsample.query.set_strict_mode(True)
+		try:
+			with pytest.raises(ValueError, match="unknown processor 'nonsense'"):
+				subsample.query.parse_process(["nonsense"], "test")
+		finally:
+			subsample.query.set_strict_mode(True)
+
+	def test_legacy_amount_saturate_renamed_to_drive (self) -> None:
+		"""saturate: { amount: 6 } → stored as 'drive' internally."""
+		spec = subsample.query.parse_process(
+			[{"saturate": {"amount": 6}}], "test",
+		)
+		assert spec.steps[0].get("drive") == 6
+		assert spec.steps[0].get("amount") is None
+
+	def test_legacy_amount_transient_renamed_to_gain (self) -> None:
+		"""transient: { amount: -3 } → stored as 'gain' internally."""
+		spec = subsample.query.parse_process(
+			[{"transient": {"amount": -3}}], "test",
+		)
+		assert spec.steps[0].get("gain") == -3
+		assert spec.steps[0].get("amount") is None
+
+	def test_legacy_amount_beat_quantize_renamed_to_strength (self) -> None:
+		spec = subsample.query.parse_process(
+			[{"beat_quantize": {"grid": 16, "amount": 0.5}}], "test",
+		)
+		assert spec.steps[0].get("strength") == 0.5
+		assert spec.steps[0].get("amount") is None
+
+	def test_legacy_amount_pad_quantize_renamed_to_strength (self) -> None:
+		spec = subsample.query.parse_process(
+			[{"pad_quantize": {"grid": 16, "amount": 0.5}}], "test",
+		)
+		assert spec.steps[0].get("strength") == 0.5
+
+	def test_legacy_and_new_amount_on_same_step_raises (self) -> None:
+		"""Mixing `amount:` and `drive:` on the same saturate step raises —
+		same mid-migration guard as the where-predicate legacy shim."""
+		with pytest.raises(ValueError, match="duplicate"):
+			subsample.query.parse_process(
+				[{"saturate": {"amount": 6, "drive": 8}}], "test",
+			)
+
+	def test_legacy_bpm_translates_to_tempo (self) -> None:
+		"""C2: processor `bpm:` → canonical `tempo:`."""
+		spec = subsample.query.parse_process(
+			[{"beat_quantize": {"bpm": 120, "grid": 16}}], "test",
+		)
+		assert spec.steps[0].get("tempo") == 120
+		assert spec.steps[0].get("bpm") is None
+
+	def test_legacy_bpm_and_tempo_on_same_step_raises (self) -> None:
+		with pytest.raises(ValueError, match="duplicate"):
+			subsample.query.parse_process(
+				[{"beat_quantize": {"bpm": 120, "tempo": 140}}], "test",
+			)
 
 	def test_invalid_type_raises (self) -> None:
 
@@ -654,30 +736,30 @@ class TestCcBinding:
 
 	def test_parse_cc_binding_in_process (self) -> None:
 		"""A dict param with 'cc' key is parsed as CcBinding."""
-		raw = [{"pad_quantize": {"grid": 16, "amount": {"cc": 1, "min": 0.0, "max": 1.0}}}]
+		raw = [{"pad_quantize": {"grid": 16, "strength": {"cc": 1, "min": 0.0, "max": 1.0}}}]
 		spec = subsample.query.parse_process(raw, "test")
 		step = spec.steps[0]
-		amount = step.get("amount")
-		assert isinstance(amount, subsample.query.CcBinding)
-		assert amount.cc == 1
-		assert amount.min_val == 0.0
-		assert amount.max_val == 1.0
+		strength = step.get("strength")
+		assert isinstance(strength, subsample.query.CcBinding)
+		assert strength.cc == 1
+		assert strength.min_val == 0.0
+		assert strength.max_val == 1.0
 
 	def test_parse_cc_binding_with_channel (self) -> None:
 		"""Channel is parsed when present."""
-		raw = [{"pad_quantize": {"amount": {"cc": 1, "channel": 10}}}]
+		raw = [{"pad_quantize": {"strength": {"cc": 1, "channel": 10}}}]
 		spec = subsample.query.parse_process(raw, "test")
-		amount = spec.steps[0].get("amount")
-		assert isinstance(amount, subsample.query.CcBinding)
-		assert amount.channel == 10
+		strength = spec.steps[0].get("strength")
+		assert isinstance(strength, subsample.query.CcBinding)
+		assert strength.channel == 10
 
 	def test_parse_scalar_params_unchanged (self) -> None:
-		"""Non-dict params remain as plain values."""
-		raw = [{"pad_quantize": {"grid": 16, "bpm": 120}}]
+		"""Non-dict scalar params remain as plain values (grid is canonical)."""
+		raw = [{"pad_quantize": {"grid": 16, "tempo": 120}}]
 		spec = subsample.query.parse_process(raw, "test")
 		step = spec.steps[0]
 		assert step.get("grid") == 16
-		assert step.get("bpm") == 120
+		assert step.get("tempo") == 120
 
 
 class TestDirectoryPredicate:
@@ -912,6 +994,155 @@ class TestLegacyWhereShim:
 		)
 		assert specs[0].where.duration == subsample.query.Range(gte=1.0)
 		assert specs[0].where.onsets   == subsample.query.Range(gt=4.0)
+
+
+class TestStrictMode:
+
+	"""Strict mode: unknown `where:` keys and processor names raise."""
+
+	def test_unknown_where_key_strict_raises (self) -> None:
+		subsample.query.set_strict_mode(True)
+		try:
+			with pytest.raises(ValueError, match="unknown where-predicate key 'duratoin'"):
+				subsample.query.parse_select(
+					{"where": {"duratoin": 1.0}}, "test",
+				)
+		finally:
+			subsample.query.set_strict_mode(True)
+
+	def test_unknown_where_key_lenient_warns (self, caplog: typing.Any) -> None:
+		subsample.query.set_strict_mode(False)
+		try:
+			with caplog.at_level("WARNING"):
+				specs = subsample.query.parse_select(
+					{"where": {"duratoin": 1.0}}, "test",
+				)
+			assert specs[0].where == subsample.query.WherePredicate()
+			assert any("duratoin" in r.message for r in caplog.records)
+		finally:
+			subsample.query.set_strict_mode(True)
+
+	def test_strict_error_lists_valid_keys (self) -> None:
+		subsample.query.set_strict_mode(True)
+		try:
+			with pytest.raises(ValueError) as exc_info:
+				subsample.query.parse_select(
+					{"where": {"bogus": 1.0}}, "test",
+				)
+			msg = str(exc_info.value)
+			# A sampling of expected valid keys should appear in the message.
+			assert "duration" in msg
+			assert "pitched" in msg
+			assert "reference" in msg
+		finally:
+			subsample.query.set_strict_mode(True)
+
+	def test_pitched_must_be_bool (self) -> None:
+		"""`pitched:` accepts only True or False literally, not Python-truthy
+		strings.  `pitched: yes` in YAML would be truthy today but is rejected."""
+		with pytest.raises(ValueError, match="'pitched' must be true or false"):
+			subsample.query.parse_select({"where": {"pitched": "yes"}}, "test")
+
+	def test_pitched_int_also_rejected (self) -> None:
+		with pytest.raises(ValueError, match="'pitched' must be true or false"):
+			subsample.query.parse_select({"where": {"pitched": 1}}, "test")
+
+
+class TestNamePathSplit:
+
+	"""`where: { path: ... }` — explicit path reference (A8)."""
+
+	def test_explicit_path_populates_name_and_name_path (self, tmp_path: pathlib.Path) -> None:
+		"""`path: foo/bar.wav` → name='bar', name_path=<resolved absolute>."""
+		specs = subsample.query.parse_select(
+			{"where": {"path": "samples/my-kick.wav"}}, "test", tmp_path,
+		)
+		assert specs[0].where.name == "my-kick"
+		assert specs[0].where.name_path == str((tmp_path / "samples/my-kick.wav").resolve())
+
+	def test_legacy_name_as_path_still_works (self, tmp_path: pathlib.Path) -> None:
+		"""Legacy `name: path/to/x` auto-detects the path form (indefinite
+		back-compat)."""
+		specs = subsample.query.parse_select(
+			{"where": {"name": "samples/my-kick.wav"}}, "test", tmp_path,
+		)
+		assert specs[0].where.name == "my-kick"
+		assert specs[0].where.name_path == str((tmp_path / "samples/my-kick.wav").resolve())
+
+	def test_bare_name_stays_as_stem (self) -> None:
+		"""Bare `name: my-kick` (no slash or leading dot) = stem match."""
+		specs = subsample.query.parse_select(
+			{"where": {"name": "my-kick"}}, "test",
+		)
+		assert specs[0].where.name == "my-kick"
+		assert specs[0].where.name_path is None
+
+	def test_name_and_path_together_raise (self, tmp_path: pathlib.Path) -> None:
+		"""Using both `name:` and `path:` in one where block is rejected."""
+		with pytest.raises(ValueError, match="mutually exclusive"):
+			subsample.query.parse_select(
+				{"where": {"name": "x", "path": "y.wav"}},
+				"test", tmp_path,
+			)
+
+
+class TestHpssUnification:
+
+	"""C1: `hpss: { keep: harmonic/percussive }` replaces the two separate
+	processor names.  Legacy `hpss_harmonic: true` / `hpss_percussive: true`
+	still translate."""
+
+	def test_new_form_harmonic (self) -> None:
+		spec = subsample.query.parse_process(
+			[{"hpss": {"keep": "harmonic"}}], "test",
+		)
+		assert spec.steps[0].name == "hpss"
+		assert spec.steps[0].get("keep") == "harmonic"
+
+	def test_new_form_percussive (self) -> None:
+		spec = subsample.query.parse_process(
+			[{"hpss": {"keep": "percussive"}}], "test",
+		)
+		assert spec.steps[0].name == "hpss"
+		assert spec.steps[0].get("keep") == "percussive"
+
+	def test_legacy_hpss_harmonic_translates (self) -> None:
+		"""Legacy `hpss_harmonic: true` → canonical `hpss {keep: harmonic}`."""
+		spec = subsample.query.parse_process(
+			[{"hpss_harmonic": True}], "test",
+		)
+		assert spec.steps[0].name == "hpss"
+		assert spec.steps[0].get("keep") == "harmonic"
+
+	def test_legacy_hpss_percussive_translates (self) -> None:
+		spec = subsample.query.parse_process(
+			[{"hpss_percussive": True}], "test",
+		)
+		assert spec.steps[0].name == "hpss"
+		assert spec.steps[0].get("keep") == "percussive"
+
+	def test_legacy_bare_string_translates (self) -> None:
+		"""Bare-string form `- hpss_harmonic` also translates."""
+		spec = subsample.query.parse_process(["hpss_harmonic"], "test")
+		assert spec.steps[0].name == "hpss"
+		assert spec.steps[0].get("keep") == "harmonic"
+
+	def test_hpss_missing_keep_raises_at_build (self) -> None:
+		"""Forgotten `keep:` raises at spec build time, not parse (`hpss:` on
+		its own is semantically incomplete but grammatically valid)."""
+		import subsample.transform as _transform
+		spec = subsample.query.parse_process([{"hpss": {}}], "test")
+		assert spec.steps[0].name == "hpss"
+		with pytest.raises(ValueError, match="must be 'harmonic' or 'percussive'"):
+			_transform.spec_from_process(spec)
+
+	def test_hpss_invalid_keep_raises (self) -> None:
+		import subsample.transform as _transform
+		spec = subsample.query.parse_process(
+			[{"hpss": {"keep": "both"}}], "test",
+		)
+		with pytest.raises(ValueError, match="must be 'harmonic' or 'percussive'"):
+			_transform.spec_from_process(spec)
 
 
 # ---------------------------------------------------------------------------

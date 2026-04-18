@@ -523,7 +523,11 @@ def _start_player (
 
 	_midi_map_path = pathlib.Path(cfg.player.midi_map)
 	try:
-		midi_map_result = subsample.player.load_midi_map(_midi_map_path, reference_library.names())
+		midi_map_result = subsample.player.load_midi_map(
+			_midi_map_path,
+			reference_library.names(),
+			strict=cfg.player.strict_midi_map,
+		)
 	except (FileNotFoundError, ValueError) as exc:
 		print(f"Error loading MIDI map: {exc}", file=sys.stderr)
 		return
@@ -712,7 +716,9 @@ def main () -> None:
 	if cfg.player.enabled and cfg.player.midi_map is not None:
 		_midi_map_path = pathlib.Path(cfg.player.midi_map)
 		try:
-			midi_map_result = subsample.player.load_midi_map(_midi_map_path, [])
+			midi_map_result = subsample.player.load_midi_map(
+				_midi_map_path, [], strict=cfg.player.strict_midi_map,
+			)
 			bank_definitions = midi_map_result.bank_definitions
 			bank_channel = midi_map_result.bank_channel
 			default_bank = midi_map_result.default_bank
@@ -1022,6 +1028,7 @@ def main () -> None:
 			try:
 				result = subsample.player.load_midi_map(
 					path, reference_library.names(),
+					strict=cfg.player.strict_midi_map,
 				)
 			except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
 				_log.warning(

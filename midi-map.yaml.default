@@ -1,305 +1,64 @@
 # ===================================================================
-# midi-map.yaml — Subsample MIDI routing map
+# midi-map.yaml - Subsample MIDI routing map
 # ===================================================================
 #
 # This file maps MIDI input (channel + note) to sample playback.
-# Copy and customise it for your controller, reference library,
-# or performance setup.
 #
-# CONVENTIONS
-#   Channels:   1-16 (standard MIDI numbering)
-#   Note names: C4 = MIDI 60 (Ableton / Logic / FL Studio standard)
-#               C-1 = 0, G9 = 127
-#               Sharps: C#4, D#4    Flats: Db4, Eb4
-#   Note specs: single (36 or C3), list ([36, 38]), range (C2..C4)
-#
-# ===================================================================
-# BANKS — multiple instrument directories (optional)
-# ===================================================================
-#
-# Declare banks to load samples from multiple directories and switch
-# between them at runtime using MIDI Program Change messages.
-#
-# When banks: is absent, the single instrument.directory from
-# config.yaml is used (no Program Change handling).
-#
-# When banks: is present, it overrides instrument.directory.
-# Each bank gets its own library, similarity index, and transform
-# cache — switching is instantaneous (no disk I/O at switch time).
-#
-#   banks:
-#     - name: "Acoustic Kit"
-#       directory: samples/acoustic
-#       program: 0                      # MIDI Program Change number (0-127)
-#     - name: "Electronic Kit"
-#       directory: samples/electronic
-#       program: 1
-#
-#   bank_channel: 10   # MIDI channel for PC messages (1-16, or 0 = any)
-#                       # Default: 10 (GM drum channel)
-#   default_bank: 0    # Program number of the bank to activate at startup
-#                       # Default: first bank in the list
-#
-# Assignments are bank-agnostic — queries run against whichever bank
-# is active.  Named samples (where: { name: X }) that only exist in
-# one bank silently produce no match in other banks.
-#
-
-# ===================================================================
-# ASSIGNMENT STRUCTURE
-# ===================================================================
-#
-# Each assignment maps one or more MIDI notes to a sample selection
-# and an optional processing pipeline:
-#
-#   name:      required  Human-readable label shown in logs
-#   channel:   required  MIDI channel 1-16
-#   notes:     required  Note spec (see above)
-#   select:    required  How to choose the sample (see SELECT below)
-#   process:   optional  How to present it (see PROCESS below)
-#   one_shot:  optional  true (default) = ignore note_off
-#   gain:      optional  Level offset in dB (default 0.0)
-#   pan:       optional  Channel weights (SMPTE order), default = identity routing
-#   output:    optional  Physical output channels (1-indexed), default = first N
-#
-# PAN
-#   Pan weights define a target channel layout.  The number of weights
-#   determines the target (2 = stereo, 4 = quad, 6 = 5.1, 8 = 7.1).
-#   Constant-power normalisation is applied automatically.
-#   If the output device has fewer channels, standard ITU downmix is applied.
-#   If the output device has more channels, extra channels are silent.
-#
-#   pan: [50, 50]                        # Stereo centre
-#   pan: [100, 0]                        # Hard left (stereo)
-#   pan: [75, 25]                        # Left of centre (stereo)
-#   pan: [50, 50, 0, 0, 30, 30]         # 5.1: mostly front, some surround
-#   pan: [100]                           # Mono target
-#
-#   Omit pan entirely for default routing (identity for matching channel
-#   counts, ITU downmix for surround-to-stereo, conservative upmix otherwise).
-#
-# OUTPUT ROUTING
-#   Routes the instrument's mix to specific physical outputs on the device.
-#   Numbers are 1-indexed, matching the labels on your audio interface.
-#   Length must match the pan target layout (or the source channel count
-#   when pan is omitted).
-#
-#   output: [1, 2]                       # Main monitors (default)
-#   output: [3, 4]                       # Route stereo to outputs 3-4
-#   output: [5, 6, 7, 8]                # Route quad to outputs 5-8
-#
-#   Requires player.audio.channels in config.yaml to match your device.
-#   Omit output entirely for default routing (outputs 1, 2, ..., N).
-#
-# ===================================================================
-# SELECT — which sample to play
-# ===================================================================
-#
-# The select block defines how to choose a sample from the instrument
-# library.  It has three parts:
-#
-#   where:     Filter predicates (all must pass).  Optional — omit to
-#              include all samples.
-#   order:     How to sort the qualifying samples.  List of clauses;
-#              later clauses break ties on earlier ones.  Optional —
-#              defaults to newest-first (age desc).
-#              Legacy `order_by:` with a bare-string token is also
-#              accepted indefinitely; see "ORDER CLAUSES" below.
-#   pick:      Which position in the sorted list (1-indexed, default: 1).
-#
-# FILTER PREDICATES (where)
-#
-# Numeric predicates (duration / onsets / tempo / pitch / quantized_beats)
-# use per-field operator dicts.  Operators:
-#
-#   gte   >=    lte   <=    gt   >    lt   <    eq   ==
-#
-# Mix any operators on one field (AND across all):
-#
-#   duration:        { gte: 1.0, lt: 5.0 }         # 1.0 <= x < 5.0
-#   onsets:          { gte: 4 }                    # >= 4
-#   tempo:           { gte: 100, lte: 140 }
-#   pitch:           { gte: C3, lt: C6 }           # Hz float or note name
-#   quantized_beats: { eq: 4 }                     # exactly 4 beats
-#
-# Scalar shorthand: a bare number under a numeric field means `{ eq: X }`.
-#   quantized_beats: 4        # same as { eq: 4 }
-#
-# Non-numeric predicates:
-#
-#   pitched                       true = has stable pitch; false = not pitched
-#   reference                     string — similarity match against a named
-#                                 reference sample
-#   name                          string — exact filename stem match
-#   directory                     string — only samples whose file path is
-#                                 inside this directory
-#
-# Units:
-#   duration        float seconds
-#   onsets          int           (onset count)
-#   tempo           float BPM
-#   pitch           float Hz or note name (C3, A4, F#5, etc.)
-#   quantized_beats float beats   (beat length of the assignment's
-#                                  beat_quantize/pad_quantize output;
-#                                  samples with no computed variant are
-#                                  excluded when this predicate is active)
-#
-# LEGACY FORM (indefinitely accepted)
-#
-# The old `min_X:` / `max_X:` keys with bare scalar values still work —
-# they translate internally into the equivalent operator dict.  Do not
-# mix legacy and new-form constraints on the same field (e.g.
-# `min_duration: 1.0` + `duration: { lte: 5.0 }` is rejected); pick one
-# form per field.  New YAML should prefer the new operator-dict form.
-#
-# ORDER CLAUSES
-#
-# `order:` is a list of clauses.  Each clause is a mapping with:
-#
-#   by:     Scorer name.  One of:
-#             age                  arrival time (sample_id)
-#             duration             length in seconds
-#             pitch                dominant frequency
-#             onsets               onset count
-#             tempo                detected BPM
-#             level                RMS loudness
-#             quantized_beats      beat length of the assignment's
-#                                  beat_quantize/pad_quantize output.
-#                                  Samples with no variant park at the
-#                                  end regardless of direction.
-#             similarity           similarity rank (requires reference
-#                                  in where; only supported as the
-#                                  primary clause).
-#   dir:    "asc" or "desc".  Default: "asc".
-#   (Any other keys in the clause are passed to the scorer as params.)
-#
-# Examples:
-#
-#   order:
-#     - { by: duration, dir: desc }
-#
-#   order:
-#     - { by: duration, dir: desc }  # primary
-#     - { by: onsets, dir: asc }     # tiebreaker
-#
-# LEGACY FORM (indefinitely accepted)
-#
-# The old `order_by:` key with a bare-string token (`duration_desc`,
-# `loudest`, `newest`, `quantized_beats_asc`, …) still works — it is
-# translated internally into an equivalent single-element `order:`
-# list.  New YAML should prefer the structured `order:` form.
-#
-# PICK
-#
-#   1-indexed position in the sorted list.  Default: 1 (first match).
-#   For multi-note assignments without explicit pick, each note gets
-#   the next position (rank distribution).  When process includes
-#   repitch, all notes share pick 1 (same sample, pitched per note).
-#
-# FALLBACK (select as a list)
-#
-#   select can be a list of specs tried in order — the first one that
-#   returns a result wins:
-#
-#   select:
-#     - where: { name: my-favourite-kick }
-#     - where: { reference: samples/reference/GM36_BassDrum1.wav }
-#
-# ===================================================================
-# PROCESS — how to present the sample
-# ===================================================================
-#
-# The process block is an optional ordered list of processors.
-# They execute in the order you write them -- order matters!
-#
-#   repitch: true                        Pitch-shift to MIDI note
-#   repitch: { note: C4 }                Pitch-shift to a fixed note
-#   beat_quantize: { grid: 16 }          Time-stretch to session target_bpm
-#   beat_quantize: { bpm: 120, grid: 8 } Time-stretch to specific BPM
-#   beat_quantize: { grid: 16, amount: 0.5 }  Partial quantize (0.0-1.0; default 1.0)
-#   pad_quantize: { grid: 16 }            Silence-pad onsets to session target_bpm
-#   pad_quantize: { bpm: 120, grid: 8 }  Silence-pad to specific BPM and grid
-#   pad_quantize: { grid: 8, amount: 0.75 }  Partial quantize for looser feel
-#
-# SEGMENT PLAYBACK
-#   By default, quantized audio plays as one merged result.  The segment
-#   parameter selects individual segments (detected onsets) instead:
-#
-#   pad_quantize: { grid: 16, segment: round_robin }  Cycle through segments
-#   pad_quantize: { grid: 16, segment: random }       Random segment each hit
-#   pad_quantize: { grid: 16, segment: 3 }            Always play segment 3
-#
-#   Use numeric indices to map specific hits from a loop to different notes:
-#
-#     - name: Kick from loop
-#       notes: 36
-#       process:
-#         - pad_quantize: { grid: 16, segment: 1 }
-#
-#     - name: Snare from loop
-#       notes: 38
-#       process:
-#         - pad_quantize: { grid: 16, segment: 3 }
-#
-#   filter_low: { freq: 500 }            Low-pass filter (default 16 kHz)
-#   filter_high: { freq: 200 }           High-pass filter (default 80 Hz)
-#   filter_band: { freq: 800, q: 1.4 }  Band-pass filter (default 1 kHz, Q 0.7)
-#   reverse: true                        Reverse the audio
-#   saturate: { amount: 6 }              Soft-clip saturation (dB drive)
-#   compress: true                        Compressor (adapts to each sample)
-#   compress: { threshold: -30, ratio: 10, attack: 0.5 }  Squash + raise tail
-#   limit: true                           Brickwall limiter (default -1 dBFS)
-#
-# Filters accept an optional resonance parameter (dB, default 0).
-# Band-pass accepts Q (quality factor; lower = wider, default 0.7):
-#   filter_low: { freq: 800, resonance: 12 }
-#   filter_band: { freq: 1000, q: 2.0 }
-#
-# HPSS separates harmonic (tonal) from percussive (transient) content:
-#   hpss_harmonic: true       Keep tonal content, remove percussion
-#   hpss_percussive: true     Keep percussion, remove tonal content
-#
-#   - gate: true                            # Noise gate (auto-adapts to noise floor)
-#   - gate: { threshold: -40 }              # Gate with explicit threshold (dBFS)
-#   - gate: { hold: 20, release: 50 }       # Gate with explicit hold and release (ms)
-#
-#   - distort: true                          # Hard-clip distortion (auto drive and tone)
-#   - distort: { mode: fold, drive: 12 }     # Foldback distortion, 12 dB drive
-#   - distort: { mode: bit_crush, bit_depth: 4, mix: 0.5 }  # Lo-fi bit-crush, 50% blend
-#   - distort: { mode: downsample, downsample_factor: 8 }    # Retro sample-rate reduction
-#
-#   - reshape: true                          # Auto tail-tightening
-#   - reshape: { release: 50 }              # Explicit 50 ms release fade
-#   - reshape: { attack: 5, sustain: 0.5, release: 100 }  # Fast attack, half sustain
-#
-#   - transient: true                        # Auto transient shaping (adapts to crest factor)
-#   - transient: { amount: 6 }              # Enhance transients by 6 dB
-#   - transient: { amount: -3 }             # Tame transients by 3 dB
-#
-#   - vocoder: { carrier: reference }          # Cross-synthesise with reference sample
-#   - vocoder: { carrier: samples/saw.wav, bands: 32, depth: 0.8 }  # Explicit carrier
-#
-# Omit process entirely for unprocessed playback (base variant).
-#
-# CC MAPPING — bind processor parameters to MIDI CC
-# ─────────────────────────────────────────────────
-# Replace any numeric parameter with a CC binding:
-#
-#   amount: { cc: 1 }                        # CC#1, range 0.0–1.0
-#   bpm: { cc: 2, min: 60, max: 180 }        # CC#2, range 60–180 BPM
-#   freq: { cc: 74, min: 200, max: 16000 }   # CC#74, range 200–16000 Hz
-#
-# Optional fields:
-#   channel: 10       # Listen on channel 10 only (default: any channel)
-#   default: 0.75     # Initial value before any CC received (default: midpoint)
-#
-# WARNING: CC mapping triggers background variant processing on each
-# distinct CC value. Use stepped/discrete controllers (knobs, faders,
-# buttons) -- NOT pitch bend, aftertouch, or high-resolution continuous
-# controllers, which generate hundreds of messages per second and would
-# flood the transform queue. Changes are debounced (200 ms) and each
-# distinct CC value produces a new variant; the transform cache evicts
-# the oldest when its memory budget is exceeded.
+# How to use:
+#   1. Copy this file to midi-map.yaml
+#   2. Uncomment any of the EXAMPLES below to try them
+#   3. Delete or comment out the ACTIVE assignments at the bottom
+#      if you don't want the default drum kit + pitched keyboard
+#   4. Save - Subsample reloads the map automatically
+#
+# Conventions:
+#   Channels   1-16 (standard MIDI numbering)
+#   Notes      36 (number), C3 (name), [36, 38] (list), C2..C4 (range)
+#   Note names C4 = MIDI 60 (Ableton / Logic / FL Studio standard)
+#              Sharps: C#4, D#4    Flats: Db4, Eb4
+#
+# Full grammar reference - every field, every predicate, every
+# processor parameter:
+#
+#   README.md, section "MIDI map"
+#
+# Quick feel for the shape - three minimal examples.  Each one is a
+# complete, working assignment.
+#
+#   # 1. Play one specific sample when you hit note 36
+#   - name: Fixed kick
+#     channel: 10
+#     notes: 36
+#     select:
+#       where:
+#         name: 2026-03-24_14-37-14
+#
+#   # 2. Find the best kick in your library by similarity
+#   - name: Any kick
+#     channel: 10
+#     notes: 36
+#     select:
+#       where:
+#         reference: samples/reference/GM36_BassDrum1.wav
+#
+#   # 3. Play the oldest pitched sample across a keyboard range,
+#   #    pitch-shifted to each MIDI note
+#   - name: Pitched keyboard
+#     channel: 1
+#     notes: C2..C6
+#     select:
+#       where: { pitched: true }
+#       order: [{ by: age, dir: asc }]
+#     process:
+#       - repitch: true
+#     one_shot: false
+#
+# The rest of this file is:
+#   EXAMPLES        commented-out assignments, ordered simple to
+#                   advanced - uncomment any to try
+#   ACTIVE          working assignments loaded at startup - a
+#                   complete GM drum kit on channel 10 + a pitched
+#                   keyboard on channel 1
 #
 # ===================================================================
 
@@ -308,14 +67,161 @@ assignments:
 
 
   # =================================================================
-  # GM DRUMS — Channel 10
+  # EXAMPLES - uncomment any of the following to try them
+  # =================================================================
+
+
+  # --- A. Specific sample by name ---
+  # The simplest possible assignment.  `name:` matches a sample's
+  # filename stem (no extension, no path).
+
+  # - name: My favourite kick
+  #   channel: 10
+  #   notes: 36
+  #   select:
+  #     where:
+  #       name: 2026-03-24_14-37-14
+
+
+  # --- B. Similarity match against a reference ---
+  # Reference samples live in samples/reference/.  The similarity
+  # engine ranks your library against the reference and plays the
+  # closest match.  When `reference:` is set and `order:` is omitted,
+  # similarity desc is assumed automatically.
+
+  # - name: Any kick
+  #   channel: 10
+  #   notes: 36
+  #   select:
+  #     where:
+  #       reference: samples/reference/GM36_BassDrum1.wav
+
+
+  # --- C. Newest capture on a keyboard, repitched ---
+  # Selects the most-recently-captured sample across the whole note
+  # range, pitch-shifted to each MIDI note.
+
+  # - name: Latest capture
+  #   channel: 2
+  #   notes: C2..C6
+  #   select:
+  #     order: [{ by: age, dir: desc }]
+  #     pick: 1
+  #   process:
+  #     - repitch: true
+  #   one_shot: false
+
+
+  # --- D. Highest-pitched sample ---
+  # Filter by `pitched: true` (only samples with a stable detected
+  # pitch), then sort by dominant pitch descending.
+
+  # - name: High tone
+  #   channel: 4
+  #   notes: C3..C5
+  #   select:
+  #     where:
+  #       pitched: true
+  #     order: [{ by: pitch, dir: desc }]
+  #     pick: 1
+  #   process:
+  #     - repitch: true
+  #   one_shot: false
+
+
+  # --- E. Third-longest sample ---
+  # `pick: 3` takes the third result in the sorted list rather than
+  # the first.  Handy for stepping through ranks.
+
+  # - name: Third longest
+  #   channel: 5
+  #   notes: 60
+  #   select:
+  #     order: [{ by: duration, dir: desc }]
+  #     pick: 3
+
+
+  # --- F. Rhythmic loops, beat-matched ---
+  # Filter by duration and onset count, then snap the chosen sample
+  # to the session's target_bpm grid.
+
+  # - name: Loop pad
+  #   channel: 3
+  #   notes: C2..C4
+  #   select:
+  #     where:
+  #       duration: { gte: 1.0 }    # at least 1 second
+  #       onsets:   { gte: 4 }      # with at least 4 transients
+  #     order: [{ by: age, dir: desc }]
+  #     pick: 1
+  #   process:
+  #     - beat_quantize: { grid: 16 }
+  #   one_shot: false
+
+
+  # --- G. Warm keys - filter + saturation + compression + repitch ---
+  # Processors in `process:` run in declaration order.  Here the
+  # sample is low-passed, saturated for analog warmth, compressed,
+  # then pitch-shifted.
+
+  # - name: Warm keys
+  #   channel: 6
+  #   notes: C2..C6
+  #   select:
+  #     where: { pitched: true }
+  #     order: [{ by: age, dir: asc }]
+  #   process:
+  #     - filter_low: { freq: 2000, resonance: 6 }
+  #     - saturate: { drive: 4 }
+  #     - compress: true
+  #     - repitch: true
+  #   one_shot: false
+
+
+  # --- H. Reversed pad ---
+  # `reverse: true` flips the sample end-to-end before repitch runs,
+  # giving a breathy attack-from-nothing character.
+
+  # - name: Reverse pad
+  #   channel: 7
+  #   notes: C3..C5
+  #   select:
+  #     where: { pitched: true, duration: { gte: 0.5 } }
+  #     order: [{ by: age, dir: asc }]
+  #   process:
+  #     - reverse: true
+  #     - repitch: true
+  #   one_shot: false
+
+
+  # --- I. Fallback chain ---
+  # `select:` can be a list of specs tried in order - the first one
+  # that yields a match wins.  Here: try a specific named sample
+  # first; if it's not in the library, fall back to the best kick.
+
+  # - name: Kick with fallback
+  #   channel: 10
+  #   notes: 36
+  #   select:
+  #     - where: { name: my-favourite-kick }
+  #     - where: { reference: samples/reference/GM36_BassDrum1.wav }
+
+
+  # =================================================================
+  # ACTIVE - a complete starter kit, loaded at startup
   # =================================================================
   #
-  # Each maps one or more GM drum notes to a GM reference sample
-  # via the similarity engine.  Reference names match the canonical
-  # GM percussion set (GM35-GM81) derived from FluidR3_GM.sf2.
-  # Multi-note assignments distribute ranks: first note = best
-  # match, second = second-best, etc.
+  # Channel 10 carries a General MIDI drum kit backed by the
+  # similarity engine: each assignment targets a GM reference sample
+  # and plays the closest match from your library.  Multi-note
+  # assignments distribute ranks (first note = best match, second =
+  # second-best, etc).
+  #
+  # Channel 1 is a pitched keyboard: the oldest pitched sample in
+  # your library, repitched to each incoming MIDI note across the
+  # full keyboard range.
+  #
+  # Delete or comment out anything you don't want.
 
 
   # --- Kicks ---
@@ -468,10 +374,7 @@ assignments:
       order: [{ by: similarity, dir: desc }]
 
 
-  # =================================================================
-  # PITCHED KEYBOARD — Channel 1
-  # =================================================================
-  #
+  # --- Pitched keyboard ---
   # Plays the oldest pitch-stable sample across the full note range,
   # pitch-shifted to each MIDI note.
 
@@ -486,95 +389,3 @@ assignments:
     process:
       - repitch: true
     one_shot: false
-
-
-  # =================================================================
-  # EXAMPLE ASSIGNMENTS (commented out)
-  # =================================================================
-
-  # --- Specific sample by name ---
-  # - name: Fixed kick
-  #   channel: 10
-  #   notes: 36
-  #   select:
-  #     where:
-  #       name: 2026-03-24_14-37-14
-
-  # --- Newest sample (keyboard) ---
-  # - name: Latest capture
-  #   channel: 2
-  #   notes: C2..C6
-  #   select:
-  #     order: [{ by: age, dir: desc }]
-  #     pick: 1
-  #   process:
-  #     - repitch: true
-  #   one_shot: false
-
-  # --- Rhythmic loops, beat-matched ---
-  # - name: Loop pad
-  #   channel: 3
-  #   notes: C2..C4
-  #   select:
-  #     where:
-  #       duration: { gte: 1.0 }
-  #       onsets:   { gte: 4 }
-  #     order: [{ by: age, dir: desc }]
-  #     pick: 1
-  #   process:
-  #     - beat_quantize: { grid: 16 }
-  #   one_shot: false
-
-  # --- Highest-pitched sample ---
-  # - name: High tone
-  #   channel: 4
-  #   notes: C3..C5
-  #   select:
-  #     where:
-  #       pitched: true
-  #     order: [{ by: pitch, dir: desc }]
-  #     pick: 1
-  #   process:
-  #     - repitch: true
-  #   one_shot: false
-
-  # --- Third longest sample ---
-  # - name: Third longest
-  #   channel: 5
-  #   notes: 60
-  #   select:
-  #     order: [{ by: duration, dir: desc }]
-  #     pick: 3
-
-  # --- Filtered + saturated keyboard ---
-  # - name: Warm keys
-  #   channel: 6
-  #   notes: C2..C6
-  #   select:
-  #     where: { pitched: true }
-  #     order: [{ by: age, dir: asc }]
-  #   process:
-  #     - filter_low: { freq: 2000, resonance: 6 }
-  #     - saturate: { amount: 4 }
-  #     - repitch: true
-  #   one_shot: false
-
-  # --- Reversed pad ---
-  # - name: Reverse pad
-  #   channel: 7
-  #   notes: C3..C5
-  #   select:
-  #     where: { pitched: true, duration: { gte: 0.5 } }
-  #     order: [{ by: age, dir: asc }]
-  #   process:
-  #     - reverse: true
-  #     - repitch: true
-  #   one_shot: false
-
-  # --- Fallback chain: try specific sample, then reference ---
-  # - name: Kick with fallback
-  #   channel: 10
-  #   notes: 36
-  #   select:
-  #     - where: { name: my-favourite-kick }
-  #     - where: { reference: samples/reference/GM36_BassDrum1.wav, order: [{ by: similarity, dir: desc }] }

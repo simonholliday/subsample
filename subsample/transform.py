@@ -3575,6 +3575,22 @@ TransformProcessor._HANDLERS[Vocoder]        = _apply_vocoder
 # Process spec → TransformSpec conversion
 # ---------------------------------------------------------------------------
 
+_WARN_ONCE_SEEN: set[str] = set()
+
+
+def _warn_once (key: str, message: str) -> None:
+
+	"""Log a warning the first time this key is seen in the process; silent
+	on subsequent calls with the same key.  Avoids per-note log spam when a
+	single misconfigured assignment fans out across a MIDI range."""
+
+	if key in _WARN_ONCE_SEEN:
+		return
+
+	_WARN_ONCE_SEEN.add(key)
+	_log.warning(message)
+
+
 def _resolve_cc (
 	value: typing.Any,
 	cc_state: typing.Optional[dict[tuple[int, int], int]],
@@ -3655,12 +3671,18 @@ def spec_from_process (
 				steps.append(PitchShift(target_midi_note=midi_note))
 
 		elif proc.name == "beat_quantize":
-			bpm = float(_resolve_cc(proc.get("bpm"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
+			tempo = float(_resolve_cc(proc.get("tempo"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
 			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution, cc_omni=cc_omni))
-			amount = max(0.0, min(1.0, float(_resolve_cc(proc.get("amount"), cc_state, 1.0, cc_omni=cc_omni))))
+			strength = max(0.0, min(1.0, float(_resolve_cc(proc.get("strength"), cc_state, 1.0, cc_omni=cc_omni))))
 
-			if bpm > 0.0:
-				steps.append(TimeStretch(target_bpm=bpm, resolution=grid, amount=amount))
+			if tempo > 0.0:
+				steps.append(TimeStretch(target_bpm=tempo, resolution=grid, amount=strength))
+			else:
+				_warn_once(
+					"beat_quantize-no-tempo",
+					"beat_quantize: no tempo available (no explicit 'tempo:' "
+					"and transform.target_bpm is 0 in config.yaml) — step skipped",
+				)
 
 		elif proc.name == "filter_low":
 			steps.append(LowPassFilter(
@@ -3686,7 +3708,7 @@ def spec_from_process (
 
 		elif proc.name == "saturate":
 			steps.append(Saturate(
-				amount_db=float(_resolve_cc(proc.get("amount"), cc_state, 6.0, cc_omni=cc_omni)),
+				amount_db=float(_resolve_cc(proc.get("drive"), cc_state, 6.0, cc_omni=cc_omni)),
 			))
 
 		elif proc.name == "compress":
@@ -3712,10 +3734,26 @@ def spec_from_process (
 				lookahead_ms=float(_resolve_cc(proc.get("lookahead"), cc_state, 5.0, cc_omni=cc_omni)),
 			))
 
+		elif proc.name == "hpss":
+			keep = str(proc.get("keep", "")).lower()
+			if keep == "harmonic":
+				steps.append(HpssHarmonic())
+			elif keep == "percussive":
+				steps.append(HpssPercussive())
+			else:
+				raise ValueError(
+					f"hpss: 'keep' must be 'harmonic' or 'percussive' "
+					f"(got {keep!r})"
+				)
+
 		elif proc.name == "hpss_harmonic":
+			# Legacy — kept for callers that build ProcessorStep directly,
+			# bypassing parse_process's translation.  YAML goes through
+			# parse_process which rewrites this to hpss: {keep: harmonic}.
 			steps.append(HpssHarmonic())
 
 		elif proc.name == "hpss_percussive":
+			# Legacy — see above.
 			steps.append(HpssPercussive())
 
 		elif proc.name == "gate":
@@ -3757,18 +3795,24 @@ def spec_from_process (
 			))
 
 		elif proc.name == "transient":
-			_amount_raw = _resolve_cc(proc.get("amount"), cc_state, cc_omni=cc_omni)
+			_gain_raw = _resolve_cc(proc.get("gain"), cc_state, cc_omni=cc_omni)
 			steps.append(Transient(
-				amount_db=float(_amount_raw) if _amount_raw is not None else None,
+				amount_db=float(_gain_raw) if _gain_raw is not None else None,
 			))
 
 		elif proc.name == "pad_quantize":
-			bpm = float(_resolve_cc(proc.get("bpm"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
+			tempo = float(_resolve_cc(proc.get("tempo"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
 			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution, cc_omni=cc_omni))
-			amount = max(0.0, min(1.0, float(_resolve_cc(proc.get("amount"), cc_state, 1.0, cc_omni=cc_omni))))
+			strength = max(0.0, min(1.0, float(_resolve_cc(proc.get("strength"), cc_state, 1.0, cc_omni=cc_omni))))
 
-			if bpm > 0.0:
-				steps.append(PadQuantize(target_bpm=bpm, resolution=grid, amount=amount))
+			if tempo > 0.0:
+				steps.append(PadQuantize(target_bpm=tempo, resolution=grid, amount=strength))
+			else:
+				_warn_once(
+					"pad_quantize-no-tempo",
+					"pad_quantize: no tempo available (no explicit 'tempo:' "
+					"and transform.target_bpm is 0 in config.yaml) — step skipped",
+				)
 
 		elif proc.name == "vocoder":
 			carrier_raw = proc.get("carrier")

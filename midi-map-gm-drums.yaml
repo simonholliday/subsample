@@ -2,30 +2,56 @@
 # midi-map-gm-drums.yaml — Complete General MIDI drum kit
 # ===================================================================
 #
-# A ready-to-use MIDI map that assigns every standard GM percussion
-# note (35-81) to its closest matching sample from your instrument
-# library, using the reference samples in samples/reference/ for
-# similarity scoring.
+# Point this map at any sample collection and you get a coherent,
+# pre-mixed drum kit on the first hit.  Nothing to configure.
 #
-# Each instrument gets console-style channel-strip processing:
-#   - High-pass and/or low-pass filters to carve frequency space
-#   - Adaptive compression on transient instruments (kicks, snares,
-#     toms, hand drums, etc.) — adapts threshold, attack, and release
-#     to each sample automatically.  Not applied to cymbals, hi-hats,
-#     shakers, or sustained/expressive instruments where it would
-#     pump, flatten dynamics, or sound unnatural.
-#   - Pan position following standard audience-perspective drum layout
-#   - Gain offset to balance the kit
+# Every standard General MIDI percussion note (35-81) is wired to a
+# similarity-based search against a canonical GM reference sample.
+# Whatever you have in your instrument library - field recordings,
+# synthesised hits, vintage drum machines, found sounds - the engine
+# picks the closest match and plays it through an appropriate
+# channel-strip:
 #
-# All filters are flat Butterworth (no resonance) for a natural,
-# transparent sound.  The similarity engine does the tonal matching;
-# filters just keep instruments out of each other's way.
+#   - Console-style filtering  carves frequency space so each drum
+#     sits where it should: 30 Hz high-pass on kicks to kill rumble,
+#     300 Hz on hi-hats to remove kick bleed, 1 kHz on triangles,
+#     etc.  Flat Butterworth, no resonance - transparent.
 #
-# To use: copy this file to midi-map.yaml (or set player.midi_map
-# in config.yaml to point here).
+#   - Adaptive compression  shapes 28 transient instruments - kicks,
+#     snares, toms, hand drums.  Threshold, attack, and release
+#     auto-adapt to each sample.  Foundation sounds get tailored
+#     ratios (kicks 6:1 with 15 ms attack for beater-punch-plus-body,
+#     snares 5:1 with 8 ms for stick-crack-plus-ring).  Cymbals,
+#     shakers, and sustained instruments are left uncompressed.
 #
-# GM notes 27-34 (GS/XG electronic percussion) and 82-87 (extended
-# percussion) are not covered — no reference samples exist for these.
+#   - Audience-perspective panning  hi-hats on the left, ride on the
+#     right, toms spread high-to-low across the stereo field, kick
+#     and snare near centre.
+#
+#   - Gain balance  cymbals and small percussion are pulled back so
+#     the kit sits together without any one instrument dominating.
+#
+# The similarity engine does all the tonal matching; the channel
+# strips keep instruments out of each other's way.  There is nothing
+# to tune per-sample - load more samples and the kit improves.
+#
+# How to use:
+#   1. Copy this file to midi-map.yaml, OR set `player.midi_map:
+#      midi-map-gm-drums.yaml` in config.yaml
+#   2. Point `instrument.directory` in config.yaml at your sample
+#      directory
+#   3. Play any MIDI controller on channel 10 (standard GM drum
+#      channel)
+#
+# Coverage:
+#   GM 35-81     all standard GM percussion
+#   GM 27-34     GS/XG electronic percussion - not included (no
+#                reference samples for these)
+#   GM 82-87     extended percussion - not included
+#
+# See midi-map.yaml.default for a heavily-commented template if you
+# want to build your own map, and README.md section "MIDI map" for
+# the full grammar reference.
 #
 # ===================================================================
 

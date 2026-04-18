@@ -254,6 +254,20 @@ can be overridden by an experienced user who wants precise control.
 
 ## MIDI map
 
+The MIDI map is where Subsample becomes an instrument you can *play*. It is the
+most expressive MIDI routing surface of any sampler we know of: you don't just
+assign samples to notes, you write *rules* that pick samples from your library
+at trigger time - by similarity to a reference, by analysis metadata, by age,
+by user-defined scoring functions, or by whatever combination you can write
+down in a few lines of plain text. Samples can then be reshaped on the way
+out through an ordered effects chain with MIDI CC control over every
+parameter.
+
+There is real complexity here - the price of a surface this expressive. The
+rest of this section leads you in gently. A five-step tutorial first, each
+step adding one concept on top of the last. Then the complete reference, then
+the advanced features (banks, ambisonic capture, MIDI CC mapping).
+
 MIDI routing is defined in a YAML file - by default `midi-map.yaml` in the
 project directory, referenced from `config.yaml`:
 
@@ -262,19 +276,146 @@ player:
   midi_map: midi-map.yaml
 ```
 
-Two maps are included:
+Two maps ship with the project:
 
-- **`midi-map.yaml.default`** - template with common assignments and full format documentation
-- **`midi-map-gm-drums.yaml`** - complete GM percussion kit, ready to play (see below)
+- **[midi-map.yaml.default](midi-map.yaml.default)** - a heavily-commented
+  template; open it, copy to `midi-map.yaml`, uncomment the example you want,
+  and go.
+- **[midi-map-gm-drums.yaml](midi-map-gm-drums.yaml)** - a complete General
+  MIDI percussion kit, ready to play against any sample library you point it
+  at. Instant kit, no tweaking needed.
 
-Copy either file as your starting point. Each map lists **assignments** -
-mapping one or more MIDI notes on a given channel to sample targets.
+### Tutorial - five steps from simple to expressive
+
+The examples below are working YAML. Each one is a self-contained
+`assignments:` entry. Copy any of them into `midi-map.yaml` under
+`assignments:` and reload to hear it.
+
+#### Step 1 - play one specific sample
+
+The simplest possible assignment: MIDI note 36 (on channel 10, the GM drum
+channel) always plays one named sample.
+
+```yaml
+- name: My favourite kick
+  channel: 10
+  notes: 36
+  select:
+    where:
+      name: 2026-03-24_14-37-14
+```
+
+`name` matches a sample's filename stem (no extension, no path). Strike note
+36 and Subsample plays that exact sample. Everything else in the library is
+ignored for this assignment.
+
+#### Step 2 - "find me the best kick"
+
+Now the interesting bit. Instead of naming a specific sample, describe the
+*kind* of sample you want. Subsample's similarity engine will pick the closest
+match from your library - every time you load new samples, the best candidate
+may change, but you never have to rewrite the YAML.
+
+```yaml
+- name: Any kick
+  channel: 10
+  notes: 36
+  select:
+    where:
+      reference: samples/reference/GM36_BassDrum1.wav
+```
+
+`reference` points at a reference WAV shipped in `samples/reference/`. The
+library's samples are ranked against this reference by a 58-dimensional
+spectral/rhythmic fingerprint; the top-ranked match plays. (When `reference`
+is set and no `order` is given, `order: [{ by: similarity, dir: desc }]` is
+assumed - see [Implicit defaults](#implicit-defaults) further down.)
+
+#### Step 3 - rule-based selection
+
+Filter the library by analysis metadata, sort the qualifying samples, and
+pick one. This example plays the **oldest pitched sample** across a whole
+keyboard range, pitch-shifted to each MIDI note:
+
+```yaml
+- name: Pitched keyboard
+  channel: 1
+  notes: C2..C6
+  select:
+    where:
+      pitched: true              # only samples with a stable detected pitch
+    order:
+      - { by: age, dir: asc }    # oldest first
+    pick: 1                      # take the top result
+  process:
+    - repitch: true              # pitch-shift each note to its MIDI value
+  one_shot: false                # release on note-off (sustained playback)
+```
+
+The `notes: C2..C6` range expands to every MIDI note between C2 and C6 - one
+assignment, 49 notes. `repitch: true` pitch-shifts the chosen sample per note.
+
+#### Step 4 - process the sample on the way out
+
+Everything in `process:` is an ordered audio-effects pipeline. Order matters -
+the sample flows through top to bottom.
+
+```yaml
+- name: Warm keys
+  channel: 1
+  notes: C2..C6
+  select:
+    where: { pitched: true }
+    order: [{ by: age, dir: asc }]
+  process:
+    - filter_low: { freq: 2000, resonance: 6 }   # low-pass with resonant peak
+    - saturate: { drive: 4 }                      # analog-style soft-clip
+    - compress: true                              # adaptive dynamics
+    - repitch: true                               # then pitch-shift
+  one_shot: false
+```
+
+Every processor accepts `true` for sensible defaults, or a dict for
+fine-grained control. All the parameters of every processor are documented in
+the [Process](#process---how-to-present-the-sample) reference below.
+
+#### Step 5 - lock a loop to your session tempo
+
+`beat_quantize` time-stretches a sample to a target BPM and snaps its onsets
+to a beat grid - turning any loosely-timed loop in your library into something
+locked to the session. Combine it with filtering for a length+rhythm pick:
+
+```yaml
+- name: Tight loops
+  channel: 2
+  notes: C3..C4
+  select:
+    where:
+      duration: { gte: 1.0, lt: 8.0 }   # at least 1 bar, less than 8
+      onsets:   { gte: 4 }              # at least 4 transients
+    order:
+      - { by: duration, dir: desc }     # prefer longer loops
+  process:
+    - beat_quantize: { strength: 0.7 }  # 70% snap - loose but locked
+  one_shot: false
+```
+
+`duration`, `onsets`, and other numeric predicates take per-field operator
+dicts (`gte`, `lte`, `gt`, `lt`, `eq`). `strength: 0.7` is a partial-quantize
+amount - fully snapped at 1.0, unchanged at 0.0.
+
+That's the ladder. The rest of this section is the full reference - every
+field, every predicate, every processor, every option - then the advanced
+features (banks, ambisonic capture, MIDI CC mapping).
 
 ### The GM drums map - instant professional drum kit
 
-`midi-map-gm-drums.yaml` covers all 47 standard GM percussion notes (35-81).
-Point it at your instrument directory and every MIDI drum note automatically
-finds the closest matching sample and plays it through a professional mix chain:
+Before the reference, a quick mention of the "no-config" path. If you want a
+complete drum kit in under a minute, use
+[midi-map-gm-drums.yaml](midi-map-gm-drums.yaml) directly. Point it at your
+instrument directory (any sample collection will do) and every MIDI drum note
+automatically finds the closest matching sample and plays it through a
+professional mix chain:
 
 - **Similarity matching** - each note finds the best sample via spectral
   fingerprint comparison against GM reference sounds
@@ -294,6 +435,14 @@ finds the closest matching sample and plays it through a professional mix chain:
 The result: a new user with a collection of recorded samples hears a coherent,
 pre-mixed drum kit on first play - no manual configuration needed.
 
+---
+
+**Reference - every option.** From here on, this section is reference material:
+every field, every predicate, every processor option. Skim it once; come back
+when you want to try something the tutorial didn't show.
+
+---
+
 ### Assignment fields
 
 | Field | Required | Description |
@@ -305,7 +454,7 @@ pre-mixed drum kit on first play - no manual configuration needed.
 | `process` | no | How to present it (see Process below) |
 | `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
-| `pan` | no | Stereo position as percentage weights e.g. `[50, 50]` = centre (default) |
+| `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
 
 ### Note syntax
@@ -337,6 +486,10 @@ select:
   pick: 1                                 # take the first match
 ```
 
+`select` is usually a single block like this. It can also be a *list* of
+blocks for fallback chains - try the first, and if nothing matches try the
+next. See [Fallback chains](#fallback-chains) below.
+
 All `where` predicates must pass (AND logic).
 
 Numeric predicates (`duration`, `onsets`, `tempo`, `pitch`, `quantized_beats`)
@@ -359,12 +512,16 @@ is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
 | `duration` | float (seconds) | Filter by sample length. Example: `{ gte: 1.0, lt: 5.0 }` |
 | `onsets` | int | Filter by detected transient count. Example: `{ gte: 4 }` |
 | `tempo` | float (BPM) | Filter by detected tempo. Example: `{ gte: 100, lte: 140 }` |
-| `pitch` | Hz or note name | Filter by detected frequency. Each operator value is either Hz or a note name (`C3`, `A4`, `F#5`). Example: `{ gte: C3, lt: C6 }` |
+| `pitch` | Hz or note name | Filter by detected frequency. Each operator value is either a Hz float (`{ gte: 130.8 }`) or a note name (`{ gte: C3, lt: C6 }`). The two forms are interchangeable - note names are converted to Hz at parse time. Sharps: `C#4`; flats: `Db4`. |
 | `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `beat_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
-| `name` | string or path | Exact filename stem match, or path to a specific WAV |
+| `name` | string | Exact filename stem match. Legacy: a path-like value (containing `/` or starting with `.`) is still auto-detected as a `path:` - see below |
+| `path` | path | Match a specific WAV file at this path (relative paths resolved against the MIDI map's directory). Preferred over `name:` for file references |
 | `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Banks vs directory predicate](#banks-vs-directory-predicate)) |
+
+`name:` and `path:` are mutually exclusive within a single `where` block - use
+one, not both.
 
 **Legacy `min_X` / `max_X` syntax**: the pre-2026-04 form
 (`min_duration: 1.0`, `max_pitch: A4`, etc.) still works indefinitely —
@@ -397,15 +554,40 @@ Built-in scorers:
 | `quantized_beats` | Beat length of the assignment's `beat_quantize`/`pad_quantize` output. Samples without a computed variant park at the end regardless of direction. |
 | `similarity` | Similarity rank against the reference in `where`. Only supported as the primary clause; requires `reference` in `where`. When `reference` is set and no `order` is given, `similarity` desc is assumed automatically. |
 
-Default when `order` is omitted and `where.reference` is unset: newest-first
-(equivalent to `order: [{ by: age, dir: desc }]`).
+#### Implicit defaults
+
+The parser fills in a few defaults that are easy to miss - they make the
+common case concise, but it helps to know which ones are on:
+
+| Omitted key | Default applied | When |
+|---|---|---|
+| `order` | `[{ by: age, dir: desc }]` (newest first) | No `where.reference` set |
+| `order` | `[{ by: similarity, dir: desc }]` | `where.reference` **is** set |
+| `pick` | `1` (best match) for the first note; incremented per note thereafter | Multi-note assignment without `repitch` |
+| `pick` | `1` for every note | Multi-note assignment with `repitch` in `process` |
+| `where` | Empty (all samples match) | `where` block omitted |
+| `process` | Empty (unprocessed playback) | `process` block omitted |
+| `grid` | `16` (sixteenth-note) | `beat_quantize` / `pad_quantize` without explicit grid |
+| `tempo` | Session `target_bpm` from `config.yaml` | `beat_quantize` / `pad_quantize` without explicit tempo |
+| `one_shot` | `true` | Omitted from assignment |
+| `gain` | `0.0` dB | Omitted from assignment |
+| `pan` | Identity routing | Omitted from assignment |
+| `output` | Outputs `1..N` | Omitted from assignment |
+
+The `where.reference` → `similarity desc` coupling is worth calling out: if
+you set `reference` and then later add another filter like
+`duration: { gte: 1.0 }`, the ordering is still similarity - there's nothing
+visible in the YAML telling you so. Add an explicit `order:` clause if you
+want a different sort.
 
 `pick` is 1-indexed. Default: 1 (first match). For multi-note assignments
 without explicit `pick`, each note gets the next position (rank distribution) -
 so `notes: [36, 35]` gives note 36 pick 1 (best match) and note 35 pick 2.
 
-**Fallback chains** - `select` can be a list of specs tried in order. The first
-that returns a result wins:
+#### Fallback chains
+
+`select` can be a list of specs tried in order. The first that returns a
+result wins:
 
 ```yaml
 select:
@@ -485,7 +667,7 @@ applied after sample selection. Omit it entirely for unprocessed playback.
 process:
   - filter_low: { freq: 800, resonance: 6 }   # low-pass, then
   - repitch: true                               # pitch-shift, then
-  - saturate: { amount: 4 }                     # saturation
+  - saturate: { drive: 4 }                      # saturation
 ```
 
 Processors execute in the order you declare them - different orderings
@@ -497,24 +679,28 @@ Available processors:
 |-----------|-----------|-------------|
 | `repitch: true` | none | Pitch-shift to match the triggering MIDI note |
 | `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
-| `beat_quantize: { grid: 16 }` | grid subdivision | Time-stretch to session `target_bpm` |
-| `beat_quantize: { bpm: 120, grid: 8 }` | explicit BPM + grid | Time-stretch to a specific BPM |
-| `beat_quantize: { amount: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantize - onsets move partway to the grid for a looser feel |
-| `pad_quantize: { grid: 16 }` | bpm (config), grid (16) | Onset-aligned silence padding - snaps onsets to the beat grid by inserting silence between segments rather than time-stretching. No pitch/speed change. Ideal for speech. |
-| `pad_quantize: { amount: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantize - same as beat_quantize amount but for silence-pad mode |
+| `beat_quantize: true` | grid (default 16), tempo (config target_bpm), strength (default 1.0) | Time-stretch to session `target_bpm` with all defaults |
+| `beat_quantize: { grid: 16 }` | as above, grid overridden | Time-stretch to session `target_bpm` |
+| `beat_quantize: { tempo: 120, grid: 8 }` | explicit tempo + grid | Time-stretch to a specific tempo |
+| `beat_quantize: { strength: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantize - onsets move partway to the grid for a looser feel |
+| `pad_quantize: true` | grid (default 16), tempo (config target_bpm), strength (default 1.0) | Silence-pad onsets with all defaults |
+| `pad_quantize: { grid: 16 }` | as above, grid overridden | Onset-aligned silence padding - snaps onsets to the beat grid by inserting silence between segments rather than time-stretching. No pitch/speed change. Ideal for speech. |
+| `pad_quantize: { strength: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantize - same as beat_quantize strength but for silence-pad mode |
 | `filter_low: true` | freq (Hz, default 16000), resonance (dB, default 0) | Low-pass filter (console-style default) |
 | `filter_high: true` | freq (Hz, default 80), resonance (dB, default 0) | High-pass filter (console-style default) |
 | `filter_band: true` | freq (Hz, default 1000), q (default 0.7), resonance (dB, default 0) | Band-pass filter (Q sets width) |
 | `reverse: true` | none | Reverse the audio |
-| `saturate: { amount: 6 }` | amount (dB of drive) | Soft-clip saturation with level compensation |
+| `saturate: true` | drive (default 6 dB) | Soft-clip saturation with level compensation (moderate default warmth) |
+| `saturate: { drive: 6 }` | drive (dB) | Soft-clip saturation with explicit drive |
 | `compress: true` | threshold (auto), ratio (4:1), attack (auto), release (auto), knee (6 dB), makeup (0 dB), lookahead (0 ms) | Dynamic range compressor (adapts to each sample) |
 | `limit: true` | threshold (-1 dB), release (50 ms), lookahead (5 ms) | Brickwall limiter (ratio 100:1, instant attack) |
-| `hpss_harmonic: true` | none | Keep only harmonic/tonal content (remove percussion) |
-| `hpss_percussive: true` | none | Keep only percussive/transient content (remove harmonics) |
+| `hpss: { keep: harmonic }` | keep (required: `harmonic` or `percussive`) | Keep only harmonic/tonal content (remove percussion) |
+| `hpss: { keep: percussive }` | as above | Keep only percussive/transient content (remove harmonics) |
 | `gate: true` | threshold (auto), attack (auto), release (auto), hold (auto), lookahead (auto) | Noise gate - silences audio below the noise floor. All parameters auto-adapt: threshold from noise floor, attack/release/hold from onset and decay character. |
 | `distort: true` | mode (hard_clip), drive (auto), mix (1.0), tone (auto), bit_depth (8), downsample_factor (4) | Waveshaping distortion with four modes: hard_clip, fold, bit_crush, downsample. Drive adapts to crest factor; tone adapts to spectral rolloff. |
 | `reshape: true` | attack (preserve), hold (0), decay (preserve), sustain (1.0), release (auto) | ADSR envelope reshaping. Default auto-tightens the tail. Set attack, decay, sustain, release to reshape specific phases. |
-| `transient: true` | amount (auto) | Transient enhancement/taming via HPSS rebalancing. Auto-adapts from crest factor: peaky samples are tamed, dull samples enhanced. |
+| `transient: true` | gain (auto, dB signed) | Transient enhancement/taming via HPSS rebalancing. Auto-adapts from crest factor: peaky samples are tamed, dull samples enhanced. |
+| `transient: { gain: 6 }` | gain (dB, signed: +/- enhance/tame) | Explicit dB of transient enhancement or taming |
 | `vocoder: { carrier: reference }` | carrier (required), bands (24), depth (1.0), formant_shift (0) | Channel vocoder cross-synthesis. Imposes the sample's spectral envelope onto a carrier signal. `carrier: reference` uses this note's reference sample; or specify a file path. |
 
 All three filters can be used without parameters - they default to classic
@@ -567,9 +753,9 @@ process:
   - reshape: { attack: 5, release: 100 }     # fast attack, controlled release
   - reshape: { sustain: 0.5, release: 50 }   # half sustain, tight tail
   - transient: true                          # auto: normalises punch from crest factor
-  - transient: { amount: 6 }                # enhance transients by 6 dB
-  - transient: { amount: -3 }               # tame transients by 3 dB
-  - pad_quantize: { bpm: 120, grid: 8 }     # silence-pad onsets to eighth-note grid
+  - transient: { gain: 6 }                  # enhance transients by 6 dB
+  - transient: { gain: -3 }                 # tame transients by 3 dB
+  - pad_quantize: { tempo: 120, grid: 8 }   # silence-pad onsets to eighth-note grid
   - vocoder: { carrier: reference }           # cross-synthesise with this note's reference
   - vocoder: { carrier: samples/reference/GM36_BassDrum1.wav, bands: 16, depth: 0.8 }
 ```
@@ -586,10 +772,39 @@ When `repitch` is in the process list, all notes in a multi-note assignment
 share pick 1 (same sample, pitched per note). Without `repitch`, each note gets
 the next rank.
 
+#### Legacy `amount:` parameter (still accepted)
+
+Four processors previously shared an `amount:` parameter with wildly different
+units (dB for `saturate` and `transient`, 0-1 fraction for the two quantizers).
+The parameter has been renamed per processor so the unit is obvious at the
+call site. The old `amount:` key still works indefinitely - the parser
+translates each one to the appropriate canonical name:
+
+| Processor | Legacy | New (preferred) | Unit |
+|---|---|---|---|
+| `saturate` | `amount` | `drive` | dB |
+| `transient` | `amount` | `gain` | dB (signed: +enhance, -tame) |
+| `beat_quantize` | `amount` | `strength` | 0.0-1.0 fraction |
+| `pad_quantize` | `amount` | `strength` | 0.0-1.0 fraction |
+
+Mixing both names on the same step is rejected at parse time.
+
+The two separate HPSS processor names `hpss_harmonic: true` and
+`hpss_percussive: true` have been unified into `hpss: { keep: harmonic }` /
+`hpss: { keep: percussive }`. The legacy names still work and translate
+internally.
+
+`beat_quantize` and `pad_quantize` now accept `tempo:` instead of `bpm:` -
+matching the `tempo:` where-predicate. Legacy `bpm:` is translated to
+`tempo:` at parse time.
+
 ### Pan
 
-Pan weights are normalised to constant-power gains so perceived loudness is
-equal at any pan position:
+`pan` is a list of per-channel weights. The values are **relative**, not
+percentages: only the ratio between channels matters. `[50, 50]`, `[1, 1]`,
+and `[100, 100]` all produce centre. The raw weights are normalised to
+constant-power gains at mix time, so perceived loudness stays equal across
+pan positions.
 
 ```yaml
 pan: [50, 50]    # centre (default)
@@ -626,6 +841,16 @@ pad:
 Set `player.audio.channels` in config to match your device (e.g. 8 for a
 Focusrite Scarlett 18i20). When `output` is omitted, instruments route to the
 first N outputs as before - stereo users see no change.
+
+---
+
+**Going further.** The sections that follow cover the optional advanced
+features: multichannel/ambisonic capture, bank switching for live kit swaps
+via MIDI Program Change, and MIDI CC control for any numeric processor
+parameter. None of this is needed for a basic setup - skip ahead if you're
+just building a drum kit or pitched keyboard.
+
+---
 
 ### Ambisonic capture
 
@@ -733,8 +958,8 @@ Replace the scalar value with a CC binding:
 
 ```yaml
 process:
-  - pad_quantize: { grid: 16, amount: { cc: 1 } }
-  - beat_quantize: { bpm: { cc: 2, min: 60, max: 180 }, grid: 16 }
+  - pad_quantize: { grid: 16, strength: { cc: 1 } }
+  - beat_quantize: { tempo: { cc: 2, min: 60, max: 180 }, grid: 16 }
   - filter_low: { freq: { cc: 74, min: 200, max: 16000 } }
 ```
 
@@ -755,6 +980,23 @@ mapping. Do not use pitch bend, aftertouch, or high-resolution continuous
 controllers - these generate hundreds of messages per second and would flood the
 transform queue. Each distinct CC value produces a new variant; the transform
 cache evicts the oldest when its memory budget is exceeded.
+
+### Vocabulary reference
+
+Every enum-string value the MIDI map accepts, in one place:
+
+| Where | Valid values |
+|---|---|
+| `where` operators | `gte` `lte` `gt` `lt` `eq` |
+| Order `dir` | `asc` `desc` |
+| Order `by` | `age` `duration` `pitch` `onsets` `tempo` `level` `quantized_beats` `similarity` |
+| `notes` range | `<low>..<high>` (e.g. `C2..C4` or `36..60`) |
+| `pitch` predicate value | Hz float (`440`) or note name (`A4`, `C#3`, `Db5`) |
+| `distort` `mode` | `hard_clip` `fold` `bit_crush` `downsample` |
+| Quantize `segment` | `round_robin` `random` or integer (1-indexed) |
+| `vocoder` `carrier` | `reference` (the note's reference sample) or a file path |
+| Legacy `order_by` tokens | `newest` `oldest` `duration_asc` `duration_desc` `pitch_asc` `pitch_desc` `onsets_asc` `onsets_desc` `tempo_asc` `tempo_desc` `loudest` `quietest` `similarity` `quantized_beats_asc` `quantized_beats_desc` |
+| Legacy numeric-predicate keys | `min_duration` `max_duration` `min_onsets` `max_onsets` `min_tempo` `max_tempo` `min_pitch` `max_pitch` `min_quantized_beats` `max_quantized_beats` |
 
 ## Performance
 

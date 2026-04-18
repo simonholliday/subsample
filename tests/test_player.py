@@ -860,6 +860,43 @@ assignments:
 		with pytest.raises(FileNotFoundError):
 			subsample.player.load_midi_map(tmp_path / "no-such-file.yaml", [])
 
+	def test_invalid_channel_error_names_assignment (self, tmp_path: pathlib.Path) -> None:
+		"""A coercion error on 'channel' must include the assignment name
+		and its index in the file — crucial for locating the bad entry in a
+		large map."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Fine
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+  - name: Broken
+    channel: ten
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+""")
+		with pytest.raises(ValueError, match="assignment 'Broken'.*#2.*invalid 'channel'"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_invalid_gain_error_names_assignment (self, tmp_path: pathlib.Path) -> None:
+		"""Coercion error on 'gain' is also localised to the assignment."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: BadGain
+    channel: 10
+    notes: 36
+    gain: "loud"
+    select:
+      where:
+        reference: BD0025
+""")
+		with pytest.raises(ValueError, match="assignment 'BadGain'.*invalid 'gain'"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
 	def test_empty_file_returns_empty_map (self, tmp_path: pathlib.Path) -> None:
 		path = self._write_map(tmp_path, "")
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map

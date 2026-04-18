@@ -1998,7 +1998,7 @@ class TestSpecFromProcess:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="beat_quantize",
-				params=(("bpm", 120), ("grid", 8)),
+				params=(("tempo", 120), ("grid", 8)),
 			),
 		))
 		spec = subsample.transform.spec_from_process(process, target_bpm=100.0)
@@ -2006,6 +2006,53 @@ class TestSpecFromProcess:
 		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
 		assert spec.steps[0].target_bpm == 120.0  # step params override function arg
 		assert spec.steps[0].resolution == 8
+
+	def test_beat_quantize_true_uses_all_defaults (self) -> None:
+		"""`beat_quantize: true` → all defaults, fed by target_bpm."""
+		process = subsample.query.parse_process([{"beat_quantize": True}], "test")
+		spec = subsample.transform.spec_from_process(process, target_bpm=120.0)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].target_bpm == 120.0
+		assert spec.steps[0].resolution == 16
+		assert spec.steps[0].amount == 1.0
+
+	def test_beat_quantize_true_no_bpm_warns_and_skips (self, caplog: typing.Any) -> None:
+		"""`beat_quantize: true` with no target_bpm logs a warning and skips."""
+		# Reset the warn-once set so this test sees the warning fresh.
+		subsample.transform._WARN_ONCE_SEEN.discard("beat_quantize-no-tempo")
+		process = subsample.query.parse_process([{"beat_quantize": True}], "test")
+		with caplog.at_level("WARNING"):
+			spec = subsample.transform.spec_from_process(process, target_bpm=None)
+		assert spec.steps == ()
+		assert any("beat_quantize" in r.message and "tempo" in r.message for r in caplog.records)
+
+	def test_pad_quantize_true_uses_all_defaults (self) -> None:
+		"""`pad_quantize: true` → all defaults, fed by target_bpm."""
+		process = subsample.query.parse_process([{"pad_quantize": True}], "test")
+		spec = subsample.transform.spec_from_process(process, target_bpm=120.0)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.PadQuantize)
+		assert spec.steps[0].target_bpm == 120.0
+		assert spec.steps[0].resolution == 16
+		assert spec.steps[0].amount == 1.0
+
+	def test_pad_quantize_true_no_bpm_warns_and_skips (self, caplog: typing.Any) -> None:
+		"""`pad_quantize: true` with no target_bpm logs a warning and skips."""
+		subsample.transform._WARN_ONCE_SEEN.discard("pad_quantize-no-tempo")
+		process = subsample.query.parse_process([{"pad_quantize": True}], "test")
+		with caplog.at_level("WARNING"):
+			spec = subsample.transform.spec_from_process(process, target_bpm=None)
+		assert spec.steps == ()
+		assert any("pad_quantize" in r.message and "tempo" in r.message for r in caplog.records)
+
+	def test_saturate_true_uses_default_drive (self) -> None:
+		"""`saturate: true` → 6 dB drive default."""
+		process = subsample.query.parse_process([{"saturate": True}], "test")
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.Saturate)
+		assert spec.steps[0].amount_db == 6.0
 
 	def test_filter_low (self) -> None:
 		process = subsample.query.ProcessSpec(steps=(
@@ -2051,7 +2098,7 @@ class TestSpecFromProcess:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="saturate",
-				params=(("amount", 8),),
+				params=(("drive", 8),),
 			),
 		))
 		spec = subsample.transform.spec_from_process(process)
@@ -2117,7 +2164,7 @@ class TestSpecFromProcess:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(name="filter_low", params=(("freq", 800),)),
 			subsample.query.ProcessorStep(name="repitch"),
-			subsample.query.ProcessorStep(name="saturate", params=(("amount", 6),)),
+			subsample.query.ProcessorStep(name="saturate", params=(("drive", 6),)),
 		))
 		spec = subsample.transform.spec_from_process(process, midi_note=60)
 
@@ -2140,9 +2187,9 @@ class TestSpecFromProcess:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(name="reverse"),
 			subsample.query.ProcessorStep(name="filter_low", params=(("freq", 500), ("resonance", 6))),
-			subsample.query.ProcessorStep(name="saturate", params=(("amount", 4),)),
+			subsample.query.ProcessorStep(name="saturate", params=(("drive", 4),)),
 			subsample.query.ProcessorStep(name="repitch"),
-			subsample.query.ProcessorStep(name="beat_quantize", params=(("bpm", 120), ("grid", 16))),
+			subsample.query.ProcessorStep(name="beat_quantize", params=(("tempo", 120), ("grid", 16))),
 		))
 		spec = subsample.transform.spec_from_process(process, midi_note=72, target_bpm=100.0)
 
@@ -2169,7 +2216,7 @@ class TestCcResolution:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
-				params=(("bpm", 120), ("amount", subsample.query.CcBinding(cc=1))),
+				params=(("tempo", 120), ("strength", subsample.query.CcBinding(cc=1))),
 			),
 		))
 		cc_omni = {1: 127}  # CC#1 = 127 (last-write-wins, any channel)
@@ -2184,7 +2231,7 @@ class TestCcResolution:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
-				params=(("bpm", 120), ("amount", subsample.query.CcBinding(cc=1, default=0.75))),
+				params=(("tempo", 120), ("strength", subsample.query.CcBinding(cc=1, default=0.75))),
 			),
 		))
 		spec = subsample.transform.spec_from_process(process, cc_state=None)
@@ -2198,7 +2245,7 @@ class TestCcResolution:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
-				params=(("bpm", 120), ("amount", binding)),
+				params=(("tempo", 120), ("strength", binding)),
 			),
 		))
 
@@ -2218,7 +2265,7 @@ class TestCcResolution:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
-				params=(("bpm", 120), ("amount", binding)),
+				params=(("tempo", 120), ("strength", binding)),
 			),
 		))
 		cc_omni = {1: 0}  # CC#1 = 0 (last-write-wins)
@@ -2820,7 +2867,7 @@ class TestPadQuantize:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
-				params=(("bpm", 120), ("grid", 8)),
+				params=(("tempo", 120), ("grid", 8)),
 			),
 		))
 		spec = subsample.transform.spec_from_process(process)
@@ -2836,7 +2883,7 @@ class TestPadQuantize:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
-				params=(("bpm", 120), ("amount", 0.5)),
+				params=(("tempo", 120), ("strength", 0.5)),
 			),
 		))
 		spec = subsample.transform.spec_from_process(process)
@@ -3037,7 +3084,7 @@ class TestPadQuantize:
 		process_over = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
-				params=(("bpm", 120), ("amount", 2.0)),
+				params=(("tempo", 120), ("strength", 2.0)),
 			),
 		))
 		spec = subsample.transform.spec_from_process(process_over)
@@ -3046,7 +3093,7 @@ class TestPadQuantize:
 		process_under = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
 				name="pad_quantize",
-				params=(("bpm", 120), ("amount", -0.5)),
+				params=(("tempo", 120), ("strength", -0.5)),
 			),
 		))
 		spec = subsample.transform.spec_from_process(process_under)
@@ -3073,7 +3120,7 @@ class TestTransient:
 	def test_spec_from_process_transient_explicit (self) -> None:
 		"""transient: {amount: 6} → explicit amount."""
 		process = subsample.query.ProcessSpec(steps=(
-			subsample.query.ProcessorStep(name="transient", params=(("amount", 6),)),
+			subsample.query.ProcessorStep(name="transient", params=(("gain", 6),)),
 		))
 		spec = subsample.transform.spec_from_process(process)
 		step = spec.steps[0]
