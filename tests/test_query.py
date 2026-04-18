@@ -216,18 +216,18 @@ class TestQuery:
 		assert len(result) == 3
 
 	def test_order_by_duration_desc (self) -> None:
-		spec = subsample.query.SelectSpec(order_by="duration_desc")
+		spec = subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="duration", dir="desc"),))
 		result = subsample.query.query(spec, self._samples())
 		assert result[0].name == "long-quiet"
 		assert result[1].name == "long-rhythmic"
 
 	def test_order_by_oldest (self) -> None:
-		spec = subsample.query.SelectSpec(order_by="oldest")
+		spec = subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="age", dir="asc"),))
 		result = subsample.query.query(spec, self._samples())
 		assert result[0].sample_id == 1
 
 	def test_order_by_loudest (self) -> None:
-		spec = subsample.query.SelectSpec(order_by="loudest")
+		spec = subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="level", dir="desc"),))
 		result = subsample.query.query(spec, self._samples())
 		assert result[0].name == "short-loud"
 
@@ -237,7 +237,7 @@ class TestQuery:
 
 		spec = subsample.query.SelectSpec(
 			where=subsample.query.WherePredicate(min_duration=1.0),
-			order_by="duration_desc",
+			order=(subsample.query.OrderClause(by="duration", dir="desc"),),
 		)
 		result = subsample.query.query(spec, self._samples())
 		assert len(result) == 3
@@ -247,7 +247,7 @@ class TestQuery:
 
 		"""Pick selects the Nth position (1-indexed) after filtering and ordering."""
 
-		spec = subsample.query.SelectSpec(order_by="duration_desc", pick=3)
+		spec = subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="duration", dir="desc"),), pick=3)
 		result = subsample.query.query(spec, self._samples())
 
 		# pick is handled by the caller, not by query() — query returns the full ranked list.
@@ -371,7 +371,7 @@ class TestQuantizedBeats:
 
 		"""quantized_beats_asc orders smallest first; None goes to the end."""
 
-		spec = subsample.query.SelectSpec(order_by="quantized_beats_asc")
+		spec = subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="quantized_beats", dir="asc"),))
 		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
 
 		ids = [r.sample_id for r in result]
@@ -382,7 +382,7 @@ class TestQuantizedBeats:
 
 		"""quantized_beats_desc orders largest first; None still goes to the end."""
 
-		spec = subsample.query.SelectSpec(order_by="quantized_beats_desc")
+		spec = subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="quantized_beats", dir="desc"),))
 		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
 
 		ids = [r.sample_id for r in result]
@@ -398,7 +398,7 @@ class TestQuantizedBeats:
 
 		spec = subsample.query.SelectSpec(
 			where=subsample.query.WherePredicate(min_quantized_beats=3.6),
-			order_by="quantized_beats_asc",
+			order=(subsample.query.OrderClause(by="quantized_beats", dir="asc"),),
 		)
 		samples = [
 			_make_record(sample_id=1, name="a"),
@@ -424,7 +424,7 @@ class TestParseSelect:
 		specs = subsample.query.parse_select(raw, "test")
 		assert len(specs) == 1
 		assert specs[0].where.min_duration == 1.0
-		assert specs[0].order_by == "newest"
+		assert specs[0].order == (subsample.query.OrderClause(by="age", dir="desc"),)
 		assert specs[0].pick == 2
 
 	def test_fallback_list (self) -> None:
@@ -451,14 +451,15 @@ class TestParseSelect:
 		specs = subsample.query.parse_select(raw, "test")
 		assert specs[0].where.min_quantized_beats == 2.0
 		assert specs[0].where.max_quantized_beats == 4.5
-		assert specs[0].order_by == "quantized_beats_desc"
+		assert specs[0].order == (subsample.query.OrderClause(by="quantized_beats", dir="desc"),)
 
 	def test_defaults (self) -> None:
 
-		"""Missing fields get sensible defaults."""
+		"""Missing fields get sensible defaults — in particular an empty
+		``order`` tuple (query() applies newest-first at evaluation time)."""
 
 		specs = subsample.query.parse_select({}, "test")
-		assert specs[0].order_by == "newest"
+		assert specs[0].order == ()
 		assert specs[0].pick == 1
 
 	def test_reference_defaults_to_similarity_order (self) -> None:
@@ -467,7 +468,7 @@ class TestParseSelect:
 
 		raw = {"where": {"reference": "BD0025"}}
 		specs = subsample.query.parse_select(raw, "test")
-		assert specs[0].order_by == "similarity"
+		assert specs[0].order == (subsample.query.OrderClause(by="similarity", dir="desc"),)
 
 	def test_path_based_reference_resolves_to_absolute (self) -> None:
 
@@ -523,8 +524,20 @@ class TestParseSelect:
 
 	def test_invalid_order_by_raises (self) -> None:
 
-		with pytest.raises(ValueError, match="order_by"):
+		"""Legacy bare-string form: unknown token must raise with a clear
+		message pointing at the offending name."""
+
+		with pytest.raises(ValueError, match="unknown order token"):
 			subsample.query.parse_select({"order_by": "bogus"}, "test")
+
+	def test_invalid_order_scorer_raises (self) -> None:
+
+		"""New structured form: unknown 'by' scorer name must raise."""
+
+		with pytest.raises(ValueError, match="unknown order scorer"):
+			subsample.query.parse_select(
+				{"order": [{"by": "bogus", "dir": "asc"}]}, "test",
+			)
 
 	def test_pick_zero_raises (self) -> None:
 
@@ -736,6 +749,194 @@ class TestSelectSpec:
 
 	def test_defaults (self) -> None:
 		spec = subsample.query.SelectSpec()
-		assert spec.order_by == "newest"
+		# Default is an empty order tuple; query() applies newest-first (age desc)
+		# as a fallback when no clauses are given.  Keeping the default empty
+		# means "no preference from the user" is distinguishable from an
+		# explicitly-written [{by: age, dir: desc}].
+		assert spec.order == ()
 		assert spec.pick == 1
 		assert spec.where == subsample.query.WherePredicate()
+
+
+# ---------------------------------------------------------------------------
+# Multi-key ordering, legacy shim, on_missing policy
+# ---------------------------------------------------------------------------
+
+
+class TestMultiKeyOrder:
+
+	"""Composed sort keys — primary wins, secondary breaks ties."""
+
+	def test_primary_and_secondary_compose (self) -> None:
+
+		# Three samples, two share a duration so secondary must break the tie.
+		a = _make_record(sample_id=1, duration=2.0, onset_count=5)
+		b = _make_record(sample_id=2, duration=2.0, onset_count=3)   # ties a on duration
+		c = _make_record(sample_id=3, duration=1.0, onset_count=9)
+
+		spec = subsample.query.SelectSpec(
+			order=(
+				subsample.query.OrderClause(by="duration", dir="desc"),   # primary: longest first
+				subsample.query.OrderClause(by="onsets",   dir="desc"),   # tiebreaker: most onsets first
+			),
+		)
+		ranked = subsample.query.query(spec, [c, b, a])
+
+		# Expected: a and b come first (duration=2.0), tie broken by onsets desc
+		# → a (5 onsets) then b (3 onsets); c last (duration=1.0).
+		assert [r.sample_id for r in ranked] == [1, 2, 3]
+
+	def test_secondary_only_breaks_ties (self) -> None:
+
+		"""Secondary clause must not re-order records that differ on the primary."""
+
+		a = _make_record(sample_id=1, duration=3.0, onset_count=1)   # would be last on onsets-only
+		b = _make_record(sample_id=2, duration=2.0, onset_count=9)
+
+		spec = subsample.query.SelectSpec(
+			order=(
+				subsample.query.OrderClause(by="duration", dir="desc"),
+				subsample.query.OrderClause(by="onsets",   dir="desc"),
+			),
+		)
+		ranked = subsample.query.query(spec, [a, b])
+
+		# Primary wins: a first (longer duration) despite fewer onsets.
+		assert [r.sample_id for r in ranked] == [1, 2]
+
+
+class TestLegacyOrderShim:
+
+	"""Bare-string tokens and the legacy `order_by:` YAML key keep working."""
+
+	def test_bare_string_token_translates_to_clause (self) -> None:
+
+		specs = subsample.query.parse_select({"order_by": "duration_desc"}, "test")
+		assert specs[0].order == (
+			subsample.query.OrderClause(by="duration", dir="desc"),
+		)
+
+	def test_legacy_and_new_key_produce_equal_specs (self) -> None:
+
+		"""Parsing either form must yield an identical SelectSpec — proves
+		the shim is a pure translation, not a subtly-different path."""
+
+		legacy = subsample.query.parse_select({"order_by": "loudest"}, "test")
+		new    = subsample.query.parse_select(
+			{"order": [{"by": "level", "dir": "desc"}]}, "test",
+		)
+		assert legacy == new
+
+	def test_both_keys_set_raises (self) -> None:
+
+		with pytest.raises(ValueError, match="both 'order' and 'order_by'"):
+			subsample.query.parse_select(
+				{"order": [{"by": "age", "dir": "desc"}], "order_by": "newest"},
+				"test",
+			)
+
+	def test_list_can_mix_legacy_and_new_forms (self) -> None:
+
+		"""A user partway through migration may have both token types in
+		one list.  Parser accepts both within the same `order:` value."""
+
+		specs = subsample.query.parse_select(
+			{"order": ["duration_desc", {"by": "onsets", "dir": "asc"}]},
+			"test",
+		)
+		assert specs[0].order == (
+			subsample.query.OrderClause(by="duration", dir="desc"),
+			subsample.query.OrderClause(by="onsets",   dir="asc"),
+		)
+
+
+class TestOnMissingPolicy:
+
+	"""Behaviour around scorer.fn returning None — exclude vs sort_last."""
+
+	def test_sort_last_keeps_records_with_none_score_at_end (self) -> None:
+
+		"""quantized_beats is on_missing='sort_last' — non-quantized samples
+		keep their place in the result but park at the end regardless of
+		direction.  Matches the pre-refactor behaviour."""
+
+		a = _make_record(sample_id=1)
+		b = _make_record(sample_id=2)
+		c = _make_record(sample_id=3)
+
+		# Resolver returns values for a/b only; c has no quantize profile.
+		def _resolver (sample_id: int) -> typing.Optional[float]:
+			return {1: 2.0, 2: 4.0}.get(sample_id)
+
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(by="quantized_beats", dir="asc"),),
+		)
+		ranked = subsample.query.query(spec, [c, b, a], beats_resolver=_resolver)
+		assert [r.sample_id for r in ranked] == [1, 2, 3]
+
+		spec_desc = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(by="quantized_beats", dir="desc"),),
+		)
+		ranked_desc = subsample.query.query(spec_desc, [c, b, a], beats_resolver=_resolver)
+		# Non-quantized `c` still parks at the end even in desc direction.
+		assert [r.sample_id for r in ranked_desc] == [2, 1, 3]
+
+	def test_exclude_drops_records_with_none_score (self) -> None:
+
+		"""A scorer registered with on_missing='exclude' removes None-scoring
+		records entirely — this is the policy future quantize_match will
+		use.  Register a test-local scorer here so we exercise the exclude
+		branch without needing the not-yet-implemented feature."""
+
+		def _only_even (
+			record:  subsample.library.SampleRecord,
+			_params: tuple[tuple[str, typing.Any], ...],
+			_state:  dict[str, typing.Any],
+		) -> typing.Optional[float]:
+			# Score exists only for even sample_ids; odd ones return None
+			# and (under on_missing='exclude') should be filtered out.
+			return float(record.sample_id) if record.sample_id % 2 == 0 else None
+
+		try:
+			subsample.query._register_scorer("_test_only_even", _only_even, on_missing="exclude")
+
+			a = _make_record(sample_id=1)
+			b = _make_record(sample_id=2)
+			c = _make_record(sample_id=3)
+			d = _make_record(sample_id=4)
+
+			spec = subsample.query.SelectSpec(
+				order=(subsample.query.OrderClause(by="_test_only_even", dir="asc"),),
+			)
+			ranked = subsample.query.query(spec, [a, b, c, d])
+			# Only even sample_ids survive the exclude filter.
+			assert [r.sample_id for r in ranked] == [2, 4]
+		finally:
+			subsample.query._SCORERS.pop("_test_only_even", None)
+
+
+class TestSimilarityClausePosition:
+
+	"""similarity is only supported as the primary clause."""
+
+	def test_similarity_as_secondary_raises (self) -> None:
+
+		a = _make_record(sample_id=1)
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(reference="foo"),
+			order=(
+				subsample.query.OrderClause(by="duration",   dir="desc"),
+				subsample.query.OrderClause(by="similarity", dir="desc"),
+			),
+		)
+		with pytest.raises(ValueError, match="primary order clause"):
+			subsample.query.query(spec, [a])
+
+	def test_similarity_without_reference_raises (self) -> None:
+
+		a = _make_record(sample_id=1)
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(by="similarity", dir="desc"),),
+		)
+		with pytest.raises(ValueError, match="where.reference"):
+			subsample.query.query(spec, [a])

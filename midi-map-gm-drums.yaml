@@ -41,7 +41,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM35_AcousticBassDrum.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 30 }
       - filter_low: { freq: 8000 }
@@ -53,7 +53,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM36_BassDrum1.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 30 }
       - filter_low: { freq: 8000 }
@@ -70,7 +70,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM37_SideStick.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
       - filter_low: { freq: 10000 }
@@ -83,7 +83,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM38_AcousticSnare.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 80 }
       - compress: { ratio: 5, attack: 8 }
@@ -95,7 +95,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM39_HandClap.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
       - compress: { ratio: 4, attack: 3 }
@@ -106,7 +106,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM40_ElectricSnare.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
       - compress: { ratio: 5, attack: 8 }
@@ -123,7 +123,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM41_LowFloorTom.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 50 }
       - filter_low: { freq: 6000 }
@@ -136,7 +136,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM43_HighFloorTom.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 60 }
       - filter_low: { freq: 7000 }
@@ -149,7 +149,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM45_LowTom.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 70 }
       - filter_low: { freq: 8000 }
@@ -162,7 +162,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM47_LowMidTom.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 80 }
       - filter_low: { freq: 8000 }
@@ -175,7 +175,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM48_HiMidTom.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 90 }
       - filter_low: { freq: 9000 }
@@ -188,7 +188,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM50_HighTom.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
       - filter_low: { freq: 10000 }
@@ -206,7 +206,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM42_ClosedHiHat.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
       - compress: { ratio: 2, release: 80 }
@@ -219,7 +219,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM44_PedalHiHat.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
       - compress: { ratio: 2, release: 80 }
@@ -232,7 +232,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM46_OpenHiHat.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
       - compress: { ratio: 2, release: 80 }
@@ -250,7 +250,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM49_CrashCymbal1.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
     gain: -3.0
@@ -262,7 +262,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM55_SplashCymbal.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
     gain: -4.0
@@ -274,7 +274,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM57_CrashCymbal2.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
     gain: -3.0
@@ -286,7 +286,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM52_ChineseCymbal.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
     gain: -4.0
@@ -303,7 +303,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM51_RideCymbal1.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
     gain: -2.0
@@ -315,7 +315,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM53_RideBell.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
     gain: -1.0
@@ -327,7 +327,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM59_RideCymbal2.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
     gain: -2.0
@@ -344,7 +344,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM54_Tambourine.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 400 }
     gain: -3.0
@@ -356,7 +356,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM56_Cowbell.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
       - filter_low: { freq: 8000 }
@@ -370,7 +370,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM58_Vibraslap.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
       - filter_low: { freq: 10000 }
@@ -387,7 +387,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM60_HiBongo.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
       - filter_low: { freq: 10000 }
@@ -401,7 +401,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM61_LowBongo.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
       - filter_low: { freq: 8000 }
@@ -420,7 +420,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM62_MuteHiConga.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
       - filter_low: { freq: 8000 }
@@ -434,7 +434,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM63_OpenHiConga.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
       - filter_low: { freq: 10000 }
@@ -448,7 +448,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM64_LowConga.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 80 }
       - filter_low: { freq: 8000 }
@@ -467,7 +467,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM65_HighTimbale.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
       - filter_low: { freq: 10000 }
@@ -481,7 +481,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM66_LowTimbale.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
       - filter_low: { freq: 8000 }
@@ -500,7 +500,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM67_HighAgogo.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
       - filter_low: { freq: 10000 }
@@ -514,7 +514,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM68_LowAgogo.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
       - filter_low: { freq: 8000 }
@@ -533,7 +533,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM69_Cabasa.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
     gain: -3.0
@@ -545,7 +545,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM70_Maracas.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
     gain: -3.0
@@ -562,7 +562,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM71_ShortWhistle.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
       - filter_low: { freq: 12000 }
@@ -574,7 +574,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM72_LongWhistle.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
       - filter_low: { freq: 12000 }
@@ -591,7 +591,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM73_ShortGuiro.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
       - filter_low: { freq: 10000 }
@@ -604,7 +604,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM74_LongGuiro.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
       - filter_low: { freq: 10000 }
@@ -622,7 +622,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM75_Claves.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
       - filter_low: { freq: 10000 }
@@ -640,7 +640,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM76_HiWoodBlock.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
       - filter_low: { freq: 10000 }
@@ -654,7 +654,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM77_LowWoodBlock.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
       - filter_low: { freq: 8000 }
@@ -673,7 +673,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM78_MuteCuica.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
       - filter_low: { freq: 8000 }
@@ -686,7 +686,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM79_OpenCuica.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
       - filter_low: { freq: 10000 }
@@ -704,7 +704,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM80_MuteTriangle.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 1000 }
     gain: -4.0
@@ -716,7 +716,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM81_OpenTriangle.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 1000 }
     gain: -4.0

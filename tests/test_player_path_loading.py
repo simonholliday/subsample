@@ -92,7 +92,7 @@ class TestResolvePathReferences:
 		ref_key = str(wav_path.resolve())
 
 		where = subsample.query.WherePredicate(reference=ref_key)
-		select = subsample.query.SelectSpec(where=where, order_by="similarity")
+		select = subsample.query.SelectSpec(where=where, order=(subsample.query.OrderClause(by="similarity", dir="desc"),))
 		assignment = subsample.query.Assignment(
 			name="test",
 			select=(select,),
@@ -110,7 +110,7 @@ class TestResolvePathReferences:
 	def test_bare_name_reference_skipped (self, tmp_path: pathlib.Path) -> None:
 		"""Bare-name references (no path) are not passed to add_reference."""
 		where = subsample.query.WherePredicate(reference="GM36_BassDrum1")
-		select = subsample.query.SelectSpec(where=where, order_by="similarity")
+		select = subsample.query.SelectSpec(where=where, order=(subsample.query.OrderClause(by="similarity", dir="desc"),))
 		assignment = subsample.query.Assignment(name="test", select=(select,))
 		note_map: subsample.player.NoteMap = {(9, 36): (assignment, 1)}
 
@@ -147,7 +147,7 @@ class TestResolvePathReferences:
 		ref_key = str(wav_path.resolve())
 
 		where = subsample.query.WherePredicate(reference=ref_key)
-		select = subsample.query.SelectSpec(where=where, order_by="similarity")
+		select = subsample.query.SelectSpec(where=where, order=(subsample.query.OrderClause(by="similarity", dir="desc"),))
 		assignment1 = subsample.query.Assignment(name="test1", select=(select,))
 		assignment2 = subsample.query.Assignment(name="test2", select=(select,))
 

@@ -100,7 +100,11 @@
 #
 #   where:     Filter predicates (all must pass).  Optional — omit to
 #              include all samples.
-#   order_by:  How to sort the qualifying samples (default: newest).
+#   order:     How to sort the qualifying samples.  List of clauses;
+#              later clauses break ties on earlier ones.  Optional —
+#              defaults to newest-first (age desc).
+#              Legacy `order_by:` with a bare-string token is also
+#              accepted indefinitely; see "ORDER CLAUSES" below.
 #   pick:      Which position in the sorted list (1-indexed, default: 1).
 #
 # FILTER PREDICATES (where)
@@ -118,19 +122,42 @@
 #                                 reference sample
 #   name                          string — exact filename stem match
 #
-# ORDER_BY VALUES
+# ORDER CLAUSES
 #
-#   newest / oldest               by arrival time (sample_id)
-#   similarity                    by similarity score (requires reference in where)
-#   duration_asc / duration_desc  by duration
-#   pitch_asc / pitch_desc        by dominant frequency
-#   onsets_asc / onsets_desc       by onset count
-#   tempo_asc / tempo_desc        by detected BPM
-#   loudest / quietest            by RMS level
-#   quantized_beats_asc /         by the beat length of the assignment's
-#   quantized_beats_desc          beat_quantize/pad_quantize output.  Samples
-#                                 with no variant sort to the end in both
-#                                 directions.
+# `order:` is a list of clauses.  Each clause is a mapping with:
+#
+#   by:     Scorer name.  One of:
+#             age                  arrival time (sample_id)
+#             duration             length in seconds
+#             pitch                dominant frequency
+#             onsets               onset count
+#             tempo                detected BPM
+#             level                RMS loudness
+#             quantized_beats      beat length of the assignment's
+#                                  beat_quantize/pad_quantize output.
+#                                  Samples with no variant park at the
+#                                  end regardless of direction.
+#             similarity           similarity rank (requires reference
+#                                  in where; only supported as the
+#                                  primary clause).
+#   dir:    "asc" or "desc".  Default: "asc".
+#   (Any other keys in the clause are passed to the scorer as params.)
+#
+# Examples:
+#
+#   order:
+#     - { by: duration, dir: desc }
+#
+#   order:
+#     - { by: duration, dir: desc }  # primary
+#     - { by: onsets, dir: asc }     # tiebreaker
+#
+# LEGACY FORM (indefinitely accepted)
+#
+# The old `order_by:` key with a bare-string token (`duration_desc`,
+# `loudest`, `newest`, `quantized_beats_asc`, …) still works — it is
+# translated internally into an equivalent single-element `order:`
+# list.  New YAML should prefer the structured `order:` form.
 #
 # PICK
 #
@@ -270,7 +297,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM36_BassDrum1.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
 
 
   # --- Snares ---
@@ -282,7 +309,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM38_AcousticSnare.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     pan: [50, 87]
 
 
@@ -295,7 +322,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM37_SideStick.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
 
 
   # --- Clap ---
@@ -307,7 +334,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM39_HandClap.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
 
 
   # --- Toms ---
@@ -320,7 +347,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM48_HiMidTom.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
 
 
   # --- Closed hi-hat ---
@@ -332,7 +359,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM42_ClosedHiHat.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     pan: [87, 50]
 
 
@@ -345,7 +372,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM46_OpenHiHat.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     pan: [87, 50]
 
 
@@ -358,7 +385,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM49_CrashCymbal1.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
 
 
   # --- Ride ---
@@ -370,7 +397,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM51_RideCymbal1.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     pan: [25, 75]
 
 
@@ -383,7 +410,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM56_Cowbell.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
     gain: -3.0
 
 
@@ -396,7 +423,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM54_Tambourine.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
 
 
   # --- Claves ---
@@ -408,7 +435,7 @@ assignments:
     select:
       where:
         reference: samples/reference/GM75_Claves.wav
-      order_by: similarity
+      order: [{ by: similarity, dir: desc }]
 
 
   # =================================================================
@@ -424,7 +451,7 @@ assignments:
     select:
       where:
         pitched: true
-      order_by: oldest
+      order: [{ by: age, dir: asc }]
       pick: 1
     process:
       - repitch: true
@@ -448,7 +475,7 @@ assignments:
   #   channel: 2
   #   notes: C2..C6
   #   select:
-  #     order_by: newest
+  #     order: [{ by: age, dir: desc }]
   #     pick: 1
   #   process:
   #     - repitch: true
@@ -462,7 +489,7 @@ assignments:
   #     where:
   #       min_duration: 1.0
   #       min_onsets: 4
-  #     order_by: newest
+  #     order: [{ by: age, dir: desc }]
   #     pick: 1
   #   process:
   #     - beat_quantize: { grid: 16 }
@@ -475,7 +502,7 @@ assignments:
   #   select:
   #     where:
   #       pitched: true
-  #     order_by: pitch_desc
+  #     order: [{ by: pitch, dir: desc }]
   #     pick: 1
   #   process:
   #     - repitch: true
@@ -486,7 +513,7 @@ assignments:
   #   channel: 5
   #   notes: 60
   #   select:
-  #     order_by: duration_desc
+  #     order: [{ by: duration, dir: desc }]
   #     pick: 3
 
   # --- Filtered + saturated keyboard ---
@@ -495,7 +522,7 @@ assignments:
   #   notes: C2..C6
   #   select:
   #     where: { pitched: true }
-  #     order_by: oldest
+  #     order: [{ by: age, dir: asc }]
   #   process:
   #     - filter_low: { freq: 2000, resonance: 6 }
   #     - saturate: { amount: 4 }
@@ -508,7 +535,7 @@ assignments:
   #   notes: C3..C5
   #   select:
   #     where: { pitched: true, min_duration: 0.5 }
-  #     order_by: oldest
+  #     order: [{ by: age, dir: asc }]
   #   process:
   #     - reverse: true
   #     - repitch: true
@@ -520,4 +547,4 @@ assignments:
   #   notes: 36
   #   select:
   #     - where: { name: my-favourite-kick }
-  #     - where: { reference: samples/reference/GM36_BassDrum1.wav, order_by: similarity }
+  #     - where: { reference: samples/reference/GM36_BassDrum1.wav, order: [{ by: similarity, dir: desc }] }

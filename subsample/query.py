@@ -159,40 +159,159 @@ class WherePredicate:
 
 
 # ---------------------------------------------------------------------------
-# Ordering
+# Ordering — scorer registry + OrderClause
 # ---------------------------------------------------------------------------
 
-# Valid order_by values and their sort key + reverse flag.
-# Each value maps to (key_function, reverse).
-# key_function takes a SampleRecord and returns a sortable value.
+# External state passed to scorers.  Each scorer opts into whichever keys it
+# needs; missing keys simply mean "this scorer can't run in this context"
+# and the scorer returns None for all records.
+_ExternalState = dict[str, typing.Any]
 
-_ORDER_BY_KEYS: dict[str, tuple[typing.Callable[["subsample.library.SampleRecord"], typing.Any], bool]] = {
-	"newest":        (lambda r: r.sample_id, True),
-	"oldest":        (lambda r: r.sample_id, False),
-	"duration_asc":  (lambda r: r.duration,  False),
-	"duration_desc": (lambda r: r.duration,  True),
-	"pitch_asc":     (lambda r: r.pitch.dominant_pitch_hz, False),
-	"pitch_desc":    (lambda r: r.pitch.dominant_pitch_hz, True),
-	"onsets_asc":    (lambda r: r.rhythm.onset_count, False),
-	"onsets_desc":   (lambda r: r.rhythm.onset_count, True),
-	"tempo_asc":     (lambda r: r.rhythm.tempo_bpm, False),
-	"tempo_desc":    (lambda r: r.rhythm.tempo_bpm, True),
-	"loudest":       (lambda r: r.level.rms, True),
-	"quietest":      (lambda r: r.level.rms, False),
-}
 
-VALID_ORDER_BY: frozenset[str] = frozenset(
-	_ORDER_BY_KEYS.keys() | {"similarity", "quantized_beats_asc", "quantized_beats_desc"}
-)
-"""`similarity` is handled in query() using the SimilarityMatrix.
-`quantized_beats_asc`/`quantized_beats_desc` are handled in query() using
-the beats_resolver callable — records whose resolver returns None are
-sorted to the end for both directions."""
+# A scorer is a pure function: (record, params, state) -> sortable float | None.
+# None means "this scorer can't score this record"; the scorer's on_missing
+# policy then decides whether the record is excluded from the result or
+# sorted to the end.
+_ScoreFn = typing.Callable[
+	["subsample.library.SampleRecord", tuple[tuple[str, typing.Any], ...], _ExternalState],
+	typing.Optional[float],
+]
+
+
+_OnMissing = typing.Literal["exclude", "sort_last"]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ScorerSpec:
+
+	"""Registry entry for a named scorer.
+
+	on_missing:
+	  "sort_last" — records whose score is None are kept in the result and
+	                placed at the end of the sort, regardless of direction.
+	                This matches the historical behaviour of
+	                quantized_beats_*, where samples without a grid profile
+	                sort last.
+	  "exclude"   — records whose score is None are dropped from the result
+	                entirely.  Used for scorers where "no score" means "not
+	                eligible" (e.g. quantize_match on a non-quantized
+	                sample)."""
+
+	fn:         _ScoreFn
+	on_missing: _OnMissing = "sort_last"
+
+
+_SCORERS: dict[str, _ScorerSpec] = {}
+"""Registered scorers keyed by their name (the ``by`` value in an
+OrderClause).  Populated at module import; see _register_scorer() calls
+below.  Module-private: plugin-style registration from user code is not
+supported yet but the design allows it if needed later."""
+
+
+def _register_scorer (
+	name: str,
+	fn: _ScoreFn,
+	*,
+	on_missing: _OnMissing = "sort_last",
+) -> None:
+
+	"""Register a named scorer for use in OrderClause.by."""
+
+	if name in _SCORERS:
+		raise ValueError(f"scorer already registered: {name!r}")
+	_SCORERS[name] = _ScorerSpec(fn=fn, on_missing=on_missing)
+
+
+# Per-sample field scorers — no external state required.
+_register_scorer("duration", lambda r, _p, _s: float(r.duration))
+_register_scorer("pitch",    lambda r, _p, _s: float(r.pitch.dominant_pitch_hz))
+_register_scorer("onsets",   lambda r, _p, _s: float(r.rhythm.onset_count))
+_register_scorer("tempo",    lambda r, _p, _s: float(r.rhythm.tempo_bpm))
+_register_scorer("level",    lambda r, _p, _s: float(r.level.rms))
+_register_scorer("age",      lambda r, _p, _s: float(r.sample_id))
+
+
+def _beats_scorer (
+	record:  "subsample.library.SampleRecord",
+	_params: tuple[tuple[str, typing.Any], ...],
+	state:   _ExternalState,
+) -> typing.Optional[float]:
+
+	"""Scorer for ``quantized_beats`` — reads external_state["beats_resolver"].
+
+	Returns the sample's quantized beat count, or None when no variant /
+	profile is available.  on_missing defaults to ``sort_last`` so
+	non-quantized samples park at the end of the result rather than being
+	dropped — matches the historical behaviour."""
+
+	resolver = state.get("beats_resolver")
+	if resolver is None:
+		return None
+	beats = resolver(record.sample_id)
+	return None if beats is None else float(beats)
+
+
+_register_scorer("quantized_beats", _beats_scorer, on_missing="sort_last")
+
+
+# Legacy bare-string tokens translate into a single-clause order tuple.  The
+# table keeps old YAML files working indefinitely; parse_select accepts these
+# verbatim and converts them to OrderClause instances before query().
+_LEGACY_ORDER_TOKENS: dict[str, "OrderClause"] = {}   # populated after OrderClause is defined
+
+
+_VALID_ORDER_NAMES: frozenset[str] = frozenset()  # rebuilt after OrderClause; see below
 
 
 # ---------------------------------------------------------------------------
-# SelectSpec
+# OrderClause + SelectSpec
 # ---------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class OrderClause:
+
+	"""One entry in the ``order:`` list of a MIDI map SelectSpec.
+
+	by:     Scorer name (registered in _SCORERS, or the special token
+	        "similarity" which is handled as a fast-path in query()).
+	dir:    "asc" or "desc".
+	params: Frozen key-value pairs for parameterised scorers.  Empty for
+	        the built-in per-sample field scorers; populated for e.g.
+	        ``{by: quantize_match, pattern: [1, 0, 1, 0, 1]}``."""
+
+	by:     str
+	dir:    typing.Literal["asc", "desc"] = "asc"
+	params: tuple[tuple[str, typing.Any], ...] = ()
+
+
+# Populate legacy token translations now that OrderClause exists.
+_LEGACY_ORDER_TOKENS.update({
+	"newest":               OrderClause(by="age",             dir="desc"),
+	"oldest":               OrderClause(by="age",             dir="asc"),
+	"duration_asc":         OrderClause(by="duration",        dir="asc"),
+	"duration_desc":        OrderClause(by="duration",        dir="desc"),
+	"pitch_asc":            OrderClause(by="pitch",           dir="asc"),
+	"pitch_desc":           OrderClause(by="pitch",           dir="desc"),
+	"onsets_asc":           OrderClause(by="onsets",          dir="asc"),
+	"onsets_desc":          OrderClause(by="onsets",          dir="desc"),
+	"tempo_asc":            OrderClause(by="tempo",           dir="asc"),
+	"tempo_desc":           OrderClause(by="tempo",           dir="desc"),
+	"loudest":              OrderClause(by="level",           dir="desc"),
+	"quietest":             OrderClause(by="level",           dir="asc"),
+	"similarity":           OrderClause(by="similarity",      dir="desc"),
+	"quantized_beats_asc":  OrderClause(by="quantized_beats", dir="asc"),
+	"quantized_beats_desc": OrderClause(by="quantized_beats", dir="desc"),
+})
+
+
+def _valid_order_names () -> frozenset[str]:
+
+	"""Return the current set of valid ``by`` names — the registered
+	scorers plus the special ``"similarity"`` token (handled as a fast
+	path in query())."""
+
+	return frozenset(_SCORERS.keys() | {"similarity"})
+
 
 @dataclasses.dataclass(frozen=True)
 class SelectSpec:
@@ -200,11 +319,16 @@ class SelectSpec:
 	"""Compiled selection criteria: filter → order → pick position.
 
 	Parsed from the ``select:`` block in a MIDI map assignment.
+
+	``order`` is a tuple of OrderClause (primary at index 0, secondary at
+	1, …) — sort keys are composed across the tuple so equal primary
+	values break ties on the secondary, and so on.  An empty tuple means
+	"no explicit order"; query() defaults to newest-first (``age`` desc).
 	"""
 
-	where:    WherePredicate = dataclasses.field(default_factory=WherePredicate)
-	order_by: str            = "newest"
-	pick:     int            = 1
+	where: WherePredicate              = dataclasses.field(default_factory=WherePredicate)
+	order: tuple[OrderClause, ...]     = ()
+	pick:  int                         = 1
 
 
 # ---------------------------------------------------------------------------
@@ -336,85 +460,125 @@ def query (
 
 	"""Evaluate a SelectSpec against a list of samples.
 
-	Applies filter predicates, sorts by the requested ordering, and returns
-	the full ranked list.  The caller picks the Nth position.
+	Applies filter predicates, sorts by the composed order clauses, and
+	returns the full ranked list.  The caller picks the Nth position.
 
-	When the ``where`` clause includes a ``reference`` predicate and
-	``order_by`` is ``"similarity"``, the similarity matrix is used to
-	produce a ranked list of sample IDs that match the reference.  The
-	``where`` predicates are then applied as post-filters on that ranked
-	list, preserving similarity order.
+	When the *primary* order clause is ``{by: "similarity"}`` and
+	``where.reference`` is set, the similarity matrix is consulted directly
+	for a ranked list of sample IDs; ``where`` predicates are applied as
+	post-filters on that ranked list, preserving similarity order.  Any
+	secondary clauses after a primary ``similarity`` are ignored (the
+	matrix returns unique scores; ties are not expected).  Using
+	``similarity`` at a non-primary position raises ValueError — only the
+	primary fast path is supported.
+
+	For all other cases, the sort composes per-clause keys across the
+	``order`` tuple.  Each scorer's ``on_missing`` policy determines
+	whether records the scorer can't score are dropped from the result
+	(``exclude``) or parked at the end (``sort_last``).
 
 	Args:
 		select_spec:       The selection criteria to evaluate.
 		samples:           All instrument samples (from InstrumentLibrary.samples()).
-		similarity_matrix: Required when ``where.reference`` is set and
-		                   ``order_by`` is ``"similarity"``.
+		similarity_matrix: Required when the primary clause is ``{by: "similarity"}``
+		                   with ``where.reference`` set.
 		beats_resolver:    Callable returning the quantized beat count for a
 		                   given sample_id, or None when no variant/profile is
-		                   available.  Required when ``where`` uses
-		                   ``min_quantized_beats``/``max_quantized_beats`` or
-		                   ``order_by`` is ``quantized_beats_asc``/``_desc``.
+		                   available.  Required by the ``quantized_beats``
+		                   scorer and by ``where.min_quantized_beats`` /
+		                   ``where.max_quantized_beats``.
 
 	Returns:
-		List of matching SampleRecord objects, ordered by the requested key.
-		Empty list if no samples match.
+		List of matching SampleRecord objects, ordered by the requested
+		clauses.  Empty list if no samples match.
 	"""
 
 	where = select_spec.where
+	state: _ExternalState = {
+		"similarity_matrix": similarity_matrix,
+		"beats_resolver":    beats_resolver,
+	}
 
-	# Reference + similarity ordering: use the pre-computed ranked list from
-	# the similarity matrix, then post-filter by the remaining predicates.
-	if where.reference is not None and select_spec.order_by == "similarity":
+	# Default to newest-first when no explicit order clauses are given.
+	clauses: tuple[OrderClause, ...] = select_spec.order
+	if not clauses:
+		clauses = (OrderClause(by="age", dir="desc"),)
+
+	# Reject similarity at any non-primary position — the similarity matrix
+	# returns a pre-ranked list; there is no per-sample score-against-a-
+	# reference API to use for secondary ordering.
+	for i, clause in enumerate(clauses):
+		if clause.by == "similarity" and i > 0:
+			raise ValueError(
+				f"'similarity' is only supported as the primary order clause "
+				f"(found at position {i})"
+			)
+
+	primary = clauses[0]
+
+	# Similarity fast-path: primary clause is similarity + reference set.
+	if primary.by == "similarity":
+		if where.reference is None:
+			raise ValueError(
+				"'similarity' ordering requires where.reference to be set"
+			)
 		if similarity_matrix is None:
 			return []
 
 		ranked = similarity_matrix.get_matches(where.reference)
-
-		# Build a sample_id → record lookup from the full list.
-		by_id = {r.sample_id: r for r in samples}
+		by_id  = {r.sample_id: r for r in samples}
 
 		result: list["subsample.library.SampleRecord"] = []
-
 		for match in ranked:
 			record = by_id.get(match.sample_id)
-
 			if record is not None and where.matches(record, beats_resolver):
 				result.append(record)
 
+		if primary.dir == "asc":
+			result.reverse()
+
 		return result
 
-	# General case: filter → sort.
+	# General path: validate scorer names, filter, compose multi-key sort.
+	valid_names = _valid_order_names()
+	for clause in clauses:
+		if clause.by not in valid_names:
+			raise ValueError(
+				f"Unknown order scorer {clause.by!r}.  "
+				f"Valid scorers: {', '.join(sorted(valid_names))}"
+			)
+
 	filtered = [r for r in samples if where.matches(r, beats_resolver)]
 
-	# quantized_beats ordering uses the resolver.  Records with no beat count
-	# (None) sort to the end regardless of direction — they are treated as
-	# "unknown" rather than "zero".
-	if select_spec.order_by in ("quantized_beats_asc", "quantized_beats_desc"):
-		reverse = select_spec.order_by == "quantized_beats_desc"
+	# Apply each "exclude"-policy scorer as an additional filter before
+	# sorting.  A record failing any exclude-scorer drops from the result.
+	for clause in clauses:
+		spec = _SCORERS[clause.by]
+		if spec.on_missing == "exclude":
+			filtered = [
+				r for r in filtered
+				if spec.fn(r, clause.params, state) is not None
+			]
 
-		if beats_resolver is None:
-			# Without a resolver the ordering is meaningless; leave unsorted.
-			return filtered
+	# Build sort key: tuple of per-clause (missing_flag, signed_value).
+	# missing_flag is 0 for scored, 1 for None — 1 always sorts after 0
+	# regardless of direction, matching the historical "unknown sorts last"
+	# rule (relevant only to sort_last scorers; exclude scorers have
+	# already dropped their None records).
+	def _compose_key (
+		record: "subsample.library.SampleRecord",
+	) -> tuple[tuple[int, float], ...]:
+		parts: list[tuple[int, float]] = []
+		for clause in clauses:
+			spec  = _SCORERS[clause.by]
+			score = spec.fn(record, clause.params, state)
+			if score is None:
+				parts.append((1, 0.0))
+			else:
+				parts.append((0, -float(score) if clause.dir == "desc" else float(score)))
+		return tuple(parts)
 
-		def _beats_key (r: "subsample.library.SampleRecord") -> tuple[int, float]:
-			beats = beats_resolver(r.sample_id)
-			# (1, 0.0) for None sorts after (0, value) in both asc and desc —
-			# because we flip only within the "known" group by using -beats
-			# for desc on the float key, not on the sentinel.
-			if beats is None:
-				return (1, 0.0)
-			return (0, -beats if reverse else beats)
-
-		filtered.sort(key=_beats_key)
-		return filtered
-
-	order_entry = _ORDER_BY_KEYS.get(select_spec.order_by)
-
-	if order_entry is not None:
-		key_fn, reverse = order_entry
-		filtered.sort(key=key_fn, reverse=reverse)
-
+	filtered.sort(key=_compose_key)
 	return filtered
 
 
@@ -510,6 +674,91 @@ def _note_name_to_hz (name: str) -> float:
 	return float(librosa.midi_to_hz(midi_note))
 
 
+def _parse_order_clause (
+	raw: typing.Any,
+	assignment_name: str,
+) -> OrderClause:
+
+	"""Parse one ``order:`` entry into an OrderClause.
+
+	Accepts:
+	  - A bare string (legacy token: ``duration_desc``, ``loudest``, …)
+	    translated via _LEGACY_ORDER_TOKENS.
+	  - A mapping with ``by`` (required), ``dir`` (optional, default
+	    "asc"), and any extra keys treated as scorer params.
+	"""
+
+	if isinstance(raw, str):
+		clause = _LEGACY_ORDER_TOKENS.get(raw)
+		if clause is None:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: unknown order token "
+				f"{raw!r}.  Valid legacy tokens: {', '.join(sorted(_LEGACY_ORDER_TOKENS))}"
+			)
+		return clause
+
+	if not isinstance(raw, dict):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: order entry must be a "
+			f"string (legacy token) or a mapping (got {type(raw).__name__})"
+		)
+
+	if "by" not in raw:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: order entry must have a 'by' key"
+		)
+
+	by      = str(raw["by"])
+	dir_raw = str(raw.get("dir", "asc")).lower()
+
+	if dir_raw not in ("asc", "desc"):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: order entry 'dir' must be "
+			f"'asc' or 'desc' (got {dir_raw!r})"
+		)
+
+	# Everything except by/dir is a scorer parameter.  Preserve insertion order
+	# by iterating the dict directly; values are kept as-is (the scorer decides
+	# how to interpret them).
+	params: list[tuple[str, typing.Any]] = [
+		(str(k), v) for k, v in raw.items() if k not in ("by", "dir")
+	]
+
+	return OrderClause(
+		by=by,
+		dir=typing.cast(typing.Literal["asc", "desc"], dir_raw),
+		params=tuple(params),
+	)
+
+
+def _parse_order (
+	raw: typing.Any,
+	assignment_name: str,
+	*,
+	key_name: str,
+) -> tuple[OrderClause, ...]:
+
+	"""Parse the ``order:`` (or legacy ``order_by:``) value into a tuple.
+
+	Accepts:
+	  - A bare string (legacy single-clause form).
+	  - A single dict (new single-clause form).
+	  - A list of strings and/or dicts (new multi-clause form; clauses
+	    from any mix of legacy and new allowed).
+	"""
+
+	if isinstance(raw, (str, dict)):
+		return (_parse_order_clause(raw, assignment_name),)
+
+	if isinstance(raw, list):
+		return tuple(_parse_order_clause(entry, assignment_name) for entry in raw)
+
+	raise ValueError(
+		f"MIDI map assignment {assignment_name!r}: {key_name!r} must be a "
+		f"string, mapping, or list (got {type(raw).__name__})"
+	)
+
+
 def _parse_select_spec (
 	raw: typing.Any,
 	assignment_name: str,
@@ -517,6 +766,13 @@ def _parse_select_spec (
 ) -> SelectSpec:
 
 	"""Parse a single ``select:`` dict into a SelectSpec.
+
+	Accepts both the new ``order:`` key (preferred) and the legacy
+	``order_by:`` alias; raises ValueError if both are set on the same
+	SelectSpec.  Within either key, both bare-string tokens
+	(``duration_desc``) and structured clauses (``{by: duration, dir:
+	desc}``) are accepted — the parser converts legacy tokens to
+	OrderClause via _LEGACY_ORDER_TOKENS.
 
 	Args:
 		raw:             The raw YAML value of the 'select' entry.
@@ -532,17 +788,42 @@ def _parse_select_spec (
 
 	where = _parse_where(raw.get("where"), assignment_name, midi_map_dir)
 
-	order_by = str(raw.get("order_by", "newest"))
+	has_order    = "order"    in raw
+	has_order_by = "order_by" in raw
 
-	if order_by not in VALID_ORDER_BY:
+	if has_order and has_order_by:
 		raise ValueError(
-			f"MIDI map assignment {assignment_name!r}: unknown order_by {order_by!r}. "
-			f"Valid values: {', '.join(sorted(VALID_ORDER_BY))}"
+			f"MIDI map assignment {assignment_name!r}: both 'order' and "
+			f"'order_by' keys are set.  Use 'order' (preferred) or the legacy "
+			f"'order_by' alias, not both."
 		)
 
-	# Default order_by to "similarity" when reference is set and no explicit order.
-	if where.reference is not None and "order_by" not in raw:
-		order_by = "similarity"
+	order: tuple[OrderClause, ...]
+	if has_order:
+		order = _parse_order(raw["order"], assignment_name, key_name="order")
+	elif has_order_by:
+		order = _parse_order(raw["order_by"], assignment_name, key_name="order_by")
+	else:
+		# No explicit order.  Default to similarity when a reference is set
+		# (preserves the historical auto-default), otherwise leave the tuple
+		# empty and let query() apply its newest-first default.
+		order = (
+			(OrderClause(by="similarity", dir="desc"),)
+			if where.reference is not None
+			else ()
+		)
+
+	# Validate every scorer name up-front so errors surface at startup, not
+	# at trigger time.  Use _valid_order_names() so newly-registered scorers
+	# (e.g. future quantize_match) are recognised automatically.
+	valid_names = _valid_order_names()
+	for clause in order:
+		if clause.by not in valid_names:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: unknown order "
+				f"scorer {clause.by!r}.  Valid scorers: "
+				f"{', '.join(sorted(valid_names))}"
+			)
 
 	pick = int(raw.get("pick", 1))
 
@@ -551,7 +832,7 @@ def _parse_select_spec (
 			f"MIDI map assignment {assignment_name!r}: pick must be >= 1 (got {pick})"
 		)
 
-	return SelectSpec(where=where, order_by=order_by, pick=pick)
+	return SelectSpec(where=where, order=order, pick=pick)
 
 
 def parse_select (

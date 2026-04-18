@@ -49,7 +49,8 @@ def _make_assignment (
 	if reference is not None and order_by == "newest":
 		order_by = "similarity"
 
-	select = (subsample.query.SelectSpec(where=where, order_by=order_by),)
+	order_clause = subsample.query._LEGACY_ORDER_TOKENS[order_by]
+	select = (subsample.query.SelectSpec(where=where, order=(order_clause,)),)
 
 	steps: list[subsample.query.ProcessorStep] = []
 
@@ -1396,7 +1397,7 @@ class TestUpdatePitchedAssignments:
 		# beat_quantize with explicit bpm=120, grid=8
 		asgn = subsample.query.Assignment(
 			name="Explicit BPM",
-			select=(subsample.query.SelectSpec(order_by="newest"),),
+			select=(subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="age", dir="desc"),)),),
 			process=subsample.query.ProcessSpec(steps=(
 				subsample.query.ProcessorStep(name="beat_quantize", params=(("bpm", 120), ("grid", 8))),
 			)),
@@ -1471,7 +1472,7 @@ assignments:
 		assert (0, 36) in note_map
 		asgn, pick = note_map[(0, 36)]
 		assert asgn.select[0].where.pitched is True
-		assert asgn.select[0].order_by == "oldest"
+		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="asc"),)
 		assert asgn.process.has_repitch()
 		assert asgn.one_shot is False
 		assert pick == 1
@@ -1495,7 +1496,7 @@ assignments:
 
 		assert (1, 60) in note_map
 		asgn, _ = note_map[(1, 60)]
-		assert asgn.select[0].order_by == "newest"
+		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="desc"),)
 		assert asgn.process.has_repitch()
 
 	def test_pitched_nth (self, tmp_path: pathlib.Path) -> None:
@@ -1596,7 +1597,7 @@ assignments:
 
 		assert (1, 36) in note_map
 		asgn, pick = note_map[(1, 36)]
-		assert asgn.select[0].order_by == "newest"
+		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="desc"),)
 		assert asgn.process.has_repitch()
 		assert asgn.one_shot is False
 
@@ -1616,7 +1617,7 @@ assignments:
 
 		assert (2, 36) in note_map
 		asgn, _ = note_map[(2, 36)]
-		assert asgn.select[0].order_by == "oldest"
+		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="asc"),)
 		assert asgn.one_shot is False
 
 	def test_newest_no_reference_needed (self, tmp_path: pathlib.Path) -> None:
@@ -1689,8 +1690,8 @@ assignments:
 		asgn, _ = note_map[(0, 60)]
 		assert len(asgn.select) == 3
 		assert asgn.select[0].where.name == "first-choice"
-		assert asgn.select[1].order_by == "oldest"
-		assert asgn.select[2].order_by == "newest"
+		assert asgn.select[1].order == (subsample.query.OrderClause(by="age", dir="asc"),)
+		assert asgn.select[2].order == (subsample.query.OrderClause(by="age", dir="desc"),)
 
 	def test_fallback_with_repitch (self, tmp_path: pathlib.Path) -> None:
 		"""Fallback chain with repitch: all notes share pick 1."""

@@ -324,16 +324,17 @@ Note names use the convention C4 = 60 (C-1 = 0, G9 = 127). Sharps: `C#4`,
 ### Select - which sample to play
 
 The `select` block defines how to choose a sample from the instrument library.
-It has three parts: filter predicates (`where`), a sort order (`order_by`), and
+It has three parts: filter predicates (`where`), a sort order (`order`), and
 a pick position (`pick`).
 
 ```yaml
 select:
   where:
-    min_duration: 1.0      # at least 1 second long
-    min_onsets: 4           # at least 4 transient hits
-  order_by: newest          # most recently captured first
-  pick: 1                   # take the first match
+    min_duration: 1.0                     # at least 1 second long
+    min_onsets: 4                         # at least 4 transient hits
+  order:
+    - { by: age, dir: desc }              # most recently captured first
+  pick: 1                                 # take the first match
 ```
 
 All `where` predicates must pass (AND logic). Available predicates:
@@ -350,13 +351,32 @@ All `where` predicates must pass (AND logic). Available predicates:
 | `name` | string or path | Exact filename stem match, or path to a specific WAV |
 | `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Banks vs directory predicate](#banks-vs-directory-predicate)) |
 
-Available `order_by` values: `newest`, `oldest`, `similarity` (requires
-`reference`), `duration_asc`, `duration_desc`, `pitch_asc`, `pitch_desc`,
-`onsets_asc`, `onsets_desc`, `tempo_asc`, `tempo_desc`, `loudest`, `quietest`,
-`quantized_beats_asc`, `quantized_beats_desc`.
-Default: `newest`. When `reference` is in `where` and no explicit `order_by` is
-given, defaults to `similarity`. For `quantized_beats_asc`/`quantized_beats_desc`,
-samples without a computed variant sort to the end in both directions.
+`order` is a list of clauses. Each clause has a `by` (scorer name), a `dir`
+(`asc` or `desc`, default `asc`), and optional scorer-specific parameters.
+Later clauses break ties on earlier ones, so primary sort + secondary
+tie-breaker is natural:
+
+```yaml
+order:
+  - { by: duration, dir: desc }           # primary
+  - { by: onsets,   dir: asc }            # tiebreaker
+```
+
+Built-in scorers:
+
+| `by` | What it sorts by |
+|-----|------------------|
+| `age` | Arrival time (sample_id) — `desc` = newest first |
+| `duration` | Sample length in seconds |
+| `pitch` | Dominant frequency |
+| `onsets` | Detected onset count |
+| `tempo` | Detected BPM |
+| `level` | RMS loudness |
+| `quantized_beats` | Beat length of the assignment's `beat_quantize`/`pad_quantize` output. Samples without a computed variant park at the end regardless of direction. |
+| `similarity` | Similarity rank against the reference in `where`. Only supported as the primary clause; requires `reference` in `where`. When `reference` is set and no `order` is given, `similarity` desc is assumed automatically. |
+
+Default when `order` is omitted and `where.reference` is unset: newest-first
+(equivalent to `order: [{ by: age, dir: desc }]`).
 
 `pick` is 1-indexed. Default: 1 (first match). For multi-note assignments
 without explicit `pick`, each note gets the next position (rank distribution) -
@@ -371,6 +391,33 @@ select:
   - where: { reference: samples/reference/GM36_BassDrum1.wav }       # fall back to similarity match
 ```
 
+#### Legacy `order_by:` syntax
+
+The pre-2026-04 `order_by:` key with a bare-string token is still accepted
+indefinitely — the parser translates it into the equivalent `order:` clause.
+These two forms produce identical results:
+
+```yaml
+# Legacy (still accepted)
+select:
+  where: { pitched: true }
+  order_by: pitch_desc
+
+# Preferred (new form)
+select:
+  where: { pitched: true }
+  order:
+    - { by: pitch, dir: desc }
+```
+
+Legacy tokens map as follows: `newest` → `{by: age, dir: desc}`, `oldest` →
+`{by: age, dir: asc}`, `duration_desc` → `{by: duration, dir: desc}`,
+`loudest` → `{by: level, dir: desc}`, `quietest` → `{by: level, dir: asc}`,
+`quantized_beats_desc` → `{by: quantized_beats, dir: desc}`, `similarity` →
+`{by: similarity, dir: desc}`, and so on — field name without the `_asc`/
+`_desc` suffix goes into `by`, the suffix determines `dir`. Mixing both keys
+on the same `select` entry is an error.
+
 #### Examples
 
 ```yaml
@@ -378,13 +425,15 @@ select:
 select:
   where:
     reference: samples/reference/GM36_BassDrum1.wav
-  order_by: similarity
+  order:
+    - { by: similarity, dir: desc }
 
 # Pitched keyboard - oldest tonal sample, repitched per note
 select:
   where:
     pitched: true
-  order_by: oldest
+  order:
+    - { by: age, dir: asc }
   pick: 1
 
 # Rhythmic loops - recent, long, with enough beats
@@ -392,13 +441,16 @@ select:
   where:
     min_duration: 1.0
     min_onsets: 4
-  order_by: newest
+  order:
+    - { by: age, dir: desc }
 
-# Highest-pitched sample in the library
+# Longest sample, with onset count breaking ties
 select:
   where:
     pitched: true
-  order_by: pitch_desc
+  order:
+    - { by: duration, dir: desc }
+    - { by: onsets,   dir: desc }
   pick: 1
 ```
 
