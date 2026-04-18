@@ -63,29 +63,91 @@ def is_path_like (s: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Filter predicates
+# Filter predicates — Range + WherePredicate
 # ---------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class Range:
+
+	"""Numeric constraint block for one WherePredicate dimension.
+
+	Each operator is optional; all set operators must pass (AND) for
+	``contains()`` to return True.  An empty Range (no operator set)
+	matches every value — used as the default for WherePredicate's
+	per-field Ranges to mean "no filter on this dimension".
+
+	Operator vocabulary:
+	  gte  x >= n   (greater than or equal to)
+	  lte  x <= n   (less than or equal to)
+	  gt   x >  n   (strictly greater than)
+	  lt   x <  n   (strictly less than)
+	  eq   x == n   (exactly equal; strict, no epsilon tolerance — fine
+	                 for int-valued fields like onset count, care with
+	                 non-round-number floats)"""
+
+	gte: typing.Optional[float] = None
+	lte: typing.Optional[float] = None
+	gt:  typing.Optional[float] = None
+	lt:  typing.Optional[float] = None
+	eq:  typing.Optional[float] = None
+
+	def contains (self, x: float) -> bool:
+		if self.eq  is not None and x != self.eq:  return False
+		if self.gte is not None and x <  self.gte: return False
+		if self.lte is not None and x >  self.lte: return False
+		if self.gt  is not None and x <= self.gt:  return False
+		if self.lt  is not None and x >= self.lt:  return False
+		return True
+
+	def is_empty (self) -> bool:
+
+		"""True when no operator is set — contains() returns True for
+		every value.  Used by matches() to skip the external-state
+		resolver lookup for quantized_beats when no constraint is
+		active."""
+
+		return (
+			self.gte is None and self.lte is None
+			and self.gt is None and self.lt is None
+			and self.eq is None
+		)
+
+
+# Per-field numeric predicates.  Each operator dict in YAML populates one
+# of these; the field name is both the internal attribute and (for pitch,
+# with the _hz suffix stripped) the YAML key.
+_NUMERIC_FIELDS: tuple[str, ...] = (
+	"duration", "onsets", "tempo", "pitch_hz", "quantized_beats",
+)
+
+_VALID_OPERATORS: frozenset[str] = frozenset({"gte", "lte", "gt", "lt", "eq"})
+
 
 @dataclasses.dataclass(frozen=True)
 class WherePredicate:
 
-	"""Filter criteria for sample selection.  All fields use None = no filter."""
+	"""Filter criteria for sample selection.
 
-	min_duration:  typing.Optional[float] = None
-	max_duration:  typing.Optional[float] = None
-	min_onsets:    typing.Optional[int]   = None
-	max_onsets:    typing.Optional[int]   = None
-	pitched:       typing.Optional[bool]  = None
-	min_tempo:     typing.Optional[float] = None
-	max_tempo:     typing.Optional[float] = None
-	min_pitch_hz:  typing.Optional[float] = None
-	max_pitch_hz:  typing.Optional[float] = None
-	min_quantized_beats: typing.Optional[float] = None
-	max_quantized_beats: typing.Optional[float] = None
-	reference:     typing.Optional[str]   = None
-	name:          typing.Optional[str]   = None
-	name_path:     typing.Optional[str]   = None  # Resolved absolute path; used by _resolve_path_references to load samples (not used in matches())
-	directory:     typing.Optional[str]   = None  # Resolved absolute path; filters to samples from this directory
+	Numeric dimensions (``duration``, ``onsets``, ``tempo``, ``pitch_hz``,
+	``quantized_beats``) each carry a Range; an empty Range means "no
+	filter on this dimension".  Non-numeric fields (``pitched``,
+	``reference``, ``name``, ``name_path``, ``directory``) remain flat
+	Optionals — they aren't comparison predicates."""
+
+	duration:        Range = dataclasses.field(default_factory=Range)
+	onsets:          Range = dataclasses.field(default_factory=Range)
+	tempo:           Range = dataclasses.field(default_factory=Range)
+	pitch_hz:        Range = dataclasses.field(default_factory=Range)
+	quantized_beats: Range = dataclasses.field(default_factory=Range)
+
+	pitched:   typing.Optional[bool] = None
+	reference: typing.Optional[str]  = None
+	name:      typing.Optional[str]  = None
+	name_path: typing.Optional[str]  = None
+	"""Internal field — set by parse_select for path-based name references;
+	used by _resolve_path_references to load samples; never evaluated in
+	matches() and never exposed in YAML."""
+	directory: typing.Optional[str]  = None
 
 	def matches (
 		self,
@@ -95,48 +157,34 @@ class WherePredicate:
 
 		"""Return True if the record passes all active filter predicates."""
 
-		if self.min_duration is not None and record.duration < self.min_duration:
+		if not self.duration.contains(record.duration):
 			return False
 
-		if self.max_duration is not None and record.duration > self.max_duration:
+		if not self.onsets.contains(record.rhythm.onset_count):
 			return False
 
-		if self.min_onsets is not None and record.rhythm.onset_count < self.min_onsets:
+		if not self.tempo.contains(record.rhythm.tempo_bpm):
 			return False
 
-		if self.max_onsets is not None and record.rhythm.onset_count > self.max_onsets:
+		if not self.pitch_hz.contains(record.pitch.dominant_pitch_hz):
 			return False
+
+		# quantized_beats is the only field that consults external state.
+		# We only call the resolver when a constraint is actually active;
+		# an empty Range skips the lookup entirely so non-quantized
+		# samples aren't excluded from otherwise-unconstrained queries.
+		if not self.quantized_beats.is_empty():
+			beats = beats_resolver(record.sample_id) if beats_resolver is not None else None
+			if beats is None:
+				return False
+			if not self.quantized_beats.contains(beats):
+				return False
 
 		if self.pitched is not None:
 			is_pitched = subsample.analysis.has_stable_pitch(
 				record.spectral, record.pitch, record.duration,
 			)
-
 			if self.pitched != is_pitched:
-				return False
-
-		if self.min_tempo is not None and record.rhythm.tempo_bpm < self.min_tempo:
-			return False
-
-		if self.max_tempo is not None and record.rhythm.tempo_bpm > self.max_tempo:
-			return False
-
-		if self.min_pitch_hz is not None and record.pitch.dominant_pitch_hz < self.min_pitch_hz:
-			return False
-
-		if self.max_pitch_hz is not None and record.pitch.dominant_pitch_hz > self.max_pitch_hz:
-			return False
-
-		if self.min_quantized_beats is not None or self.max_quantized_beats is not None:
-			beats = beats_resolver(record.sample_id) if beats_resolver is not None else None
-
-			if beats is None:
-				return False
-
-			if self.min_quantized_beats is not None and beats < self.min_quantized_beats:
-				return False
-
-			if self.max_quantized_beats is not None and beats > self.max_quantized_beats:
 				return False
 
 		if self.name is not None and record.name != self.name:
@@ -145,9 +193,10 @@ class WherePredicate:
 		if self.directory is not None:
 			if record.filepath is None:
 				return False
-
 			try:
-				pathlib.Path(record.filepath).resolve().relative_to(pathlib.Path(self.directory).resolve())
+				pathlib.Path(record.filepath).resolve().relative_to(
+					pathlib.Path(self.directory).resolve(),
+				)
 			except ValueError:
 				return False
 
@@ -156,6 +205,34 @@ class WherePredicate:
 		# requires the full ranked list, so it's applied in query().
 
 		return True
+
+
+# Legacy ``min_X:`` / ``max_X:`` YAML keys translate into (field, operator)
+# pairs.  Kept indefinitely so existing YAML keeps working; not deprecated.
+_LEGACY_WHERE_KEYS: dict[str, tuple[str, str]] = {
+	"min_duration":        ("duration",        "gte"),
+	"max_duration":        ("duration",        "lte"),
+	"min_onsets":          ("onsets",          "gte"),
+	"max_onsets":          ("onsets",          "lte"),
+	"min_tempo":           ("tempo",           "gte"),
+	"max_tempo":           ("tempo",           "lte"),
+	"min_pitch":           ("pitch_hz",        "gte"),   # value may be a note name
+	"max_pitch":           ("pitch_hz",        "lte"),
+	"min_quantized_beats": ("quantized_beats", "gte"),
+	"max_quantized_beats": ("quantized_beats", "lte"),
+}
+
+
+# YAML keys for the numeric fields — the preferred new-form names.  pitch
+# in YAML maps to the internal pitch_hz attribute (the _hz suffix makes
+# units explicit in Python, awkward in user-facing YAML).
+_NUMERIC_YAML_KEYS: dict[str, str] = {
+	"duration":        "duration",
+	"onsets":          "onsets",
+	"tempo":           "tempo",
+	"pitch":           "pitch_hz",
+	"quantized_beats": "quantized_beats",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +671,13 @@ def _parse_where (
 
 	"""Parse a ``where:`` dict from a MIDI map assignment into a WherePredicate.
 
+	Accepts both the new per-field operator-dict form and the legacy
+	``min_X``/``max_X`` bare-key form.  Within numeric fields, a bare
+	scalar is shorthand for ``{eq: X}``.  Legacy and new forms on the
+	same field raise ValueError — a cheap guard against mid-migration
+	accidents (e.g. someone copying a new-form block on top of an old-
+	form one).
+
 	Args:
 		raw:                The raw YAML value of the 'where' block.
 		assignment_name:    Human-readable name of the assignment (for error messages).
@@ -609,53 +693,96 @@ def _parse_where (
 			f"MIDI map assignment {assignment_name!r}: 'where' must be a mapping"
 		)
 
-	kwargs: dict[str, typing.Any] = {}
+	# Accumulated per-field operator kwargs, keyed by internal field name
+	# (e.g. "duration", "pitch_hz").  Each value is a dict of
+	# {operator_name: float_value} ready to splat into Range(**...).
+	range_kwargs: dict[str, dict[str, float]] = {
+		field: {} for field in _NUMERIC_FIELDS
+	}
+
+	# Fields whose values came from legacy min_X/max_X keys — used to
+	# reject collisions with a new-form entry on the same field.
+	touched_by_legacy: set[str] = set()
+	touched_by_new:    set[str] = set()
+
+	# Non-range predicate kwargs collected separately; constructed directly
+	# into WherePredicate at the end.
+	other_kwargs: dict[str, typing.Any] = {}
 
 	for key, value in raw.items():
 
-		if key in ("min_duration", "max_duration"):
-			kwargs[key] = float(value)
+		# Legacy min_X / max_X keys: translate to (field, operator).
+		if key in _LEGACY_WHERE_KEYS:
+			field, op = _LEGACY_WHERE_KEYS[key]
+			if field in touched_by_new:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: field "
+					f"{field!r} has both legacy ({key!r}) and new-form "
+					f"constraints — use one form or the other, not both."
+				)
+			range_kwargs[field][op] = _coerce_range_value(
+				field, key, value, assignment_name,
+			)
+			touched_by_legacy.add(field)
+			continue
 
-		elif key in ("min_onsets", "max_onsets"):
-			kwargs[key] = int(value)
+		# New-form numeric field: duration / onsets / tempo / pitch / quantized_beats.
+		if key in _NUMERIC_YAML_KEYS:
+			field = _NUMERIC_YAML_KEYS[key]
+			if field in touched_by_legacy:
+				legacy_pair = [
+					k for k, (f, _) in _LEGACY_WHERE_KEYS.items() if f == field
+				]
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: field "
+					f"{key!r} has both new-form and legacy "
+					f"({'/'.join(sorted(legacy_pair))}) constraints — use "
+					f"one form or the other, not both."
+				)
 
-		elif key == "pitched":
-			kwargs["pitched"] = bool(value)
-
-		elif key in ("min_tempo", "max_tempo"):
-			kwargs[key] = float(value)
-
-		elif key in ("min_pitch", "max_pitch"):
-			# Accept Hz (float) or note name (string).
-			if isinstance(value, str):
-				hz = _note_name_to_hz(value)
-				kwargs[key + "_hz"] = hz
+			# Dict → operator block.  Scalar (int/float/str) → eq shorthand.
+			if isinstance(value, dict):
+				for op, op_value in value.items():
+					if op not in _VALID_OPERATORS:
+						raise ValueError(
+							f"MIDI map assignment {assignment_name!r}: "
+							f"unknown operator {op!r} under {key!r}.  "
+							f"Valid operators: "
+							f"{', '.join(sorted(_VALID_OPERATORS))}"
+						)
+					range_kwargs[field][op] = _coerce_range_value(
+						field, f"{key}.{op}", op_value, assignment_name,
+					)
 			else:
-				kwargs[key + "_hz"] = float(value)
+				# Scalar shorthand for eq.
+				range_kwargs[field]["eq"] = _coerce_range_value(
+					field, key, value, assignment_name,
+				)
 
-		elif key in ("min_quantized_beats", "max_quantized_beats"):
-			kwargs[key] = float(value)
+			touched_by_new.add(field)
+			continue
+
+		# Non-range predicates — unchanged parsing.
+		if key == "pitched":
+			other_kwargs["pitched"] = bool(value)
 
 		elif key == "reference":
 			ref = str(value)
 			if is_path_like(ref):
-				# Path-based reference: resolve to absolute path (used as matrix key)
-				kwargs["reference"] = str((midi_map_dir / ref).resolve())
+				other_kwargs["reference"] = str((midi_map_dir / ref).resolve())
 			else:
-				# Bare name: keep as-is; case-insensitive lookup happens at query time
-				kwargs["reference"] = ref
+				other_kwargs["reference"] = ref
 
 		elif key == "name":
 			raw_name = str(value)
 			if is_path_like(raw_name):
-				# Path-based name: store the stem in 'name', resolved path in 'name_path'
-				kwargs["name"] = pathlib.Path(raw_name).stem
-				kwargs["name_path"] = str((midi_map_dir / raw_name).resolve())
+				other_kwargs["name"]      = pathlib.Path(raw_name).stem
+				other_kwargs["name_path"] = str((midi_map_dir / raw_name).resolve())
 			else:
-				kwargs["name"] = raw_name
+				other_kwargs["name"] = raw_name
 
 		elif key == "directory":
-			kwargs["directory"] = str((midi_map_dir / str(value)).resolve())
+			other_kwargs["directory"] = str((midi_map_dir / str(value)).resolve())
 
 		else:
 			_log.warning(
@@ -663,7 +790,48 @@ def _parse_where (
 				assignment_name, key,
 			)
 
-	return WherePredicate(**kwargs)
+	# Build the WherePredicate explicitly so mypy sees the field-name →
+	# Range correspondence.  Empty Ranges (no operator set) default via
+	# default_factory on the dataclass.
+	def _range_for (field: str) -> Range:
+		ops = range_kwargs[field]
+		return Range(**ops) if ops else Range()
+
+	return WherePredicate(
+		duration        = _range_for("duration"),
+		onsets          = _range_for("onsets"),
+		tempo           = _range_for("tempo"),
+		pitch_hz        = _range_for("pitch_hz"),
+		quantized_beats = _range_for("quantized_beats"),
+		**other_kwargs,
+	)
+
+
+def _coerce_range_value (
+	field: str,
+	source_key: str,
+	value: typing.Any,
+	assignment_name: str,
+) -> float:
+
+	"""Convert a raw YAML scalar into the float the Range slot expects.
+
+	Handles the pitch-field note-name special case: under ``pitch`` or
+	``min_pitch`` / ``max_pitch``, a string value is treated as a note
+	name and converted to Hz via _note_name_to_hz.  Other fields require
+	a numeric value.
+	"""
+
+	if field == "pitch_hz" and isinstance(value, str):
+		return _note_name_to_hz(value)
+
+	try:
+		return float(value)
+	except (TypeError, ValueError) as exc:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: value for "
+			f"{source_key!r} must be numeric (got {value!r})"
+		) from exc
 
 
 def _note_name_to_hz (name: str) -> float:

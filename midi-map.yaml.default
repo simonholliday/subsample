@@ -109,18 +109,48 @@
 #
 # FILTER PREDICATES (where)
 #
-#   min_duration / max_duration   float seconds
-#   min_onsets / max_onsets       int (onset_count)
+# Numeric predicates (duration / onsets / tempo / pitch / quantized_beats)
+# use per-field operator dicts.  Operators:
+#
+#   gte   >=    lte   <=    gt   >    lt   <    eq   ==
+#
+# Mix any operators on one field (AND across all):
+#
+#   duration:        { gte: 1.0, lt: 5.0 }         # 1.0 <= x < 5.0
+#   onsets:          { gte: 4 }                    # >= 4
+#   tempo:           { gte: 100, lte: 140 }
+#   pitch:           { gte: C3, lt: C6 }           # Hz float or note name
+#   quantized_beats: { eq: 4 }                     # exactly 4 beats
+#
+# Scalar shorthand: a bare number under a numeric field means `{ eq: X }`.
+#   quantized_beats: 4        # same as { eq: 4 }
+#
+# Non-numeric predicates:
+#
 #   pitched                       true = has stable pitch; false = not pitched
-#   min_tempo / max_tempo         float BPM
-#   min_pitch / max_pitch         float Hz or note name (e.g. C3)
-#   min_quantized_beats           float beats — length of the assignment's
-#   max_quantized_beats           beat_quantize/pad_quantize output (non-integer
-#                                 values accepted).  Samples with no variant yet
-#                                 computed are excluded.
 #   reference                     string — similarity match against a named
 #                                 reference sample
 #   name                          string — exact filename stem match
+#   directory                     string — only samples whose file path is
+#                                 inside this directory
+#
+# Units:
+#   duration        float seconds
+#   onsets          int           (onset count)
+#   tempo           float BPM
+#   pitch           float Hz or note name (C3, A4, F#5, etc.)
+#   quantized_beats float beats   (beat length of the assignment's
+#                                  beat_quantize/pad_quantize output;
+#                                  samples with no computed variant are
+#                                  excluded when this predicate is active)
+#
+# LEGACY FORM (indefinitely accepted)
+#
+# The old `min_X:` / `max_X:` keys with bare scalar values still work —
+# they translate internally into the equivalent operator dict.  Do not
+# mix legacy and new-form constraints on the same field (e.g.
+# `min_duration: 1.0` + `duration: { lte: 5.0 }` is rejected); pick one
+# form per field.  New YAML should prefer the new operator-dict form.
 #
 # ORDER CLAUSES
 #
@@ -487,8 +517,8 @@ assignments:
   #   notes: C2..C4
   #   select:
   #     where:
-  #       min_duration: 1.0
-  #       min_onsets: 4
+  #       duration: { gte: 1.0 }
+  #       onsets:   { gte: 4 }
   #     order: [{ by: age, dir: desc }]
   #     pick: 1
   #   process:
@@ -534,7 +564,7 @@ assignments:
   #   channel: 7
   #   notes: C3..C5
   #   select:
-  #     where: { pitched: true, min_duration: 0.5 }
+  #     where: { pitched: true, duration: { gte: 0.5 } }
   #     order: [{ by: age, dir: asc }]
   #   process:
   #     - reverse: true

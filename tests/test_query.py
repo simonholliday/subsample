@@ -100,22 +100,22 @@ class TestWherePredicate:
 		assert pred.matches(record)
 
 	def test_min_duration (self) -> None:
-		pred = subsample.query.WherePredicate(min_duration=2.0)
+		pred = subsample.query.WherePredicate(duration=subsample.query.Range(gte=2.0))
 		assert not pred.matches(_make_record(duration=1.5))
 		assert pred.matches(_make_record(duration=2.5))
 
 	def test_max_duration (self) -> None:
-		pred = subsample.query.WherePredicate(max_duration=1.0)
+		pred = subsample.query.WherePredicate(duration=subsample.query.Range(lte=1.0))
 		assert pred.matches(_make_record(duration=0.5))
 		assert not pred.matches(_make_record(duration=1.5))
 
 	def test_min_onsets (self) -> None:
-		pred = subsample.query.WherePredicate(min_onsets=4)
+		pred = subsample.query.WherePredicate(onsets=subsample.query.Range(gte=4))
 		assert not pred.matches(_make_record(onset_count=2))
 		assert pred.matches(_make_record(onset_count=5))
 
 	def test_max_onsets (self) -> None:
-		pred = subsample.query.WherePredicate(max_onsets=3)
+		pred = subsample.query.WherePredicate(onsets=subsample.query.Range(lte=3))
 		assert pred.matches(_make_record(onset_count=2))
 		assert not pred.matches(_make_record(onset_count=5))
 
@@ -146,22 +146,22 @@ class TestWherePredicate:
 		assert pred.matches(_make_record(dominant_pitch_hz=0.0))
 
 	def test_min_tempo (self) -> None:
-		pred = subsample.query.WherePredicate(min_tempo=100.0)
+		pred = subsample.query.WherePredicate(tempo=subsample.query.Range(gte=100.0))
 		assert not pred.matches(_make_record(tempo_bpm=80.0))
 		assert pred.matches(_make_record(tempo_bpm=120.0))
 
 	def test_max_tempo (self) -> None:
-		pred = subsample.query.WherePredicate(max_tempo=130.0)
+		pred = subsample.query.WherePredicate(tempo=subsample.query.Range(lte=130.0))
 		assert pred.matches(_make_record(tempo_bpm=120.0))
 		assert not pred.matches(_make_record(tempo_bpm=140.0))
 
 	def test_min_pitch_hz (self) -> None:
-		pred = subsample.query.WherePredicate(min_pitch_hz=300.0)
+		pred = subsample.query.WherePredicate(pitch_hz=subsample.query.Range(gte=300.0))
 		assert not pred.matches(_make_record(dominant_pitch_hz=200.0))
 		assert pred.matches(_make_record(dominant_pitch_hz=440.0))
 
 	def test_max_pitch_hz (self) -> None:
-		pred = subsample.query.WherePredicate(max_pitch_hz=500.0)
+		pred = subsample.query.WherePredicate(pitch_hz=subsample.query.Range(lte=500.0))
 		assert pred.matches(_make_record(dominant_pitch_hz=440.0))
 		assert not pred.matches(_make_record(dominant_pitch_hz=880.0))
 
@@ -174,7 +174,7 @@ class TestWherePredicate:
 
 		"""Multiple predicates are AND-ed: all must pass."""
 
-		pred = subsample.query.WherePredicate(min_duration=1.0, min_onsets=4)
+		pred = subsample.query.WherePredicate(duration=subsample.query.Range(gte=1.0), onsets=subsample.query.Range(gte=4))
 		assert not pred.matches(_make_record(duration=2.0, onset_count=2))
 		assert not pred.matches(_make_record(duration=0.5, onset_count=5))
 		assert pred.matches(_make_record(duration=2.0, onset_count=5))
@@ -209,7 +209,7 @@ class TestQuery:
 
 	def test_min_duration_filter (self) -> None:
 		spec = subsample.query.SelectSpec(
-			where=subsample.query.WherePredicate(min_duration=1.0),
+			where=subsample.query.WherePredicate(duration=subsample.query.Range(gte=1.0)),
 		)
 		result = subsample.query.query(spec, self._samples())
 		assert all(r.duration >= 1.0 for r in result)
@@ -236,7 +236,7 @@ class TestQuery:
 		"""Longer than 1s, ordered by duration descending."""
 
 		spec = subsample.query.SelectSpec(
-			where=subsample.query.WherePredicate(min_duration=1.0),
+			where=subsample.query.WherePredicate(duration=subsample.query.Range(gte=1.0)),
 			order=(subsample.query.OrderClause(by="duration", dir="desc"),),
 		)
 		result = subsample.query.query(spec, self._samples())
@@ -260,7 +260,7 @@ class TestQuery:
 		"""Filters that match nothing return an empty list."""
 
 		spec = subsample.query.SelectSpec(
-			where=subsample.query.WherePredicate(min_duration=100.0),
+			where=subsample.query.WherePredicate(duration=subsample.query.Range(gte=100.0)),
 		)
 		result = subsample.query.query(spec, self._samples())
 		assert result == []
@@ -310,7 +310,7 @@ class TestQuantizedBeats:
 		"""min_quantized_beats excludes samples below the threshold."""
 
 		spec = subsample.query.SelectSpec(
-			where=subsample.query.WherePredicate(min_quantized_beats=4.0),
+			where=subsample.query.WherePredicate(quantized_beats=subsample.query.Range(gte=4.0)),
 		)
 		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
 
@@ -322,7 +322,7 @@ class TestQuantizedBeats:
 		"""max_quantized_beats excludes samples above the threshold."""
 
 		spec = subsample.query.SelectSpec(
-			where=subsample.query.WherePredicate(max_quantized_beats=4.0),
+			where=subsample.query.WherePredicate(quantized_beats=subsample.query.Range(lte=4.0)),
 		)
 		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
 
@@ -335,8 +335,7 @@ class TestQuantizedBeats:
 
 		spec = subsample.query.SelectSpec(
 			where=subsample.query.WherePredicate(
-				min_quantized_beats=3.0,
-				max_quantized_beats=5.0,
+				quantized_beats=subsample.query.Range(gte=3.0, lte=5.0),
 			),
 		)
 		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
@@ -348,7 +347,7 @@ class TestQuantizedBeats:
 		"""Samples whose resolver returns None are excluded from min/max filters."""
 
 		spec = subsample.query.SelectSpec(
-			where=subsample.query.WherePredicate(min_quantized_beats=0.0),
+			where=subsample.query.WherePredicate(quantized_beats=subsample.query.Range(gte=0.0)),
 		)
 		result = subsample.query.query(spec, self._samples(), beats_resolver=self._resolver())
 
@@ -361,7 +360,7 @@ class TestQuantizedBeats:
 		"""Without a resolver, quantized_beats filters exclude everything."""
 
 		spec = subsample.query.SelectSpec(
-			where=subsample.query.WherePredicate(min_quantized_beats=1.0),
+			where=subsample.query.WherePredicate(quantized_beats=subsample.query.Range(gte=1.0)),
 		)
 		result = subsample.query.query(spec, self._samples(), beats_resolver=None)
 
@@ -397,7 +396,7 @@ class TestQuantizedBeats:
 		resolver = lambda sid: mapping.get(sid)
 
 		spec = subsample.query.SelectSpec(
-			where=subsample.query.WherePredicate(min_quantized_beats=3.6),
+			where=subsample.query.WherePredicate(quantized_beats=subsample.query.Range(gte=3.6)),
 			order=(subsample.query.OrderClause(by="quantized_beats", dir="asc"),),
 		)
 		samples = [
@@ -423,7 +422,7 @@ class TestParseSelect:
 		raw = {"where": {"min_duration": 1.0}, "order_by": "newest", "pick": 2}
 		specs = subsample.query.parse_select(raw, "test")
 		assert len(specs) == 1
-		assert specs[0].where.min_duration == 1.0
+		assert specs[0].where.duration.gte == 1.0
 		assert specs[0].order == (subsample.query.OrderClause(by="age", dir="desc"),)
 		assert specs[0].pick == 2
 
@@ -449,8 +448,8 @@ class TestParseSelect:
 			"order_by": "quantized_beats_desc",
 		}
 		specs = subsample.query.parse_select(raw, "test")
-		assert specs[0].where.min_quantized_beats == 2.0
-		assert specs[0].where.max_quantized_beats == 4.5
+		assert specs[0].where.quantized_beats.gte == 2.0
+		assert specs[0].where.quantized_beats.lte == 4.5
 		assert specs[0].order == (subsample.query.OrderClause(by="quantized_beats", dir="desc"),)
 
 	def test_defaults (self) -> None:
@@ -720,11 +719,11 @@ class TestDirectoryPredicate:
 		record = dataclasses.replace(record, filepath=pathlib.Path("/samples/captures/test.wav"))
 
 		# Passes both directory and min_onsets
-		pred = subsample.query.WherePredicate(directory="/samples/captures", min_onsets=3)
+		pred = subsample.query.WherePredicate(directory="/samples/captures", onsets=subsample.query.Range(gte=3))
 		assert pred.matches(record)
 
 		# Passes directory but fails min_onsets
-		pred2 = subsample.query.WherePredicate(directory="/samples/captures", min_onsets=10)
+		pred2 = subsample.query.WherePredicate(directory="/samples/captures", onsets=subsample.query.Range(gte=10))
 		assert not pred2.matches(record)
 
 	def test_parse_where_directory (self) -> None:
@@ -756,6 +755,163 @@ class TestSelectSpec:
 		assert spec.order == ()
 		assert spec.pick == 1
 		assert spec.where == subsample.query.WherePredicate()
+
+
+# ---------------------------------------------------------------------------
+# Range + operator-dict YAML surface
+# ---------------------------------------------------------------------------
+
+
+class TestRange:
+
+	"""Unit tests for the Range helper (AND semantics across all slots)."""
+
+	def test_empty_range_contains_any_value (self) -> None:
+		r = subsample.query.Range()
+		assert r.is_empty()
+		for x in [-1e9, -1.0, 0.0, 1.0, 1e9]:
+			assert r.contains(x)
+
+	def test_gte_is_inclusive (self) -> None:
+		r = subsample.query.Range(gte=5.0)
+		assert     r.contains(5.0)
+		assert     r.contains(5.000001)
+		assert not r.contains(4.999999)
+
+	def test_lte_is_inclusive (self) -> None:
+		r = subsample.query.Range(lte=5.0)
+		assert     r.contains(5.0)
+		assert     r.contains(4.999999)
+		assert not r.contains(5.000001)
+
+	def test_gt_is_strict (self) -> None:
+		r = subsample.query.Range(gt=5.0)
+		assert not r.contains(5.0)
+		assert     r.contains(5.000001)
+
+	def test_lt_is_strict (self) -> None:
+		r = subsample.query.Range(lt=5.0)
+		assert not r.contains(5.0)
+		assert     r.contains(4.999999)
+
+	def test_eq_is_exact (self) -> None:
+		r = subsample.query.Range(eq=4.0)
+		assert     r.contains(4.0)
+		assert not r.contains(3.999)
+		assert not r.contains(4.001)
+
+	def test_combined_operators_and_together (self) -> None:
+		"""gte + lt composes to a half-open range."""
+		r = subsample.query.Range(gte=1.0, lt=5.0)
+		assert     r.contains(1.0)
+		assert     r.contains(3.0)
+		assert not r.contains(0.9)
+		assert not r.contains(5.0)
+
+	def test_contradictory_operators_match_nothing (self) -> None:
+		"""`{gte: 5, lte: 3}` is intentionally empty — models what was written."""
+		r = subsample.query.Range(gte=5.0, lte=3.0)
+		assert not r.contains(4.0)
+		assert not r.contains(5.0)
+		assert not r.contains(3.0)
+
+
+class TestOperatorDictYaml:
+
+	"""The new per-field `{gte: ..., lte: ...}` YAML form."""
+
+	def test_duration_operator_dict_parsed (self) -> None:
+		raw   = {"where": {"duration": {"gte": 1.0, "lt": 5.0}}}
+		specs = subsample.query.parse_select(raw, "test")
+		assert specs[0].where.duration == subsample.query.Range(gte=1.0, lt=5.0)
+
+	def test_all_five_operators_on_one_field (self) -> None:
+		"""All five operators route through the parser together.  (The
+		resulting Range would match nothing for most of these combinations;
+		the test only checks parser fidelity.)"""
+		raw = {"where": {"onsets": {"gte": 1, "lte": 10, "gt": 2, "lt": 9, "eq": 5}}}
+		specs = subsample.query.parse_select(raw, "test")
+		assert specs[0].where.onsets == subsample.query.Range(
+			gte=1.0, lte=10.0, gt=2.0, lt=9.0, eq=5.0,
+		)
+
+	def test_scalar_shorthand_is_eq (self) -> None:
+		"""Bare scalar under a numeric field is sugar for `{eq: X}`."""
+		raw   = {"where": {"quantized_beats": 4}}
+		specs = subsample.query.parse_select(raw, "test")
+		assert specs[0].where.quantized_beats == subsample.query.Range(eq=4.0)
+
+	def test_pitch_accepts_note_name_under_operator (self) -> None:
+		"""String under pitch routes through _note_name_to_hz.  Regression
+		guard — the legacy parser supported this but the old test suite
+		never covered it."""
+		import librosa
+		raw   = {"where": {"pitch": {"gte": "C3", "lt": "C6"}}}
+		specs = subsample.query.parse_select(raw, "test")
+		expected_c3 = float(librosa.midi_to_hz(48))
+		expected_c6 = float(librosa.midi_to_hz(84))
+		assert specs[0].where.pitch_hz.gte == pytest.approx(expected_c3)
+		assert specs[0].where.pitch_hz.lt  == pytest.approx(expected_c6)
+
+	def test_unknown_operator_raises (self) -> None:
+		raw = {"where": {"duration": {"between": [1.0, 5.0]}}}
+		with pytest.raises(ValueError, match="unknown operator"):
+			subsample.query.parse_select(raw, "test")
+
+
+class TestLegacyWhereShim:
+
+	"""Legacy `min_X`/`max_X` YAML keys keep working."""
+
+	def test_legacy_min_duration_translates_to_gte (self) -> None:
+		specs = subsample.query.parse_select(
+			{"where": {"min_duration": 1.0}}, "test",
+		)
+		assert specs[0].where.duration == subsample.query.Range(gte=1.0)
+
+	def test_legacy_max_duration_translates_to_lte (self) -> None:
+		specs = subsample.query.parse_select(
+			{"where": {"max_duration": 5.0}}, "test",
+		)
+		assert specs[0].where.duration == subsample.query.Range(lte=5.0)
+
+	def test_legacy_and_new_produce_equal_specs (self) -> None:
+		"""Parsing either form must yield an identical SelectSpec — proves
+		the shim is a pure translation, not a subtly-different path."""
+		legacy = subsample.query.parse_select(
+			{"where": {"min_duration": 1.0, "max_duration": 5.0}}, "test",
+		)
+		new = subsample.query.parse_select(
+			{"where": {"duration": {"gte": 1.0, "lte": 5.0}}}, "test",
+		)
+		assert legacy == new
+
+	def test_legacy_min_pitch_accepts_note_name (self) -> None:
+		"""Legacy path still works; regression guard against shim drift."""
+		specs = subsample.query.parse_select(
+			{"where": {"min_pitch": "A4"}}, "test",
+		)
+		assert specs[0].where.pitch_hz.gte == pytest.approx(440.0)
+
+	def test_mixing_legacy_and_new_on_same_field_raises (self) -> None:
+		"""Mid-migration accident: a user overlays a new-form block on top
+		of an old-form block for the same field.  Catch this loudly rather
+		than silently picking one form's value."""
+		with pytest.raises(ValueError, match="legacy"):
+			subsample.query.parse_select(
+				{"where": {"min_duration": 1.0, "duration": {"lte": 5.0}}},
+				"test",
+			)
+
+	def test_mixing_forms_across_different_fields_is_fine (self) -> None:
+		"""Gradual migration: legacy on one field, new-form on another.
+		This must not raise."""
+		specs = subsample.query.parse_select(
+			{"where": {"min_duration": 1.0, "onsets": {"gt": 4}}},
+			"test",
+		)
+		assert specs[0].where.duration == subsample.query.Range(gte=1.0)
+		assert specs[0].where.onsets   == subsample.query.Range(gt=4.0)
 
 
 # ---------------------------------------------------------------------------

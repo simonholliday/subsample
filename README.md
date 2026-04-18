@@ -330,26 +330,48 @@ a pick position (`pick`).
 ```yaml
 select:
   where:
-    min_duration: 1.0                     # at least 1 second long
-    min_onsets: 4                         # at least 4 transient hits
+    duration: { gte: 1.0 }                # at least 1 second long
+    onsets:   { gte: 4 }                  # at least 4 transient hits
   order:
     - { by: age, dir: desc }              # most recently captured first
   pick: 1                                 # take the first match
 ```
 
-All `where` predicates must pass (AND logic). Available predicates:
+All `where` predicates must pass (AND logic).
+
+Numeric predicates (`duration`, `onsets`, `tempo`, `pitch`, `quantized_beats`)
+use a per-field operator dict. Operators:
+
+| Operator | Meaning |
+|-----|---------|
+| `gte` | `>=` inclusive lower bound |
+| `lte` | `<=` inclusive upper bound |
+| `gt` | `>` strict lower bound |
+| `lt` | `<` strict upper bound |
+| `eq` | `==` exact equality |
+
+Any combination on one field AND-composes. A bare scalar under a numeric field
+is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
+`quantized_beats: { eq: 4 }`.
 
 | Predicate | Type | Description |
 |-----------|------|-------------|
-| `min_duration` / `max_duration` | float (seconds) | Filter by sample length |
-| `min_onsets` / `max_onsets` | int | Filter by detected transient count |
+| `duration` | float (seconds) | Filter by sample length. Example: `{ gte: 1.0, lt: 5.0 }` |
+| `onsets` | int | Filter by detected transient count. Example: `{ gte: 4 }` |
+| `tempo` | float (BPM) | Filter by detected tempo. Example: `{ gte: 100, lte: 140 }` |
+| `pitch` | Hz or note name | Filter by detected frequency. Each operator value is either Hz or a note name (`C3`, `A4`, `F#5`). Example: `{ gte: C3, lt: C6 }` |
+| `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `beat_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
-| `min_tempo` / `max_tempo` | float (BPM) | Filter by detected tempo |
-| `min_pitch` / `max_pitch` | Hz or note name | Filter by detected frequency |
-| `min_quantized_beats` / `max_quantized_beats` | float (beats) | Filter by the beat length of the assignment's `beat_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded. Non-integer values accepted. |
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
 | `name` | string or path | Exact filename stem match, or path to a specific WAV |
 | `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Banks vs directory predicate](#banks-vs-directory-predicate)) |
+
+**Legacy `min_X` / `max_X` syntax**: the pre-2026-04 form
+(`min_duration: 1.0`, `max_pitch: A4`, etc.) still works indefinitely —
+the parser translates each legacy key into the equivalent operator
+(`gte` for `min_`, `lte` for `max_`). Mixing both forms on the same
+field in one `where` block raises an error; use one form per field. New
+YAML should prefer the operator-dict form.
 
 `order` is a list of clauses. Each clause has a `by` (scorer name), a `dir`
 (`asc` or `desc`, default `asc`), and optional scorer-specific parameters.
