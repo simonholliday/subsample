@@ -93,7 +93,7 @@ def _quantize_params (
 	config_bpm: float = 0.0,
 ) -> tuple[typing.Optional[float], int]:
 
-	"""Extract BPM and grid from a beat_quantize or pad_quantize step.
+	"""Extract BPM and grid from a stretch_quantize or pad_quantize step.
 
 	Returns (target_bpm, grid). When no explicit BPM is declared in the
 	step, falls back to config_bpm (from transform.target_bpm in config).
@@ -129,7 +129,7 @@ def _build_beats_resolver (
 
 	"""Build a callable that returns the quantized beat count for a sample.
 
-	Inspects the assignment's process spec for a ``beat_quantize`` or
+	Inspects the assignment's process spec for a ``stretch_quantize`` or
 	``pad_quantize`` step and extracts the effective BPM and grid.  The
 	returned callable looks up the matching variant via the transform
 	manager and reads the ``GridEnergyProfile`` length to derive the
@@ -145,8 +145,8 @@ def _build_beats_resolver (
 	# Determine which quantize step (if any) applies.
 	step: typing.Union[subsample.transform.TimeStretch, subsample.transform.PadQuantize]
 
-	if process.has_beat_quantize():
-		bpm, grid = _quantize_params(process, "beat_quantize", session_bpm)
+	if process.has_stretch_quantize():
+		bpm, grid = _quantize_params(process, "stretch_quantize", session_bpm)
 		if bpm is None or bpm <= 0:
 			return None
 		step = subsample.transform.TimeStretch(target_bpm=float(bpm), resolution=int(grid))
@@ -156,7 +156,7 @@ def _build_beats_resolver (
 			return None
 		step = subsample.transform.PadQuantize(target_bpm=float(bpm), resolution=int(grid))
 	elif session_bpm > 0:
-		# Fall back to session-level beat_quantize.
+		# Fall back to session-level stretch_quantize.
 		step = subsample.transform.TimeStretch(target_bpm=float(session_bpm), resolution=16)
 	else:
 		return None
@@ -169,6 +169,59 @@ def _build_beats_resolver (
 			return None
 		profile = result.energy_profile
 		return len(profile.energy) * 4.0 / profile.resolution
+
+	return _resolver
+
+
+def _build_energy_profile_resolver (
+	process: subsample.query.ProcessSpec,
+	transform_manager: typing.Optional[subsample.transform.TransformManager],
+	session_bpm: float,
+) -> typing.Optional[typing.Callable[[int], typing.Optional[subsample.transform.GridEnergyProfile]]]:
+
+	"""Build a callable returning the full GridEnergyProfile for a sample.
+
+	Twin of ``_build_beats_resolver`` but returns the whole profile
+	(not just the beat count).  Used by the ``beat_match`` order
+	scorer, which needs per-slot energy data.
+
+	Same quantize-step inspection logic as _build_beats_resolver:
+	inspects the assignment's process for a ``stretch_quantize`` or
+	``pad_quantize`` step, looks up the matching variant, and returns
+	its ``energy_profile``.
+
+	Returns None (not a callable) when no valid quantize step is
+	present, no transform manager is available, or the effective BPM
+	is 0.
+	"""
+
+	if transform_manager is None:
+		return None
+
+	step: typing.Union[subsample.transform.TimeStretch, subsample.transform.PadQuantize]
+
+	if process.has_stretch_quantize():
+		bpm, grid = _quantize_params(process, "stretch_quantize", session_bpm)
+		if bpm is None or bpm <= 0:
+			return None
+		step = subsample.transform.TimeStretch(target_bpm=float(bpm), resolution=int(grid))
+	elif process.has_pad_quantize():
+		bpm, grid = _quantize_params(process, "pad_quantize", session_bpm)
+		if bpm is None or bpm <= 0:
+			return None
+		step = subsample.transform.PadQuantize(target_bpm=float(bpm), resolution=int(grid))
+	elif session_bpm > 0:
+		step = subsample.transform.TimeStretch(target_bpm=float(session_bpm), resolution=16)
+	else:
+		return None
+
+	spec = subsample.transform.TransformSpec(steps=(step,))
+
+	def _resolver (sample_id: int) -> typing.Optional[subsample.transform.GridEnergyProfile]:
+		result = transform_manager.get_variant(sample_id, spec)
+		if result is None:
+			return None
+		return result.energy_profile
 
 	return _resolver
 
@@ -664,7 +717,7 @@ def load_midi_map (
 	Each assignment declares:
 	  select:   Which sample to play — filter predicates, ordering, pick position.
 	            Can be a single spec or a list (fallback chain, tried in order).
-	  process:  How to present it — ordered list of processors (repitch, beat_quantize, etc.).
+	  process:  How to present it — ordered list of processors (repitch, stretch_quantize, etc.).
 	  one_shot: Playback behaviour — true (default) ignores note_off.
 	  gain:     Level offset in dB (default 0.0).
 	  pan:      Channel weights defining a target layout (e.g. [50, 50] for stereo,
@@ -801,7 +854,7 @@ def load_midi_map (
 		segment_mode: typing.Union[str, int] = ""
 
 		for step in process.steps:
-			if step.name in ("beat_quantize", "pad_quantize"):
+			if step.name in ("stretch_quantize", "pad_quantize"):
 				raw_seg = step.get("segment", "")
 
 				if isinstance(raw_seg, int) and raw_seg > 0:
@@ -1199,7 +1252,7 @@ class MidiPlayer:
 			if asgn.process.has_repitch():
 				line += " pitched"
 
-			if asgn.process.has_beat_quantize():
+			if asgn.process.has_stretch_quantize():
 				line += " beat-quantized"
 
 			if asgn.process.has_pad_quantize():
@@ -1534,11 +1587,15 @@ class MidiPlayer:
 		beats_resolver = _build_beats_resolver(
 			assignment.process, eff_transform, self._target_bpm,
 		)
+		energy_profile_resolver = _build_energy_profile_resolver(
+			assignment.process, eff_transform, self._target_bpm,
+		)
 
 		for select_spec in assignment.select:
 
 			ranked = subsample.query.query(
 				select_spec, all_samples, eff_similarity, beats_resolver,
+				energy_profile_resolver=energy_profile_resolver,
 			)
 
 			if ranked:
@@ -1578,17 +1635,17 @@ class MidiPlayer:
 					if subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
 						midi_note_for_spec = msg.note
 
-				# Validation: skip beat_quantize for samples with no tempo.
+				# Validation: skip stretch_quantize for samples with no tempo.
 				# pad_quantize does NOT need source tempo — only target BPM.
 				bpm_for_spec: typing.Optional[float] = None
 				grid_for_spec = 16
 
-				if assignment.process.has_beat_quantize():
+				if assignment.process.has_stretch_quantize():
 					if record.rhythm.tempo_bpm > 0.0:
-						bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "beat_quantize", self._target_bpm)
+						bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "stretch_quantize", self._target_bpm)
 					else:
 						_log.warning(
-							"beat_quantize %s: sample %r has no detected tempo — "
+							"stretch_quantize %s: sample %r has no detected tempo — "
 							"playing without beat-quantizing",
 							assignment.name, record.name,
 						)
@@ -1707,7 +1764,7 @@ class MidiPlayer:
 		Groups notes by Assignment, resolves each to its current sample via the
 		query engine, and enqueues the appropriate variants.  The full ordered
 		process chain (filters, saturate, reverse, etc.) is included alongside
-		repitch / beat_quantize via spec_from_process().
+		repitch / stretch_quantize via spec_from_process().
 
 		The TransformProcessor deduplicates in-flight and cached keys, so
 		repeated calls are safe and cheap.
@@ -1731,7 +1788,7 @@ class MidiPlayer:
 
 		# Group notes by Assignment identity (object id) — all notes in the same
 		# assignment share the same select/process spec.  Collect (note, pick)
-		# pairs so beat_quantize can pre-compute a variant for every pick
+		# pairs so stretch_quantize can pre-compute a variant for every pick
 		# position (each note may resolve to a different sample).
 		groups: dict[int, tuple[subsample.query.Assignment, list[tuple[int, int]]]] = {}
 
@@ -1760,10 +1817,14 @@ class MidiPlayer:
 			beats_resolver = _build_beats_resolver(
 				asgn.process, eff_transform, self._target_bpm,
 			)
+			energy_profile_resolver = _build_energy_profile_resolver(
+				asgn.process, eff_transform, self._target_bpm,
+			)
 
 			for select_spec in asgn.select:
 				ranked = subsample.query.query(
 					select_spec, all_samples, eff_similarity, beats_resolver,
+					energy_profile_resolver=energy_profile_resolver,
 				)
 
 				if ranked:
@@ -1801,8 +1862,8 @@ class MidiPlayer:
 			# Beat-quantize: each note may pick a different sample, so enqueue
 			# a variant for every distinct pick position.  The full process
 			# chain is included via spec_from_process().
-			elif asgn.process.has_beat_quantize():
-				bpm, grid = _quantize_params(asgn.process, "beat_quantize", self._target_bpm)
+			elif asgn.process.has_stretch_quantize():
+				bpm, grid = _quantize_params(asgn.process, "stretch_quantize", self._target_bpm)
 				enqueued = 0
 
 				# Deduplicate by sample_id — multiple notes with the same pick
@@ -1824,7 +1885,7 @@ class MidiPlayer:
 
 					if record.rhythm.tempo_bpm <= 0.0:
 						_log.warning(
-							"beat_quantize %s: sample %r (pick %d) has no detected tempo — "
+							"stretch_quantize %s: sample %r (pick %d) has no detected tempo — "
 							"will not be beat-quantized",
 							asgn.name, record.name, pick,
 						)
@@ -1846,11 +1907,11 @@ class MidiPlayer:
 					_total_variants += enqueued
 
 					_log.debug(
-						"beat_quantize %s: queued %d variant(s)",
+						"stretch_quantize %s: queued %d variant(s)",
 						asgn.name, enqueued,
 					)
 
-			# Pad-quantize: same dedup pattern as beat_quantize but no
+			# Pad-quantize: same dedup pattern as stretch_quantize but no
 			# tempo check — pad_quantize only needs onsets, not source tempo.
 			elif asgn.process.has_pad_quantize():
 				bpm, grid = _quantize_params(asgn.process, "pad_quantize", self._target_bpm)

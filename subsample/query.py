@@ -15,7 +15,7 @@ SelectSpec
 
 ProcessSpec
     Parsed from the ``process:`` list.  Contains an ordered sequence of
-    processor declarations (repitch, beat_quantize, etc.) that map to
+    processor declarations (repitch, stretch_quantize, etc.) that map to
     TransformStep subclasses at execution time.
 
 Assignment
@@ -49,6 +49,7 @@ import subsample.analysis
 if typing.TYPE_CHECKING:
 	import subsample.library
 	import subsample.similarity
+	import subsample.transform
 
 _log = logging.getLogger(__name__)
 
@@ -148,7 +149,8 @@ def set_strict_mode (strict: bool) -> None:
 # reject unknown names at parse time when strict mode is enabled.
 _VALID_PROCESSOR_NAMES: frozenset[str] = frozenset({
 	"repitch",
-	"beat_quantize",
+	"stretch_quantize",
+	"beat_quantize",    # legacy; translated to stretch_quantize
 	"pad_quantize",
 	"filter_low",
 	"filter_high",
@@ -178,14 +180,49 @@ _VALID_PROCESSOR_NAMES: frozenset[str] = frozenset({
 # The new names are unit-indicative (drive/gain in dB, strength as a
 # 0-1 fraction) so `amount` no longer has to be context-disambiguated.
 _LEGACY_PROCESSOR_PARAMS: dict[tuple[str, str], str] = {
-	("saturate",      "amount"): "drive",     # dB
-	("transient",     "amount"): "gain",      # dB (signed)
-	("beat_quantize", "amount"): "strength",  # 0-1 fraction
-	("pad_quantize",  "amount"): "strength",  # 0-1 fraction
+	("saturate",         "amount"): "drive",     # dB
+	("transient",        "amount"): "gain",      # dB (signed)
+	("stretch_quantize", "amount"): "strength",  # 0-1 fraction
+	("pad_quantize",     "amount"): "strength",  # 0-1 fraction
 	# `bpm` → `tempo` (C2): property name matches the where-predicate.
-	("beat_quantize", "bpm"):    "tempo",
-	("pad_quantize",  "bpm"):    "tempo",
+	("stretch_quantize", "bpm"):    "tempo",
+	("pad_quantize",     "bpm"):    "tempo",
 }
+# Keyed on canonical processor names.  The parser translates legacy
+# processor names (e.g. `beat_quantize` → `stretch_quantize`) before
+# looking up param renames, so these entries do not need legacy-name
+# duplicates.
+
+
+def _canonical_processor_name (name: str) -> str:
+	"""Translate a legacy processor name to its canonical form.
+
+	Legacy aliases kept in the valid-names whitelist so strict mode
+	accepts them; the parser canonicalises before building the
+	ProcessorStep so downstream code (spec_from_process, ProcessSpec
+	methods) only ever sees the new names.
+
+	- hpss_harmonic / hpss_percussive → hpss (keep: injected at parse)
+	- beat_quantize → stretch_quantize (pure name rename)
+	"""
+	if name in ("hpss_harmonic", "hpss_percussive"):
+		return "hpss"
+	if name == "beat_quantize":
+		return "stretch_quantize"
+	return name
+
+
+def _hpss_keep_for_legacy_name (name: str) -> typing.Optional[str]:
+	"""Return the `keep:` value implied by a legacy HPSS processor name.
+
+	`hpss_harmonic` → "harmonic"; `hpss_percussive` → "percussive";
+	anything else → None.  Used by parse_process() to inject the
+	`keep:` param when a user writes the legacy bare name."""
+	if name == "hpss_harmonic":
+		return "harmonic"
+	if name == "hpss_percussive":
+		return "percussive"
+	return None
 
 
 # Non-range where-predicate keys.  Numeric keys (new-form + legacy) are
@@ -413,6 +450,113 @@ def _beats_scorer (
 _register_scorer("quantized_beats", _beats_scorer, on_missing="sort_last")
 
 
+# ---------------------------------------------------------------------------
+# beat_match — order by per-beat energy pattern similarity
+# ---------------------------------------------------------------------------
+
+def _downsample_to_beats (
+	energy:     typing.Sequence[float],
+	resolution: int,
+) -> tuple[float, ...]:
+
+	"""Collapse a GridEnergyProfile's per-slot energy to per-beat energy.
+
+	`resolution` is the grid's slots-per-bar (4=quarters, 8=eighths, …).
+	One beat = quarter-note = `resolution / 4` slots, so each beat's
+	energy is the mean of `resolution / 4` consecutive slots.  For
+	non-multiple-of-4 resolutions (triplets, 6, 5, …) we fall back to
+	`numpy.array_split(energy, round(beat_count))` so buckets differ by
+	at most one slot — a best-effort aggregation.
+
+	Resolution-invariant: the same musical content quantized at 8ths vs
+	16ths collapses to the same per-beat vector, which is what makes
+	cross-grid comparison meaningful."""
+
+	if len(energy) == 0 or resolution <= 0:
+		return ()
+
+	# Expected number of beats in the profile.
+	beat_count = int(round(len(energy) * 4 / resolution))
+	if beat_count <= 0:
+		return ()
+
+	arr = numpy.asarray(energy, dtype=numpy.float64)
+
+	if resolution % 4 == 0 and len(arr) % (resolution // 4) == 0:
+		# Clean divisibility — reshape + mean along the slot axis.
+		slots_per_beat = resolution // 4
+		reshaped = arr[: beat_count * slots_per_beat].reshape(beat_count, slots_per_beat)
+		return tuple(float(x) for x in reshaped.mean(axis=1))
+
+	# Fallback: best-effort bucket split.
+	buckets = numpy.array_split(arr, beat_count)
+	return tuple(float(b.mean()) if b.size else 0.0 for b in buckets)
+
+
+def _cosine_similarity_truncated (
+	a: typing.Sequence[float],
+	b: typing.Sequence[float],
+	k: int,
+) -> float:
+
+	"""Cosine similarity between the first `k` elements of `a` and `b`.
+
+	Both inputs are assumed non-negative (pattern values in [0, 1],
+	energy values in [0, 1]).  Returns 0.0 when either truncated vector
+	has zero magnitude — tied-last behaviour, never NaN."""
+
+	va = numpy.asarray(a[:k], dtype=numpy.float64)
+	vb = numpy.asarray(b[:k], dtype=numpy.float64)
+	na = float(numpy.linalg.norm(va))
+	nb = float(numpy.linalg.norm(vb))
+	if na == 0.0 or nb == 0.0:
+		return 0.0
+	return float(numpy.dot(va, vb) / (na * nb))
+
+
+def _beat_match_scorer (
+	record:  "subsample.library.SampleRecord",
+	params:  tuple[tuple[str, typing.Any], ...],
+	state:   _ExternalState,
+) -> typing.Optional[float]:
+
+	"""Scorer for ``beat_match`` — ranks by per-beat-energy similarity
+	to a user-supplied pattern.
+
+	Reads ``external_state["energy_profile_resolver"]`` to fetch the
+	quantized variant's ``GridEnergyProfile`` for each sample.  Returns
+	None (→ excluded) when no resolver is registered, when the sample
+	has no quantized variant yet, or when the profile is empty.
+
+	Metric: cosine similarity between the pattern and the per-beat
+	downsampled profile, LHS-aligned over ``min(len(pattern),
+	len(beats))`` elements.  Returns a value in ``[0, 1]`` — 1.0 is a
+	perfect shape match."""
+
+	resolver = state.get("energy_profile_resolver")
+	if resolver is None:
+		return None
+
+	profile = resolver(record.sample_id)
+	if profile is None or len(profile.energy) == 0:
+		return None
+
+	pattern = dict(params).get("pattern")
+	if pattern is None:
+		# Parser should have rejected this; defence in depth.
+		return None
+
+	beats = _downsample_to_beats(profile.energy, profile.resolution)
+	k     = min(len(pattern), len(beats))
+	if k == 0:
+		return None
+
+	return _cosine_similarity_truncated(pattern, beats, k)
+
+
+_register_scorer("beat_match", _beat_match_scorer, on_missing="exclude")
+
+
 # Legacy bare-string tokens translate into a single-clause order tuple.  The
 # table keeps old YAML files working indefinitely; parse_select accepts these
 # verbatim and converts them to OrderClause instances before query().
@@ -499,7 +643,7 @@ class ProcessorStep:
 
 	"""A single processor declaration within a process pipeline.
 
-	name:   Processor name (e.g. "repitch", "beat_quantize").
+	name:   Processor name (e.g. "repitch", "stretch_quantize").
 	params: Frozen key-value pairs (e.g. (("grid", 16), ("bpm", 120))).
 	        Empty tuple for parameterless processors (e.g. "repitch: true").
 	        Stored as a tuple of pairs so the frozen dataclass is truly hashable.
@@ -564,9 +708,9 @@ class ProcessSpec:
 		"""True if any step is a repitch processor."""
 		return any(s.name == "repitch" for s in self.steps)
 
-	def has_beat_quantize (self) -> bool:
-		"""True if any step is a beat_quantize processor."""
-		return any(s.name == "beat_quantize" for s in self.steps)
+	def has_stretch_quantize (self) -> bool:
+		"""True if any step is a stretch_quantize processor."""
+		return any(s.name == "stretch_quantize" for s in self.steps)
 
 	def has_pad_quantize (self) -> bool:
 		"""True if any step is a pad_quantize processor."""
@@ -611,10 +755,13 @@ class Assignment:
 # ---------------------------------------------------------------------------
 
 def query (
-	select_spec:       SelectSpec,
-	samples:           list["subsample.library.SampleRecord"],
-	similarity_matrix: typing.Optional["subsample.similarity.SimilarityMatrix"] = None,
-	beats_resolver:    typing.Optional[typing.Callable[[int], typing.Optional[float]]] = None,
+	select_spec:             SelectSpec,
+	samples:                 list["subsample.library.SampleRecord"],
+	similarity_matrix:       typing.Optional["subsample.similarity.SimilarityMatrix"] = None,
+	beats_resolver:          typing.Optional[typing.Callable[[int], typing.Optional[float]]] = None,
+	energy_profile_resolver: typing.Optional[
+		typing.Callable[[int], typing.Optional["subsample.transform.GridEnergyProfile"]]
+	] = None,
 ) -> list["subsample.library.SampleRecord"]:
 
 	"""Evaluate a SelectSpec against a list of samples.
@@ -654,8 +801,9 @@ def query (
 
 	where = select_spec.where
 	state: _ExternalState = {
-		"similarity_matrix": similarity_matrix,
-		"beats_resolver":    beats_resolver,
+		"similarity_matrix":       similarity_matrix,
+		"beats_resolver":          beats_resolver,
+		"energy_profile_resolver": energy_profile_resolver,
 	}
 
 	# Default to newest-first when no explicit order clauses are given.
@@ -1002,16 +1150,86 @@ def _parse_order_clause (
 
 	# Everything except by/dir is a scorer parameter.  Preserve insertion order
 	# by iterating the dict directly; values are kept as-is (the scorer decides
-	# how to interpret them).
+	# how to interpret them), then any per-scorer validators run below to
+	# coerce mutable containers (lists) into hashable form.
 	params: list[tuple[str, typing.Any]] = [
 		(str(k), v) for k, v in raw.items() if k not in ("by", "dir")
 	]
+
+	if by == "beat_match":
+		params = _validate_beat_match_params(params, assignment_name)
 
 	return OrderClause(
 		by=by,
 		dir=typing.cast(typing.Literal["asc", "desc"], dir_raw),
 		params=tuple(params),
 	)
+
+
+def _validate_beat_match_params (
+	params: list[tuple[str, typing.Any]],
+	assignment_name: str,
+) -> list[tuple[str, typing.Any]]:
+
+	"""Validate and normalise the `pattern:` param for `beat_match`.
+
+	Returns a new params list where the `pattern` value is a tuple of
+	floats (hashable so the OrderClause stays hashable).  Raises
+	ValueError at parse time for malformed inputs — empty list, length
+	< 2, non-numeric elements, or values outside [0, 1]."""
+
+	out: list[tuple[str, typing.Any]] = []
+	found_pattern = False
+
+	for k, v in params:
+
+		if k != "pattern":
+			out.append((k, v))
+			continue
+
+		found_pattern = True
+
+		if not isinstance(v, list):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: beat_match "
+				f"'pattern' must be a list of numbers (got {type(v).__name__})"
+			)
+
+		if len(v) < 2:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: beat_match "
+				f"'pattern' must have at least 2 elements (got {len(v)})"
+			)
+
+		coerced: list[float] = []
+		for i, elem in enumerate(v):
+			# bool is a subclass of int in Python; accept it (True→1.0, False→0.0)
+			# but reject strings and other types explicitly.
+			if not isinstance(elem, (int, float)):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: beat_match "
+					f"'pattern' element #{i} must be a number in [0, 1] "
+					f"(got {elem!r})"
+				)
+			f = float(elem)
+			if f < 0.0 or f > 1.0:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: beat_match "
+					f"'pattern' element #{i} ({f}) is outside [0, 1]"
+				)
+			coerced.append(f)
+
+		# Store as tuple for hashability (OrderClause is frozen and must
+		# be hashable; a list inside the tuple would break that).
+		out.append(("pattern", tuple(coerced)))
+
+	if not found_pattern:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: beat_match requires "
+			f"a 'pattern' parameter (a list of numbers in [0, 1])"
+		)
+
+	return out
 
 
 def _parse_order (
@@ -1188,23 +1406,22 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 				f"{', '.join(sorted(_VALID_PROCESSOR_NAMES))}."
 			)
 
-	def _translate_legacy_processor (step: ProcessorStep) -> ProcessorStep:
-		"""Canonicalise legacy processor names into the new form.
+	def _build_parameterless_step (raw_name: str) -> ProcessorStep:
+		"""Build a ProcessorStep for a bare / bool processor entry.
 
-		Currently handles `hpss_harmonic` / `hpss_percussive` → `hpss` with
-		`keep:` param (C1 in the language review).  Other legacy names pass
-		through unchanged."""
-		if step.name == "hpss_harmonic":
-			return ProcessorStep(name="hpss", params=(("keep", "harmonic"),))
-		if step.name == "hpss_percussive":
-			return ProcessorStep(name="hpss", params=(("keep", "percussive"),))
-		return step
+		Canonicalises the name and, for legacy HPSS aliases, injects the
+		`keep:` param that the canonical `hpss` processor requires."""
+		canonical = _canonical_processor_name(raw_name)
+		keep = _hpss_keep_for_legacy_name(raw_name)
+		if keep is not None:
+			return ProcessorStep(name=canonical, params=(("keep", keep),))
+		return ProcessorStep(name=canonical)
 
 	for entry in raw:
 
 		if isinstance(entry, str):
 			_check_processor_name(entry)
-			steps.append(_translate_legacy_processor(ProcessorStep(name=entry)))
+			steps.append(_build_parameterless_step(entry))
 
 		elif isinstance(entry, dict):
 
@@ -1216,40 +1433,47 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 
 			proc_name = next(iter(entry))
 			proc_value = entry[proc_name]
-			_check_processor_name(str(proc_name))
+			proc_name_str = str(proc_name)
+			_check_processor_name(proc_name_str)
+
+			# Canonicalise the processor name up-front so legacy param
+			# lookups (_LEGACY_PROCESSOR_PARAMS) use the new name as key.
+			canonical_name = _canonical_processor_name(proc_name_str)
 
 			if isinstance(proc_value, bool) or proc_value is None:
 				# e.g. "repitch: true" or "repitch:"
-				steps.append(_translate_legacy_processor(ProcessorStep(name=str(proc_name))))
+				steps.append(_build_parameterless_step(proc_name_str))
 
 			elif isinstance(proc_value, dict):
-				# e.g. "beat_quantize: { grid: 16, bpm: 120 }"
+				# e.g. "stretch_quantize: { grid: 16, tempo: 120 }"
 				# Param values that are dicts with a "cc" key become CcBindings.
 				resolved_params: list[tuple[str, typing.Any]] = []
 				seen_params: set[str] = set()
 
 				for k, v in proc_value.items():
-					# Translate legacy param aliases (e.g. saturate.amount → drive).
+					# Translate legacy param aliases (e.g. saturate.amount → drive)
+					# using the canonical processor name as the lookup key.
 					k_str = str(k)
-					canonical = _LEGACY_PROCESSOR_PARAMS.get(
-						(str(proc_name), k_str), k_str,
+					canonical_param = _LEGACY_PROCESSOR_PARAMS.get(
+						(canonical_name, k_str), k_str,
 					)
 
-					if canonical in seen_params:
+					if canonical_param in seen_params:
 						# Both "amount" (legacy) and "drive" (new) on one step
 						# — reject loudly.  The legacy shim is a pure alias,
 						# not a cumulative binding.
 						raise ValueError(
 							f"MIDI map assignment {assignment_name!r}: "
-							f"processor {str(proc_name)!r} has duplicate "
-							f"parameter {canonical!r} (possibly from mixing "
-							f"legacy and new-form names) — use one, not both."
+							f"processor {proc_name_str!r} has duplicate "
+							f"parameter {canonical_param!r} (possibly from "
+							f"mixing legacy and new-form names) — use one, "
+							f"not both."
 						)
 
-					seen_params.add(canonical)
+					seen_params.add(canonical_param)
 
 					if isinstance(v, dict) and "cc" in v:
-						resolved_params.append((canonical, CcBinding(
+						resolved_params.append((canonical_param, CcBinding(
 							cc=int(v["cc"]),
 							min_val=float(v.get("min", 0.0)),
 							max_val=float(v.get("max", 1.0)),
@@ -1257,11 +1481,18 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 							channel=int(v["channel"]) if "channel" in v else None,
 						)))
 					else:
-						resolved_params.append((canonical, v))
+						resolved_params.append((canonical_param, v))
 
-				frozen_params = tuple(resolved_params)
-				steps.append(_translate_legacy_processor(
-					ProcessorStep(name=str(proc_name), params=frozen_params),
+				# Inject the HPSS `keep:` param for legacy dict-form entries
+				# (e.g. `hpss_harmonic: {}`).  Silently preserves any user-
+				# supplied `keep:` value in the rare dict-form legacy case.
+				keep = _hpss_keep_for_legacy_name(proc_name_str)
+				if keep is not None and "keep" not in seen_params:
+					resolved_params.insert(0, ("keep", keep))
+
+				steps.append(ProcessorStep(
+					name=canonical_name,
+					params=tuple(resolved_params),
 				))
 
 			else:

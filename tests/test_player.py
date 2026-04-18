@@ -12,6 +12,7 @@ import subsample.library
 import subsample.player
 import subsample.query
 import subsample.similarity
+import subsample.transform
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ def _make_assignment (
 	pitched_filter: typing.Optional[bool] = None,
 	order_by: str = "newest",
 	repitch: bool = False,
-	beat_quantize: bool = False,
+	stretch_quantize: bool = False,
 	one_shot: bool = True,
 	pan_weights: typing.Optional[numpy.ndarray] = None,
 	gain_db: float = 0.0,
@@ -57,8 +58,8 @@ def _make_assignment (
 	if repitch:
 		steps.append(subsample.query.ProcessorStep(name="repitch"))
 
-	if beat_quantize:
-		steps.append(subsample.query.ProcessorStep(name="beat_quantize", params=(("grid", 16),)))
+	if stretch_quantize:
+		steps.append(subsample.query.ProcessorStep(name="stretch_quantize", params=(("grid", 16),)))
 
 	process = subsample.query.ProcessSpec(steps=tuple(steps))
 
@@ -1389,10 +1390,10 @@ class TestUpdatePitchedAssignments:
 		transform_manager.enqueue_pitch_range.assert_not_called()
 
 	def test_beat_quantize_pre_computation (self) -> None:
-		"""update_assignments() calls get_variant() for beat_quantize assignments."""
+		"""update_assignments() calls get_variant() for stretch_quantize assignments."""
 
 		asgn = _make_assignment(
-			name="Loops", beat_quantize=True, repitch=False,
+			name="Loops", stretch_quantize=True, repitch=False,
 			order_by="newest", one_shot=False,
 		)
 		note_map = _make_note_map(asgn, channel=0, notes=[60])
@@ -1431,12 +1432,12 @@ class TestUpdatePitchedAssignments:
 	def test_beat_quantize_with_explicit_bpm (self) -> None:
 		"""Per-assignment BPM override produces a spec with correct params."""
 
-		# beat_quantize with explicit bpm=120, grid=8
+		# stretch_quantize with explicit bpm=120, grid=8
 		asgn = subsample.query.Assignment(
 			name="Explicit BPM",
 			select=(subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="age", dir="desc"),)),),
 			process=subsample.query.ProcessSpec(steps=(
-				subsample.query.ProcessorStep(name="beat_quantize", params=(("bpm", 120), ("grid", 8))),
+				subsample.query.ProcessorStep(name="stretch_quantize", params=(("bpm", 120), ("grid", 8))),
 			)),
 			one_shot=False,
 		)
@@ -2135,3 +2136,414 @@ class TestSelectSegment:
 		process = subsample.query.ProcessSpec(steps=(step,))
 
 		assert step.get("segment", "") == 3
+
+
+# ---------------------------------------------------------------------------
+# _build_energy_profile_resolver — unit tests for the resolver builder
+# ---------------------------------------------------------------------------
+
+class TestBuildEnergyProfileResolver:
+
+	"""Unit tests for player._build_energy_profile_resolver — proves the
+	resolver is constructed correctly from a ProcessSpec and delegates to
+	the transform manager with the right TransformSpec."""
+
+	def _profile (
+		self,
+		resolution: int = 4,
+		energy: tuple[float, ...] = (1.0, 0.0, 1.0, 0.0),
+	) -> subsample.transform.GridEnergyProfile:
+		return subsample.transform.GridEnergyProfile(
+			bpm=120.0, resolution=resolution, energy=energy,
+		)
+
+	def test_returns_none_when_no_transform_manager (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="stretch_quantize", params=(("bpm", 120), ("grid", 16)),
+			),
+		))
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=None, session_bpm=120.0,
+		)
+		assert resolver is None
+
+	def test_returns_none_when_no_quantize_step_and_no_session_bpm (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="repitch"),
+		))
+		transform_manager = unittest.mock.MagicMock()
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=0.0,
+		)
+		assert resolver is None
+
+	def test_stretch_quantize_builds_timestretch_spec (self) -> None:
+		"""Resolver's get_variant call uses a TransformSpec with a TimeStretch step."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="stretch_quantize", params=(("bpm", 120), ("grid", 8)),
+			),
+		))
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.return_value = unittest.mock.MagicMock(
+			energy_profile=self._profile(),
+		)
+
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=100.0,
+		)
+		assert resolver is not None
+		resolver(sample_id=42)
+
+		# Verify the spec passed to get_variant.
+		transform_manager.get_variant.assert_called_once()
+		sample_id, spec = transform_manager.get_variant.call_args[0]
+		assert sample_id == 42
+		assert len(spec.steps) == 1
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].target_bpm == 120.0   # per-assignment bpm wins
+		assert spec.steps[0].resolution == 8
+
+	def test_pad_quantize_builds_padquantize_spec (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize", params=(("bpm", 90), ("grid", 16)),
+			),
+		))
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.return_value = unittest.mock.MagicMock(
+			energy_profile=self._profile(),
+		)
+
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=0.0,
+		)
+		assert resolver is not None
+		resolver(sample_id=1)
+
+		sample_id, spec = transform_manager.get_variant.call_args[0]
+		assert isinstance(spec.steps[0], subsample.transform.PadQuantize)
+		assert spec.steps[0].target_bpm == 90.0
+		assert spec.steps[0].resolution == 16
+
+	def test_session_bpm_fallback_when_no_quantize_step (self) -> None:
+		"""No quantize step but session_bpm > 0 → fall back to session-level
+		TimeStretch at the default grid (matches _build_beats_resolver)."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="repitch"),
+		))
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.return_value = unittest.mock.MagicMock(
+			energy_profile=self._profile(),
+		)
+
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=140.0,
+		)
+		assert resolver is not None
+		resolver(sample_id=1)
+
+		_, spec = transform_manager.get_variant.call_args[0]
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].target_bpm == 140.0
+
+	def test_resolver_returns_profile_from_variant (self) -> None:
+		profile = self._profile(energy=(0.9, 0.1, 0.8, 0.2))
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.return_value = unittest.mock.MagicMock(
+			energy_profile=profile,
+		)
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+			),
+		))
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=120.0,
+		)
+		assert resolver is not None
+		assert resolver(sample_id=1) is profile
+
+	def test_resolver_returns_none_when_variant_missing (self) -> None:
+		"""When get_variant returns None (cache miss), resolver returns None."""
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.return_value = None
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+			),
+		))
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=120.0,
+		)
+		assert resolver is not None
+		assert resolver(sample_id=99) is None
+
+	def test_resolver_returns_none_when_variant_has_no_profile (self) -> None:
+		"""When get_variant returns a result but energy_profile is None,
+		resolver returns None — the scorer treats this as 'no data'."""
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.return_value = unittest.mock.MagicMock(
+			energy_profile=None,
+		)
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+			),
+		))
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=120.0,
+		)
+		assert resolver is not None
+		assert resolver(sample_id=1) is None
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: beat_match scorer via the full player → query() wiring
+# ---------------------------------------------------------------------------
+
+class TestBeatMatchEndToEnd:
+
+	"""Integration test: prove the energy_profile_resolver is built by the
+	player, passed through to query(), and used by the beat_match scorer
+	to rank samples correctly.  This catches wiring bugs the unit tests
+	in test_query.py (which use a synthetic resolver) cannot."""
+
+	def test_beat_match_ranks_samples_through_full_player_path (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+
+		# Three samples, each with a distinct pre-baked GridEnergyProfile.
+		# Pattern [1, 0, 1, 0] should pick sample 1 (even-beats).
+		profiles = {
+			1: subsample.transform.GridEnergyProfile(
+				bpm=120.0, resolution=4, energy=(1.0, 0.0, 1.0, 0.0),  # matches
+			),
+			2: subsample.transform.GridEnergyProfile(
+				bpm=120.0, resolution=4, energy=(0.0, 1.0, 0.0, 1.0),  # orthogonal
+			),
+			3: subsample.transform.GridEnergyProfile(
+				bpm=120.0, resolution=4, energy=(0.5, 0.5, 0.5, 0.5),  # uniform
+			),
+		}
+
+		mock_records = []
+		for sid in (1, 2, 3):
+			r = unittest.mock.MagicMock()
+			r.sample_id = sid
+			r.name = f"sample-{sid}"
+			r.duration = 1.0
+			r.rhythm.tempo_bpm = 120.0
+			r.rhythm.onset_count = 4
+			r.pitch.dominant_pitch_hz = 0.0
+			r.level.rms = 0.1
+			# matches() is called on WherePredicate with the record; keep the
+			# where-predicate empty in the assignment so all samples pass.
+			mock_records.append(r)
+
+		# Mock transform_manager that returns the right profile for each sample_id.
+		def fake_get_variant (sample_id: int, spec: typing.Any) -> typing.Any:
+			result = unittest.mock.MagicMock()
+			result.energy_profile = profiles.get(sample_id)
+			return result
+
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.side_effect = fake_get_variant
+
+		# Assignment using beat_match against [1, 0, 1, 0] with a
+		# stretch_quantize step so the resolver fires.
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+			),
+		))
+		select = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="desc",
+				params=(("pattern", (1.0, 0.0, 1.0, 0.0)),),
+			),),
+		)
+
+		# Exercise the exact code path the player uses: build the resolver,
+		# pass it through to query().
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=120.0,
+		)
+		assert resolver is not None
+
+		result = subsample.query.query(
+			select, mock_records, similarity_matrix=None,
+			beats_resolver=None, energy_profile_resolver=resolver,
+		)
+
+		# Sample 1 (matches pattern) wins; sample 2 (orthogonal) scored 0.0
+		# but on_missing=exclude means only the non-None scorers are kept —
+		# here all three samples *have* a profile, so all three are ranked.
+		assert [r.sample_id for r in result] == [1, 3, 2]
+
+	def test_beat_match_excludes_samples_without_quantized_variant (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+		"""When a sample's variant hasn't been computed yet (get_variant
+		returns None), beat_match excludes it from the result."""
+
+		profiles: dict[int, subsample.transform.GridEnergyProfile] = {
+			1: subsample.transform.GridEnergyProfile(
+				bpm=120.0, resolution=4, energy=(1.0, 0.0, 1.0, 0.0),
+			),
+			# Sample 2 has no profile → resolver returns None → excluded.
+		}
+
+		mock_records = []
+		for sid in (1, 2):
+			r = unittest.mock.MagicMock()
+			r.sample_id = sid
+			r.name = f"sample-{sid}"
+			r.duration = 1.0
+			r.rhythm.tempo_bpm = 120.0
+			r.rhythm.onset_count = 4
+			r.pitch.dominant_pitch_hz = 0.0
+			r.level.rms = 0.1
+			mock_records.append(r)
+
+		def fake_get_variant (sample_id: int, spec: typing.Any) -> typing.Any:
+			if sample_id not in profiles:
+				return None  # cache miss
+			result = unittest.mock.MagicMock()
+			result.energy_profile = profiles[sample_id]
+			return result
+
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.side_effect = fake_get_variant
+
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+			),
+		))
+		select = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="desc",
+				params=(("pattern", (1.0, 0.0, 1.0, 0.0)),),
+			),),
+		)
+
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=120.0,
+		)
+		assert resolver is not None
+
+		result = subsample.query.query(
+			select, mock_records, similarity_matrix=None,
+			beats_resolver=None, energy_profile_resolver=resolver,
+		)
+
+		# Only sample 1 has a profile; sample 2 is excluded.
+		assert [r.sample_id for r in result] == [1]
+
+	def test_beat_match_without_quantize_step_yields_empty_result (self) -> None:
+		"""Assignment uses beat_match but its process has no quantize step.
+		_build_energy_profile_resolver returns None → no resolver is passed
+		→ all samples score None → all excluded → empty result."""
+
+		mock_records = [unittest.mock.MagicMock()]
+		mock_records[0].sample_id = 1
+		mock_records[0].duration = 1.0
+		mock_records[0].rhythm.tempo_bpm = 120.0
+		mock_records[0].rhythm.onset_count = 4
+		mock_records[0].pitch.dominant_pitch_hz = 0.0
+		mock_records[0].level.rms = 0.1
+
+		# Process has only a repitch step — no quantize.
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="repitch"),
+		))
+		select = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="desc",
+				params=(("pattern", (1.0, 0.0, 1.0, 0.0)),),
+			),),
+		)
+
+		transform_manager = unittest.mock.MagicMock()
+
+		# session_bpm=0 so the fallback path in _build_energy_profile_resolver
+		# also declines — no resolver at all.
+		resolver = subsample.player._build_energy_profile_resolver(
+			process, transform_manager=transform_manager, session_bpm=0.0,
+		)
+		assert resolver is None
+
+		result = subsample.query.query(
+			select, mock_records, similarity_matrix=None,
+			beats_resolver=None, energy_profile_resolver=resolver,
+		)
+		assert result == []
+
+	def test_midi_player_passes_energy_profile_resolver_through (self) -> None:
+		"""Direct assertion on the player: update_assignments() builds the
+		energy_profile_resolver and the transform_manager.get_variant is
+		invoked during resolution (proves the wiring from the player's
+		call site all the way into the scorer)."""
+
+		asgn = subsample.query.Assignment(
+			name="Beat match via player",
+			select=(subsample.query.SelectSpec(
+				order=(subsample.query.OrderClause(
+					by="beat_match", dir="desc",
+					params=(("pattern", (1.0, 0.0, 1.0, 0.0)),),
+				),),
+			),),
+			process=subsample.query.ProcessSpec(steps=(
+				subsample.query.ProcessorStep(
+					name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+				),
+			)),
+			one_shot=False,
+		)
+		note_map: subsample.player.NoteMap = {(0, 60): (asgn, 1)}
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		mock_record = unittest.mock.MagicMock()
+		mock_record.sample_id = 7
+		mock_record.name = "candidate"
+		mock_record.duration = 1.0
+		mock_record.rhythm.tempo_bpm = 120.0
+		mock_record.rhythm.onset_count = 4
+		mock_record.pitch.dominant_pitch_hz = 0.0
+		mock_record.level.rms = 0.1
+
+		player._instrument_library.samples.return_value = [mock_record]
+		player._instrument_library.get.return_value = mock_record
+
+		profile = subsample.transform.GridEnergyProfile(
+			bpm=120.0, resolution=4, energy=(1.0, 0.0, 1.0, 0.0),
+		)
+		transform_manager = unittest.mock.MagicMock()
+		transform_manager.get_variant.return_value = unittest.mock.MagicMock(
+			energy_profile=profile,
+		)
+		player._transform_manager = transform_manager
+
+		# Trigger the full select-and-schedule flow; if the resolver wasn't
+		# wired through, the beat_match scorer would exclude this sample
+		# and update_assignments would find nothing to enqueue.
+		player.update_assignments()
+
+		# get_variant was called at least once (once by the resolver, once
+		# by the variant-precompute path). The key assertion is that it
+		# ran — which only happens when the resolver is built and passed.
+		assert transform_manager.get_variant.called

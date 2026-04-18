@@ -522,13 +522,14 @@ analysis:
 #   # is not installed or you prefer lazy rendering over background pre-computation.
 #
 #   target_bpm: 0.0
-#   # Default BPM for beat_quantize processors that don't specify an explicit bpm.
-#   # 0.0 = disabled.  When a MIDI map assignment uses beat_quantize: { grid: 16 }
-#   # without an explicit bpm, this value is used.
+#   # Default tempo for stretch_quantize / pad_quantize processors that don't
+#   # specify an explicit tempo.  (Legacy name `beat_quantize` is also accepted.)
+#   # 0.0 = disabled.  When a MIDI map assignment uses stretch_quantize: { grid: 16 }
+#   # without an explicit tempo, this value is used.
 #
 #   quantize_resolution: 16
-#   # Default grid subdivision for beat_quantize processors that don't specify
-#   # an explicit grid.
+#   # Default grid subdivision for stretch_quantize / pad_quantize processors
+#   # that don't specify an explicit grid.
 #   # 1 = whole notes, 2 = half, 4 = quarter, 8 = eighth, 16 = sixteenth.
 #   # Higher values give finer onset alignment.
 #   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values

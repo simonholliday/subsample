@@ -572,29 +572,29 @@ class TestParseProcess:
 
 	def test_beat_quantize_with_params (self) -> None:
 		"""YAML `bpm:` translates to canonical `tempo:` in the step params."""
-		raw = [{"beat_quantize": {"grid": 16, "bpm": 120}}]
+		raw = [{"stretch_quantize": {"grid": 16, "bpm": 120}}]
 		spec = subsample.query.parse_process(raw, "test")
-		assert spec.steps[0].name == "beat_quantize"
+		assert spec.steps[0].name == "stretch_quantize"
 		assert spec.steps[0].get("grid") == 16
 		assert spec.steps[0].get("tempo") == 120
 		assert spec.steps[0].get("bpm") is None  # legacy key was renamed
 
 	def test_multiple_processors (self) -> None:
 
-		raw = [{"beat_quantize": {"grid": 16}}, {"repitch": True}]
+		raw = [{"stretch_quantize": {"grid": 16}}, {"repitch": True}]
 		spec = subsample.query.parse_process(raw, "test")
 		assert len(spec.steps) == 2
-		assert spec.steps[0].name == "beat_quantize"
+		assert spec.steps[0].name == "stretch_quantize"
 		assert spec.steps[1].name == "repitch"
 
 	def test_has_repitch (self) -> None:
 		spec = subsample.query.parse_process([{"repitch": True}], "test")
 		assert spec.has_repitch()
-		assert not spec.has_beat_quantize()
+		assert not spec.has_stretch_quantize()
 
 	def test_has_beat_quantize (self) -> None:
-		spec = subsample.query.parse_process([{"beat_quantize": {"grid": 8}}], "test")
-		assert spec.has_beat_quantize()
+		spec = subsample.query.parse_process([{"stretch_quantize": {"grid": 8}}], "test")
+		assert spec.has_stretch_quantize()
 		assert not spec.has_repitch()
 
 	def test_unknown_processor_strict_raises (self) -> None:
@@ -644,7 +644,7 @@ class TestParseProcess:
 
 	def test_legacy_amount_beat_quantize_renamed_to_strength (self) -> None:
 		spec = subsample.query.parse_process(
-			[{"beat_quantize": {"grid": 16, "amount": 0.5}}], "test",
+			[{"stretch_quantize": {"grid": 16, "amount": 0.5}}], "test",
 		)
 		assert spec.steps[0].get("strength") == 0.5
 		assert spec.steps[0].get("amount") is None
@@ -666,7 +666,7 @@ class TestParseProcess:
 	def test_legacy_bpm_translates_to_tempo (self) -> None:
 		"""C2: processor `bpm:` → canonical `tempo:`."""
 		spec = subsample.query.parse_process(
-			[{"beat_quantize": {"bpm": 120, "grid": 16}}], "test",
+			[{"stretch_quantize": {"bpm": 120, "grid": 16}}], "test",
 		)
 		assert spec.steps[0].get("tempo") == 120
 		assert spec.steps[0].get("bpm") is None
@@ -674,8 +674,61 @@ class TestParseProcess:
 	def test_legacy_bpm_and_tempo_on_same_step_raises (self) -> None:
 		with pytest.raises(ValueError, match="duplicate"):
 			subsample.query.parse_process(
-				[{"beat_quantize": {"bpm": 120, "tempo": 140}}], "test",
+				[{"stretch_quantize": {"bpm": 120, "tempo": 140}}], "test",
 			)
+
+	def test_legacy_beat_quantize_name_translates_to_stretch_quantize (self) -> None:
+		"""Legacy `beat_quantize:` name is translated to canonical
+		`stretch_quantize` at parse time; the resulting step's name is
+		the canonical form regardless of which name the user wrote."""
+		spec = subsample.query.parse_process(
+			[{"beat_quantize": {"grid": 16, "tempo": 120}}], "test",
+		)
+		assert spec.steps[0].name == "stretch_quantize"
+		assert spec.steps[0].get("grid") == 16
+		assert spec.steps[0].get("tempo") == 120
+
+	def test_legacy_beat_quantize_bare_string_form (self) -> None:
+		"""Bare `- beat_quantize` string also translates."""
+		spec = subsample.query.parse_process(["beat_quantize"], "test")
+		assert spec.steps[0].name == "stretch_quantize"
+
+	def test_legacy_beat_quantize_true_form (self) -> None:
+		"""`beat_quantize: true` also translates."""
+		spec = subsample.query.parse_process([{"beat_quantize": True}], "test")
+		assert spec.steps[0].name == "stretch_quantize"
+
+	def test_legacy_beat_quantize_chained_param_shim (self) -> None:
+		"""Legacy NAME + legacy PARAMS chained through the shim correctly:
+		`beat_quantize: { amount: 0.5, bpm: 120 }` →
+		`stretch_quantize` with `strength: 0.5, tempo: 120`."""
+		spec = subsample.query.parse_process(
+			[{"beat_quantize": {"amount": 0.5, "bpm": 120}}], "test",
+		)
+		assert spec.steps[0].name == "stretch_quantize"
+		assert spec.steps[0].get("strength") == 0.5
+		assert spec.steps[0].get("tempo") == 120
+		assert spec.steps[0].get("amount") is None
+		assert spec.steps[0].get("bpm") is None
+
+	def test_legacy_beat_quantize_accepted_under_strict_mode (self) -> None:
+		"""Legacy name stays in the strict-mode valid-names whitelist."""
+		subsample.query.set_strict_mode(True)
+		try:
+			spec = subsample.query.parse_process(
+				[{"beat_quantize": {"grid": 16}}], "test",
+			)
+			assert spec.steps[0].name == "stretch_quantize"
+		finally:
+			subsample.query.set_strict_mode(True)
+
+	def test_has_stretch_quantize_true_for_legacy_yaml (self) -> None:
+		"""ProcessSpec.has_stretch_quantize() is True for a spec built
+		from legacy YAML (canonicalisation happens at parse time)."""
+		spec = subsample.query.parse_process(
+			[{"beat_quantize": {"grid": 16}}], "test",
+		)
+		assert spec.has_stretch_quantize()
 
 	def test_invalid_type_raises (self) -> None:
 
@@ -697,7 +750,7 @@ class TestProcessSpec:
 	def test_empty_spec (self) -> None:
 		spec = subsample.query.ProcessSpec()
 		assert not spec.has_repitch()
-		assert not spec.has_beat_quantize()
+		assert not spec.has_stretch_quantize()
 
 
 class TestCcBinding:
@@ -1327,3 +1380,276 @@ class TestSimilarityClausePosition:
 		)
 		with pytest.raises(ValueError, match="where.reference"):
 			subsample.query.query(spec, [a])
+
+
+# ---------------------------------------------------------------------------
+# beat_match scorer — per-beat energy pattern matching
+# ---------------------------------------------------------------------------
+
+class TestBeatMatchHelpers:
+
+	"""Unit tests for the private helpers — no scorer plumbing."""
+
+	def test_downsample_clean_16_slots_at_res_16 (self) -> None:
+		"""16 slots @ resolution=16 → 4 beats (4 slots per beat)."""
+		energy = [1.0, 1.0, 1.0, 1.0,   0.0, 0.0, 0.0, 0.0,
+		          1.0, 1.0, 1.0, 1.0,   0.0, 0.0, 0.0, 0.0]
+		beats = subsample.query._downsample_to_beats(energy, resolution=16)
+		assert beats == (1.0, 0.0, 1.0, 0.0)
+
+	def test_downsample_8ths_at_res_8 (self) -> None:
+		"""8 slots @ resolution=8 → 4 beats (2 slots per beat)."""
+		energy = [1.0, 1.0,  0.0, 0.0,  1.0, 1.0,  0.0, 0.0]
+		beats = subsample.query._downsample_to_beats(energy, resolution=8)
+		assert beats == (1.0, 0.0, 1.0, 0.0)
+
+	def test_downsample_resolution_invariance (self) -> None:
+		"""Same musical content at 8ths and 16ths yields same per-beat result."""
+		e8  = [1.0, 1.0,  0.0, 0.0,  1.0, 1.0,  0.0, 0.0]
+		e16 = [1.0, 1.0, 1.0, 1.0,   0.0, 0.0, 0.0, 0.0,
+		       1.0, 1.0, 1.0, 1.0,   0.0, 0.0, 0.0, 0.0]
+		assert subsample.query._downsample_to_beats(e8,  resolution=8) \
+			== subsample.query._downsample_to_beats(e16, resolution=16)
+
+	def test_downsample_quarter_resolution (self) -> None:
+		"""4 slots @ resolution=4 → 4 beats (1 slot per beat, pass-through)."""
+		energy = [0.8, 0.2, 0.5, 0.1]
+		beats = subsample.query._downsample_to_beats(energy, resolution=4)
+		assert beats == (0.8, 0.2, 0.5, 0.1)
+
+	def test_downsample_empty (self) -> None:
+		assert subsample.query._downsample_to_beats([], resolution=16) == ()
+
+	def test_cosine_identical_vectors (self) -> None:
+		score = subsample.query._cosine_similarity_truncated(
+			[1.0, 0.0, 1.0, 0.0], [1.0, 0.0, 1.0, 0.0], 4,
+		)
+		assert score == pytest.approx(1.0)
+
+	def test_cosine_level_insensitive (self) -> None:
+		"""Same shape, different scale → cosine = 1.0."""
+		score = subsample.query._cosine_similarity_truncated(
+			[1.0, 0.0, 1.0, 0.0], [0.5, 0.0, 0.5, 0.0], 4,
+		)
+		assert score == pytest.approx(1.0)
+
+	def test_cosine_orthogonal (self) -> None:
+		"""[1,0,1,0] vs [0,1,0,1] are orthogonal → 0.0."""
+		score = subsample.query._cosine_similarity_truncated(
+			[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0], 4,
+		)
+		assert score == pytest.approx(0.0)
+
+	def test_cosine_zero_magnitude_returns_zero (self) -> None:
+		"""Edge case: all-zero input → 0.0 (not NaN)."""
+		score = subsample.query._cosine_similarity_truncated(
+			[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 3,
+		)
+		assert score == 0.0
+
+	def test_cosine_truncates_to_k (self) -> None:
+		"""Only the first k elements are scored."""
+		# Identical on first 3, diverges after - with k=3, cosine = 1.0
+		score = subsample.query._cosine_similarity_truncated(
+			[1.0, 1.0, 1.0, 999.0], [1.0, 1.0, 1.0, 0.0], 3,
+		)
+		assert score == pytest.approx(1.0)
+
+
+class TestBeatMatchParseValidation:
+
+	"""Pattern validation at parse time."""
+
+	def test_pattern_accepted_as_list_of_ints (self) -> None:
+		specs = subsample.query.parse_select(
+			{"order": [{"by": "beat_match", "pattern": [1, 0, 1, 0]}]}, "test",
+		)
+		# Pattern is coerced to a tuple of floats for hashability.
+		clause = specs[0].order[0]
+		params = dict(clause.params)
+		assert params["pattern"] == (1.0, 0.0, 1.0, 0.0)
+
+	def test_pattern_accepted_as_list_of_floats (self) -> None:
+		specs = subsample.query.parse_select(
+			{"order": [{"by": "beat_match", "pattern": [1.0, 0.9, 0.8]}]}, "test",
+		)
+		clause = specs[0].order[0]
+		params = dict(clause.params)
+		assert params["pattern"] == (1.0, 0.9, 0.8)
+
+	def test_missing_pattern_raises (self) -> None:
+		with pytest.raises(ValueError, match="requires a 'pattern'"):
+			subsample.query.parse_select(
+				{"order": [{"by": "beat_match"}]}, "test",
+			)
+
+	def test_non_list_pattern_raises (self) -> None:
+		with pytest.raises(ValueError, match="must be a list"):
+			subsample.query.parse_select(
+				{"order": [{"by": "beat_match", "pattern": "abc"}]}, "test",
+			)
+
+	def test_empty_pattern_raises (self) -> None:
+		with pytest.raises(ValueError, match="at least 2 elements"):
+			subsample.query.parse_select(
+				{"order": [{"by": "beat_match", "pattern": []}]}, "test",
+			)
+
+	def test_single_element_pattern_raises (self) -> None:
+		with pytest.raises(ValueError, match="at least 2 elements"):
+			subsample.query.parse_select(
+				{"order": [{"by": "beat_match", "pattern": [1]}]}, "test",
+			)
+
+	def test_non_numeric_pattern_element_raises (self) -> None:
+		with pytest.raises(ValueError, match="must be a number"):
+			subsample.query.parse_select(
+				{"order": [{"by": "beat_match", "pattern": [1, "hi", 0]}]}, "test",
+			)
+
+	def test_out_of_range_pattern_element_raises (self) -> None:
+		with pytest.raises(ValueError, match="outside \\[0, 1\\]"):
+			subsample.query.parse_select(
+				{"order": [{"by": "beat_match", "pattern": [1, 1.5, 0]}]}, "test",
+			)
+
+	def test_negative_pattern_element_raises (self) -> None:
+		with pytest.raises(ValueError, match="outside \\[0, 1\\]"):
+			subsample.query.parse_select(
+				{"order": [{"by": "beat_match", "pattern": [1, -0.1]}]}, "test",
+			)
+
+
+class TestBeatMatchScorer:
+
+	"""Scorer behaviour — via query() with synthetic resolver."""
+
+	def _make_resolver (
+		self,
+		profiles: dict[int, typing.Optional[tuple[float, ...]]],
+		resolution: int = 16,
+	) -> typing.Callable[[int], typing.Any]:
+		"""Build a resolver that returns pre-baked GridEnergyProfiles."""
+		def _resolver (sample_id: int) -> typing.Any:
+			energy = profiles.get(sample_id)
+			if energy is None:
+				return None
+			import subsample.transform as _t
+			return _t.GridEnergyProfile(bpm=120.0, resolution=resolution, energy=energy)
+		return _resolver
+
+	def test_binary_pattern_ranks_by_shape (self) -> None:
+		"""Pattern [1,0,1,0] → sample matching that shape wins."""
+		samples = [
+			_make_record(sample_id=1, name="even-beats"),
+			_make_record(sample_id=2, name="odd-beats"),
+			_make_record(sample_id=3, name="all-loud"),
+		]
+		# 4 beats @ resolution=4 → 1 slot per beat for clean testing
+		resolver = self._make_resolver({
+			1: (1.0, 0.0, 1.0, 0.0),  # matches [1,0,1,0]
+			2: (0.0, 1.0, 0.0, 1.0),  # matches [0,1,0,1]
+			3: (1.0, 1.0, 1.0, 1.0),  # uniform
+		}, resolution=4)
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="desc",
+				params=(("pattern", (1.0, 0.0, 1.0, 0.0)),),
+			),),
+		)
+		result = subsample.query.query(
+			spec, samples, energy_profile_resolver=resolver,
+		)
+		assert result[0].sample_id == 1  # even-beats wins
+
+	def test_samples_without_profile_excluded (self) -> None:
+		"""on_missing='exclude': samples with no profile are dropped."""
+		samples = [
+			_make_record(sample_id=1, name="has-profile"),
+			_make_record(sample_id=2, name="no-profile"),
+		]
+		resolver = self._make_resolver({
+			1: (1.0, 0.0, 1.0, 0.0),
+			# sample 2 → resolver returns None → excluded
+		}, resolution=4)
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="desc",
+				params=(("pattern", (1.0, 0.0, 1.0, 0.0)),),
+			),),
+		)
+		result = subsample.query.query(
+			spec, samples, energy_profile_resolver=resolver,
+		)
+		ids = [r.sample_id for r in result]
+		assert ids == [1]  # sample 2 excluded
+
+	def test_no_resolver_excludes_all (self) -> None:
+		"""Without an energy_profile_resolver, no sample can score →
+		all excluded → empty result."""
+		samples = [_make_record(sample_id=1)]
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="desc",
+				params=(("pattern", (1.0, 0.0, 1.0, 0.0)),),
+			),),
+		)
+		result = subsample.query.query(spec, samples)
+		assert result == []
+
+	def test_dir_asc_puts_worst_match_first (self) -> None:
+		samples = [
+			_make_record(sample_id=1, name="even-match"),
+			_make_record(sample_id=2, name="odd-match"),
+		]
+		resolver = self._make_resolver({
+			1: (1.0, 0.0, 1.0, 0.0),
+			2: (0.0, 1.0, 0.0, 1.0),
+		}, resolution=4)
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="asc",
+				params=(("pattern", (1.0, 0.0, 1.0, 0.0)),),
+			),),
+		)
+		result = subsample.query.query(
+			spec, samples, energy_profile_resolver=resolver,
+		)
+		# asc: orthogonal (score 0) first, then matching (score 1)
+		assert result[0].sample_id == 2
+
+	def test_pattern_longer_than_profile_lhs_truncates (self) -> None:
+		"""Pattern of 6 beats, profile of 4 beats → compare first 4."""
+		samples = [_make_record(sample_id=1)]
+		resolver = self._make_resolver({
+			1: (1.0, 0.0, 1.0, 0.0),  # 4 beats
+		}, resolution=4)
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="desc",
+				params=(("pattern", (1.0, 0.0, 1.0, 0.0, 1.0, 0.0)),),
+			),),
+		)
+		result = subsample.query.query(
+			spec, samples, energy_profile_resolver=resolver,
+		)
+		# Sample not excluded — pattern was truncated to 4, matches fully.
+		assert len(result) == 1
+
+	def test_pattern_shorter_than_profile_lhs_truncates (self) -> None:
+		"""Pattern of 2 beats, profile of 4 beats → compare first 2."""
+		samples = [_make_record(sample_id=1)]
+		resolver = self._make_resolver({
+			1: (1.0, 0.0, 999.0, 999.0),  # first 2 match [1,0]; rest garbage
+		}, resolution=4)
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(
+				by="beat_match", dir="desc",
+				params=(("pattern", (1.0, 0.0)),),
+			),),
+		)
+		result = subsample.query.query(
+			spec, samples, energy_profile_resolver=resolver,
+		)
+		# Only first 2 beats compared → perfect match → sample included
+		assert len(result) == 1

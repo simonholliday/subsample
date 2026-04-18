@@ -381,7 +381,7 @@ the [Process](#process---how-to-present-the-sample) reference below.
 
 #### Step 5 - lock a loop to your session tempo
 
-`beat_quantize` time-stretches a sample to a target BPM and snaps its onsets
+`stretch_quantize` time-stretches a sample to a target BPM and snaps its onsets
 to a beat grid - turning any loosely-timed loop in your library into something
 locked to the session. Combine it with filtering for a length+rhythm pick:
 
@@ -396,7 +396,7 @@ locked to the session. Combine it with filtering for a length+rhythm pick:
     order:
       - { by: duration, dir: desc }     # prefer longer loops
   process:
-    - beat_quantize: { strength: 0.7 }  # 70% snap - loose but locked
+    - stretch_quantize: { strength: 0.7 }  # 70% snap - loose but locked
   one_shot: false
 ```
 
@@ -513,7 +513,7 @@ is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
 | `onsets` | int | Filter by detected transient count. Example: `{ gte: 4 }` |
 | `tempo` | float (BPM) | Filter by detected tempo. Example: `{ gte: 100, lte: 140 }` |
 | `pitch` | Hz or note name | Filter by detected frequency. Each operator value is either a Hz float (`{ gte: 130.8 }`) or a note name (`{ gte: C3, lt: C6 }`). The two forms are interchangeable - note names are converted to Hz at parse time. Sharps: `C#4`; flats: `Db4`. |
-| `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `beat_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
+| `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
 | `name` | string | Exact filename stem match. Legacy: a path-like value (containing `/` or starting with `.`) is still auto-detected as a `path:` - see below |
@@ -551,8 +551,9 @@ Built-in scorers:
 | `onsets` | Detected onset count |
 | `tempo` | Detected BPM |
 | `level` | RMS loudness |
-| `quantized_beats` | Beat length of the assignment's `beat_quantize`/`pad_quantize` output. Samples without a computed variant park at the end regardless of direction. |
+| `quantized_beats` | Beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples without a computed variant park at the end regardless of direction. |
 | `similarity` | Similarity rank against the reference in `where`. Only supported as the primary clause; requires `reference` in `where`. When `reference` is set and no `order` is given, `similarity` desc is assumed automatically. |
+| `beat_match` | Cosine similarity between a user-supplied `pattern:` (a list of numbers in `[0, 1]` per beat) and the sample's per-beat energy profile. Requires a `stretch_quantize` or `pad_quantize` step in the same assignment; samples without a quantized variant are excluded from the result. See [Beat-pattern matching](#beat-pattern-matching) below for the full semantics. |
 
 #### Implicit defaults
 
@@ -567,8 +568,8 @@ common case concise, but it helps to know which ones are on:
 | `pick` | `1` for every note | Multi-note assignment with `repitch` in `process` |
 | `where` | Empty (all samples match) | `where` block omitted |
 | `process` | Empty (unprocessed playback) | `process` block omitted |
-| `grid` | `16` (sixteenth-note) | `beat_quantize` / `pad_quantize` without explicit grid |
-| `tempo` | Session `target_bpm` from `config.yaml` | `beat_quantize` / `pad_quantize` without explicit tempo |
+| `grid` | `16` (sixteenth-note) | `stretch_quantize` / `pad_quantize` without explicit grid |
+| `tempo` | Session `target_bpm` from `config.yaml` | `stretch_quantize` / `pad_quantize` without explicit tempo |
 | `one_shot` | `true` | Omitted from assignment |
 | `gain` | `0.0` dB | Omitted from assignment |
 | `pan` | Identity routing | Omitted from assignment |
@@ -583,6 +584,57 @@ want a different sort.
 `pick` is 1-indexed. Default: 1 (first match). For multi-note assignments
 without explicit `pick`, each note gets the next position (rank distribution) -
 so `notes: [36, 35]` gives note 36 pick 1 (best match) and note 35 pick 2.
+
+#### Beat-pattern matching
+
+`beat_match` is the shape-based companion to `similarity`: where `similarity`
+ranks by spectral/timbral closeness to a reference sample, `beat_match` ranks
+by *rhythmic* closeness to a user-defined pattern.
+
+**Applies only to quantized samples.** `beat_match` scores the per-beat energy
+profile that `stretch_quantize` and `pad_quantize` produce as a by-product of
+snapping onsets to a beat grid. Any assignment that uses `beat_match` in its
+`order:` must therefore include one of those processors in its `process:`
+block - without a quantize step, no sample has an energy profile to compare
+against, and the result set is empty.
+
+```yaml
+select:
+  where:
+    duration: { gte: 1.0 }
+    onsets:   { gte: 4 }
+  order:
+    - { by: beat_match, pattern: [1, 0, 1, 0, 1, 0, 1, 0] }
+process:
+  - stretch_quantize: { grid: 16 }
+```
+
+**The pattern.** A list of numbers in `[0, 1]`, one per beat. Values are
+relative — only the shape matters, not the absolute magnitudes. Examples:
+
+| Pattern | Intent |
+|---|---|
+| `[1, 0, 1, 0]` | energy on every other beat (back-beat feel) |
+| `[0, 1, 0, 1]` | energy on the off-beats |
+| `[1, 0.9, 0.8, 0.7, 0.6, 0.5]` | gentle decay from beat 1 to beat 6 |
+| `[0, 0, 1, 1, 0, 0, 1, 1]` | double-hits on beats 3-4 and 7-8 |
+
+**How a sample is scored.** Each quantized sample has a *grid energy profile* —
+per-slot RMS computed after the quantize step. `beat_match` mean-pools that
+profile down to per-beat energy (so an 8th-note grid and a 16th-note grid
+both reduce to the same per-beat values — cross-grid invariance), then
+computes cosine similarity between the pattern and the profile over
+`min(len(pattern), len(beats))` elements (left-aligned). Samples with no
+quantized variant score `None` and are excluded.
+
+**Behaviour summary:**
+
+- `dir: desc` (default) = best match first. `dir: asc` = worst match first.
+- Shape-sensitive, level-insensitive: `[1, 0, 1, 0]` perfectly matches a
+  sample with energy `[0.5, 0, 0.5, 0]` (score 1.0).
+- Length mismatches are truncated left-aligned — no resampling, no padding.
+- Ints and floats are both accepted in the pattern list; values outside
+  `[0, 1]` are rejected at parse time.
 
 #### Fallback chains
 
@@ -679,13 +731,13 @@ Available processors:
 |-----------|-----------|-------------|
 | `repitch: true` | none | Pitch-shift to match the triggering MIDI note |
 | `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
-| `beat_quantize: true` | grid (default 16), tempo (config target_bpm), strength (default 1.0) | Time-stretch to session `target_bpm` with all defaults |
-| `beat_quantize: { grid: 16 }` | as above, grid overridden | Time-stretch to session `target_bpm` |
-| `beat_quantize: { tempo: 120, grid: 8 }` | explicit tempo + grid | Time-stretch to a specific tempo |
-| `beat_quantize: { strength: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantize - onsets move partway to the grid for a looser feel |
+| `stretch_quantize: true` | grid (default 16), tempo (config target_bpm), strength (default 1.0) | Time-stretch to session `target_bpm` with all defaults |
+| `stretch_quantize: { grid: 16 }` | as above, grid overridden | Time-stretch to session `target_bpm` |
+| `stretch_quantize: { tempo: 120, grid: 8 }` | explicit tempo + grid | Time-stretch to a specific tempo |
+| `stretch_quantize: { strength: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantize - onsets move partway to the grid for a looser feel |
 | `pad_quantize: true` | grid (default 16), tempo (config target_bpm), strength (default 1.0) | Silence-pad onsets with all defaults |
 | `pad_quantize: { grid: 16 }` | as above, grid overridden | Onset-aligned silence padding - snaps onsets to the beat grid by inserting silence between segments rather than time-stretching. No pitch/speed change. Ideal for speech. |
-| `pad_quantize: { strength: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantize - same as beat_quantize strength but for silence-pad mode |
+| `pad_quantize: { strength: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantize - same as stretch_quantize strength but for silence-pad mode |
 | `filter_low: true` | freq (Hz, default 16000), resonance (dB, default 0) | Low-pass filter (console-style default) |
 | `filter_high: true` | freq (Hz, default 80), resonance (dB, default 0) | High-pass filter (console-style default) |
 | `filter_band: true` | freq (Hz, default 1000), q (default 0.7), resonance (dB, default 0) | Band-pass filter (Q sets width) |
@@ -766,7 +818,7 @@ squash transients and raise the relative level of the sustain/decay.
 
 HPSS (Harmonic/Percussive Source Separation) decomposes audio into sustained
 tonal content and transient clicks/hits. Useful as a pre-filter before repitch
-(avoids pitch-shifting drum bleed) or beat_quantize (cleaner grid alignment).
+(avoids pitch-shifting drum bleed) or stretch_quantize (cleaner grid alignment).
 
 When `repitch` is in the process list, all notes in a multi-note assignment
 share pick 1 (same sample, pitched per note). Without `repitch`, each note gets
@@ -784,7 +836,7 @@ translates each one to the appropriate canonical name:
 |---|---|---|---|
 | `saturate` | `amount` | `drive` | dB |
 | `transient` | `amount` | `gain` | dB (signed: +enhance, -tame) |
-| `beat_quantize` | `amount` | `strength` | 0.0-1.0 fraction |
+| `stretch_quantize` | `amount` | `strength` | 0.0-1.0 fraction |
 | `pad_quantize` | `amount` | `strength` | 0.0-1.0 fraction |
 
 Mixing both names on the same step is rejected at parse time.
@@ -794,9 +846,16 @@ The two separate HPSS processor names `hpss_harmonic: true` and
 `hpss: { keep: percussive }`. The legacy names still work and translate
 internally.
 
-`beat_quantize` and `pad_quantize` now accept `tempo:` instead of `bpm:` -
+`stretch_quantize` and `pad_quantize` now accept `tempo:` instead of `bpm:` -
 matching the `tempo:` where-predicate. Legacy `bpm:` is translated to
 `tempo:` at parse time.
+
+The processor formerly named `beat_quantize` is now `stretch_quantize`: both
+the new name and its companion `pad_quantize` describe *how* each quantizer
+aligns onsets to a grid - one stretches audio in time, the other pads with
+silence between segments. The legacy name `beat_quantize` still works -
+the parser translates it to `stretch_quantize` at parse time, preserving any
+params.
 
 ### Pan
 
@@ -959,7 +1018,7 @@ Replace the scalar value with a CC binding:
 ```yaml
 process:
   - pad_quantize: { grid: 16, strength: { cc: 1 } }
-  - beat_quantize: { tempo: { cc: 2, min: 60, max: 180 }, grid: 16 }
+  - stretch_quantize: { tempo: { cc: 2, min: 60, max: 180 }, grid: 16 }
   - filter_low: { freq: { cc: 74, min: 200, max: 16000 } }
 ```
 
@@ -989,7 +1048,7 @@ Every enum-string value the MIDI map accepts, in one place:
 |---|---|
 | `where` operators | `gte` `lte` `gt` `lt` `eq` |
 | Order `dir` | `asc` `desc` |
-| Order `by` | `age` `duration` `pitch` `onsets` `tempo` `level` `quantized_beats` `similarity` |
+| Order `by` | `age` `duration` `pitch` `onsets` `tempo` `level` `quantized_beats` `similarity` `beat_match` |
 | `notes` range | `<low>..<high>` (e.g. `C2..C4` or `36..60`) |
 | `pitch` predicate value | Hz float (`440`) or note name (`A4`, `C#3`, `Db5`) |
 | `distort` `mode` | `hard_clip` `fold` `bit_crush` `downsample` |
@@ -997,6 +1056,8 @@ Every enum-string value the MIDI map accepts, in one place:
 | `vocoder` `carrier` | `reference` (the note's reference sample) or a file path |
 | Legacy `order_by` tokens | `newest` `oldest` `duration_asc` `duration_desc` `pitch_asc` `pitch_desc` `onsets_asc` `onsets_desc` `tempo_asc` `tempo_desc` `loudest` `quietest` `similarity` `quantized_beats_asc` `quantized_beats_desc` |
 | Legacy numeric-predicate keys | `min_duration` `max_duration` `min_onsets` `max_onsets` `min_tempo` `max_tempo` `min_pitch` `max_pitch` `min_quantized_beats` `max_quantized_beats` |
+| Legacy processor names | `beat_quantize` (→ `stretch_quantize`) `hpss_harmonic` (→ `hpss: { keep: harmonic }`) `hpss_percussive` (→ `hpss: { keep: percussive }`) |
+| Legacy processor param names | `amount` (→ `drive` / `gain` / `strength` per processor) `bpm` (→ `tempo` in quantizers) |
 
 ## Performance
 
@@ -1081,7 +1142,7 @@ variants also store a grid energy profile - per-grid-slot RMS energy normalized
 to [0, 1] - alongside the audio, enabling future complementary pattern matching.
 
 Samples with detected rhythmic content can be time-stretched to a target tempo
-using the `beat_quantize` processor in a MIDI map assignment. Detected attacks are
+using the `stretch_quantize` processor in a MIDI map assignment. Detected attacks are
 snapped to a quantized beat grid and the entire mapping is applied in a single
 pass using Rubber Band's offline finer engine. Time-stretch variants are produced
 on-demand when an assignment requests them - no global startup cost.
@@ -1811,7 +1872,7 @@ MIDI note_on
     → query engine: filter → order → pick → sample_id
         (fallback: try each select spec in order)
     → transform_manager.get_pitched()  → pitch variant (repitch assignments)
-    → transform_manager.get_at_bpm()   → time-stretch variant (beat_quantize assignments)
+    → transform_manager.get_at_bpm()   → time-stretch variant (stretch_quantize assignments)
     → transform_manager.get_base()     → base variant (all samples)
     → _render()                        → on-the-fly fallback (first trigger only)
     → _render_float(): apply gain · velocity² · anti-clip ceiling

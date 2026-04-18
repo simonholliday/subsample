@@ -155,7 +155,7 @@ assignments:
   #     order: [{ by: age, dir: desc }]
   #     pick: 1
   #   process:
-  #     - beat_quantize: { grid: 16 }
+  #     - stretch_quantize: { grid: 16 }
   #   one_shot: false
 
 
@@ -205,6 +205,29 @@ assignments:
   #   select:
   #     - where: { name: my-favourite-kick }
   #     - where: { reference: samples/reference/GM36_BassDrum1.wav }
+
+
+  # --- J. Beat-pattern match ---
+  # `beat_match` ranks samples by how closely their per-beat energy
+  # matches a supplied pattern.  The pattern is a list of numbers in
+  # [0, 1], one per beat - each value is a target relative energy for
+  # that beat.  The example below finds loops whose energy lands on
+  # even beats (1, 3, 5, 7) and is quiet on odd beats.  Requires a
+  # `stretch_quantize` or `pad_quantize` step in the same assignment -
+  # samples without a quantized variant are excluded from the result.
+
+  # - name: Beat-pattern loop
+  #   channel: 3
+  #   notes: C2..C3
+  #   select:
+  #     where:
+  #       duration: { gte: 1.0 }
+  #       onsets:   { gte: 4 }
+  #     order:
+  #       - { by: beat_match, pattern: [1, 0, 1, 0, 1, 0, 1, 0] }
+  #   process:
+  #     - stretch_quantize: { grid: 16 }
+  #   one_shot: false
 
 
   # =================================================================

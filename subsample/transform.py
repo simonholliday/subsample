@@ -332,7 +332,7 @@ class HpssPercussive:
 	"""Keep only the percussive (transient) component via HPSS.
 
 	Removes harmonic/tonal content, preserving clicks, hits, and transients.
-	Useful as a pre-filter before beat_quantize for cleaner grid alignment,
+	Useful as a pre-filter before stretch_quantize for cleaner grid alignment,
 	or as a creative effect to extract the rhythmic skeleton of a sound.
 	"""
 
@@ -466,7 +466,7 @@ class PadQuantize:
 
 	"""Quantize onsets to a beat grid by inserting silence between segments.
 
-	Unlike beat_quantize (TimeStretch), which time-stretches audio to align
+	Unlike stretch_quantize (TimeStretch), which time-stretches audio to align
 	onsets to the grid, pad_quantize inserts silence so each segment plays
 	at its original speed — no pitch or tempo artefacts.  Ideal for speech
 	samples where natural timbre must be preserved.
@@ -1639,7 +1639,7 @@ class TransformManager:
 
 		By default reads target_bpm and quantize_resolution from the stored
 		config.  Per-assignment overrides can be passed explicitly — this
-		supports beat_quantize processors that declare their own BPM/grid.
+		supports stretch_quantize processors that declare their own BPM/grid.
 
 		On a cache miss, enqueues the transform and returns None so the
 		variant is ready on the next trigger.
@@ -3176,7 +3176,7 @@ def _apply_pad_quantize (
 	if step.amount <= 0.0:
 		return audio
 
-	# Prefer sample-accurate attack times, same as beat_quantize.
+	# Prefer sample-accurate attack times, same as stretch_quantize.
 	attack_times = record.rhythm.attack_times
 
 	if not attack_times:
@@ -3641,7 +3641,7 @@ def spec_from_process (
 	Iterates the process steps in *declaration order*, converting each
 	ProcessorStep into the corresponding TransformStep dataclass.  Dynamic
 	parameters (midi_note for repitch, target_bpm/resolution for
-	beat_quantize, reference_path for vocoder carrier: reference) are
+	stretch_quantize, reference_path for vocoder carrier: reference) are
 	substituted at the position the user declared them.
 
 	Parameters that are CcBinding instances are resolved from cc_state at
@@ -3670,7 +3670,7 @@ def spec_from_process (
 			elif midi_note is not None:
 				steps.append(PitchShift(target_midi_note=midi_note))
 
-		elif proc.name == "beat_quantize":
+		elif proc.name == "stretch_quantize":
 			tempo = float(_resolve_cc(proc.get("tempo"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
 			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution, cc_omni=cc_omni))
 			strength = max(0.0, min(1.0, float(_resolve_cc(proc.get("strength"), cc_state, 1.0, cc_omni=cc_omni))))
@@ -3679,8 +3679,8 @@ def spec_from_process (
 				steps.append(TimeStretch(target_bpm=tempo, resolution=grid, amount=strength))
 			else:
 				_warn_once(
-					"beat_quantize-no-tempo",
-					"beat_quantize: no tempo available (no explicit 'tempo:' "
+					"stretch_quantize-no-tempo",
+					"stretch_quantize: no tempo available (no explicit 'tempo:' "
 					"and transform.target_bpm is 0 in config.yaml) — step skipped",
 				)
 

@@ -1997,7 +1997,7 @@ class TestSpecFromProcess:
 	def test_beat_quantize_with_params (self) -> None:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="beat_quantize",
+				name="stretch_quantize",
 				params=(("tempo", 120), ("grid", 8)),
 			),
 		))
@@ -2008,8 +2008,8 @@ class TestSpecFromProcess:
 		assert spec.steps[0].resolution == 8
 
 	def test_beat_quantize_true_uses_all_defaults (self) -> None:
-		"""`beat_quantize: true` → all defaults, fed by target_bpm."""
-		process = subsample.query.parse_process([{"beat_quantize": True}], "test")
+		"""`stretch_quantize: true` → all defaults, fed by target_bpm."""
+		process = subsample.query.parse_process([{"stretch_quantize": True}], "test")
 		spec = subsample.transform.spec_from_process(process, target_bpm=120.0)
 		assert len(spec.steps) == 1
 		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
@@ -2018,14 +2018,14 @@ class TestSpecFromProcess:
 		assert spec.steps[0].amount == 1.0
 
 	def test_beat_quantize_true_no_bpm_warns_and_skips (self, caplog: typing.Any) -> None:
-		"""`beat_quantize: true` with no target_bpm logs a warning and skips."""
+		"""`stretch_quantize: true` with no target_bpm logs a warning and skips."""
 		# Reset the warn-once set so this test sees the warning fresh.
-		subsample.transform._WARN_ONCE_SEEN.discard("beat_quantize-no-tempo")
-		process = subsample.query.parse_process([{"beat_quantize": True}], "test")
+		subsample.transform._WARN_ONCE_SEEN.discard("stretch_quantize-no-tempo")
+		process = subsample.query.parse_process([{"stretch_quantize": True}], "test")
 		with caplog.at_level("WARNING"):
 			spec = subsample.transform.spec_from_process(process, target_bpm=None)
 		assert spec.steps == ()
-		assert any("beat_quantize" in r.message and "tempo" in r.message for r in caplog.records)
+		assert any("stretch_quantize" in r.message and "tempo" in r.message for r in caplog.records)
 
 	def test_pad_quantize_true_uses_all_defaults (self) -> None:
 		"""`pad_quantize: true` → all defaults, fed by target_bpm."""
@@ -2189,7 +2189,7 @@ class TestSpecFromProcess:
 			subsample.query.ProcessorStep(name="filter_low", params=(("freq", 500), ("resonance", 6))),
 			subsample.query.ProcessorStep(name="saturate", params=(("drive", 4),)),
 			subsample.query.ProcessorStep(name="repitch"),
-			subsample.query.ProcessorStep(name="beat_quantize", params=(("tempo", 120), ("grid", 16))),
+			subsample.query.ProcessorStep(name="stretch_quantize", params=(("tempo", 120), ("grid", 16))),
 		))
 		spec = subsample.transform.spec_from_process(process, midi_note=72, target_bpm=100.0)
 
