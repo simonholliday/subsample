@@ -25,6 +25,7 @@ dependencies = [
 	"python-rtmidi>=1.5",
 	"pyrubberband>=0.4",
 	"watchdog>=4.0",
+	"Pillow>=10.0",
 	"pymididefs @ git+https://github.com/simonholliday/PyMidiDefs.git",
 ]
 

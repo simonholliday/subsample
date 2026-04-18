@@ -105,6 +105,18 @@
 recorder:
   enabled: true
 
+  # previews: true
+  # Visual sample previews.  When enabled (default), every captured or
+  # imported sample gets two artefacts:
+  #   * <sample>.preview.png  — fixed 1024×256 thumbnail (RGB, ~15-25 KB),
+  #     for browsing the library in an OS file manager.
+  #   * A compact `preview` block embedded in <sample>.analysis.json,
+  #     which the Supervisor dashboard renders as scalable SVG on demand
+  #     (composition: waveform envelope, 4-band frequency skyline, onset
+  #     ticks, beat grid if rhythmic, pitch/BPM/duration badge).
+  # Set false to skip both — saves ~15-25 KB per PNG and ~4 KB of JSON
+  # per sample if you do not browse the library visually.
+
   audio:
 
     # device: "Samson Go Mic: USB Audio (hw:1,0)"

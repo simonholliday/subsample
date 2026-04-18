@@ -18,6 +18,12 @@ files; samples are stored as canonical AmbiX B-format and decoded at playback
 time with project-wide rotation. Optional OSC integration sends sample events
 to and receives import requests from other OSC-compatible apps. An optional
 Supervisor WebSocket dashboard broadcasts live state (MIDI activity, library
-contents, recorder status) for in-browser monitoring.
+contents, recorder status) for in-browser monitoring. Each captured or imported
+sample is also given a visual preview: a fixed 1024x256 `.preview.png`
+thumbnail (waveform, 4-band frequency skyline, onset ticks, optional beat
+grid, pitch/BPM badge) sits next to the audio file for OS file-manager
+browsing, and a compact preview-data block is embedded in the
+`.analysis.json` sidecar so Supervisor can render a scalable vector preview
+at any size on demand.
 """
 

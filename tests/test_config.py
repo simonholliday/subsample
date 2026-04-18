@@ -1194,3 +1194,48 @@ class TestAudioFormatConfig:
 
 		assert cfg.recorder.audio.audio_format == "flac"
 		assert cfg.recorder.audio.bit_depth    == 24
+
+
+class TestPreviewsConfig:
+
+	"""Tests for recorder.previews parsing."""
+
+	def test_default_is_true (self) -> None:
+		"""With no override, previews resolves to True — new libraries get
+		visual previews out of the box."""
+
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert cfg.recorder.previews is True
+
+	def test_explicit_false_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""Setting recorder.previews: false in YAML is parsed correctly."""
+
+		import shutil
+
+		default     = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write("\nrecorder:\n  previews: false\n")
+
+		cfg = subsample.config.load_config(user_config)
+
+		assert cfg.recorder.previews is False
+
+	def test_explicit_true_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""Setting recorder.previews: true is idempotent with the default."""
+
+		import shutil
+
+		default     = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write("\nrecorder:\n  previews: true\n")
+
+		cfg = subsample.config.load_config(user_config)
+
+		assert cfg.recorder.previews is True

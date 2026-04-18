@@ -36,6 +36,7 @@ import subsample.ambisonic
 import subsample.analysis
 import subsample.cache
 import subsample.config
+import subsample.preview
 
 
 _log = logging.getLogger(__name__)
@@ -374,12 +375,26 @@ class SampleProcessor:
 					20.0 * math.log10(level.peak),
 				)
 
+			# Compute preview data from the same mono float signal analyze_all()
+			# consumed, so the envelope/onset alignment is exact.  Skipped when
+			# the master previews toggle is off — saves both the STFT cost here
+			# and the PNG / JSON bytes downstream.
+			preview_data: typing.Optional[subsample.preview.PreviewData] = None
+			if self._cfg.recorder.previews:
+				preview_duration = len(mono) / effective_sample_rate
+				preview_data = subsample.preview.compute_preview_data(
+					mono, effective_sample_rate,
+					rhythm, pitch, result, level, band_energy,
+					duration=preview_duration,
+				)
+
 			write_result = self._write_audio_file(
 				req.audio, req.timestamp, rhythm, result, pitch, timbre, level, band_energy,
 				filename_base=req.filename_base,
 				sample_rate=req.sample_rate,
 				bit_depth=req.bit_depth,
 				channel_format=channel_format_tag,
+				preview_data=preview_data,
 			)
 
 			if self._on_complete is not None and write_result is not None:
@@ -403,6 +418,7 @@ class SampleProcessor:
 		sample_rate: typing.Optional[int] = None,
 		bit_depth: typing.Optional[int] = None,
 		channel_format: str = "pcm",
+		preview_data: typing.Optional[subsample.preview.PreviewData] = None,
 	) -> tuple[pathlib.Path, float] | None:
 
 		"""Write a single audio segment to disk and save its analysis sidecar.
@@ -524,7 +540,9 @@ class SampleProcessor:
 
 		# Persist analysis alongside the audio file so future reads (e.g.
 		# reference file loading on startup) can skip re-analysis when
-		# nothing changes.
+		# nothing changes.  When preview data is supplied, it is embedded
+		# in the same sidecar so the Supervisor dashboard can render a
+		# vector preview without touching the audio.
 		subsample.cache.save_cache(
 			audio_path     = filepath,
 			audio_md5      = audio_md5,
@@ -540,7 +558,18 @@ class SampleProcessor:
 			channels       = n_channels,
 			captured_at    = timestamp.isoformat(),
 			channel_format = channel_format,
+			preview_data   = preview_data,
 		)
+
+		# Raster preview: written only when preview_data was computed.  The
+		# master `recorder.previews` toggle in _process gates both the data
+		# block and the PNG sidecar in a single decision.
+		if preview_data is not None:
+			png_path = filepath.with_name(filepath.name + ".preview.png")
+			try:
+				subsample.preview.render_png(preview_data, png_path)
+			except OSError as exc:
+				_log.warning("Failed to write preview %s: %s", png_path.name, exc)
 
 		return filepath, duration
 

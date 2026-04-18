@@ -577,3 +577,183 @@ class TestReanalyzePreservesChannelFormat:
 		assert result is not None
 		*_, channel_format = result
 		assert channel_format == "pcm"
+
+
+# ---------------------------------------------------------------------------
+# TestPreviewRoundtrip
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewRoundtrip:
+
+	"""save_cache accepts a preview_data kwarg; load_preview_data retrieves it."""
+
+	def _preview_data (self) -> "subsample.preview.PreviewData":
+
+		import subsample.preview
+
+		bins = subsample.preview._ENVELOPE_BINS
+		n    = subsample.preview._N_BANDS
+		return subsample.preview.PreviewData(
+			version      = subsample.preview.PREVIEW_VERSION,
+			envelope_min = numpy.linspace(-60, 60, bins).astype(numpy.int8),
+			envelope_max = numpy.linspace(-40, 80, bins).astype(numpy.int8),
+			bands        = tuple(
+				numpy.linspace(0, 100 + 5 * b, bins).astype(numpy.int8)
+				for b in range(n)
+			),
+			band_totals  = tuple(1.0 / n for _ in range(n)),
+			onset_times  = (0.1, 0.4, 0.7),
+			beat_times   = (0.0, 0.5),
+			tempo_bpm    = 120.0,
+			duration     = 1.0,
+			peak         = 0.8,
+			rms          = 0.3,
+			accent_rgb   = (200, 100, 150),
+			pitch_label  = "A3",
+			is_rhythmic  = True,
+		)
+
+	def test_preview_block_persists_to_sidecar (self, tmp_path: pathlib.Path) -> None:
+
+		import subsample.preview
+
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+		preview = self._preview_data()
+
+		subsample.cache.save_cache(
+			wav, "deadbeef", tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+			preview_data=preview,
+		)
+
+		sidecar = subsample.cache.cache_path(wav)
+		payload = json.loads(sidecar.read_text())
+
+		assert "preview" in payload
+		assert payload["preview"]["version"] == subsample.preview.PREVIEW_VERSION
+
+	def test_no_preview_data_omits_block (self, tmp_path: pathlib.Path) -> None:
+
+		"""save_cache called without preview_data writes no ``preview`` key —
+		loaders treat its absence as 'no preview available', no warning."""
+
+		wav = tmp_path / "snare.wav"
+		tests.helpers._make_wav(wav)
+
+		subsample.cache.save_cache(
+			wav, "deadbeef", tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+		)
+
+		payload = json.loads(subsample.cache.cache_path(wav).read_text())
+		assert "preview" not in payload
+
+	def test_load_preview_data_roundtrip (self, tmp_path: pathlib.Path) -> None:
+
+		wav = tmp_path / "hat.wav"
+		tests.helpers._make_wav(wav)
+		preview = self._preview_data()
+
+		subsample.cache.save_cache(
+			wav, "deadbeef", tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+			preview_data=preview,
+		)
+
+		loaded = subsample.cache.load_preview_data(wav)
+		assert loaded is not None
+		assert loaded.version     == preview.version
+		assert loaded.pitch_label == preview.pitch_label
+		assert loaded.tempo_bpm   == preview.tempo_bpm
+		assert (loaded.envelope_min == preview.envelope_min).all()
+		assert (loaded.envelope_max == preview.envelope_max).all()
+		for b1, b2 in zip(loaded.bands, preview.bands):
+			assert (b1 == b2).all()
+
+	def test_load_preview_data_returns_none_when_absent (self, tmp_path: pathlib.Path) -> None:
+
+		"""Sidecars written before the preview feature (no ``preview`` key)
+		load normally; load_preview_data just returns None."""
+
+		wav = tmp_path / "legacy.wav"
+		tests.helpers._make_wav(wav)
+
+		subsample.cache.save_cache(
+			wav, "deadbeef", tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+		)
+
+		assert subsample.cache.load_preview_data(wav) is None
+
+	def test_load_preview_data_returns_none_when_sidecar_missing (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+
+		"""load_preview_data must tolerate a totally missing sidecar (e.g.
+		called before any analysis has run) without raising."""
+
+		wav = tmp_path / "orphan.wav"
+		tests.helpers._make_wav(wav)
+
+		assert subsample.cache.load_preview_data(wav) is None
+
+	def test_load_preview_data_returns_none_for_malformed_block (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+
+		"""A corrupt preview block must not crash the loader — Supervisor
+		should just see 'no preview' and move on."""
+
+		wav = tmp_path / "bad.wav"
+		tests.helpers._make_wav(wav)
+		preview = self._preview_data()
+
+		subsample.cache.save_cache(
+			wav, "deadbeef", tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+			preview_data=preview,
+		)
+
+		# Corrupt the block: make envelope_min not-base64.
+		sidecar = subsample.cache.cache_path(wav)
+		payload = json.loads(sidecar.read_text())
+		payload["preview"]["envelope_min"] = "not valid base64 at all"
+		sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+		assert subsample.cache.load_preview_data(wav) is None
+
+	def test_main_load_cache_unaffected_by_preview_block (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+
+		"""The primary load_cache path returns the same 9-tuple whether the
+		sidecar carries a preview block or not — preview is a pure bolt-on."""
+
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+		md5 = subsample.cache.compute_audio_md5(wav)
+		preview = self._preview_data()
+
+		subsample.cache.save_cache(
+			wav, md5, tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+			preview_data=preview,
+		)
+
+		result = subsample.cache.load_cache(wav)
+		assert result is not None
+		assert len(result) == 9

@@ -14,6 +14,12 @@ midi-map-*.yaml
 # Logs
 *.log
 
+# OS-generated thumbnail and metadata files
+Thumbs.db
+ehthumbs.db
+.DS_Store
+desktop.ini
+
 # Audio and video files — never tracked anywhere in the repo.
 *.wav
 *.flac
@@ -33,6 +39,11 @@ midi-map-*.yaml
 # Analysis sidecars — generated locally, not tracked (except in
 # samples/reference/ which un-ignores them via its own .gitignore).
 *.analysis.json
+
+# Preview PNGs — generated alongside each sample for OS file-manager
+# thumbnails; regeneratable via scripts/regen_previews_png.py from the
+# audio + analysis sidecar, so there's no reason to track them.
+*.preview.png
 
 # samples/ — directory structure is committed via .gitkeep files.
 # Per-directory .gitignore files handle any additional whitelisting

@@ -34,6 +34,7 @@ import numpy
 import subsample.analysis
 import subsample.audio
 import subsample.config
+import subsample.preview
 
 
 _log = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ def save_cache (
 	channels: int = 1,
 	captured_at: typing.Optional[str] = None,
 	channel_format: str = "pcm",
+	preview_data: typing.Optional[subsample.preview.PreviewData] = None,
 ) -> None:
 
 	"""Write analysis results to a JSON sidecar file.
@@ -136,6 +138,12 @@ def save_cache (
 		captured_at: ISO 8601 capture timestamp for live recordings; None for
 		             reference samples and file imports whose capture time is
 		             unknown.
+		preview_data: Optional compact visual-preview block (envelopes,
+		             per-band energies, onset/beat markers, accent colour,
+		             badge text) serialised into the sidecar for the
+		             Supervisor dashboard's on-demand SVG renderer.  When
+		             None, the ``preview`` key is omitted — loaders treat
+		             missing preview as "no preview available".
 	"""
 
 	effective_level = level if level is not None else subsample.analysis.LevelResult(peak=0.0, rms=0.0)
@@ -151,7 +159,7 @@ def save_cache (
 		audio_md5, params, spectral, rhythm, pitch, timbre, duration,
 		effective_level, effective_band_energy,
 		bit_depth=bit_depth, channels=channels, captured_at=captured_at,
-		channel_format=channel_format,
+		channel_format=channel_format, preview_data=preview_data,
 	)
 	json_str = json.dumps(payload, indent=2)
 
@@ -391,6 +399,39 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 	return _deserialize_payload(payload, sidecar_path.name)
 
 
+def load_preview_data (
+	audio_path: pathlib.Path,
+) -> typing.Optional[subsample.preview.PreviewData]:
+
+	"""Return the PreviewData embedded in a sample's .analysis.json sidecar,
+	or None when the sidecar is absent, corrupt, or has no ``preview`` block.
+
+	Does NOT validate audio MD5 or analysis version — preview schema evolves
+	independently.  A malformed ``preview`` block logs a warning and returns
+	None rather than raising, so consumers (e.g. Supervisor) can treat the
+	sample as simply "no preview available" and continue.
+	"""
+
+	sidecar = cache_path(audio_path)
+	payload = _load_payload(sidecar, "preview")
+	if payload is None:
+		return None
+
+	preview_raw = payload.get("preview")
+	if preview_raw is None:
+		return None
+
+	if not isinstance(preview_raw, dict):
+		_log.warning("Ignoring non-dict preview block in %s", sidecar.name)
+		return None
+
+	try:
+		return subsample.preview.deserialize_from_sidecar(preview_raw)
+	except ValueError as exc:
+		_log.warning("Ignoring malformed preview in %s: %s", sidecar.name, exc)
+		return None
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -469,6 +510,7 @@ def _serialize (
 	channels: int = 1,
 	captured_at: typing.Optional[str] = None,
 	channel_format: str = "pcm",
+	preview_data: typing.Optional[subsample.preview.PreviewData] = None,
 ) -> dict[str, typing.Any]:
 
 	"""Build the JSON-serializable dict from analysis results."""
@@ -494,7 +536,7 @@ def _serialize (
 		"onset_count":     rhythm.onset_count,
 	}
 
-	return {
+	payload: dict[str, typing.Any] = {
 		"analysis_version": subsample.analysis.ANALYSIS_VERSION,
 		"audio_md5":        audio_md5,
 		"sample_rate":      params.sample_rate,
@@ -511,6 +553,11 @@ def _serialize (
 		"level":            dataclasses.asdict(level),
 		"band_energy":      dataclasses.asdict(band_energy),
 	}
+
+	if preview_data is not None:
+		payload["preview"] = subsample.preview.serialize_for_sidecar(preview_data)
+
+	return payload
 
 
 def _deserialize_spectral (data: dict[str, typing.Any]) -> subsample.analysis.AnalysisResult:

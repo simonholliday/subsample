@@ -616,3 +616,118 @@ class TestFlacCapture:
 			for sidecar in sidecars:
 				payload = json.loads(sidecar.read_text())
 				assert "channel_format" in payload
+
+
+def _make_config_with_previews (
+	output_dir: pathlib.Path,
+	*,
+	previews: bool = True,
+) -> subsample.config.Config:
+	"""Like _make_config but with explicit control over the previews toggle."""
+
+	return subsample.config.Config(
+		recorder=subsample.config.RecorderConfig(
+			audio=subsample.config.AudioConfig(
+				sample_rate=44100, bit_depth=16, channels=1, chunk_size=512,
+			),
+			buffer=subsample.config.BufferConfig(max_seconds=10),
+			previews=previews,
+		),
+		detection=subsample.config.DetectionConfig(
+			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
+			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,
+		),
+		output=subsample.config.OutputConfig(
+			directory=str(output_dir),
+			filename_format="%Y-%m-%d_%H-%M-%S",
+		),
+	)
+
+
+class TestPreviewEmission:
+
+	"""Preview sidecar + analysis.json `preview` block emission from _process."""
+
+	def test_previews_enabled_emits_png_sidecar (self) -> None:
+
+		"""Default previews=True: capture produces a .preview.png alongside
+		the audio, sized 1024x256, with an RGB (no-alpha) payload."""
+
+		import json
+
+		import subsample.preview
+		from PIL import Image
+
+		rng   = numpy.random.RandomState(10)
+		audio = (rng.randn(4410, 1) * 5000.0).astype(numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_config_with_previews(out_dir, previews=True)
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+			writer.enqueue(audio, datetime.datetime.now(), filename_base="with_preview")
+			writer.flush()
+			writer.shutdown()
+
+			png_path = out_dir / "with_preview.wav.preview.png"
+			assert png_path.exists(), "preview PNG sidecar missing"
+
+			with Image.open(png_path) as img:
+				assert img.size == (
+					subsample.preview.PNG_WIDTH, subsample.preview.PNG_HEIGHT,
+				)
+				assert img.mode == "RGB"
+
+			# Sidecar JSON should also carry a preview block so Supervisor
+			# can render SVG on demand — both artefacts are gated by the
+			# same toggle.
+			payload = json.loads((out_dir / "with_preview.wav.analysis.json").read_text())
+			assert "preview" in payload
+			assert payload["preview"]["version"] == subsample.preview.PREVIEW_VERSION
+
+	def test_previews_disabled_emits_nothing_extra (self) -> None:
+
+		"""previews=False: no .preview.png, no `preview` block in JSON."""
+
+		import json
+
+		rng   = numpy.random.RandomState(11)
+		audio = (rng.randn(4410, 1) * 5000.0).astype(numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_config_with_previews(out_dir, previews=False)
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+			writer.enqueue(audio, datetime.datetime.now(), filename_base="no_preview")
+			writer.flush()
+			writer.shutdown()
+
+			# Audio + sidecar still written.
+			assert (out_dir / "no_preview.wav").exists()
+			assert (out_dir / "no_preview.wav.analysis.json").exists()
+
+			# No preview artefacts.
+			assert not (out_dir / "no_preview.wav.preview.png").exists()
+			payload = json.loads((out_dir / "no_preview.wav.analysis.json").read_text())
+			assert "preview" not in payload
+
+	def test_preview_png_does_not_confuse_sidecar_glob (self) -> None:
+
+		"""Library loader discovers samples via `*.analysis.json` glob —
+		extra `.preview.png` siblings must not be discovered as sidecars.
+		Regression guard for the library-loader's discovery path."""
+
+		rng   = numpy.random.RandomState(12)
+		audio = (rng.randn(4410, 1) * 5000.0).astype(numpy.int16)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			out_dir = pathlib.Path(tmp)
+			cfg = _make_config_with_previews(out_dir, previews=True)
+			writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+			writer.enqueue(audio, datetime.datetime.now(), filename_base="single")
+			writer.flush()
+			writer.shutdown()
+
+			sidecars = list(out_dir.glob("*.analysis.json"))
+			assert len(sidecars) == 1, "PNG must not be matched by the analysis.json glob"
+			assert sidecars[0].name == "single.wav.analysis.json"

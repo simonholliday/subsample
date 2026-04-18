@@ -111,6 +111,11 @@ you focus on playing.
   shrink your sample library by ~40-60% with zero quality loss. Existing
   WAV samples continue to load unchanged alongside any new FLAC captures -
   see [Storage format](#storage-format).
+- **Visual sample previews.** Every capture gets a fixed 1024x256 `.preview.png`
+  thumbnail (waveform + 4-band frequency skyline + onset ticks + pitch/BPM
+  badge) for browsing in an OS file manager, plus a compact preview-data
+  block embedded in the analysis sidecar that the Supervisor dashboard
+  renders as scalable SVG on demand - see [Sample previews](#sample-previews).
 - **Headless and config-driven.** Everything is YAML - version-controllable,
   reproducible, no GUI required. Runs equally well on a studio Mac, a
   Raspberry Pi in the rehearsal room, or a rack server. Drive it from any
@@ -861,6 +866,7 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
 | `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, ~40-60% smaller, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
+| `recorder.previews` | `true` | Emit a `.preview.png` thumbnail sidecar (1024x256, ~15-25 KB) and embed a compact `preview` data block in `.analysis.json` so the Supervisor dashboard can render a scalable SVG on demand. See [Sample previews](#sample-previews) |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
 | `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit |
@@ -970,6 +976,45 @@ depth per session, so they stay consistent within a run.
 not touch your existing `.wav` samples — they continue to load unchanged.
 No migration, no bulk conversion.  FLAC only affects what gets written for
 *new* captures once you flip the flag.
+
+### Sample previews
+
+When `recorder.previews: true` (the default), every captured or imported sample
+also produces two visual-preview artefacts alongside the audio and analysis
+sidecar:
+
+- **`<sample>.preview.png`** — a fixed 1024x256 raster thumbnail (RGB, around
+  15-25 KB) for browsing the library in an OS file manager.  The composition
+  layers a 4-band frequency skyline behind a mirrored waveform envelope, with
+  short vertical ticks at each detected onset and (when the sample is
+  rhythmic) a dashed beat grid.  Stratum heights scale with each band's
+  share of total energy (same four bands as `band_energy.energy_fractions`),
+  so a bass-heavy kick looks bottom-heavy at a glance and a cymbal
+  looks top-heavy — every band keeps at least a small minimum height
+  so its temporal shape stays readable.  A bottom-right badge shows
+  pitch (when tonal), BPM (when rhythmic), and duration.
+- **A `preview` block embedded in `<sample>.analysis.json`** (around 4 KB) —
+  the same composition's inputs (envelopes, band strata, onset/beat times,
+  accent colour, badge text) in a compact form.  The Supervisor dashboard
+  calls `subsample.preview.render_svg(data, width, height)` at request time
+  to materialise a scalable vector preview at whatever size the layout wants.
+
+> File managers on macOS, Windows, and Linux do **not** treat sibling PNGs as
+> the audio file's own icon — the `.preview.png` appears as a separate file
+> in the directory listing.  This is deliberate: embedding cover art would
+> mutate the audio container, which subsample does not do.  Browse the
+> previews alongside the audio files, or use the Supervisor dashboard for
+> in-browser thumbnails.
+
+Visual design (stroke weights, colours, layout) can be iterated later without
+any schema bump — the `preview` block stores the underlying data, not the
+rendered output.  Only a change in envelope resolution or band count
+requires a `preview.version` bump.  Existing samples with no `preview`
+block simply render nothing in the dashboard; they continue to play back
+and analyse identically.
+
+Set `recorder.previews: false` to skip both artefacts and save around
+15-25 KB per PNG plus 4 KB of JSON per sample.
 
 ## Instrument sample library
 

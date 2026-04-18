@@ -104,6 +104,13 @@ class RecorderConfig:
 	audio: AudioConfig
 	buffer: BufferConfig
 	enabled: bool = True
+	previews: bool = True
+	"""Master switch for visual sample previews.  When True (default),
+	every captured or imported sample gets a ``.preview.png`` sidecar
+	(fixed 1024×256 thumbnail) and an embedded ``preview`` block in its
+	``.analysis.json`` sidecar (compact data the Supervisor dashboard
+	renders as SVG on demand).  Set False to save ~15-25 KB per PNG and
+	~4 KB of JSON per sample if you do not browse the library visually."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -722,6 +729,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		audio=audio,
 		buffer=buffer,
 		enabled=bool(recorder_raw.get("enabled", True)),
+		previews=bool(recorder_raw.get("previews", True)),
 	)
 
 	player_raw: dict[str, typing.Any] = raw.get("player", {})
