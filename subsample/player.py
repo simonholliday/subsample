@@ -58,12 +58,13 @@ _log = logging.getLogger(__name__)
 # actual output sample rate so the duration is correct regardless of device.
 _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 
-# Note map: (mido_channel, midi_note) → (Assignment, pick_position).
-# pick_position is the 1-indexed rank for this specific note within the
-# assignment's note list (used for per-note rank distribution in multi-note
-# assignments without explicit pick).  For single-note or explicit-pick
-# assignments, this equals Assignment.pick.
-NoteMap = dict[tuple[int, int], tuple[subsample.query.Assignment, int]]
+# Note map: (mido_channel, midi_note) → (Assignment, PickSpec).
+# PickSpec is the per-note rank specification.  For single-note or explicit-pick
+# assignments, it equals the SelectSpec's pick (scalar or range).  For multi-note
+# assignments without explicit pick, each note gets a single-rank PickSpec(i, i)
+# distributing across ranked matches.  The actual rank is drawn at note-on by
+# PickSpec.resolve_index() — single ranks are deterministic, ranges re-roll.
+NoteMap = dict[tuple[int, int], tuple[subsample.query.Assignment, subsample.query.PickSpec]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,7 +73,7 @@ class MidiMapResult:
 	"""Complete result of parsing a MIDI map YAML file.
 
 	Fields:
-		note_map:         Note routing table: (mido_channel, midi_note) → (Assignment, pick).
+		note_map:         Note routing table: (mido_channel, midi_note) → (Assignment, PickSpec).
 		bank_definitions: Parsed bank declarations from the optional ``banks:`` key.
 		                  Empty list when no banks are declared (single-directory mode).
 		bank_channel:     MIDI channel for Program Change bank switching (user-facing 1-16,
@@ -85,6 +86,22 @@ class MidiMapResult:
 	bank_definitions: list[subsample.bank.BankDefinition]
 	bank_channel:     int
 	default_bank:     typing.Optional[int] = None
+
+
+def _ranks_for (pick_spec: subsample.query.PickSpec, ranked_len: int) -> range:
+
+	"""Iterable of 1-indexed ranks this PickSpec might draw at trigger time.
+
+	Used by update_assignments() to pre-compute variants for every reachable
+	rank: scalar PickSpec(n, n) yields a single rank; range PickSpec(lo, hi)
+	yields lo..hi inclusive, clamped to ranked_len so requests past the end
+	collapse onto the last rank (mirrors resolve_index's clamping).
+	"""
+
+	hi = min(pick_spec.hi, ranked_len)
+	lo = min(pick_spec.lo, hi)
+
+	return range(lo, hi + 1)
 
 
 def _quantize_params (
@@ -597,7 +614,7 @@ def _resolve_path_references (
 	  - Directory predicates → all samples in the directory loaded into instrument library
 
 	Args:
-		note_map:            Note routing table: (mido_channel, midi_note) → (Assignment, pick).
+		note_map:            Note routing table: (mido_channel, midi_note) → (Assignment, PickSpec).
 		matrices:            List of SimilarityMatrix (one per bank) to add references to.
 		instrument_lib:      InstrumentLibrary to add path-based instruments to.
 		target_sample_rate:  When set, resample loaded audio to this rate.
@@ -611,7 +628,7 @@ def _resolve_path_references (
 	# Extract unique assignments from the note map
 	seen_assignments: set[int] = set()
 
-	for (assignment, pick) in note_map.values():
+	for (assignment, _pick_spec) in note_map.values():
 		assignment_id = id(assignment)
 		if assignment_id in seen_assignments:
 			continue
@@ -884,7 +901,9 @@ def load_midi_map (
 		# When process includes repitch, all notes share pick=1 (same sample,
 		# pitched per note).  Otherwise, each note gets the next pick position
 		# so multi-note assignments distribute across ranked matches.
-		# An explicit pick in the SelectSpec overrides this default.
+		# An explicit pick in the SelectSpec (scalar or range) overrides this
+		# default — range forms re-roll at trigger time rather than being
+		# distributed across notes at load time.
 		if isinstance(select_raw, dict):
 			explicit_pick = "pick" in select_raw
 		elif isinstance(select_raw, list) and select_raw:
@@ -895,11 +914,12 @@ def load_midi_map (
 		for note_idx, note in enumerate(notes):
 
 			if explicit_pick or process.has_repitch() or len(notes) == 1:
-				pick = select_specs[0].pick
+				pick_spec = select_specs[0].pick
 			else:
-				pick = note_idx + 1
+				rank = note_idx + 1
+				pick_spec = subsample.query.PickSpec(rank, rank)
 
-			note_map[(mido_channel, int(note))] = (assignment, pick)
+			note_map[(mido_channel, int(note))] = (assignment, pick_spec)
 
 	_log.info(
 		"MIDI map loaded from %s: %d note(s) across %d assignment(s)%s",
@@ -1059,7 +1079,7 @@ class MidiPlayer:
 
 	Note routing is loaded from a YAML file by the caller via load_midi_map()
 	and passed as the `midi_map` parameter.  The map keys notes by
-	(mido_channel, midi_note) and stores (Assignment, pick_position) per note.
+	(mido_channel, midi_note) and stores (Assignment, PickSpec) per note.
 	At trigger time, the query engine evaluates the assignment's select chain
 	against the active instrument library to find the best-matching sample.
 
@@ -1156,7 +1176,7 @@ class MidiPlayer:
 		# multi-channel interfaces.
 		self._output_channels: int = output_channels if output_channels is not None else 2
 
-		# Note routing map: (mido_channel, midi_note) → (Assignment, pick_position).
+		# Note routing map: (mido_channel, midi_note) → (Assignment, PickSpec).
 		# Loaded from the MIDI map YAML file by the caller (cli.py) via load_midi_map().
 		self._note_map: NoteMap = midi_map
 
@@ -1224,22 +1244,26 @@ class MidiPlayer:
 
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
-		groups: list[tuple[int, int, int, subsample.query.Assignment, int]] = []
+		# Each group tracks the set of PickSpecs across its notes — a single
+		# shared PickSpec means an explicit pick (or single-note assignment);
+		# multiple distinct PickSpecs mean auto-distribution kicked in.
+		groups: list[tuple[int, int, int, subsample.query.Assignment, set[subsample.query.PickSpec]]] = []
 
-		for (ch, note), (asgn, pick) in sorted(self._note_map.items()):
+		for (ch, note), (asgn, pick_spec) in sorted(self._note_map.items()):
 			if (
 				groups
 				and groups[-1][0] == ch
 				and groups[-1][2] == note - 1
 				and groups[-1][3] is asgn
 			):
-				groups[-1] = (ch, groups[-1][1], note, asgn, pick)
+				groups[-1][4].add(pick_spec)
+				groups[-1] = (ch, groups[-1][1], note, asgn, groups[-1][4])
 			else:
-				groups.append((ch, note, note, asgn, pick))
+				groups.append((ch, note, note, asgn, {pick_spec}))
 
 		lines: list[str] = []
 
-		for ch, lo, hi, asgn, _pick in groups:
+		for ch, lo, hi, asgn, pick_specs in groups:
 			count = hi - lo + 1
 
 			if count == 1:
@@ -1248,6 +1272,16 @@ class MidiPlayer:
 				note_str = f"notes {_midi_to_note_name(lo)}..{_midi_to_note_name(hi)} ({count})"
 
 			line = f"ch{ch+1} {note_str} → {asgn.name}"
+
+			if len(pick_specs) == 1:
+				ps = next(iter(pick_specs))
+				if ps.lo == ps.hi:
+					if ps.lo != 1:
+						line += f" pick {ps.lo}"
+				else:
+					line += f" pick {ps.lo}-{ps.hi}"
+			else:
+				line += " pick distributed"
 
 			if asgn.process.has_repitch():
 				line += " pitched"
@@ -1328,9 +1362,9 @@ class MidiPlayer:
 
 		# Validate output routing indices against the resolved device channel count.
 		# Collect replacements first to avoid mutating the dict during iteration.
-		routing_fixes: dict[tuple[int, int], tuple[subsample.query.Assignment, int]] = {}
+		routing_fixes: dict[tuple[int, int], tuple[subsample.query.Assignment, subsample.query.PickSpec]] = {}
 
-		for (ch, note), (assignment, _pick) in self._note_map.items():
+		for (ch, note), (assignment, _pick_spec) in self._note_map.items():
 			routing = assignment.output_routing
 			if routing is not None:
 				for idx in routing:
@@ -1349,9 +1383,8 @@ class MidiPlayer:
 								gain_db=assignment.gain_db,
 								pan_weights=assignment.pan_weights,
 								output_routing=None,
-								pick=assignment.pick,
 							),
-							_pick,
+							_pick_spec,
 						)
 						break
 
@@ -1571,7 +1604,7 @@ class MidiPlayer:
 			_log.debug("MIDI ch%d note %d: no mapping", msg.channel + 1, msg.note)
 			return
 
-		assignment, pick = entry
+		assignment, pick_spec = entry
 		pan_weights    = assignment.pan_weights
 		output_routing = assignment.output_routing
 		one_shot       = assignment.one_shot
@@ -1599,8 +1632,10 @@ class MidiPlayer:
 			)
 
 			if ranked:
-				# pick is 1-indexed; clamp to available range, fall back to rank 0.
-				idx = min(pick - 1, len(ranked) - 1)
+				# PickSpec.resolve_index draws a 0-indexed rank from [lo, hi],
+				# clamping hi to len(ranked).  Single-rank PickSpecs are
+				# deterministic; range PickSpecs re-roll on every note-on.
+				idx = pick_spec.resolve_index(len(ranked))
 				sample_id = ranked[idx].sample_id
 				break
 
@@ -1787,12 +1822,13 @@ class MidiPlayer:
 		eff_similarity = self._effective_similarity_matrix
 
 		# Group notes by Assignment identity (object id) — all notes in the same
-		# assignment share the same select/process spec.  Collect (note, pick)
-		# pairs so stretch_quantize can pre-compute a variant for every pick
-		# position (each note may resolve to a different sample).
-		groups: dict[int, tuple[subsample.query.Assignment, list[tuple[int, int]]]] = {}
+		# assignment share the same select/process spec.  Collect (note, PickSpec)
+		# pairs so stretch_quantize can pre-compute a variant for every reachable
+		# rank (each note may resolve to a different sample, and a range PickSpec
+		# may resolve to any rank in [lo, hi] at trigger time).
+		groups: dict[int, tuple[subsample.query.Assignment, list[tuple[int, subsample.query.PickSpec]]]] = {}
 
-		for (_ch, note), (asgn, pick) in self._note_map.items():
+		for (_ch, note), (asgn, pick_spec) in self._note_map.items():
 
 			if asgn.process.steps:
 				group_key = id(asgn)
@@ -1800,7 +1836,7 @@ class MidiPlayer:
 				if group_key not in groups:
 					groups[group_key] = (asgn, [])
 
-				groups[group_key][1].append((note, pick))
+				groups[group_key][1].append((note, pick_spec))
 
 		if not groups:
 			return
@@ -1859,48 +1895,49 @@ class MidiPlayer:
 						asgn.name, len(notes), record.name,
 					)
 
-			# Beat-quantize: each note may pick a different sample, so enqueue
-			# a variant for every distinct pick position.  The full process
+			# Beat-quantize: each note may pick a different sample, and a range
+			# PickSpec may resolve to any rank in [lo, hi] at trigger time —
+			# enqueue a variant for every reachable rank.  The full process
 			# chain is included via spec_from_process().
 			elif asgn.process.has_stretch_quantize():
 				bpm, grid = _quantize_params(asgn.process, "stretch_quantize", self._target_bpm)
 				enqueued = 0
 
-				# Deduplicate by sample_id — multiple notes with the same pick
-				# only need one variant.
+				# Deduplicate by sample_id — multiple ranks may resolve to the
+				# same sample, and only one variant is needed.
 				seen_ids: set[int] = set()
 
-				for _note, pick in note_picks:
-					idx = min(pick - 1, len(ranked) - 1)
-					sid = ranked[idx].sample_id
+				for _note, pick_spec in note_picks:
+					for rank in _ranks_for(pick_spec, len(ranked)):
+						sid = ranked[rank - 1].sample_id
 
-					if sid in seen_ids:
-						continue
+						if sid in seen_ids:
+							continue
 
-					seen_ids.add(sid)
-					record = eff_library.get(sid)
+						seen_ids.add(sid)
+						record = eff_library.get(sid)
 
-					if record is None:
-						continue
+						if record is None:
+							continue
 
-					if record.rhythm.tempo_bpm <= 0.0:
-						_log.warning(
-							"stretch_quantize %s: sample %r (pick %d) has no detected tempo — "
-							"will not be beat-quantized",
-							asgn.name, record.name, pick,
+						if record.rhythm.tempo_bpm <= 0.0:
+							_log.warning(
+								"stretch_quantize %s: sample %r (pick %d) has no detected tempo — "
+								"will not be beat-quantized",
+								asgn.name, record.name, rank,
+							)
+							continue
+
+						spec = subsample.transform.spec_from_process(
+							asgn.process,
+							target_bpm=bpm,
+							resolution=grid,
+							reference_path=_reference_wav_path(asgn),
+							cc_state=self._cc_state,
+							cc_omni=self._cc_omni,
 						)
-						continue
-
-					spec = subsample.transform.spec_from_process(
-						asgn.process,
-						target_bpm=bpm,
-						resolution=grid,
-						reference_path=_reference_wav_path(asgn),
-						cc_state=self._cc_state,
-						cc_omni=self._cc_omni,
-					)
-					eff_transform.get_variant(sid, spec)
-					enqueued += 1
+						eff_transform.get_variant(sid, spec)
+						enqueued += 1
 
 				if enqueued > 0:
 					_total_assignments += 1
@@ -1918,29 +1955,29 @@ class MidiPlayer:
 				enqueued = 0
 				seen_ids_pad: set[int] = set()
 
-				for _note, pick in note_picks:
-					idx = min(pick - 1, len(ranked) - 1)
-					sid = ranked[idx].sample_id
+				for _note, pick_spec in note_picks:
+					for rank in _ranks_for(pick_spec, len(ranked)):
+						sid = ranked[rank - 1].sample_id
 
-					if sid in seen_ids_pad:
-						continue
+						if sid in seen_ids_pad:
+							continue
 
-					seen_ids_pad.add(sid)
-					record = eff_library.get(sid)
+						seen_ids_pad.add(sid)
+						record = eff_library.get(sid)
 
-					if record is None:
-						continue
+						if record is None:
+							continue
 
-					spec = subsample.transform.spec_from_process(
-						asgn.process,
-						target_bpm=bpm,
-						resolution=grid,
-						reference_path=_reference_wav_path(asgn),
-						cc_state=self._cc_state,
-						cc_omni=self._cc_omni,
-					)
-					eff_transform.get_variant(sid, spec)
-					enqueued += 1
+						spec = subsample.transform.spec_from_process(
+							asgn.process,
+							target_bpm=bpm,
+							resolution=grid,
+							reference_path=_reference_wav_path(asgn),
+							cc_state=self._cc_state,
+							cc_omni=self._cc_omni,
+						)
+						eff_transform.get_variant(sid, spec)
+						enqueued += 1
 
 				if enqueued > 0:
 					_total_assignments += 1
@@ -1964,15 +2001,15 @@ class MidiPlayer:
 				if spec.steps:
 					seen_ids_static: set[int] = set()
 
-					for _note, pick in note_picks:
-						idx = min(pick - 1, len(ranked) - 1)
-						sid = ranked[idx].sample_id
+					for _note, pick_spec in note_picks:
+						for rank in _ranks_for(pick_spec, len(ranked)):
+							sid = ranked[rank - 1].sample_id
 
-						if sid in seen_ids_static:
-							continue
+							if sid in seen_ids_static:
+								continue
 
-						seen_ids_static.add(sid)
-						eff_transform.get_variant(sid, spec)
+							seen_ids_static.add(sid)
+							eff_transform.get_variant(sid, spec)
 
 					_total_assignments += 1
 					_total_variants += len(seen_ids_static)

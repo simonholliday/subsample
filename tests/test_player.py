@@ -85,8 +85,8 @@ def _make_note_map (
 	note_map: subsample.player.NoteMap = {}
 
 	for i, note in enumerate(notes):
-		pick = (i + 1) if per_note_pick else 1
-		note_map[(channel, note)] = (assignment, pick)
+		rank = (i + 1) if per_note_pick else 1
+		note_map[(channel, note)] = (assignment, subsample.query.PickSpec(rank, rank))
 
 	return note_map
 
@@ -768,7 +768,7 @@ assignments:
 		asgn, pick = note_map[(9, 36)]
 		assert asgn.select[0].where.reference == "BD0025"
 		assert asgn.one_shot is True
-		assert pick == 1
+		assert pick == subsample.query.PickSpec(1, 1)
 
 	def test_multi_note_rank_distribution (self, tmp_path: pathlib.Path) -> None:
 		"""Note list distributes picks: first note = pick 1, second = pick 2."""
@@ -785,8 +785,8 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
-		assert note_map[(9, 36)][1] == 1   # pick 1
-		assert note_map[(9, 35)][1] == 2   # pick 2
+		assert note_map[(9, 36)][1] == subsample.query.PickSpec(1, 1)   # pick 1
+		assert note_map[(9, 35)][1] == subsample.query.PickSpec(2, 2)   # pick 2
 
 	def test_channel_conversion (self, tmp_path: pathlib.Path) -> None:
 		"""User-facing channel 10 converts to mido channel 9."""
@@ -1059,7 +1059,7 @@ assignments:
 
 		for midi_note in [48, 50, 52]:
 			asgn, pick = note_map[(0, midi_note)]
-			assert pick == 1
+			assert pick == subsample.query.PickSpec(1, 1)
 			assert asgn.process.has_repitch()
 
 	def test_no_repitch_distributes_picks (self, tmp_path: pathlib.Path) -> None:
@@ -1077,8 +1077,8 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
-		assert note_map[(9, 36)][1] == 1
-		assert note_map[(9, 35)][1] == 2
+		assert note_map[(9, 36)][1] == subsample.query.PickSpec(1, 1)
+		assert note_map[(9, 35)][1] == subsample.query.PickSpec(2, 2)
 		assert not note_map[(9, 36)][0].process.has_repitch()
 
 	def test_note_name_in_map (self, tmp_path: pathlib.Path) -> None:
@@ -1429,6 +1429,64 @@ class TestUpdatePitchedAssignments:
 		call_args = transform_manager.get_variant.call_args
 		assert call_args[0][0] == 7  # sample_id
 
+	def test_range_pick_precomputes_all_ranks (self) -> None:
+		"""A range pick pre-computes variants for every reachable rank, so
+		the runtime random draw never hits a cold cache."""
+
+		# stretch_quantize assignment with PickSpec(1, 3) on a single note.
+		asgn = subsample.query.Assignment(
+			name="Varied loops",
+			select=(subsample.query.SelectSpec(
+				order=(subsample.query.OrderClause(by="age", dir="desc"),),
+				pick=subsample.query.PickSpec(1, 3),
+			),),
+			process=subsample.query.ProcessSpec(steps=(
+				subsample.query.ProcessorStep(name="stretch_quantize", params=(("bpm", 120), ("grid", 16))),
+			)),
+			one_shot=False,
+		)
+		note_map: subsample.player.NoteMap = {
+			(0, 60): (asgn, subsample.query.PickSpec(1, 3)),
+		}
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		# Three mock samples: ids 30, 20, 10 → newest-first ranks them as
+		# [30, 20, 10] so all three are reachable from PickSpec(1, 3).
+		records = []
+		for sid in (30, 20, 10):
+			r = unittest.mock.MagicMock()
+			r.sample_id        = sid
+			r.name             = f"loop-{sid}"
+			r.rhythm.tempo_bpm = 120.0
+			records.append(r)
+
+		player._instrument_library.samples.return_value = records
+		player._instrument_library.get.side_effect = lambda sid: next(
+			(r for r in records if r.sample_id == sid), None,
+		)
+
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+
+		player.update_assignments()
+
+		# All three ranks should have been pre-computed (one get_variant per sample_id).
+		assert transform_manager.get_variant.call_count == 3
+		called_sids = {call.args[0] for call in transform_manager.get_variant.call_args_list}
+		assert called_sids == {30, 20, 10}
+
 	def test_beat_quantize_with_explicit_bpm (self) -> None:
 		"""Per-assignment BPM override produces a spec with correct params."""
 
@@ -1441,7 +1499,7 @@ class TestUpdatePitchedAssignments:
 			)),
 			one_shot=False,
 		)
-		note_map: subsample.player.NoteMap = {(0, 60): (asgn, 1)}
+		note_map: subsample.player.NoteMap = {(0, 60): (asgn, subsample.query.PickSpec(1, 1))}
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
@@ -1513,7 +1571,7 @@ assignments:
 		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="asc"),)
 		assert asgn.process.has_repitch()
 		assert asgn.one_shot is False
-		assert pick == 1
+		assert pick == subsample.query.PickSpec(1, 1)
 
 	def test_pitched_newest (self, tmp_path: pathlib.Path) -> None:
 		"""Pitched newest: where pitched, order newest, repitch."""
@@ -1556,8 +1614,8 @@ assignments:
 
 		assert (0, 60) in note_map
 		asgn, pick = note_map[(0, 60)]
-		assert asgn.select[0].pick == 2
-		assert pick == 2
+		assert asgn.select[0].pick == subsample.query.PickSpec(2, 2)
+		assert pick == subsample.query.PickSpec(2, 2)
 
 	def test_repitch_all_notes_same_pick (self, tmp_path: pathlib.Path) -> None:
 		"""All notes in a repitched range share pick 1."""
@@ -1579,7 +1637,7 @@ assignments:
 
 		for midi_note in [48, 50, 52]:
 			asgn, pick = note_map[(0, midi_note)]
-			assert pick == 1
+			assert pick == subsample.query.PickSpec(1, 1)
 			assert asgn.process.has_repitch()
 
 	def test_pitched_full_range (self, tmp_path: pathlib.Path) -> None:
@@ -1598,6 +1656,96 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, []).note_map
 		assert len(note_map) == 128
+
+
+# ---------------------------------------------------------------------------
+# TestLoadMidiMapPickRange — range pick form ([lo, hi] / {gte, lte})
+# ---------------------------------------------------------------------------
+
+class TestLoadMidiMapPickRange:
+
+	"""load_midi_map's handling of the range pick forms."""
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_pick_list_form_stored_as_pickspec (self, tmp_path: pathlib.Path) -> None:
+		"""pick: [1, 3] parses to PickSpec(1, 3) on the SelectSpec."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Varied kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+      pick: [1, 3]
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		asgn, pick_spec = note_map[(9, 36)]
+		assert asgn.select[0].pick == subsample.query.PickSpec(1, 3)
+		assert pick_spec == subsample.query.PickSpec(1, 3)
+
+	def test_pick_dict_form_stored_as_pickspec (self, tmp_path: pathlib.Path) -> None:
+		"""pick: {gte: 1, lte: 3} is equivalent to [1, 3]."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Varied kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+      pick: {gte: 1, lte: 3}
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		_asgn, pick_spec = note_map[(9, 36)]
+		assert pick_spec == subsample.query.PickSpec(1, 3)
+
+	def test_pick_range_suppresses_auto_distribute (self, tmp_path: pathlib.Path) -> None:
+		"""A range pick on multiple notes suppresses auto-distribute — every
+		note in the assignment stores the same PickSpec.  Per-note variety
+		comes from the runtime random draw, not load-time distribution."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Varied kicks
+    channel: 10
+    notes: [36, 37, 38]
+    select:
+      where:
+        reference: BD0025
+      order_by: similarity
+      pick: [1, 3]
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		# All three notes should share the same PickSpec(1, 3).
+		for note in (36, 37, 38):
+			_asgn, pick_spec = note_map[(9, note)]
+			assert pick_spec == subsample.query.PickSpec(1, 3)
+
+
+class TestRanksFor:
+
+	"""_ranks_for — the helper that expands a PickSpec to its reachable ranks."""
+
+	def test_single_rank (self) -> None:
+		assert list(subsample.player._ranks_for(subsample.query.PickSpec(2, 2), 5)) == [2]
+
+	def test_range (self) -> None:
+		assert list(subsample.player._ranks_for(subsample.query.PickSpec(1, 3), 5)) == [1, 2, 3]
+
+	def test_hi_clamped (self) -> None:
+		"""hi clamped to ranked_len so we never enqueue past the end."""
+		assert list(subsample.player._ranks_for(subsample.query.PickSpec(1, 10), 3)) == [1, 2, 3]
+
+	def test_lo_clamped_when_above_ranked_len (self) -> None:
+		"""When lo also exceeds ranked_len, collapse onto the last rank."""
+		assert list(subsample.player._ranks_for(subsample.query.PickSpec(8, 12), 3)) == [3]
 
 
 # NOTE: TestResolvePitchedSelector, TestResolveLibraryPosition, and
@@ -1751,7 +1899,7 @@ assignments:
 		for midi_note in range(36, 49):
 			assert (0, midi_note) in note_map
 			asgn, pick = note_map[(0, midi_note)]
-			assert pick == 1
+			assert pick == subsample.query.PickSpec(1, 1)
 			assert asgn.process.has_repitch()
 
 	def test_fallback_invalid_reference_skips (
@@ -1799,7 +1947,7 @@ class TestFallbackResolution:
 			select=select_specs,
 		)
 
-		note_map: subsample.player.NoteMap = {(0, 60): (asgn, 1)}
+		note_map: subsample.player.NoteMap = {(0, 60): (asgn, subsample.query.PickSpec(1, 1))}
 
 		return subsample.player.MidiPlayer(
 			"Test Device",
@@ -2502,7 +2650,7 @@ class TestBeatMatchEndToEnd:
 			)),
 			one_shot=False,
 		)
-		note_map: subsample.player.NoteMap = {(0, 60): (asgn, 1)}
+		note_map: subsample.player.NoteMap = {(0, 60): (asgn, subsample.query.PickSpec(1, 1))}
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)

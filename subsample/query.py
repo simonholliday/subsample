@@ -38,6 +38,7 @@ this is microseconds and needs no secondary indices.
 import dataclasses
 import logging
 import pathlib
+import random
 import typing
 
 import librosa
@@ -617,6 +618,36 @@ def _valid_order_names () -> frozenset[str]:
 
 
 @dataclasses.dataclass(frozen=True)
+class PickSpec:
+
+	"""How to pick a rank from the ranked match list.
+
+	``pick: 1`` in YAML becomes ``PickSpec(1, 1)`` — always pick the best
+	match.  ``pick: [1, 3]`` becomes ``PickSpec(1, 3)`` — draw a fresh
+	random rank in [1, 3] inclusive on every note-on, giving a little
+	variation across the top matches.  ``pick: {gte: 1, lte: 3}`` is the
+	explicit dict form, identical to the list shorthand.
+
+	Both bounds are 1-indexed and inclusive.  ``resolve_index`` clamps the
+	upper bound to the length of the ranked list so out-of-range picks
+	fall back to the last available match rather than failing.
+	"""
+
+	lo: int
+	hi: int
+
+	def resolve_index (self, ranked_len: int) -> int:
+
+		"""Return a 0-indexed rank, drawn uniformly from [lo, hi] and
+		clamped to ranked_len."""
+
+		hi = min(self.hi, ranked_len)
+		lo = min(self.lo, hi)
+
+		return random.randint(lo, hi) - 1
+
+
+@dataclasses.dataclass(frozen=True)
 class SelectSpec:
 
 	"""Compiled selection criteria: filter → order → pick position.
@@ -631,7 +662,7 @@ class SelectSpec:
 
 	where: WherePredicate              = dataclasses.field(default_factory=WherePredicate)
 	order: tuple[OrderClause, ...]     = ()
-	pick:  int                         = 1
+	pick:  PickSpec                    = dataclasses.field(default_factory=lambda: PickSpec(1, 1))
 
 
 # ---------------------------------------------------------------------------
@@ -747,7 +778,6 @@ class Assignment:
 	"round_robin" = cycle through segments sequentially.
 	"random" = random segment each trigger.
 	int (1-indexed) = always play that specific segment."""
-	pick:           int                              = 1
 
 
 # ---------------------------------------------------------------------------
@@ -1260,6 +1290,150 @@ def _parse_order (
 	)
 
 
+_VALID_PICK_OPERATORS: typing.Final[frozenset[str]] = frozenset({"gte", "lte", "gt", "lt", "eq"})
+
+
+def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
+
+	"""Parse the ``pick:`` value from a select spec.
+
+	Accepted forms:
+	  - missing / None      → PickSpec(1, 1)   (best match)
+	  - int n               → PickSpec(n, n)   (exact rank, n >= 1)
+	  - [lo, hi]            → PickSpec(lo, hi) (random rank in range, both >= 1, lo <= hi)
+	  - {gte, lte, gt, lt, eq: ...} → equivalent range (gt: 1 → lo=2, etc.)
+
+	The range form re-rolls on every note-on (see ``PickSpec.resolve_index``).
+	"""
+
+	if raw is None:
+		return PickSpec(1, 1)
+
+	# bool is a subclass of int in Python — reject explicitly so 'pick: true'
+	# doesn't silently become PickSpec(1, 1) and 'pick: false' PickSpec(0, 0).
+	if isinstance(raw, bool):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'pick' must be a positive "
+			f"integer, a 2-element list, or an operator mapping (got bool)"
+		)
+
+	if isinstance(raw, int):
+		if raw < 1:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick must be >= 1 (got {raw})"
+			)
+		return PickSpec(raw, raw)
+
+	if isinstance(raw, list):
+		if len(raw) != 2 or not all(isinstance(x, int) and not isinstance(x, bool) for x in raw):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'pick' list must be "
+				f"exactly two integers [lo, hi] (got {raw!r})"
+			)
+
+		lo, hi = raw
+
+		if lo < 1 or hi < 1:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick bounds must be "
+				f">= 1 (got [{lo}, {hi}])"
+			)
+
+		if lo > hi:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick 'lo' must be "
+				f"<= 'hi' (got [{lo}, {hi}])"
+			)
+
+		return PickSpec(lo, hi)
+
+	if isinstance(raw, dict):
+		unknown = set(raw.keys()) - _VALID_PICK_OPERATORS
+
+		if unknown and _STRICT_MODE:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: unknown 'pick' "
+				f"operator(s) {sorted(unknown)}.  Valid operators: "
+				f"{', '.join(sorted(_VALID_PICK_OPERATORS))}"
+			)
+
+		# eq pins both bounds; other operators define lo (gte/gt) and hi (lte/lt).
+		# pick has no natural upper bound at parse time, so require at least
+		# one of lte/lt/eq — a lower-bound-only range is ambiguous.
+		eq_val  = raw.get("eq")
+		gte_val = raw.get("gte")
+		gt_val  = raw.get("gt")
+		lte_val = raw.get("lte")
+		lt_val  = raw.get("lt")
+
+		if eq_val is not None:
+			if not isinstance(eq_val, int) or isinstance(eq_val, bool) or eq_val < 1:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: pick 'eq' must be "
+					f"a positive integer (got {eq_val!r})"
+				)
+			return PickSpec(eq_val, eq_val)
+
+		dict_lo: int = 1
+
+		if gte_val is not None:
+			if not isinstance(gte_val, int) or isinstance(gte_val, bool):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: pick 'gte' must "
+					f"be an integer (got {gte_val!r})"
+				)
+			dict_lo = gte_val
+		elif gt_val is not None:
+			if not isinstance(gt_val, int) or isinstance(gt_val, bool):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: pick 'gt' must "
+					f"be an integer (got {gt_val!r})"
+				)
+			dict_lo = gt_val + 1
+
+		dict_hi: typing.Optional[int] = None
+
+		if lte_val is not None:
+			if not isinstance(lte_val, int) or isinstance(lte_val, bool):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: pick 'lte' must "
+					f"be an integer (got {lte_val!r})"
+				)
+			dict_hi = lte_val
+		elif lt_val is not None:
+			if not isinstance(lt_val, int) or isinstance(lt_val, bool):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: pick 'lt' must "
+					f"be an integer (got {lt_val!r})"
+				)
+			dict_hi = lt_val - 1
+
+		if dict_hi is None:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'pick' operator dict "
+				f"must include an upper bound (lte / lt / eq); got {raw!r}"
+			)
+
+		if dict_lo < 1 or dict_hi < 1:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick bounds must be "
+				f">= 1 (got lo={dict_lo}, hi={dict_hi})"
+			)
+
+		if dict_lo > dict_hi:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick 'lo' must be "
+				f"<= 'hi' (got lo={dict_lo}, hi={dict_hi})"
+			)
+
+		return PickSpec(dict_lo, dict_hi)
+
+	raise ValueError(
+		f"MIDI map assignment {assignment_name!r}: 'pick' must be an integer, "
+		f"a 2-element list, or an operator mapping (got {type(raw).__name__})"
+	)
+
+
 def _parse_select_spec (
 	raw: typing.Any,
 	assignment_name: str,
@@ -1331,12 +1505,7 @@ def _parse_select_spec (
 				f"{', '.join(sorted(valid_names))}"
 			)
 
-	pick = int(raw.get("pick", 1))
-
-	if pick < 1:
-		raise ValueError(
-			f"MIDI map assignment {assignment_name!r}: pick must be >= 1 (got {pick})"
-		)
+	pick = _parse_pick(raw.get("pick"), assignment_name)
 
 	return SelectSpec(where=where, order=order, pick=pick)
 

@@ -248,11 +248,14 @@ class TestQuery:
 
 		"""Pick selects the Nth position (1-indexed) after filtering and ordering."""
 
-		spec = subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="duration", dir="desc"),), pick=3)
+		spec = subsample.query.SelectSpec(
+			order=(subsample.query.OrderClause(by="duration", dir="desc"),),
+			pick=subsample.query.PickSpec(3, 3),
+		)
 		result = subsample.query.query(spec, self._samples())
 
 		# pick is handled by the caller, not by query() — query returns the full ranked list.
-		# The caller does: result[pick - 1] if pick <= len(result).
+		# The caller does: result[spec.pick.resolve_index(len(result))] for the chosen rank.
 		assert len(result) == 5
 		assert result[2].name == "medium-tonal"  # 3rd longest
 
@@ -425,7 +428,7 @@ class TestParseSelect:
 		assert len(specs) == 1
 		assert specs[0].where.duration.gte == 1.0
 		assert specs[0].order == (subsample.query.OrderClause(by="age", dir="desc"),)
-		assert specs[0].pick == 2
+		assert specs[0].pick == subsample.query.PickSpec(2, 2)
 
 	def test_fallback_list (self) -> None:
 
@@ -460,7 +463,7 @@ class TestParseSelect:
 
 		specs = subsample.query.parse_select({}, "test")
 		assert specs[0].order == ()
-		assert specs[0].pick == 1
+		assert specs[0].pick == subsample.query.PickSpec(1, 1)
 
 	def test_reference_defaults_to_similarity_order (self) -> None:
 
@@ -543,6 +546,13 @@ class TestParseSelect:
 
 		with pytest.raises(ValueError, match="pick"):
 			subsample.query.parse_select({"pick": 0}, "test")
+
+	def test_pick_list_zero_raises (self) -> None:
+
+		"""A list with a zero bound still fails — lo must be >= 1."""
+
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": [0, 3]}, "test")
 
 	def test_invalid_type_raises (self) -> None:
 
@@ -888,8 +898,141 @@ class TestSelectSpec:
 		# means "no preference from the user" is distinguishable from an
 		# explicitly-written [{by: age, dir: desc}].
 		assert spec.order == ()
-		assert spec.pick == 1
+		assert spec.pick == subsample.query.PickSpec(1, 1)
 		assert spec.where == subsample.query.WherePredicate()
+
+
+# ---------------------------------------------------------------------------
+# PickSpec — pick parsing and resolve_index
+# ---------------------------------------------------------------------------
+
+class TestParsePick:
+
+	"""YAML-surface parsing of the `pick:` value through parse_select."""
+
+	def test_scalar_int (self) -> None:
+		specs = subsample.query.parse_select({"pick": 2}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(2, 2)
+
+	def test_missing_defaults_to_one (self) -> None:
+		specs = subsample.query.parse_select({}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(1, 1)
+
+	def test_list_range (self) -> None:
+		specs = subsample.query.parse_select({"pick": [1, 3]}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(1, 3)
+
+	def test_list_single_value_collapses (self) -> None:
+		"""[2, 2] is a valid (degenerate) range — same as scalar 2."""
+		specs = subsample.query.parse_select({"pick": [2, 2]}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(2, 2)
+
+	def test_dict_gte_lte (self) -> None:
+		specs = subsample.query.parse_select({"pick": {"gte": 1, "lte": 3}}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(1, 3)
+
+	def test_dict_gt_lt (self) -> None:
+		"""gt/lt shift bounds: gt: 1 → lo=2, lt: 5 → hi=4."""
+		specs = subsample.query.parse_select({"pick": {"gt": 1, "lt": 5}}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(2, 4)
+
+	def test_dict_eq (self) -> None:
+		specs = subsample.query.parse_select({"pick": {"eq": 3}}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(3, 3)
+
+	def test_dict_only_upper_bound (self) -> None:
+		"""Missing lower bound defaults to 1."""
+		specs = subsample.query.parse_select({"pick": {"lte": 3}}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(1, 3)
+
+	def test_list_wrong_length_raises (self) -> None:
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": [1]}, "test")
+
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": [1, 2, 3]}, "test")
+
+	def test_list_lo_greater_than_hi_raises (self) -> None:
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": [3, 1]}, "test")
+
+	def test_list_zero_bound_raises (self) -> None:
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": [0, 3]}, "test")
+
+	def test_dict_missing_upper_bound_raises (self) -> None:
+		"""A dict with only a lower bound has no natural upper bound."""
+		with pytest.raises(ValueError, match="upper bound"):
+			subsample.query.parse_select({"pick": {"gte": 1}}, "test")
+
+	def test_dict_unknown_operator_raises_in_strict_mode (self) -> None:
+		"""Strict mode (default) rejects unknown pick operators."""
+		with pytest.raises(ValueError, match="unknown"):
+			subsample.query.parse_select(
+				{"pick": {"gte": 1, "lte": 3, "weight": "exp"}}, "test",
+			)
+
+	def test_dict_lo_greater_than_hi_raises (self) -> None:
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": {"gte": 5, "lte": 3}}, "test")
+
+	def test_bool_rejected (self) -> None:
+		"""'pick: true' must not silently become PickSpec(1, 1)."""
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": True}, "test")
+
+	def test_wrong_type_raises (self) -> None:
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": "first"}, "test")
+
+
+class TestPickSpecResolve:
+
+	"""PickSpec.resolve_index — the trigger-time rank draw."""
+
+	def test_single_rank_deterministic (self) -> None:
+		"""A degenerate range returns the same index every time."""
+		spec = subsample.query.PickSpec(2, 2)
+		for _ in range(10):
+			assert spec.resolve_index(5) == 1   # rank 2 → idx 1
+
+	def test_range_draws_within_bounds (self) -> None:
+		spec = subsample.query.PickSpec(1, 3)
+		seen: set[int] = set()
+		for _ in range(200):
+			idx = spec.resolve_index(10)
+			assert 0 <= idx <= 2
+			seen.add(idx)
+		# Across 200 draws all three ranks should appear (vanishingly unlikely otherwise).
+		assert seen == {0, 1, 2}
+
+	def test_hi_clamped_to_ranked_len (self) -> None:
+		"""Requesting rank 5 against 3 samples falls back to the last rank."""
+		spec = subsample.query.PickSpec(5, 7)
+		for _ in range(10):
+			assert spec.resolve_index(3) == 2   # idx 2 = rank 3 = last
+
+	def test_lo_clamped_when_above_ranked_len (self) -> None:
+		"""Even lo > ranked_len collapses onto the last rank."""
+		spec = subsample.query.PickSpec(10, 20)
+		assert spec.resolve_index(3) == 2
+
+	def test_passes_lo_hi_to_random (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""resolve_index calls random.randint with the clamped bounds."""
+		calls: list[tuple[int, int]] = []
+
+		def fake_randint (lo: int, hi: int) -> int:
+			calls.append((lo, hi))
+			return lo
+
+		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+
+		subsample.query.PickSpec(1, 3).resolve_index(10)
+		assert calls == [(1, 3)]
+
+		calls.clear()
+		subsample.query.PickSpec(1, 5).resolve_index(3)   # hi clamped to 3
+		assert calls == [(1, 3)]
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,9 @@ __pycache__/
 dist/
 build/
 
+# Tooling caches (pytest writes its own .gitignore inside its cache dir)
+.mypy_cache/
+
 # Config (user-specific files; midi-map.yaml.default is tracked)
 config.yaml
 midi-map.yaml
@@ -44,6 +47,10 @@ desktop.ini
 # thumbnails; regeneratable via scripts/regen_previews_png.py from the
 # audio + analysis sidecar, so there's no reason to track them.
 *.preview.png
+
+# Third-party sample-browser databases (e.g. Sononym writes sononym.db into
+# any folder it scans).  Never tracked anywhere under samples/.
+samples/**/*.db
 
 # samples/ — directory structure is committed via .gitkeep files.
 # Per-directory .gitignore files handle any additional whitelisting

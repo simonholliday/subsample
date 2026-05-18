@@ -484,6 +484,8 @@ select:
   order:
     - { by: age, dir: desc }              # most recently captured first
   pick: 1                                 # take the first match
+  # pick: [1, 3]                          # or: a different match in your top 3
+                                          #     on every hit (random per trigger)
 ```
 
 `select` is usually a single block like this. It can also be a *list* of
@@ -564,8 +566,9 @@ common case concise, but it helps to know which ones are on:
 |---|---|---|
 | `order` | `[{ by: age, dir: desc }]` (newest first) | No `where.reference` set |
 | `order` | `[{ by: similarity, dir: desc }]` | `where.reference` **is** set |
-| `pick` | `1` (best match) for the first note; incremented per note thereafter | Multi-note assignment without `repitch` |
+| `pick` | `1` (best match) for the first note; incremented per note thereafter | Multi-note assignment without `repitch`, and no explicit `pick` |
 | `pick` | `1` for every note | Multi-note assignment with `repitch` in `process` |
+| `pick` | Same `pick` for every note (no per-note distribution) | Any explicit `pick` — scalar or range |
 | `where` | Empty (all samples match) | `where` block omitted |
 | `process` | Empty (unprocessed playback) | `process` block omitted |
 | `grid` | `16` (sixteenth-note) | `stretch_quantize` / `pad_quantize` without explicit grid |
@@ -584,6 +587,22 @@ want a different sort.
 `pick` is 1-indexed. Default: 1 (first match). For multi-note assignments
 without explicit `pick`, each note gets the next position (rank distribution) -
 so `notes: [36, 35]` gives note 36 pick 1 (best match) and note 35 pick 2.
+
+**Pick a different sample on every hit.** `pick` also accepts a *range*: a
+fresh random rank is drawn on every note-on, so the same pad plays a different
+sample each time without scripting. Two equivalent forms:
+
+```yaml
+pick: [1, 3]              # shorthand: random rank in 1..3 inclusive
+pick: { gte: 1, lte: 3 }  # explicit: same vocabulary as `where:` operators
+```
+
+The dict form also accepts `gt` / `lt` / `eq` (so `pick: { gt: 1, lt: 5 }`
+draws from ranks 2-4). If the upper bound exceeds the number of available
+matches, the draw clamps to the last rank — matching the scalar fallback
+behaviour. Any explicit `pick` (scalar or range) suppresses per-note
+distribution, so a range on `notes: [60, 61, 62]` rolls independently for
+each key instead of fixing different ranks to different notes.
 
 #### Beat-pattern matching
 
@@ -822,7 +841,8 @@ tonal content and transient clicks/hits. Useful as a pre-filter before repitch
 
 When `repitch` is in the process list, all notes in a multi-note assignment
 share pick 1 (same sample, pitched per note). Without `repitch`, each note gets
-the next rank.
+the next rank — unless an explicit `pick` (scalar or range) is given, in which
+case every note uses that same `pick` (range picks roll fresh per trigger).
 
 #### Legacy `amount:` parameter (still accepted)
 
@@ -1785,11 +1805,6 @@ repository; audio files are local-only and .gitignored.
   transient detection, then add each slice to the library as a separate sample.
 - **Similar-to-this query** - "find more sounds like this one" by exposing the
   similarity engine as a user-facing search.
-
-### Additional select/process features
-
-- **Random selection** - `order_by: random` to pick a different sample on each
-  trigger.
 
 ### Monitoring
 
