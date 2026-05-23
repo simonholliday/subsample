@@ -175,6 +175,8 @@ def _process_input_files (
 			_log.warning("Could not read %s: %s — skipping", path.name, exc)
 			continue
 
+		print(f"  {file_info.sample_rate} Hz  {file_info.bit_depth}-bit  {file_info.channels}ch")
+
 		audio_dtype = _AUDIO_DTYPE.get(file_info.bit_depth)
 		if audio_dtype is None:
 			_log.warning(
@@ -702,6 +704,10 @@ def main () -> None:
 	# Segments are written to the output directory (which is typically the same
 	# as the instrument directory), so they are picked up by the instrument loader below.
 	if args.files:
+		# Recorder banner shows the live-capture config; file-input mode reads
+		# at each source's native format.  Clarify so a 32-bit float source
+		# isn't mistaken for "24-bit" because that's what the config says.
+		print("File input mode: reading each file at its native sample rate, bit depth, channel count.")
 		_process_input_files(args.files, cfg)
 		return
 

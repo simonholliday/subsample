@@ -513,3 +513,173 @@ class TestFlacReadPrecision:
 		assert info.bit_depth == 16
 		assert info.audio.dtype == numpy.int16
 		numpy.testing.assert_array_equal(info.audio, samples)
+
+
+class TestNonPcmRead:
+
+	"""Non-PCM_16/24/32 subtypes that need special handling in the soundfile
+	fallback path: 32-bit FLOAT and 64-bit DOUBLE (must scale float → int32),
+	and ALAC_24 / ALAC_32 (must read as int32 to preserve precision).
+
+	Regression guards for two distinct failure modes:
+	1. soundfile.read(dtype="int32") on a FLOAT/DOUBLE source direct-casts
+	   (1.0 → 1) instead of scaling to full-scale int32; the detection
+	   pipeline then saw what looked like silence and produced zero segments.
+	2. Falling through to the int16 else-branch for ALAC_24/ALAC_32 silently
+	   truncates the upper bits — same family as the original 24-bit FLAC
+	   truncation bug."""
+
+	def test_float_wav_scales_to_full_int32_range (self, tmp_path: pathlib.Path) -> None:
+		"""A 0.6-amplitude sine in a FLOAT WAV reads back with int32
+		magnitudes near 0.6 × 2**31, not as ±1 noise."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		sr = 44100
+		t  = numpy.linspace(0, 0.1, int(sr * 0.1), dtype=numpy.float32)
+		mono = (numpy.sin(2 * numpy.pi * 440 * t) * 0.6).astype(numpy.float32)
+		stereo = numpy.stack([mono, mono], axis=1)
+
+		path = tmp_path / "float.wav"
+		soundfile.write(str(path), stereo, sr, subtype="FLOAT")
+
+		info = subsample.audio.read_audio_file(path)
+
+		assert info.bit_depth  == 32
+		assert info.audio.dtype == numpy.int32
+		assert info.sample_rate == sr
+		assert info.channels    == 2
+
+		# Peak should sit close to 0.6 × full-scale int32 (within rounding
+		# and a tiny epsilon from sin discretisation).  Before the fix the
+		# whole array clamped to ±1.
+		expected_peak = 0.6 * (2 ** 31 - 1)
+		assert info.audio.max() > expected_peak * 0.95
+		assert info.audio.min() < -expected_peak * 0.95
+
+	def test_float_wav_silence_is_zero (self, tmp_path: pathlib.Path) -> None:
+		"""A silent FLOAT WAV reads back as all zeros (not ±1 noise)."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		silence = numpy.zeros((1024, 2), dtype=numpy.float32)
+		path = tmp_path / "silence.wav"
+		soundfile.write(str(path), silence, 44100, subtype="FLOAT")
+
+		info = subsample.audio.read_audio_file(path)
+
+		assert info.bit_depth == 32
+		numpy.testing.assert_array_equal(info.audio, numpy.zeros((1024, 2), dtype=numpy.int32))
+
+	def test_float_wav_clipping_safe (self, tmp_path: pathlib.Path) -> None:
+		"""A FLOAT WAV with > 1.0 sample doesn't wrap on int32 cast — it clamps."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		# Slightly over-scale audio (headroom-mixed files occasionally do this).
+		hot = numpy.array([[1.2, -1.2], [0.5, -0.5]], dtype=numpy.float32)
+		path = tmp_path / "hot.wav"
+		soundfile.write(str(path), hot, 44100, subtype="FLOAT")
+
+		info = subsample.audio.read_audio_file(path)
+
+		# Over-scale samples must clamp to int32's actual bounds, not wrap to
+		# the opposite sign (which would happen on a naked cast of a value
+		# slightly above 2**31).  Two's complement is asymmetric: int32 min
+		# is -2**31, max is 2**31 - 1.
+		assert info.audio[0, 0] == numpy.iinfo(numpy.int32).max
+		assert info.audio[0, 1] == numpy.iinfo(numpy.int32).min
+
+	def test_double_wav_scales_to_full_int32_range (self, tmp_path: pathlib.Path) -> None:
+		"""A 0.6-amplitude sine in a 64-bit DOUBLE WAV reads back with
+		int32 magnitudes near 0.6 × 2**31.  Same failure mode as FLOAT but
+		via a different code path (would otherwise fall to the int16
+		else-branch and collapse to peaks of ±1)."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		sr = 44100
+		t  = numpy.linspace(0, 0.1, int(sr * 0.1), dtype=numpy.float64)
+		mono = numpy.sin(2 * numpy.pi * 440 * t) * 0.6
+		stereo = numpy.stack([mono, mono], axis=1)
+
+		path = tmp_path / "double.wav"
+		soundfile.write(str(path), stereo, sr, subtype="DOUBLE")
+
+		info = subsample.audio.read_audio_file(path)
+
+		assert info.bit_depth   == 32
+		assert info.audio.dtype == numpy.int32
+		assert info.sample_rate == sr
+		assert info.channels    == 2
+
+		expected_peak = 0.6 * (2 ** 31 - 1)
+		assert info.audio.max() > expected_peak * 0.95
+		assert info.audio.min() < -expected_peak * 0.95
+
+	def test_double_aiff_scales_to_full_int32_range (self, tmp_path: pathlib.Path) -> None:
+		"""DOUBLE inside an AIFF container — soundfile normalises the subtype
+		string regardless of container, so the same code path serves both."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		sr = 44100
+		t  = numpy.linspace(0, 0.05, int(sr * 0.05), dtype=numpy.float64)
+		mono = numpy.sin(2 * numpy.pi * 880 * t) * 0.5
+		stereo = numpy.stack([mono, mono], axis=1)
+
+		path = tmp_path / "double.aiff"
+		soundfile.write(str(path), stereo, sr, subtype="DOUBLE", format="AIFF")
+
+		info = subsample.audio.read_audio_file(path)
+
+		assert info.bit_depth   == 32
+		assert info.audio.dtype == numpy.int32
+
+		expected_peak = 0.5 * (2 ** 31 - 1)
+		assert info.audio.max() > expected_peak * 0.95
+
+	def test_alac_24_preserves_full_precision (self, tmp_path: pathlib.Path) -> None:
+		"""24-bit ALAC (Apple Lossless) in a CAF container reads back as
+		int32 with the value in the upper 24 bits, matching how PCM_24 FLAC
+		is handled.  Before the fix, ALAC_24 fell to the int16 else-branch
+		and silently lost its lower 8 bits."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		# Same hand-picked values as the PCM_24 FLAC test, so the same
+		# recovery convention applies.
+		samples_24 = [0x7FFFFF, -0x800000, 0x123456]
+		audio = numpy.array([[v << 8] for v in samples_24], dtype=numpy.int32)
+
+		path = tmp_path / "alac24.caf"
+		soundfile.write(str(path), audio, 44100, subtype="ALAC_24", format="CAF")
+
+		info = subsample.audio.read_audio_file(path)
+
+		assert info.bit_depth   == 24
+		assert info.audio.dtype == numpy.int32
+
+		recovered = info.audio[:, 0] >> 8
+		assert list(recovered) == samples_24
+
+	def test_alac_32_returns_full_int32 (self, tmp_path: pathlib.Path) -> None:
+		"""32-bit ALAC reads back as int32 at full scale (not truncated to int16).
+
+		Write via float32 input — libsndfile's ALAC_32 encoder corrupts
+		direct int32 input, but the real-world Apple Music / Logic encode
+		path (DAW float → ALAC_32) round-trips correctly."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		sr = 44100
+		t  = numpy.linspace(0, 0.05, int(sr * 0.05), dtype=numpy.float32)
+		mono = (numpy.sin(2 * numpy.pi * 440 * t) * 0.6).astype(numpy.float32)
+		stereo = numpy.stack([mono, mono], axis=1)
+
+		path = tmp_path / "alac32.caf"
+		soundfile.write(str(path), stereo, sr, subtype="ALAC_32", format="CAF")
+
+		info = subsample.audio.read_audio_file(path)
+
+		assert info.bit_depth   == 32
+		assert info.audio.dtype == numpy.int32
+
+		# Peak should sit near 0.6 × full-scale int32, *not* near ±0.6 × 2**15
+		# (which is what we'd see if the file fell back to int16 read).
+		expected_peak = 0.6 * (2 ** 31 - 1)
+		assert info.audio.max() > expected_peak * 0.95
+		assert info.audio.min() < -expected_peak * 0.95

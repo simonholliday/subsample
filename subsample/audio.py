@@ -94,26 +94,64 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 	except wave.Error:
 		pass  # Not a WAV file — fall through to soundfile.
 
-	# Fallback: soundfile (libsndfile) handles FLAC, AIFF, OGG, and more.
+	# Fallback: soundfile (libsndfile) handles FLAC, AIFF, OGG, MP3, and also
+	# WAV variants the stdlib wave module rejects — notably WAVE_FORMAT_IEEE_FLOAT
+	# (32-bit float WAVs from DAWs and field recorders).
 	#
 	# Pick an input dtype that preserves the file's native bit depth:
-	#  - PCM_24 files are decoded as int32 with the 24-bit value in the
-	#    upper 3 bytes (matches unpack_audio's 24-bit convention); the
+	#  - PCM_24 / ALAC_24 files are decoded as int32 with the 24-bit value in
+	#    the upper 3 bytes (matches unpack_audio's 24-bit convention); the
 	#    bit_depth we return is 24 so downstream code treats it correctly.
-	#  - PCM_32 / FLOAT files are decoded as int32 at full scale.
-	#  - Everything else (PCM_16, PCM_S8, compressed formats) is decoded
-	#    as int16.
+	#  - PCM_32 / ALAC_32 files are decoded as int32 natively (full scale).
+	#  - FLOAT (32-bit) and DOUBLE (64-bit) files are decoded as float first
+	#    and scaled to int32 by hand: soundfile's dtype="int32" on a float
+	#    source does a direct cast (1.0 → 1, not 1.0 → 2**31), silently
+	#    collapsing the signal to near-silence.  Scaling here keeps the
+	#    downstream int32 pipeline happy without any float-aware special
+	#    case further on.
+	#  - Everything else (PCM_16, ALAC_16, ULAW, ALAW, VORBIS, OPUS,
+	#    MP3/MPEG, etc.) is decoded as int16 — these are either natively
+	#    16-bit or lossy/companded formats whose effective precision sits
+	#    comfortably inside int16.
 	# Without this, a 24-bit FLAC written by the recorder and later read
-	# back would be silently truncated to 16-bit.
+	# back would be silently truncated to 16-bit, a 32-bit float WAV
+	# would be silently flattened to near-zero, a 64-bit double-precision
+	# WAV would do the same, and a 24-bit ALAC file would lose its upper
+	# 8 bits of precision.
 	try:
 		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		sf_info = soundfile.info(str(path))
 		subtype = (sf_info.subtype or "").upper()
+		sample_rate = sf_info.samplerate
 
-		if subtype in ("PCM_24", "PCM_32", "FLOAT"):
+		if subtype in ("FLOAT", "DOUBLE"):
+			# Read at native float precision.  DOUBLE → float64 preserves the
+			# extra mantissa bits during scaling; FLOAT → float32 is enough.
+			# Either way the scale-and-clamp logic below is identical.
+			float_dtype = "float32" if subtype == "FLOAT" else "float64"
+			float_data, sample_rate = soundfile.read(str(path), dtype=float_dtype, always_2d=True)
+			# Scale [-1.0, 1.0] → int32 full scale.  Multiply in float64 and
+			# clip *after* multiplication so a stray sample > 1.0 (rare in
+			# headroom-mixed files) doesn't wrap on cast; the float32 mantissa
+			# can't represent 2**31 - 1 exactly, so clamping with int32's
+			# actual limits avoids both wrap and silently-altered peak values.
+			int32_min = float(numpy.iinfo(numpy.int32).min)
+			int32_max = float(numpy.iinfo(numpy.int32).max)
+			scaled = numpy.clip(float_data.astype(numpy.float64) * float(2**31), int32_min, int32_max)
+			audio = numpy.ascontiguousarray(scaled.astype(numpy.int32))
+			bit_depth = 32
+
+			return AudioFileInfo(
+				audio       = audio,
+				sample_rate = sample_rate,
+				bit_depth   = bit_depth,
+				channels    = audio.shape[1],
+			)
+
+		if subtype in ("PCM_24", "PCM_32", "ALAC_24", "ALAC_32"):
 			read_dtype = "int32"
-			bit_depth  = 24 if subtype == "PCM_24" else 32
+			bit_depth  = 32 if subtype in ("PCM_32", "ALAC_32") else 24
 		else:
 			read_dtype = "int16"
 			bit_depth  = 16
