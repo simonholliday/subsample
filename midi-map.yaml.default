@@ -251,6 +251,36 @@ assignments:
   #   one_shot: false
 
 
+  # --- K. Channel-pattern extraction at playback time ---
+  # `extract:` collapses a multi-channel sample to a 1-channel sub-signal
+  # emulating a named microphone pickup pattern.  Useful when you want a
+  # stereo sample to play dead-centre mono (kick), or to pull the side
+  # content of an M/S recording for a stereo-spread snare, etc.
+  #
+  # Vocabulary (works across PCM mono/stereo/quad/5.1/7.1 and Ambisonic
+  # B-format - silently chooses the right channels for the format):
+  #   omni     equal-energy sum (M of M/S; W of B-format; full downmix)
+  #   side     left-right figure-eight    (L-R for stereo; Y for B-format)
+  #   depth    front-back figure-eight    (B-format X; surround only)
+  #   height   up-down figure-eight       (B-format Z only)
+  #   left     left-facing cardioid       (L for stereo)
+  #   right    right-facing cardioid      (R for stereo)
+  #   front    forward cardioid           (front speakers)
+  #   back     rear cardioid              (surround/B-format only)
+  #   channel.N  literal Nth input channel (1-indexed escape hatch)
+  #
+  # `extract:` runs BEFORE `pan:` and `output:` - the mono extract is
+  # then routed across output channels as usual.  Incompatible patterns
+  # (e.g. `depth` on a stereo source) are rejected at map load.
+
+  # - name: Mono kick
+  #   channel: 10
+  #   notes: drum.kick_1
+  #   select:
+  #     where: { reference: samples/reference/GM36_BassDrum1.wav }
+  #   extract: omni    # stereo source → mono, distributed equally to all outputs
+
+
   # =================================================================
   # ACTIVE - a complete starter kit, loaded at startup
   # =================================================================

@@ -14,6 +14,8 @@ import subsample.query
 import subsample.similarity
 import subsample.transform
 
+import tests.helpers
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers for building NoteMap entries in the new format
@@ -2249,6 +2251,335 @@ class TestParseOutputRouting:
 		"""Empty list raises ValueError."""
 		with pytest.raises(ValueError, match="non-empty"):
 			subsample.player._parse_output_routing([], "test", None)
+
+
+class TestParseExtract:
+
+	"""Tests for _parse_extract — YAML extract value to ExtractSpec."""
+
+	def test_none_returns_none (self) -> None:
+		"""Missing field returns None (no extract)."""
+		assert subsample.player._parse_extract(None, "test") is None
+
+	def test_omni_parses (self) -> None:
+		"""'omni' parses to ExtractSpec(kind='omni')."""
+		result = subsample.player._parse_extract("omni", "test")
+		assert result == subsample.query.ExtractSpec(kind="omni")
+
+	def test_all_named_kinds_parse (self) -> None:
+		"""Every kind in EXTRACT_KINDS parses to a matching ExtractSpec."""
+		for kind in subsample.query.EXTRACT_KINDS:
+			result = subsample.player._parse_extract(kind, "test")
+			assert result == subsample.query.ExtractSpec(kind=kind)
+
+	def test_case_insensitive (self) -> None:
+		"""OMNI, Omni, oMnI all normalise to kind='omni'."""
+		for value in ("OMNI", "Omni", "oMnI"):
+			result = subsample.player._parse_extract(value, "test")
+			assert result == subsample.query.ExtractSpec(kind="omni")
+
+	def test_whitespace_stripped (self) -> None:
+		"""Leading/trailing whitespace is stripped."""
+		result = subsample.player._parse_extract("  omni  ", "test")
+		assert result == subsample.query.ExtractSpec(kind="omni")
+
+	def test_channel_index_parses (self) -> None:
+		"""'channel.3' parses to ExtractSpec(kind='channel', channel_index=3)."""
+		result = subsample.player._parse_extract("channel.3", "test")
+		assert result == subsample.query.ExtractSpec(kind="channel", channel_index=3)
+
+	def test_channel_index_higher (self) -> None:
+		"""'channel.8' parses correctly."""
+		result = subsample.player._parse_extract("channel.8", "test")
+		assert result == subsample.query.ExtractSpec(kind="channel", channel_index=8)
+
+	def test_channel_zero_rejected (self) -> None:
+		"""'channel.0' raises (1-indexed)."""
+		with pytest.raises(ValueError, match="1-indexed"):
+			subsample.player._parse_extract("channel.0", "test")
+
+	def test_channel_negative_rejected (self) -> None:
+		"""'channel.-1' raises."""
+		with pytest.raises(ValueError, match="1-indexed"):
+			subsample.player._parse_extract("channel.-1", "test")
+
+	def test_channel_non_integer_rejected (self) -> None:
+		"""'channel.foo' raises with 'integer'."""
+		with pytest.raises(ValueError, match="integer"):
+			subsample.player._parse_extract("channel.foo", "test")
+
+	def test_unknown_kind_rejected (self) -> None:
+		"""Unknown kind raises with the valid options listed."""
+		with pytest.raises(ValueError, match="unknown extract"):
+			subsample.player._parse_extract("midside", "test")
+
+	def test_unknown_kind_lists_valid (self) -> None:
+		"""Error message lists the valid kinds."""
+		with pytest.raises(ValueError, match="omni"):
+			subsample.player._parse_extract("midside", "test")
+
+	def test_non_string_rejected (self) -> None:
+		"""Non-string values raise with the type name."""
+		with pytest.raises(ValueError, match="must be a string"):
+			subsample.player._parse_extract(42, "test")
+
+	def test_assignment_name_in_error (self) -> None:
+		"""The assignment name is included in error messages."""
+		with pytest.raises(ValueError, match="kick"):
+			subsample.player._parse_extract("bogus", "kick")
+
+
+def _make_player_for_mix_matrix (output_channels: int = 2) -> subsample.player.MidiPlayer:
+	"""Construct a minimal MidiPlayer suitable for testing _get_mix_matrix."""
+	instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+	similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+	return subsample.player.MidiPlayer(
+		"Test Device",
+		threading.Event(),
+		instrument_library=instrument_library,
+		similarity_matrix=similarity_matrix,
+		midi_map={},
+		sample_rate=44100,
+		bit_depth=16,
+		output_channels=output_channels,
+	)
+
+
+class TestGetMixMatrixWithExtract:
+
+	"""Tests for the extract composition path in MidiPlayer._get_mix_matrix."""
+
+	def test_extract_omni_stereo_to_stereo_centred_pan (self) -> None:
+		"""extract=omni + pan=[50,50] → (L+R)/√2 sent equally to both outputs."""
+		player = _make_player_for_mix_matrix(output_channels=2)
+		extract = subsample.query.ExtractSpec(kind="omni")
+		pan     = numpy.array([50.0, 50.0], dtype=numpy.float32)
+
+		mat = player._get_mix_matrix(2, pan, None, "pcm", extract)
+
+		assert mat.shape == (2, 2)
+		# Both output rows should be identical (mono signal in both outs).
+		numpy.testing.assert_allclose(mat[0, :], mat[1, :])
+		# Each output should sum from both inputs symmetrically.
+		numpy.testing.assert_allclose(mat[0, 0], mat[0, 1])
+
+	def test_extract_omni_no_pan_distributes_to_all_outputs (self) -> None:
+		"""Without explicit pan, an extract distributes the mono signal equally across all outputs (constant-power)."""
+		player = _make_player_for_mix_matrix(output_channels=2)
+		extract = subsample.query.ExtractSpec(kind="omni")
+
+		mat = player._get_mix_matrix(2, None, None, "pcm", extract)
+
+		assert mat.shape == (2, 2)
+		# Both output rows must be identical (mono signal present in both outs).
+		numpy.testing.assert_allclose(mat[0, :], mat[1, :])
+		# Both inputs contribute equally to both outputs.
+		numpy.testing.assert_allclose(mat[0, 0], mat[0, 1])
+		# Each output sums in the L+R extract at 0.5 (constant-power for stereo).
+		numpy.testing.assert_allclose(mat[0, 0], 0.5, atol=1e-6)
+
+	def test_extract_omni_no_pan_matches_explicit_pan (self) -> None:
+		"""extract: omni with no pan equals extract: omni with pan=[1, 1] (uniform)."""
+		player = _make_player_for_mix_matrix(output_channels=2)
+		extract = subsample.query.ExtractSpec(kind="omni")
+		uniform = numpy.array([1.0, 1.0], dtype=numpy.float32)
+
+		mat_default  = player._get_mix_matrix(2, None,    None, "pcm", extract)
+		mat_explicit = player._get_mix_matrix(2, uniform, None, "pcm", extract)
+
+		numpy.testing.assert_allclose(mat_default, mat_explicit)
+
+	def test_extract_omni_no_pan_8ch_distributes_to_all (self) -> None:
+		"""On an 8-channel output device, mono extract with no pan goes to all 8 outputs."""
+		player = _make_player_for_mix_matrix(output_channels=8)
+		extract = subsample.query.ExtractSpec(kind="omni")
+
+		mat = player._get_mix_matrix(2, None, None, "pcm", extract)
+
+		assert mat.shape == (8, 2)
+		# Every output row must be non-zero (mono signal hits every speaker).
+		for row in range(8):
+			assert numpy.linalg.norm(mat[row, :]) > 0, f"output {row} unexpectedly silent"
+
+	def test_extract_with_output_routing (self) -> None:
+		"""extract=omni + output=[3,4] routes the mono signal to device channels 3+4."""
+		player = _make_player_for_mix_matrix(output_channels=8)
+		extract = subsample.query.ExtractSpec(kind="omni")
+		pan     = numpy.array([50.0, 50.0], dtype=numpy.float32)
+		routing = (2, 3)   # 0-indexed for channels 3, 4
+
+		mat = player._get_mix_matrix(2, pan, routing, "pcm", extract)
+
+		assert mat.shape == (8, 2)
+		# Outputs 1, 2, 5-8 (indices 0, 1, 4-7) must be silent.
+		for row in (0, 1, 4, 5, 6, 7):
+			numpy.testing.assert_allclose(mat[row, :], 0.0)
+		# Outputs 3 and 4 (indices 2, 3) carry the mono signal.
+		assert numpy.linalg.norm(mat[2, :]) > 0
+		assert numpy.linalg.norm(mat[3, :]) > 0
+
+	def test_extract_caches_per_spec (self) -> None:
+		"""Calling _get_mix_matrix twice with the same args hits the cache."""
+		player = _make_player_for_mix_matrix(output_channels=2)
+		extract = subsample.query.ExtractSpec(kind="omni")
+		pan     = numpy.array([50.0, 50.0], dtype=numpy.float32)
+
+		mat1 = player._get_mix_matrix(2, pan, None, "pcm", extract)
+		mat2 = player._get_mix_matrix(2, pan, None, "pcm", extract)
+
+		# Identity check: cache returns the same array object.
+		assert mat1 is mat2
+
+	def test_extract_cache_key_distinguishes_different_extracts (self) -> None:
+		"""Different extracts produce different cache entries (and different matrices)."""
+		player = _make_player_for_mix_matrix(output_channels=2)
+		pan = numpy.array([50.0, 50.0], dtype=numpy.float32)
+
+		omni_mat = player._get_mix_matrix(2, pan, None, "pcm", subsample.query.ExtractSpec(kind="omni"))
+		side_mat = player._get_mix_matrix(2, pan, None, "pcm", subsample.query.ExtractSpec(kind="side"))
+
+		# Both should exist as separate cache entries and differ in value.
+		assert omni_mat is not side_mat
+		assert not numpy.allclose(omni_mat, side_mat)
+
+	def test_no_extract_falls_through_unchanged (self) -> None:
+		"""extract=None preserves existing behaviour (identity for stereo→stereo)."""
+		player = _make_player_for_mix_matrix(output_channels=2)
+		mat = player._get_mix_matrix(2, None, None, "pcm", None)
+
+		numpy.testing.assert_allclose(mat, numpy.eye(2))
+
+
+class TestValidateAssignmentExtracts:
+
+	"""Tests for _validate_assignment_extracts — load-time format compatibility."""
+
+	def _make_record (
+		self,
+		name: str,
+		channels: int,
+		channel_format: str = "pcm",
+	) -> subsample.library.SampleRecord:
+		"""Build a minimal SampleRecord with the requested channel layout."""
+		return subsample.library.SampleRecord(
+			sample_id   = subsample.library.allocate_id(),
+			name        = name,
+			spectral    = tests.helpers._make_spectral(),
+			rhythm      = tests.helpers._make_rhythm(),
+			pitch       = tests.helpers._make_pitch(),
+			timbre      = tests.helpers._make_timbre(),
+			level       = tests.helpers._make_level(),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = tests.helpers._make_params(),
+			duration    = 1.0,
+			audio       = numpy.zeros((100, channels), dtype=numpy.int32),
+			channel_format = channel_format,
+		)
+
+	def _populated_library (
+		self,
+		records: list[subsample.library.SampleRecord],
+	) -> subsample.library.InstrumentLibrary:
+		"""Build an InstrumentLibrary containing the given records."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10_000_000)
+		for r in records:
+			lib.add(r)
+		return lib
+
+	def test_no_extract_skips_validation (self) -> None:
+		"""Assignments without an extract are skipped silently."""
+		record = self._make_record("a", 2)
+		lib    = self._populated_library([record])
+		assignment = subsample.query.Assignment(name="a", select=(subsample.query.SelectSpec(),))
+		note_map = {(0, 60): (assignment, subsample.query.PickSpec(1, 1))}
+
+		# Should not raise.
+		subsample.player._validate_assignment_extracts(note_map, lib)
+
+	def test_compatible_extract_passes (self) -> None:
+		"""omni on a stereo library is compatible — validation passes."""
+		records = [self._make_record(f"sample_{i}", 2) for i in range(3)]
+		lib     = self._populated_library(records)
+
+		assignment = subsample.query.Assignment(
+			name="kick",
+			select=(subsample.query.SelectSpec(),),
+			extract=subsample.query.ExtractSpec(kind="omni"),
+		)
+		note_map = {(0, 36): (assignment, subsample.query.PickSpec(1, 1))}
+
+		# Should not raise.
+		subsample.player._validate_assignment_extracts(note_map, lib)
+
+	def test_incompatible_extract_rejected (self) -> None:
+		"""depth on stereo samples raises with the assignment name and 'depth'."""
+		records = [self._make_record(f"sample_{i}", 2) for i in range(3)]
+		lib     = self._populated_library(records)
+
+		assignment = subsample.query.Assignment(
+			name="bass_drum",
+			select=(subsample.query.SelectSpec(),),
+			extract=subsample.query.ExtractSpec(kind="depth"),
+		)
+		note_map = {(0, 36): (assignment, subsample.query.PickSpec(1, 1))}
+
+		with pytest.raises(ValueError, match="bass_drum"):
+			subsample.player._validate_assignment_extracts(note_map, lib)
+
+	def test_empty_library_skipped (self) -> None:
+		"""No matching samples — validation skips (no failure to report)."""
+		lib = self._populated_library([])
+		assignment = subsample.query.Assignment(
+			name="x",
+			select=(subsample.query.SelectSpec(),),
+			extract=subsample.query.ExtractSpec(kind="depth"),
+		)
+		note_map = {(0, 36): (assignment, subsample.query.PickSpec(1, 1))}
+
+		# Should not raise — depth has no candidates to test.
+		subsample.player._validate_assignment_extracts(note_map, lib)
+
+	def test_warns_on_equivalent_to_omni (self, caplog: pytest.LogCaptureFixture) -> None:
+		"""front on stereo (no F/B info) logs a warning but doesn't raise."""
+		import logging
+		caplog.set_level(logging.WARNING, logger="subsample.player")
+
+		records = [self._make_record(f"sample_{i}", 2) for i in range(2)]
+		lib     = self._populated_library(records)
+
+		assignment = subsample.query.Assignment(
+			name="front_kick",
+			select=(subsample.query.SelectSpec(),),
+			extract=subsample.query.ExtractSpec(kind="front"),
+		)
+		note_map = {(0, 36): (assignment, subsample.query.PickSpec(1, 1))}
+
+		# Should not raise.
+		subsample.player._validate_assignment_extracts(note_map, lib)
+
+		# But should warn.
+		assert any("equivalent to 'omni'" in r.message for r in caplog.records)
+
+	def test_deduplicates_same_assignment_across_notes (self) -> None:
+		"""An assignment mapped to multiple notes is validated once."""
+		records = [self._make_record("sample_0", 2)]
+		lib     = self._populated_library(records)
+
+		assignment = subsample.query.Assignment(
+			name="x",
+			select=(subsample.query.SelectSpec(),),
+			extract=subsample.query.ExtractSpec(kind="omni"),
+		)
+		# Same Assignment object on three notes.
+		note_map = {
+			(0, 36): (assignment, subsample.query.PickSpec(1, 1)),
+			(0, 37): (assignment, subsample.query.PickSpec(1, 1)),
+			(0, 38): (assignment, subsample.query.PickSpec(1, 1)),
+		}
+
+		# Should not raise and should complete without exception.
+		subsample.player._validate_assignment_extracts(note_map, lib)
 
 
 class TestSelectSegment:

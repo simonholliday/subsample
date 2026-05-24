@@ -19,6 +19,9 @@ import typing
 
 import numpy
 
+if typing.TYPE_CHECKING:
+	import subsample.query
+
 
 # ---------------------------------------------------------------------------
 # SMPTE channel positions (ascending bit order from WAVEFORMATEXTENSIBLE)
@@ -301,3 +304,216 @@ def route_to_device (
 		result[device_row, :] = logical_matrix[logical_row, :]
 
 	return result
+
+
+# ---------------------------------------------------------------------------
+# Extract matrices — microphone-pattern sub-signal extraction
+# ---------------------------------------------------------------------------
+# Each entry is a (1, in_channels) coefficient vector that collapses a
+# multi-channel input to a single channel emulating a named microphone
+# pickup pattern (omni, side, depth, height, cardioids).  Coefficients are
+# normalised to unit L2 length so the extracted signal has constant energy
+# across formats.  Hardcoded per (kind, in_channels) — there is no analytic
+# formula across SMPTE layouts; each cell is a deliberate design choice
+# that reflects the channels physically present and meaningful for the
+# requested pattern.
+
+_SQRT3_INV = float(numpy.sqrt(1.0 / 3.0))
+_SQRT5_INV = float(numpy.sqrt(1.0 / 5.0))
+_SQRT6_INV = float(numpy.sqrt(1.0 / 6.0))
+_SQRT7_INV = float(numpy.sqrt(1.0 / 7.0))
+_SQRT2     = float(numpy.sqrt(2.0))
+
+# (kind, in_channels) → coefficient vector.  Missing combinations are
+# rejected with a "no spatial information for this pattern" message in
+# build_extract_matrix().  LFE channels (index 3 in 5.1/7.1 layouts) are
+# excluded from "omni" sums because LFE is band-limited; including it in
+# a full-range extract would let bass dominate the result.
+_PCM_EXTRACT_VECTORS: dict[tuple[str, int], list[float]] = {
+
+	# omni — zero-order equal-energy sum (LFE excluded on 5.1/7.1)
+	("omni",  1): [1.0],
+	("omni",  2): [_SQRT2_INV, _SQRT2_INV],
+	("omni",  4): [0.5, 0.5, 0.5, 0.5],
+	("omni",  6): [_SQRT5_INV, _SQRT5_INV, _SQRT5_INV, 0.0, _SQRT5_INV, _SQRT5_INV],
+	("omni",  8): [_SQRT7_INV, _SQRT7_INV, _SQRT7_INV, 0.0, _SQRT7_INV, _SQRT7_INV, _SQRT7_INV, _SQRT7_INV],
+
+	# side — L–R figure-eight dipole
+	("side",  2): [_SQRT2_INV, -_SQRT2_INV],
+	("side",  4): [0.5, -0.5, 0.5, -0.5],
+	("side",  6): [0.5, -0.5, 0.0, 0.0, 0.5, -0.5],
+	("side",  8): [_SQRT6_INV, -_SQRT6_INV, 0.0, 0.0, _SQRT6_INV, -_SQRT6_INV, _SQRT6_INV, -_SQRT6_INV],
+
+	# depth — F–B figure-eight dipole (requires ≥ 4 channels)
+	("depth", 4): [0.5, 0.5, -0.5, -0.5],
+	("depth", 6): [_SQRT6_INV, _SQRT6_INV, _SQRT6_INV * _SQRT2, 0.0, -_SQRT6_INV, -_SQRT6_INV],
+	("depth", 8): [_SQRT6_INV, _SQRT6_INV, _SQRT6_INV * _SQRT2, 0.0, -_SQRT6_INV, -_SQRT6_INV, 0.0, 0.0],
+
+	# height — only meaningful for Ambisonic B-format; rejected on all PCM layouts
+
+	# left — left-facing cardioid
+	("left",  1): [1.0],
+	("left",  2): [1.0, 0.0],
+	("left",  4): [_SQRT2_INV, 0.0, _SQRT2_INV, 0.0],
+	("left",  6): [_SQRT2_INV, 0.0, 0.0, 0.0, _SQRT2_INV, 0.0],
+	("left",  8): [_SQRT3_INV, 0.0, 0.0, 0.0, _SQRT3_INV, 0.0, _SQRT3_INV, 0.0],
+
+	# right — right-facing cardioid
+	("right", 1): [1.0],
+	("right", 2): [0.0, 1.0],
+	("right", 4): [0.0, _SQRT2_INV, 0.0, _SQRT2_INV],
+	("right", 6): [0.0, _SQRT2_INV, 0.0, 0.0, 0.0, _SQRT2_INV],
+	("right", 8): [0.0, _SQRT3_INV, 0.0, 0.0, 0.0, _SQRT3_INV, 0.0, _SQRT3_INV],
+
+	# front — forward-facing cardioid (no F/B distinction on mono/stereo)
+	("front", 1): [1.0],
+	("front", 2): [_SQRT2_INV, _SQRT2_INV],   # equivalent to omni; validation warns
+	("front", 4): [_SQRT2_INV, _SQRT2_INV, 0.0, 0.0],
+	("front", 6): [0.5, 0.5, 0.5 * _SQRT2, 0.0, 0.0, 0.0],
+	("front", 8): [0.5, 0.5, 0.5 * _SQRT2, 0.0, 0.0, 0.0, 0.0, 0.0],
+
+	# back — rear-facing cardioid (requires ≥ 4 channels)
+	("back",  4): [0.0, 0.0, _SQRT2_INV, _SQRT2_INV],
+	("back",  6): [0.0, 0.0, 0.0, 0.0, _SQRT2_INV, _SQRT2_INV],
+	("back",  8): [0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5],
+}
+
+
+# AmbiX ACN channel indices (W, Y, Z, X order — same as ambisonic.py).
+_ACN_W = 0
+_ACN_Y = 1
+_ACN_Z = 2
+_ACN_X = 3
+
+
+def _build_extract_matrix_ambisonic (kind: str) -> numpy.ndarray:
+
+	"""Build a (1, 4) extract matrix for AmbiX B-format input.
+
+	First-order B-format already encodes a microphone-pattern basis: W is
+	the omnidirectional, (X, Y, Z) are the three orthogonal figure-eight
+	dipoles.  Cardioids are formed as (W ± dipole)/√2.
+	"""
+
+	if kind == "omni":
+		return numpy.array([[1.0, 0.0, 0.0, 0.0]], dtype=numpy.float32)
+
+	if kind == "side":
+		return numpy.array([[0.0, 1.0, 0.0, 0.0]], dtype=numpy.float32)
+
+	if kind == "height":
+		return numpy.array([[0.0, 0.0, 1.0, 0.0]], dtype=numpy.float32)
+
+	if kind == "depth":
+		return numpy.array([[0.0, 0.0, 0.0, 1.0]], dtype=numpy.float32)
+
+	if kind == "left":
+		return numpy.array([[_SQRT2_INV,  _SQRT2_INV, 0.0, 0.0]], dtype=numpy.float32)
+
+	if kind == "right":
+		return numpy.array([[_SQRT2_INV, -_SQRT2_INV, 0.0, 0.0]], dtype=numpy.float32)
+
+	if kind == "front":
+		return numpy.array([[_SQRT2_INV, 0.0, 0.0,  _SQRT2_INV]], dtype=numpy.float32)
+
+	if kind == "back":
+		return numpy.array([[_SQRT2_INV, 0.0, 0.0, -_SQRT2_INV]], dtype=numpy.float32)
+
+	raise ValueError(f"extract: unknown kind {kind!r}")
+
+
+def build_extract_matrix (
+	extract_spec:   "subsample.query.ExtractSpec",
+	in_channels:    int,
+	channel_format: str = "pcm",
+) -> numpy.ndarray:
+
+	"""Return a (1, in_channels) float32 matrix that extracts a 1-channel
+	sub-signal from a multi-channel input.
+
+	The extracted signal emulates a named microphone pickup pattern at the
+	sample's position — `omni` is the equal-energy sum, `side`/`depth`/
+	`height` are figure-eight dipoles, `left`/`right`/`front`/`back` are
+	first-order cardioids, and `channel.N` is a literal index pick (1-indexed).
+
+	Dispatches first on ``channel_format``.  For Ambisonic B-format (AmbiX
+	ACN order: W=0, Y=1, Z=2, X=3), the four channels already form a
+	microphone-pattern basis — extracts are formed as combinations of W
+	with the directional X/Y/Z components.  For PCM, the matrix is
+	hardcoded per (kind, in_channels) layout to use the channels that are
+	physically meaningful for the pattern (e.g. ``front`` on 5.1 uses
+	FL+FR+FC; ``side`` on stereo uses L−R).
+
+	Args:
+		extract_spec:   The extraction specification (kind + optional channel_index).
+		in_channels:    Number of channels in the source audio.
+		channel_format: ``"pcm"`` for plain multichannel; ``"b_format_ambix"``
+		                for first-order AmbiX B-format (requires in_channels==4).
+
+	Returns:
+		float32 array of shape (1, in_channels).
+
+	Raises:
+		ValueError: If the (kind, format, in_channels) combination has no
+		            meaningful definition (e.g. ``depth`` on stereo input).
+	"""
+
+	if in_channels < 1:
+		raise ValueError(f"extract: in_channels must be >= 1, got {in_channels}")
+
+	# Literal channel index — format-agnostic, valid as long as the channel exists.
+	if extract_spec.kind == "channel":
+		n = extract_spec.channel_index
+
+		if n is None:
+			raise ValueError("extract: 'channel' spec is missing channel_index")
+
+		if n < 1 or n > in_channels:
+			raise ValueError(
+				f"extract 'channel.{n}': index out of range for "
+				f"{in_channels}-channel input (valid: 1..{in_channels})"
+			)
+
+		matrix = numpy.zeros((1, in_channels), dtype=numpy.float32)
+		matrix[0, n - 1] = 1.0
+		return matrix
+
+	# Named patterns: dispatch on channel_format.
+	if channel_format == "b_format_ambix":
+		if in_channels != 4:
+			raise ValueError(
+				f"extract {extract_spec.kind!r} on Ambisonic B-format: "
+				f"requires 4 input channels, got {in_channels}"
+			)
+
+		return _build_extract_matrix_ambisonic(extract_spec.kind)
+
+	if channel_format == "pcm":
+
+		if in_channels not in STANDARD_LAYOUTS:
+			raise ValueError(
+				f"extract {extract_spec.kind!r}: unsupported PCM layout with "
+				f"{in_channels} channels (supported: {sorted(STANDARD_LAYOUTS.keys())})"
+			)
+
+		cell = _PCM_EXTRACT_VECTORS.get((extract_spec.kind, in_channels))
+
+		if cell is not None:
+			return numpy.array([cell], dtype=numpy.float32)
+
+		# Rejected combination: the pattern has no meaningful definition for
+		# this PCM layout (e.g. depth/height on stereo, back on mono).
+		layout_name = LAYOUT_NAMES.get(in_channels, f"{in_channels}-channel")
+		available   = sorted({k for (k, n) in _PCM_EXTRACT_VECTORS if n == in_channels})
+
+		raise ValueError(
+			f"extract {extract_spec.kind!r}: not available for PCM {layout_name} "
+			f"input ({in_channels} channels) — this pattern requires spatial "
+			f"information not present in {layout_name}. "
+			f"Available extracts for {layout_name}: {available}, or channel.<n>"
+		)
+
+	raise ValueError(
+		f"extract: unsupported channel_format {channel_format!r} "
+		f"(supported: 'pcm', 'b_format_ambix')"
+	)

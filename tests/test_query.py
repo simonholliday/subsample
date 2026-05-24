@@ -1,5 +1,6 @@
 """Tests for subsample/query.py — sample query engine and MIDI map parser."""
 
+import dataclasses
 import pathlib
 import typing
 
@@ -1033,6 +1034,46 @@ class TestPickSpecResolve:
 		calls.clear()
 		subsample.query.PickSpec(1, 5).resolve_index(3)   # hi clamped to 3
 		assert calls == [(1, 3)]
+
+
+class TestExtractSpec:
+
+	"""Tests for ExtractSpec — the channel-pattern extraction spec dataclass."""
+
+	def test_basic_construction (self) -> None:
+		"""An ExtractSpec is built from a kind string."""
+		spec = subsample.query.ExtractSpec(kind="omni")
+		assert spec.kind == "omni"
+		assert spec.channel_index is None
+
+	def test_channel_index_form (self) -> None:
+		"""kind='channel' carries a channel_index."""
+		spec = subsample.query.ExtractSpec(kind="channel", channel_index=3)
+		assert spec.kind == "channel"
+		assert spec.channel_index == 3
+
+	def test_frozen (self) -> None:
+		"""ExtractSpec is frozen (cannot be mutated)."""
+		spec = subsample.query.ExtractSpec(kind="omni")
+		with pytest.raises(dataclasses.FrozenInstanceError):
+			spec.kind = "side"   # type: ignore[misc]
+
+	def test_equality (self) -> None:
+		"""Two ExtractSpecs with the same fields are equal."""
+		a = subsample.query.ExtractSpec(kind="side")
+		b = subsample.query.ExtractSpec(kind="side")
+		assert a == b
+
+	def test_channel_specs_equal_only_on_same_index (self) -> None:
+		"""ExtractSpec(channel, 1) != ExtractSpec(channel, 2)."""
+		a = subsample.query.ExtractSpec(kind="channel", channel_index=1)
+		b = subsample.query.ExtractSpec(kind="channel", channel_index=2)
+		assert a != b
+
+	def test_extract_kinds_set_contents (self) -> None:
+		"""EXTRACT_KINDS is the agreed first/zero-order vocabulary (without 'channel')."""
+		expected = {"omni", "side", "depth", "height", "left", "right", "front", "back"}
+		assert subsample.query.EXTRACT_KINDS == expected
 
 
 # ---------------------------------------------------------------------------

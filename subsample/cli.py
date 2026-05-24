@@ -558,6 +558,11 @@ def _start_player (
 		target_sample_rate=effective_output_sr,
 	)
 
+	# Validate `extract:` directives now that all candidate samples are
+	# loaded: any assignment whose extract is incompatible with even one of
+	# its matching samples is rejected here, before audio playback begins.
+	subsample.player._validate_assignment_extracts(midi_map, instrument_library)
+
 	# Virtual port mode: bypass hardware device selection entirely.
 	# MidiPlayer.run() will open the named virtual port with virtual=True.
 	if cfg.player.virtual_midi_port is not None:

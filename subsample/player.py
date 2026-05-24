@@ -338,6 +338,73 @@ def _parse_output_routing (
 	return tuple(ch - 1 for ch in channels)
 
 
+def _parse_extract (raw: typing.Any, assignment_name: str) -> typing.Optional[subsample.query.ExtractSpec]:
+
+	"""Parse the ``extract:`` field from a MIDI map assignment into an ExtractSpec.
+
+	Accepted forms:
+	  - One of the named kinds in ``subsample.query.EXTRACT_KINDS`` (omni,
+	    side, depth, height, left, right, front, back). Case-insensitive.
+	  - ``channel.<N>`` where N is a 1-indexed integer pointing at a literal
+	    input channel.
+	  - ``None`` (no extract — full multi-channel signal flows through pan/output).
+
+	Validation here is syntactic only.  Semantic compatibility against the
+	actual sample's ``channel_format`` is checked at map-load time by
+	``_validate_assignment_extracts`` once samples are resolved.
+
+	Args:
+		raw:             Raw YAML value (string, or None for no extract).
+		assignment_name: Name for error messages.
+
+	Returns:
+		ExtractSpec or None.
+
+	Raises:
+		ValueError: On unknown kind, malformed channel.N, or wrong type.
+	"""
+
+	if raw is None:
+		return None
+
+	if not isinstance(raw, str):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: extract must be a string, "
+			f"got {type(raw).__name__}"
+		)
+
+	value = raw.strip().lower()
+
+	if value in subsample.query.EXTRACT_KINDS:
+		return subsample.query.ExtractSpec(kind=value)
+
+	if "." in value:
+		prefix, _, rest = value.partition(".")
+
+		if prefix == "channel":
+			try:
+				n = int(rest)
+			except ValueError:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: extract "
+					f"'channel.<n>' requires an integer, got {rest!r}"
+				)
+
+			if n < 1:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: extract "
+					f"'channel.{n}' must be 1-indexed (>= 1)"
+				)
+
+			return subsample.query.ExtractSpec(kind="channel", channel_index=n)
+
+	valid = ", ".join(sorted(subsample.query.EXTRACT_KINDS))
+	raise ValueError(
+		f"MIDI map assignment {assignment_name!r}: unknown extract {raw!r} "
+		f"(valid: {valid}, or channel.<n>)"
+	)
+
+
 # Note name conversion — delegated to pymididefs.
 _midi_to_note_name = pymididefs.notes.note_to_name
 _parse_note_name = pymididefs.notes.name_to_note
@@ -765,6 +832,124 @@ def _resolve_path_references (
 		_log.debug("Added path-based instrument from %s", path)
 
 
+def _validate_assignment_extracts (
+	note_map: NoteMap,
+	instrument_lib: subsample.library.InstrumentLibrary,
+) -> None:
+
+	"""Reject the MIDI map if any assignment's ``extract`` is incompatible with a candidate sample.
+
+	For every unique Assignment with ``extract != None``, evaluate the
+	SelectSpec.where predicates against the populated instrument library
+	(without a beats_resolver — samples with active quantized_beats
+	predicates are skipped, which is acceptable conservative behaviour).
+	For each unique ``(channel_format, in_channels)`` candidate, attempt to
+	build the extract matrix.  If any candidate's format would raise, raise
+	ValueError listing the assignment name, the extract kind, and the
+	offending formats so the user can fix the map.
+
+	When a directional extract (e.g. ``front`` on stereo) degenerates to
+	the omni matrix for a given format, log a one-time warning per
+	(assignment, format) pair — the assignment still loads.
+
+	Args:
+		note_map:       Note routing table after _resolve_path_references has
+		                loaded path-based references, instruments, and
+		                directory samples.
+		instrument_lib: Populated instrument library.
+
+	Raises:
+		ValueError: If any extract is incompatible with any matching sample.
+	"""
+
+	seen_assignments: set[int] = set()
+
+	for (assignment, _pick_spec) in note_map.values():
+
+		if assignment.extract is None:
+			continue
+
+		aid = id(assignment)
+
+		if aid in seen_assignments:
+			continue
+
+		seen_assignments.add(aid)
+
+		# Gather the unique (channel_format, in_channels) combinations that
+		# any select spec could pick.  We deliberately don't supply a
+		# beats_resolver — quantized_beats predicates are skipped (matches()
+		# returns False), so they appear as if no sample matched.  This is
+		# conservative: validation may miss a few samples in unusual maps,
+		# but won't reject correct ones.
+		candidates: set[tuple[str, int]] = set()
+
+		for select_spec in assignment.select:
+
+			for record in instrument_lib.samples():
+
+				if not select_spec.where.matches(record):
+					continue
+
+				if record.audio is None:
+					continue
+
+				ch_count = record.audio.shape[1]
+				candidates.add((record.channel_format, ch_count))
+
+		if not candidates:
+			continue
+
+		failures:           list[tuple[str, int, str]] = []
+		equivalent_to_omni: list[tuple[str, int]]      = []
+
+		for fmt, ch_count in sorted(candidates):
+
+			try:
+				ext_mat = subsample.channel.build_extract_matrix(
+					assignment.extract, ch_count, fmt,
+				)
+			except ValueError as exc:
+				failures.append((fmt, ch_count, str(exc)))
+				continue
+
+			# A directional pattern with no spatial information for this
+			# format reduces to the omni matrix (e.g. `front` on stereo —
+			# no F/B distinction exists).  Tell the user this is happening
+			# but don't reject; the audio result is still useful.
+			if assignment.extract.kind not in ("omni", "channel"):
+				omni_spec = subsample.query.ExtractSpec(kind="omni")
+
+				try:
+					omni_mat = subsample.channel.build_extract_matrix(
+						omni_spec, ch_count, fmt,
+					)
+				except ValueError:
+					continue
+
+				if numpy.allclose(ext_mat, omni_mat):
+					equivalent_to_omni.append((fmt, ch_count))
+
+		if failures:
+			details = "\n".join(
+				f"  - {fmt} {ch_count}ch: {msg}"
+				for (fmt, ch_count, msg) in failures
+			)
+			raise ValueError(
+				f"MIDI map assignment {assignment.name!r}: extract "
+				f"{assignment.extract.kind!r} cannot be applied to "
+				f"{len(failures)} matched sample format(s):\n{details}"
+			)
+
+		for fmt, ch_count in equivalent_to_omni:
+			_log.warning(
+				"MIDI map assignment %r: extract %r on %s %dch input is "
+				"equivalent to 'omni' — this format carries no spatial "
+				"information beyond mono.",
+				assignment.name, assignment.extract.kind, fmt, ch_count,
+			)
+
+
 def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
@@ -912,6 +1097,7 @@ def load_midi_map (
 
 		pan_weights    = _parse_pan_weights(assignment_raw.get("pan"), name)
 		output_routing = _parse_output_routing(assignment_raw.get("output"), name, pan_weights)
+		extract        = _parse_extract(assignment_raw.get("extract"), name)
 
 		# Extract segment playback mode from quantize step parameters.
 		segment_mode: typing.Union[str, int] = ""
@@ -940,6 +1126,7 @@ def load_midi_map (
 			gain_db=gain_db,
 			pan_weights=pan_weights,
 			output_routing=output_routing,
+			extract=extract,
 			segment_mode=segment_mode,
 		)
 
@@ -1280,7 +1467,13 @@ class MidiPlayer:
 		# map so a surviving entry is still correct for its inputs) but
 		# the explicit lock removes the ambiguity and matches the locking
 		# discipline used for _voices_lock and _cc_debounce_lock.
-		_MixCacheKey = tuple[int, typing.Optional[tuple[float, ...]], typing.Optional[tuple[int, ...]], str]
+		_MixCacheKey = tuple[
+			int,
+			typing.Optional[tuple[float, ...]],
+			typing.Optional[tuple[int, ...]],
+			str,
+			typing.Optional[tuple[str, typing.Optional[int]]],
+		]
 		self._mix_matrix_cache: dict[_MixCacheKey, numpy.ndarray] = {}
 		self._mix_matrix_lock:  threading.Lock                    = threading.Lock()
 
@@ -1752,7 +1945,7 @@ class MidiPlayer:
 							variant.audio, variant.level, variant.segment_bounds,
 							assignment.segment_mode, msg.channel, msg.note,
 						)
-						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format)
+						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1773,7 +1966,7 @@ class MidiPlayer:
 							prev.audio, prev.level, prev.segment_bounds,
 							assignment.segment_mode, msg.channel, msg.note,
 						)
-						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format)
+						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1791,7 +1984,7 @@ class MidiPlayer:
 					base.audio, base.level, base.segment_bounds,
 					assignment.segment_mode, msg.channel, msg.note,
 				)
-				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format)
+				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 				rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 				with self._voices_lock:
 					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
@@ -1802,7 +1995,7 @@ class MidiPlayer:
 				return
 
 		# 4. Last resort: convert from int PCM on this trigger.
-		mix_mat = self._get_mix_matrix(record.audio.shape[1] if record.audio is not None else 1, pan_weights, output_routing, record.channel_format)
+		mix_mat = self._get_mix_matrix(record.audio.shape[1] if record.audio is not None else 1, pan_weights, output_routing, record.channel_format, assignment.extract)
 		original: typing.Optional[numpy.ndarray] = self._render(record, msg.velocity, mix_mat, assignment.gain_db)
 
 		if original is None:
@@ -2148,9 +2341,10 @@ class MidiPlayer:
 		pan_weights: typing.Optional[numpy.ndarray],
 		output_routing: typing.Optional[tuple[int, ...]] = None,
 		channel_format: str = "pcm",
+		extract: typing.Optional[subsample.query.ExtractSpec] = None,
 	) -> numpy.ndarray:
 
-		"""Look up or build a mixing matrix for the given input channel count, pan weights, and output routing.
+		"""Look up or build a mixing matrix for the given input channel count, pan weights, output routing, and optional extract.
 
 		For raw PCM samples (channel_format="pcm"), the matrix is built by
 		channel.build_mix_matrix() as usual.  For ambisonic B-format samples
@@ -2158,8 +2352,15 @@ class MidiPlayer:
 		of the project-wide rotation and decoder — so the same matmul in the
 		render path decodes 4-channel B-format to the output layout.
 
+		When ``extract`` is set, the input is first collapsed to 1 channel
+		via channel.build_extract_matrix() emulating a named microphone
+		pickup pattern (omni, side, etc.), then the existing pan/routing
+		logic distributes that mono signal across the output channels.
+		Composition: ``final = pan_matrix @ extract_matrix`` — one matmul in
+		the render path, just like the non-extract case.
+
 		Cached by (in_channels, pan_weights_tuple, output_routing,
-		channel_format).
+		channel_format, extract).
 		"""
 
 		key = (
@@ -2167,6 +2368,7 @@ class MidiPlayer:
 			tuple(pan_weights.tolist()) if pan_weights is not None else None,
 			output_routing,
 			channel_format,
+			(extract.kind, extract.channel_index) if extract is not None else None,
 		)
 
 		with self._mix_matrix_lock:
@@ -2174,6 +2376,45 @@ class MidiPlayer:
 
 			if cached is not None:
 				return cached
+
+			if extract is not None:
+				# Extract collapses the input to 1 channel emulating a named
+				# microphone pickup pattern.  Skip the Ambisonic decoder path
+				# entirely — the extract has already produced the desired
+				# sub-signal (e.g. W only for `omni` on B-format).
+				extract_matrix = subsample.channel.build_extract_matrix(
+					extract, in_channels, channel_format,
+				)
+
+				# Default pan for the extracted mono signal: equal distribution
+				# across all logical outputs (constant-power).  Without this,
+				# build_mix_matrix(1, N, None) would apply the conservative
+				# upmix rule (mono → front position only), so the user's
+				# centred-mono kick would land in the left speaker only.
+				# Explicit pan_weights override this default.
+				logical_out = len(output_routing) if output_routing is not None else self._output_channels
+				effective_pan = pan_weights
+
+				if effective_pan is None:
+					effective_pan = numpy.ones(logical_out, dtype=numpy.float32)
+
+				if output_routing is not None:
+					pan_matrix = subsample.channel.build_mix_matrix(
+						1, len(output_routing), effective_pan,
+					)
+					logical = pan_matrix @ extract_matrix
+					mat = subsample.channel.route_to_device(
+						logical, self._output_channels, output_routing,
+					)
+				else:
+					pan_matrix = subsample.channel.build_mix_matrix(
+						1, self._output_channels, effective_pan,
+					)
+					mat = pan_matrix @ extract_matrix
+
+				mat = numpy.asarray(mat, dtype=numpy.float32)
+				self._mix_matrix_cache[key] = mat
+				return mat
 
 			if channel_format == "b_format_ambix" and self._ambisonic_config is not None:
 				logical_out_ch = len(output_routing) if output_routing is not None else self._output_channels

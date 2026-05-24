@@ -933,6 +933,71 @@ Set `player.audio.channels` in config to match your device (e.g. 8 for a
 Focusrite Scarlett 18i20). When `output` is omitted, instruments route to the
 first N outputs as before - stereo users see no change.
 
+### Extract - present a multi-channel sample as a sub-pattern
+
+`extract:` collapses a multi-channel sample to a 1-channel sub-signal at playback
+time, emulating a named microphone pickup pattern. The source file is unchanged
+- the same sample can be used in full stereo by another assignment. Extract
+runs **before** `pan` and `output`, so the routing logic distributes the mono
+extract across the chosen outputs as usual.
+
+The classic use case is a kick: a stereo recording might have slight L/R
+differences from room reflection or mic placement, but you usually want the
+kick to land dead-centre and mono. `extract: omni` collapses the stereo source
+to its `(L+R)/√2` sum and then `pan: [50, 50]` sends the mono signal equally to
+both outputs.
+
+```yaml
+- name: Kick
+  channel: 10
+  notes: drum.kick_1
+  select:
+    where: { reference: samples/reference/GM36_BassDrum1.wav }
+  extract: omni     # collapse to centred mono, distributed equally to all outputs
+```
+
+When `extract:` is set and `pan:` is omitted, the mono extract is distributed
+equally across every output channel (constant-power) — the natural default for
+a "collapsed to mono" signal. Explicit `pan:` still works as a per-output
+weighting if you want something other than uniform.
+
+The vocabulary is microphone-pattern names: every input format has a
+canonical answer for `omni` (zero-order, equal-weight) and for each cardinal
+first-order pickup pattern. The dispatch is automatic - the same YAML works
+for mono, stereo, quad, 5.1, 7.1, and Ambisonic B-format inputs.
+
+| value      | pattern                                | stereo (2ch)      | B-format AmbiX (4ch) |
+|------------|----------------------------------------|-------------------|----------------------|
+| `omni`     | equal-energy sum / W / M of M/S        | `(L+R)/√2`        | **W** only           |
+| `side`     | left-right figure-eight                | `(L-R)/√2`        | **Y**                |
+| `depth`    | front-back figure-eight                | rejected          | **X**                |
+| `height`   | up-down figure-eight                   | rejected          | **Z**                |
+| `left`     | left-facing cardioid                   | `L` only          | `(W+Y)/√2`           |
+| `right`    | right-facing cardioid                  | `R` only          | `(W-Y)/√2`           |
+| `front`    | forward cardioid                       | same as `omni` ⚠ | `(W+X)/√2`           |
+| `back`     | rear cardioid                          | rejected          | `(W-X)/√2`           |
+| `channel.N`| literal Nth input channel (1-indexed)  | -                 | -                    |
+
+Surround (quad / 5.1 / 7.1) inputs are also supported; each pattern uses the
+channels that carry the requested spatial information (e.g. `front` on 5.1
+sums FL+FR+FC, normalised). `omni` on 5.1 / 7.1 **excludes LFE** because LFE
+is band-limited and would dominate a full-range omni sum. Mono inputs are
+treated as identity for `omni`, `left`, `right`, and `front` (no spatial
+information to collapse).
+
+⚠ `front` on stereo input has no front-back information to discriminate, so
+it reduces to the omni matrix. The map still loads, but a warning is logged.
+
+**Parse-time validation.** Patterns that have no meaningful definition for
+the input format are **rejected at map load** (before any audio plays). For
+example, `extract: depth` on a stereo reference raises a `ValueError` naming
+the assignment and the offending sample; you fix the map or change the
+extract.
+
+The `channel.N` form is the escape hatch when you really do want a literal
+channel pick (e.g. `extract: channel.2` for the second input channel only).
+N is 1-indexed and rejected if it exceeds the input's channel count.
+
 ---
 
 **Going further.** The sections that follow cover the optional advanced

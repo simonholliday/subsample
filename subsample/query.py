@@ -666,6 +666,39 @@ class SelectSpec:
 
 
 # ---------------------------------------------------------------------------
+# ExtractSpec — channel-pattern extraction at playback time
+# ---------------------------------------------------------------------------
+
+# The named first/zero-order microphone-pattern extractions.  ``channel`` is
+# the literal index escape hatch and is *not* a member of this set — it has
+# its own dataclass field.
+EXTRACT_KINDS: typing.Final[frozenset[str]] = frozenset({
+	"omni", "side", "depth", "height", "left", "right", "front", "back",
+})
+
+
+@dataclasses.dataclass(frozen=True)
+class ExtractSpec:
+
+	"""How to extract a 1-channel sub-signal from a multi-channel input.
+
+	An assignment with ``extract: omni`` collapses the input to mono using
+	the equal-energy sum (M of M/S for stereo, W for B-format, ITU-like
+	downmix for surround), then the existing pan/output routing distributes
+	that mono signal across output channels.  Each ``kind`` corresponds to
+	a microphone-pattern analogue:
+
+	- ``omni``                       zero-order omnidirectional pickup
+	- ``side`` / ``depth`` / ``height`` first-order figure-eight dipoles
+	- ``left`` / ``right`` / ``front`` / ``back`` first-order cardioids
+	- ``channel`` (with channel_index) literal Nth input channel
+	"""
+
+	kind:          str
+	channel_index: typing.Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
 # ProcessSpec
 # ---------------------------------------------------------------------------
 
@@ -772,6 +805,7 @@ class Assignment:
 	gain_db:   float              = 0.0
 	pan_weights:    typing.Optional[numpy.ndarray]  = None
 	output_routing: typing.Optional[tuple[int, ...]] = None
+	extract:        typing.Optional[ExtractSpec]    = None
 	segment_mode:   typing.Union[str, int]             = ""
 	"""Segment playback mode for quantized samples.
 	"" = play entire merged audio (default).
