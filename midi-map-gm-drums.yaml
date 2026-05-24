@@ -63,7 +63,7 @@ assignments:
 
   - name: Kick 2 (Acoustic Bass Drum)
     channel: 10
-    notes: 35
+    notes: drum.kick_2
     select:
       where:
         reference: samples/reference/GM35_AcousticBassDrum.wav
@@ -82,7 +82,7 @@ assignments:
 
   - name: Kick 1 (Bass Drum 1)
     channel: 10
-    notes: 36
+    notes: drum.kick_1
     select:
       where:
         reference: samples/reference/GM36_BassDrum1.wav
@@ -99,7 +99,7 @@ assignments:
 
   - name: Side Stick
     channel: 10
-    notes: 37
+    notes: drum.side_stick
     select:
       where:
         reference: samples/reference/GM37_SideStick.wav
@@ -112,7 +112,7 @@ assignments:
 
   - name: Snare 1 (Acoustic Snare)
     channel: 10
-    notes: 38
+    notes: drum.snare_1
     select:
       where:
         reference: samples/reference/GM38_AcousticSnare.wav
@@ -124,7 +124,7 @@ assignments:
 
   - name: Hand Clap
     channel: 10
-    notes: 39
+    notes: drum.hand_clap
     select:
       where:
         reference: samples/reference/GM39_HandClap.wav
@@ -135,7 +135,7 @@ assignments:
 
   - name: Snare 2 (Electric Snare)
     channel: 10
-    notes: 40
+    notes: drum.snare_2
     select:
       where:
         reference: samples/reference/GM40_ElectricSnare.wav
@@ -152,7 +152,7 @@ assignments:
 
   - name: Low Floor Tom
     channel: 10
-    notes: 41
+    notes: drum.low_floor_tom
     select:
       where:
         reference: samples/reference/GM41_LowFloorTom.wav
@@ -165,7 +165,7 @@ assignments:
 
   - name: High Floor Tom
     channel: 10
-    notes: 43
+    notes: drum.high_floor_tom
     select:
       where:
         reference: samples/reference/GM43_HighFloorTom.wav
@@ -178,7 +178,7 @@ assignments:
 
   - name: Low Tom
     channel: 10
-    notes: 45
+    notes: drum.low_tom
     select:
       where:
         reference: samples/reference/GM45_LowTom.wav
@@ -191,7 +191,7 @@ assignments:
 
   - name: Low Mid Tom
     channel: 10
-    notes: 47
+    notes: drum.low_mid_tom
     select:
       where:
         reference: samples/reference/GM47_LowMidTom.wav
@@ -204,7 +204,7 @@ assignments:
 
   - name: Hi Mid Tom
     channel: 10
-    notes: 48
+    notes: drum.high_mid_tom
     select:
       where:
         reference: samples/reference/GM48_HiMidTom.wav
@@ -217,7 +217,7 @@ assignments:
 
   - name: High Tom
     channel: 10
-    notes: 50
+    notes: drum.high_tom
     select:
       where:
         reference: samples/reference/GM50_HighTom.wav
@@ -235,7 +235,7 @@ assignments:
 
   - name: Closed Hi-Hat
     channel: 10
-    notes: 42
+    notes: drum.hi_hat_closed
     select:
       where:
         reference: samples/reference/GM42_ClosedHiHat.wav
@@ -248,7 +248,7 @@ assignments:
 
   - name: Pedal Hi-Hat
     channel: 10
-    notes: 44
+    notes: drum.hi_hat_pedal
     select:
       where:
         reference: samples/reference/GM44_PedalHiHat.wav
@@ -261,7 +261,7 @@ assignments:
 
   - name: Open Hi-Hat
     channel: 10
-    notes: 46
+    notes: drum.hi_hat_open
     select:
       where:
         reference: samples/reference/GM46_OpenHiHat.wav
@@ -279,7 +279,7 @@ assignments:
 
   - name: Crash Cymbal 1
     channel: 10
-    notes: 49
+    notes: drum.crash_1
     select:
       where:
         reference: samples/reference/GM49_CrashCymbal1.wav
@@ -291,7 +291,7 @@ assignments:
 
   - name: Splash Cymbal
     channel: 10
-    notes: 55
+    notes: drum.splash_cymbal
     select:
       where:
         reference: samples/reference/GM55_SplashCymbal.wav
@@ -303,7 +303,7 @@ assignments:
 
   - name: Crash Cymbal 2
     channel: 10
-    notes: 57
+    notes: drum.crash_2
     select:
       where:
         reference: samples/reference/GM57_CrashCymbal2.wav
@@ -315,7 +315,7 @@ assignments:
 
   - name: Chinese Cymbal
     channel: 10
-    notes: 52
+    notes: drum.chinese_cymbal
     select:
       where:
         reference: samples/reference/GM52_ChineseCymbal.wav
@@ -332,7 +332,7 @@ assignments:
 
   - name: Ride Cymbal 1
     channel: 10
-    notes: 51
+    notes: drum.ride_1
     select:
       where:
         reference: samples/reference/GM51_RideCymbal1.wav
@@ -344,7 +344,7 @@ assignments:
 
   - name: Ride Bell
     channel: 10
-    notes: 53
+    notes: drum.ride_bell
     select:
       where:
         reference: samples/reference/GM53_RideBell.wav
@@ -356,7 +356,7 @@ assignments:
 
   - name: Ride Cymbal 2
     channel: 10
-    notes: 59
+    notes: drum.ride_2
     select:
       where:
         reference: samples/reference/GM59_RideCymbal2.wav
@@ -373,7 +373,7 @@ assignments:
 
   - name: Tambourine
     channel: 10
-    notes: 54
+    notes: drum.tambourine
     select:
       where:
         reference: samples/reference/GM54_Tambourine.wav
@@ -385,7 +385,7 @@ assignments:
 
   - name: Cowbell
     channel: 10
-    notes: 56
+    notes: drum.cowbell
     select:
       where:
         reference: samples/reference/GM56_Cowbell.wav
@@ -399,7 +399,7 @@ assignments:
 
   - name: Vibraslap
     channel: 10
-    notes: 58
+    notes: drum.vibraslap
     select:
       where:
         reference: samples/reference/GM58_Vibraslap.wav
@@ -416,7 +416,7 @@ assignments:
 
   - name: High Bongo
     channel: 10
-    notes: 60
+    notes: drum.high_bongo
     select:
       where:
         reference: samples/reference/GM60_HiBongo.wav
@@ -430,7 +430,7 @@ assignments:
 
   - name: Low Bongo
     channel: 10
-    notes: 61
+    notes: drum.low_bongo
     select:
       where:
         reference: samples/reference/GM61_LowBongo.wav
@@ -449,7 +449,7 @@ assignments:
 
   - name: Mute Hi Conga
     channel: 10
-    notes: 62
+    notes: drum.mute_high_conga
     select:
       where:
         reference: samples/reference/GM62_MuteHiConga.wav
@@ -463,7 +463,7 @@ assignments:
 
   - name: Open Hi Conga
     channel: 10
-    notes: 63
+    notes: drum.open_high_conga
     select:
       where:
         reference: samples/reference/GM63_OpenHiConga.wav
@@ -477,7 +477,7 @@ assignments:
 
   - name: Low Conga
     channel: 10
-    notes: 64
+    notes: drum.low_conga
     select:
       where:
         reference: samples/reference/GM64_LowConga.wav
@@ -496,7 +496,7 @@ assignments:
 
   - name: High Timbale
     channel: 10
-    notes: 65
+    notes: drum.high_timbale
     select:
       where:
         reference: samples/reference/GM65_HighTimbale.wav
@@ -510,7 +510,7 @@ assignments:
 
   - name: Low Timbale
     channel: 10
-    notes: 66
+    notes: drum.low_timbale
     select:
       where:
         reference: samples/reference/GM66_LowTimbale.wav
@@ -529,7 +529,7 @@ assignments:
 
   - name: High Agogo
     channel: 10
-    notes: 67
+    notes: drum.high_agogo
     select:
       where:
         reference: samples/reference/GM67_HighAgogo.wav
@@ -543,7 +543,7 @@ assignments:
 
   - name: Low Agogo
     channel: 10
-    notes: 68
+    notes: drum.low_agogo
     select:
       where:
         reference: samples/reference/GM68_LowAgogo.wav
@@ -562,7 +562,7 @@ assignments:
 
   - name: Cabasa
     channel: 10
-    notes: 69
+    notes: drum.cabasa
     select:
       where:
         reference: samples/reference/GM69_Cabasa.wav
@@ -574,7 +574,7 @@ assignments:
 
   - name: Maracas
     channel: 10
-    notes: 70
+    notes: drum.maracas
     select:
       where:
         reference: samples/reference/GM70_Maracas.wav
@@ -591,7 +591,7 @@ assignments:
 
   - name: Short Whistle
     channel: 10
-    notes: 71
+    notes: drum.short_whistle
     select:
       where:
         reference: samples/reference/GM71_ShortWhistle.wav
@@ -603,7 +603,7 @@ assignments:
 
   - name: Long Whistle
     channel: 10
-    notes: 72
+    notes: drum.long_whistle
     select:
       where:
         reference: samples/reference/GM72_LongWhistle.wav
@@ -620,7 +620,7 @@ assignments:
 
   - name: Short Guiro
     channel: 10
-    notes: 73
+    notes: drum.short_guiro
     select:
       where:
         reference: samples/reference/GM73_ShortGuiro.wav
@@ -633,7 +633,7 @@ assignments:
 
   - name: Long Guiro
     channel: 10
-    notes: 74
+    notes: drum.long_guiro
     select:
       where:
         reference: samples/reference/GM74_LongGuiro.wav
@@ -651,7 +651,7 @@ assignments:
 
   - name: Claves
     channel: 10
-    notes: 75
+    notes: drum.claves
     select:
       where:
         reference: samples/reference/GM75_Claves.wav
@@ -669,7 +669,7 @@ assignments:
 
   - name: Hi Wood Block
     channel: 10
-    notes: 76
+    notes: drum.high_woodblock
     select:
       where:
         reference: samples/reference/GM76_HiWoodBlock.wav
@@ -683,7 +683,7 @@ assignments:
 
   - name: Low Wood Block
     channel: 10
-    notes: 77
+    notes: drum.low_woodblock
     select:
       where:
         reference: samples/reference/GM77_LowWoodBlock.wav
@@ -702,7 +702,7 @@ assignments:
 
   - name: Mute Cuica
     channel: 10
-    notes: 78
+    notes: drum.mute_cuica
     select:
       where:
         reference: samples/reference/GM78_MuteCuica.wav
@@ -715,7 +715,7 @@ assignments:
 
   - name: Open Cuica
     channel: 10
-    notes: 79
+    notes: drum.open_cuica
     select:
       where:
         reference: samples/reference/GM79_OpenCuica.wav
@@ -733,7 +733,7 @@ assignments:
 
   - name: Mute Triangle
     channel: 10
-    notes: 80
+    notes: drum.mute_triangle
     select:
       where:
         reference: samples/reference/GM80_MuteTriangle.wav
@@ -745,7 +745,7 @@ assignments:
 
   - name: Open Triangle
     channel: 10
-    notes: 81
+    notes: drum.open_triangle
     select:
       where:
         reference: samples/reference/GM81_OpenTriangle.wav

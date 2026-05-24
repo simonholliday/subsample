@@ -35,6 +35,7 @@ import pyaudio
 import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 import yaml
 
+import pymididefs.drums
 import pymididefs.notes
 import subsample.ambisonic
 import subsample.analysis
@@ -342,16 +343,30 @@ _midi_to_note_name = pymididefs.notes.note_to_name
 _parse_note_name = pymididefs.notes.name_to_note
 
 
+# Symbolic note-name namespaces.  A `notes:` value of "drum.kick_1" is looked
+# up here: split on the first dot, the prefix selects a PyMidiDefs table, the
+# symbol (case-insensitive) is the dict key.  The dict shape is the
+# extension point — adding "program" → pymididefs.gm.GM_INSTRUMENT_MAP later
+# requires only one entry, no parser changes.
+_SYMBOL_NAMESPACES: typing.Final[dict[str, typing.Mapping[str, int]]] = {
+	"drum": pymididefs.drums.GM_DRUM_MAP,
+}
+
+
 def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 
 	"""Parse the 'notes' field from a MIDI map assignment into MIDI note numbers.
 
 	Accepts:
-	  Integer:          36          → [36]
-	  Note name:        "C3"        → [48]
-	  Numeric range:    "36..60"    → [36, 37, ..., 60]
-	  Note name range:  "C2..C4"    → [36, 37, ..., 60]
-	  List (mixed):     [36, "C3"]  → [36, 48]
+	  Integer:          36                  → [36]
+	  Note name:        "C3"                → [48]
+	  GM drum symbol:   "drum.kick_1"       → [36]   (case-insensitive)
+	  Numeric range:    "36..60"            → [36, 37, ..., 60]
+	  Note name range:  "C2..C4"            → [36, 37, ..., 60]
+	  List (mixed):     [36, "C3", "drum.snare_1"]  → [36, 48, 38]
+
+	Range syntax is intentionally not supported for symbolic notes — drum
+	names aren't sequential, use a list instead.
 
 	Args:
 		notes_raw:       Raw YAML value for the 'notes' field.
@@ -365,7 +380,8 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 	"""
 
 	def _single (item: typing.Any) -> int:
-		"""Resolve one note value: int, numeric string, or note-name string."""
+		"""Resolve one note value: int, numeric string, note-name string, or
+		symbolic form like "drum.kick_1"."""
 
 		if isinstance(item, int):
 			if not 0 <= item <= 127:
@@ -375,6 +391,26 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 			return item
 
 		if isinstance(item, str):
+
+			# Symbolic form ("drum.kick_1") — single dot, no range separator.
+			# Looked up case-insensitively in _SYMBOL_NAMESPACES.  Unknown
+			# namespaces fall through to the int / note-name path so a typo
+			# like "C.4" still gets the existing note-name error.
+			if "." in item and ".." not in item:
+				prefix, _, sym = item.partition(".")
+				table = _SYMBOL_NAMESPACES.get(prefix.lower())
+
+				if table is not None:
+					try:
+						return table[sym.lower()]
+					except KeyError:
+						valid = sorted(table)
+						raise ValueError(
+							f"MIDI map assignment {assignment_name!r}: "
+							f"unknown {prefix!r} symbol {sym!r} "
+							f"(valid: {', '.join(valid[:5])}…)"
+						)
+
 			# Try parsing as a bare integer first ("36"), then as a note name ("C3").
 			try:
 				n = int(item)
@@ -397,8 +433,18 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 			f"MIDI map assignment {assignment_name!r}: unexpected note value {item!r}"
 		)
 
-	# Range syntax: "C2..C4" or "36..60"
+	# Range syntax: "C2..C4" or "36..60".  Reject symbolic ranges explicitly so
+	# the user gets a targeted error pointing at list syntax, rather than the
+	# generic "not a valid note name" from the inner _single() call.
 	if isinstance(notes_raw, str) and ".." in notes_raw:
+
+		if "." in notes_raw.split("..")[0]:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: "
+				f"range syntax (a..b) is not supported for symbolic notes — "
+				f"use a list instead, e.g. [drum.kick_1, drum.snare_1]"
+			)
+
 		lo_str, hi_str = notes_raw.split("..", 1)
 		lo = _single(lo_str.strip())
 		hi = _single(hi_str.strip())

@@ -1186,6 +1186,76 @@ class TestParseNoteSpec:
 		with pytest.raises(ValueError, match="start"):
 			subsample.player._parse_note_spec("60..36", "test")
 
+	# -- Symbolic notes via PyMidiDefs (drum.kick_1, etc.) ------------------
+
+	def test_drum_symbol_lowercase (self) -> None:
+		"""'drum.kick_1' looks up pymididefs.drums.GM_DRUM_MAP and returns 36."""
+		assert subsample.player._parse_note_spec("drum.kick_1", "test") == [36]
+
+	def test_drum_symbol_uppercase (self) -> None:
+		"""Symbol part is case-insensitive — uppercase matches PyMidiDefs's Python constants."""
+		assert subsample.player._parse_note_spec("drum.KICK_1", "test") == [36]
+
+	def test_drum_symbol_mixed_case_namespace (self) -> None:
+		"""Namespace prefix is also case-insensitive."""
+		assert subsample.player._parse_note_spec("Drum.kick_1", "test") == [36]
+
+	def test_drum_symbol_in_list (self) -> None:
+		"""Symbolic notes work inside a list."""
+		assert subsample.player._parse_note_spec(["drum.kick_1", "drum.snare_1"], "test") == [36, 38]
+
+	def test_drum_symbol_mixed_list (self) -> None:
+		"""A list can mix symbolic, integer, and note-name forms."""
+		assert subsample.player._parse_note_spec(["drum.kick_1", 38, "C3"], "test") == [36, 38, 48]
+
+	def test_unknown_namespace_falls_through (self) -> None:
+		"""An unknown namespace falls through to the note-name parser, which
+		then raises the existing 'not a valid note name' error — no special
+		handling needed."""
+		with pytest.raises(ValueError):
+			subsample.player._parse_note_spec("foo.bar", "test")
+
+	def test_unknown_drum_symbol_raises (self) -> None:
+		"""An unknown drum symbol raises with both prefix and symbol in the message."""
+		with pytest.raises(ValueError, match="drum.*nonexistent"):
+			subsample.player._parse_note_spec("drum.nonexistent", "test")
+
+	def test_drum_range_rejected (self) -> None:
+		"""Symbolic ranges are explicitly rejected with a list-syntax hint."""
+		with pytest.raises(ValueError, match="list"):
+			subsample.player._parse_note_spec("drum.kick_1..drum.snare_1", "test")
+
+
+# ---------------------------------------------------------------------------
+# Symbolic notes — end-to-end through load_midi_map
+# ---------------------------------------------------------------------------
+
+class TestLoadMidiMapSymbolicNotes:
+
+	"""Verify symbolic notes flow through load_midi_map() into the NoteMap.
+
+	Distinct from the _parse_note_spec unit tests above — those check the
+	parser in isolation; this confirms the symbolic form survives the full
+	YAML → Assignment → NoteMap pipeline."""
+
+	def test_drum_symbol_in_yaml_map (self, tmp_path: pathlib.Path) -> None:
+		path = tmp_path / "symbolic-map.yaml"
+		path.write_text("""
+assignments:
+  - name: Kick
+    channel: 10
+    notes: drum.kick_1
+    select:
+      where:
+        pitched: false
+""", encoding="utf-8")
+
+		note_map = subsample.player.load_midi_map(path, []).note_map
+
+		# mido channel 9 = MIDI channel 10 (user-facing 1-indexed → 0-indexed)
+		assert (9, 36) in note_map
+		assert note_map[(9, 36)][0].name == "Kick"
+
 
 # ---------------------------------------------------------------------------
 # MidiPlayer.update_pitched_assignments

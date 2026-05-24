@@ -462,13 +462,25 @@ when you want to try something the tutorial didn't show.
 ```yaml
 notes: 36          # single MIDI note number
 notes: C4          # note name (C4 = MIDI 60, same as Ableton/Logic/FL Studio)
+notes: drum.kick_1 # GM percussion by symbolic name (case-insensitive)
 notes: [36, 35]    # list - each gets the next similarity rank (first = best match)
+notes: [drum.kick_1, drum.snare_1]   # list of symbolic names
 notes: C2..C4      # range - expands to every MIDI note from C2 (36) to C4 (60)
 notes: 36..60      # range with note numbers
 ```
 
 Note names use the convention C4 = 60 (C-1 = 0, G9 = 127). Sharps: `C#4`,
 `D#3`. Flats: `Db4`, `Eb3`.
+
+**Symbolic GM drum names** — `drum.<name>` looks up
+[`pymididefs.drums.GM_DRUM_MAP`](https://github.com/simonholliday/PyMidiDefs)
+(case-insensitive, so `drum.kick_1`, `drum.KICK_1`, and `Drum.kick_1` are
+equivalent). Covers the full GM percussion key map (notes 27-87): kicks,
+snares, hi-hats, toms, cymbals, Latin percussion, shakers, woodblocks,
+triangles. Use a list for multiple drums — `drum.x..drum.y` ranges are
+deliberately not supported because drum names aren't a musical sequence.
+Equivalent: `notes: drum.low_floor_tom` and `notes: 41` produce the same
+result; the symbolic form simply makes intent visible.
 
 ### Select - which sample to play
 
