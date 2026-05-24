@@ -68,6 +68,13 @@ assignments:
       where:
         reference: samples/reference/GM35_AcousticBassDrum.wav
       order: [{ by: similarity, dir: desc }]
+      # Uncomment to play a different sample on every hit, drawn at random
+      # from the top N similarity matches.  Adds natural variation so
+      # repeated kicks don't sound like a machine gun.  [1, 3] is a safe
+      # default; raise the upper bound for more variety, drop it for tighter
+      # consistency.  If your library has fewer than N close matches the
+      # draw clamps to whatever's available, so nothing breaks.
+      # pick: [1, 3]
     process:
       - filter_high: { freq: 30 }
       - filter_low: { freq: 8000 }
