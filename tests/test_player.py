@@ -2117,6 +2117,88 @@ class TestReloadMidiMap:
 			player.reload_midi_map(note_map)
 			mock_update.assert_called_once()
 
+	def test_try_update_assignments_swallows_exception (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""_try_update_assignments must catch any exception, log at ERROR,
+		and not propagate — so the live-state paths (bank switch, CC
+		debounce, sample integration) survive a transient query failure."""
+
+		import logging
+		asgn = _make_assignment(name="Kicks", reference="BD0025")
+		note_map = _make_note_map(asgn, channel=9, notes=[36])
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		with unittest.mock.patch.object(
+			player, "update_assignments",
+			side_effect=ValueError("simulated query failure"),
+		):
+			with caplog.at_level(logging.ERROR, logger="subsample.player"):
+				# Must NOT raise.
+				player._try_update_assignments("test context")
+
+		messages = [r.message for r in caplog.records]
+		assert any("test context" in m for m in messages), \
+			"context label should appear in the error log"
+		assert any("simulated query failure" in m for m in messages), \
+			"underlying exception should appear in the error log"
+
+	def test_rolls_back_when_update_assignments_raises (self) -> None:
+
+		"""reload_midi_map() restores the previous map when update_assignments raises.
+
+		Regression test for the live-performance crash: a YAML semantic error
+		only detectable at query time (e.g. similarity ordering without
+		where.reference) should not stop playback — the old map must remain
+		active so the next note_on still plays."""
+
+		asgn_old = _make_assignment(name="Kicks", reference="BD0025")
+		old_map  = _make_note_map(asgn_old, channel=9, notes=[36])
+
+		asgn_new = _make_assignment(name="Snares", reference="SD0010")
+		new_map  = _make_note_map(asgn_new, channel=9, notes=[38])
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map=old_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+		mapped_ccs_before = player._mapped_ccs
+
+		with unittest.mock.patch.object(
+			player, "update_assignments",
+			side_effect=ValueError("simulated query-time validation failure"),
+		):
+			with pytest.raises(ValueError, match="simulated"):
+				player.reload_midi_map(new_map)
+
+		# Active map and CC set restored to the previous good state.
+		assert player._note_map is old_map
+		assert (9, 36) in player._note_map
+		assert (9, 38) not in player._note_map
+		assert player._mapped_ccs == mapped_ccs_before
+
 
 # ---------------------------------------------------------------------------
 # MidiPlayer._render_float — gain_db

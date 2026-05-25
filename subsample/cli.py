@@ -1164,7 +1164,8 @@ def _main_impl () -> None:
 				)
 			except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
 				_log.warning(
-					"MIDI map reload failed — keeping current map: %s", exc,
+					"MIDI map reload failed at parse time — keeping current "
+					"map: %s", exc,
 				)
 				return
 
@@ -1182,7 +1183,18 @@ def _main_impl () -> None:
 					"Assignment-only changes will still apply.",
 				)
 
-			player.reload_midi_map(result.note_map)
+			# reload_midi_map runs update_assignments() against the new map
+			# and rolls back to the previous map on any exception — broad
+			# catch here so a runtime-validated YAML error (e.g. similarity
+			# ordering without where.reference set, only detectable when the
+			# query actually runs) never stops live playback.
+			try:
+				player.reload_midi_map(result.note_map)
+			except Exception as exc:
+				_log.error(
+					"MIDI map reload failed validation — keeping current map: %s",
+					exc,
+				)
 
 		midi_map_watcher = subsample.watcher.MidiMapWatcher(
 			path=_midi_map_watch_path,
@@ -1372,7 +1384,15 @@ def _integrate_sample (
 		transform_manager.on_sample_added(record)
 
 	if player_cell is not None and player_cell[0] is not None:
-		player_cell[0].update_pitched_assignments()
+		# Defensive: a runtime query failure here (e.g. a hot-edited map
+		# containing a similarity order without a reference) must not
+		# kill the watcher / OSC import thread that triggered this
+		# integration.  The sample is already in the library and
+		# similarity matrix; only the variant pre-compute would be lost,
+		# and the next note_on falls back to non-pitched playback.
+		player_cell[0]._try_update_assignments(
+			f"new sample {record.name!r} integration",
+		)
 
 	if app_events is not None:
 		app_events.emit("sample_loaded", record=record)

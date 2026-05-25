@@ -1814,7 +1814,10 @@ class MidiPlayer:
 				if bm.switch_to(msg.program):
 					self._last_played.clear()
 					self._segment_counters.clear()
-					self.update_assignments()
+					# Defensive: a malformed bank map raised at query time
+					# (e.g. similarity order without where.reference) must
+					# not kill the player thread mid-set.
+					self._try_update_assignments(f"bank switch to program {msg.program}")
 			return
 
 		# Control Change: update CC state and debounce re-evaluation for
@@ -1844,8 +1847,13 @@ class MidiPlayer:
 					if self._cc_debounce_timer is not None:
 						self._cc_debounce_timer.cancel()
 
+					# Defensive timer target: a transient query failure here
+					# must not silently kill the timer thread and stall every
+					# subsequent CC-driven re-evaluation for the session.
 					self._cc_debounce_timer = threading.Timer(
-						_CC_DEBOUNCE_SECONDS, self.update_assignments,
+						_CC_DEBOUNCE_SECONDS,
+						self._try_update_assignments,
+						args=(f"CC #{msg.control} debounce",),
 					)
 					self._cc_debounce_timer.start()
 
@@ -2293,26 +2301,83 @@ class MidiPlayer:
 	# Backward-compatible alias — cli.py and tests call this name.
 	update_pitched_assignments = update_assignments
 
+	def _try_update_assignments (self, context: str) -> None:
+
+		"""Run ``update_assignments`` defensively, swallowing any exception.
+
+		Used by the live-state paths that should never kill the player on
+		a transient failure: bank switches (program_change), CC re-eval
+		debounce, and the post-sample integration call in ``cli.py``.  The
+		reload path itself does NOT use this — it relies on the raised
+		exception to know whether the new map validated.
+
+		``context`` is included in the ERROR log so a stuck behaviour can
+		be traced to the trigger.
+		"""
+
+		try:
+			self.update_assignments()
+		except Exception as exc:
+			_log.error(
+				"update_assignments failed during %s — playback continues with "
+				"the previous variant set: %s",
+				context, exc,
+			)
+
 	def reload_midi_map (self, new_map: NoteMap) -> None:
 
 		"""Replace the active note map and re-compute transform variants.
 
-		Thread-safe: dict assignment is atomic under the GIL.  The old map
-		remains consistent for any in-flight _handle_message() call; the
-		next call sees the new map.
+		Atomic in the sense that matters for live performance: if the new
+		map is structurally valid but semantically broken (e.g. an order
+		clause like ``similarity`` whose required ``where.reference:`` was
+		accidentally commented out), ``update_assignments()`` raises on the
+		first offending assignment.  This method catches that, restores the
+		previous map, and re-raises so the watcher caller can log and stay
+		live under the old map — playback never stops mid-performance for
+		a YAML typo.
+
+		Thread-safety: dict rebinds are atomic under the GIL, so any in-
+		flight ``_handle_message()`` call sees either the old map or the
+		new map, never a half-applied state.
 
 		Args:
 			new_map: Parsed NoteMap from load_midi_map().note_map.  Must be a
 			         complete replacement (not a diff).
+
+		Raises:
+			Exception: whatever update_assignments() surfaces while
+			validating the new map.  The active map is restored before
+			propagating, so the player remains usable.
 		"""
 
-		old_count = len(self._note_map)
-		self._note_map = new_map
+		old_note_map    = self._note_map
+		old_mapped_ccs  = self._mapped_ccs
+		old_count       = len(self._note_map)
+
+		# Apply the new map first so update_assignments() validates against
+		# the configuration the player would actually run with.  This is the
+		# canonical validation path — we don't duplicate query logic for a
+		# separate dry-run.
+		self._note_map   = new_map
 		self._mapped_ccs = _collect_mapped_ccs(new_map)
+
+		try:
+			self.update_assignments()
+		except Exception:
+			# Roll back so the caller's catch leaves the player on the
+			# previously-good map.  Any variants update_assignments() may
+			# have enqueued before raising are harmless — they sit in the
+			# transform manager's cache for future calls.
+			self._note_map   = old_note_map
+			self._mapped_ccs = old_mapped_ccs
+			raise
+
+		# Validation succeeded — clear caches whose entries reference the
+		# old assignments by identity so the next note_on rebuilds them.
 		with self._mix_matrix_lock:
 			self._mix_matrix_cache.clear()
 		self._segment_counters.clear()
-		self.update_assignments()
 
 		_log.info(
 			"MIDI map reloaded: %d note(s) (was %d)",
