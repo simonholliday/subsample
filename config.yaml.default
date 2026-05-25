@@ -302,6 +302,18 @@ player:
     # Scarlett 18i20, 4 for a 4-output interface).  Each instrument's "output"
     # field in the MIDI map routes its mix to specific physical outputs.
 
+    # buffer_frames: null
+    # PortAudio output buffer size in frames.  null (default) lets the OS pick
+    # the device-preferred size — a safe value for most setups.  Set explicitly
+    # to trade stability for tighter latency.
+    #   128 → ~2.9 ms at 44.1 kHz   (lowest latency; underrun risk under load)
+    #   256 → ~5.8 ms
+    #   512 → ~11.6 ms
+    #  1024 → ~23.2 ms              (safest)
+    # Must be a power of two in [32, 4096].  If the device can't honour the
+    # requested size at stream open, subsample logs an ERROR and falls back
+    # to the device default automatically.
+
 # ---------------------------------------------------------------------------
 # detection — level-based trigger for recording segments
 # ---------------------------------------------------------------------------

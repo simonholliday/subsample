@@ -4,11 +4,31 @@ Handles MIDI input device selection (replicating the audio device selection
 pattern from audio.py) and the MidiPlayer class which listens for MIDI events
 and triggers polyphonic audio playback.
 
+Threading model:
+  - PortAudio output runs in its own callback thread (_audio_callback).
+  - MIDI input runs in callback mode via mido.open_input(callback=...).
+    rtmidi dispatches each incoming message to _safe_handle_message on its
+    own dedicated thread — no polling loop, no fixed input-latency floor.
+    Sub-millisecond MIDI-to-handler latency on a quiet Linux system.
+  - The player's run() thread is purely a lifecycle coordinator: open
+    ports, wait for shutdown, then close.
+
+Concurrency control:
+  - _voices_lock guards _voices (audio callback + handler).
+  - _mix_matrix_lock guards _mix_matrix_cache (handler + reload).
+  - _cc_debounce_lock guards _cc_debounce_timer (handler + cleanup).
+  - _state_lock guards the small mutable dicts (_cc_state, _cc_omni,
+    _cc_last_log, _segment_counters, _last_played) that are touched by
+    both _handle_message (rtmidi thread) and update_assignments
+    (watcher / CC debounce / on-complete threads).  Lock-ordering rule:
+    _state_lock is outermost; never acquire it while holding any of the
+    others.
+
 Mixing architecture: a PyAudio callback stream requests N frames at regular
 intervals. Each triggered note adds a _Voice (pre-rendered multichannel float32
 audio + playback cursor) to a shared list. The callback sums all active
 voices into one output buffer, clips, converts to PCM bytes at the output
-bit depth, and returns them. The MIDI polling loop adds voices under a lock;
+bit depth, and returns them. The MIDI handler adds voices under a lock;
 the callback reads them.
 
 Per-voice gain is controlled by cfg.player.max_polyphony: each voice's RMS
@@ -1371,6 +1391,7 @@ class MidiPlayer:
 		target_bpm: float = 0.0,
 		output_channels: typing.Optional[int] = None,
 		ambisonic_config: typing.Optional[subsample.config.AmbisonicConfig] = None,
+		buffer_frames: typing.Optional[int] = None,
 	) -> None:
 
 		self._device_name        = device_name
@@ -1435,6 +1456,11 @@ class MidiPlayer:
 		# to 2 (stereo); set via player.audio.channels in config for
 		# multi-channel interfaces.
 		self._output_channels: int = output_channels if output_channels is not None else 2
+
+		# Optional PortAudio output buffer size in frames.  When None, the
+		# device default is used.  Validated as a power of two in [32, 4096]
+		# at config load.  See PlayerAudioConfig.buffer_frames docstring.
+		self._buffer_frames: typing.Optional[int] = buffer_frames
 
 		# Note routing map: (mido_channel, midi_note) → (Assignment, PickSpec).
 		# Loaded from the MIDI map YAML file by the caller (cli.py) via load_midi_map().
@@ -1507,6 +1533,20 @@ class MidiPlayer:
 		# Per-note segment counter for round-robin segment playback.
 		# Cleared on MIDI map reload and bank switch.
 		self._segment_counters: dict[tuple[int, int], int] = {}
+
+		# Single lock for the small mutable dicts touched by both
+		# _handle_message (rtmidi callback thread) and the threads that run
+		# update_assignments (watcher, CC debounce timer, on-complete).
+		# Protects: _cc_state, _cc_omni, _cc_last_log, _segment_counters,
+		# _last_played.  All critical sections are sub-microsecond — one
+		# lock is simpler than per-dict locking and there is no deadlock
+		# topology because _state_lock is never acquired alongside any
+		# other player lock.
+		#
+		# Lock ordering rule (enforced by code review, not the runtime):
+		# _state_lock is outermost.  Never acquire it while holding
+		# _voices_lock, _mix_matrix_lock, or _cc_debounce_lock.
+		self._state_lock: threading.Lock = threading.Lock()
 
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
@@ -1597,10 +1637,17 @@ class MidiPlayer:
 
 	def run (self) -> None:
 
-		"""Open MIDI input and a callback output stream, then dispatch events.
+		"""Open MIDI input and a callback output stream, then wait for shutdown.
 
-		Blocks until shutdown_event is set. Both the MIDI port and the PyAudio
-		stream are closed in the finally block.
+		MIDI input runs in callback mode — ``mido.open_input(callback=…)``
+		registers ``_safe_handle_message`` so rtmidi dispatches every
+		message on its own dedicated thread the moment it arrives.  There
+		is no polling loop; this thread just blocks on the shutdown event
+		until it fires, then closes the port and audio stream cleanly.
+
+		Both the MIDI port and the PyAudio stream are closed in the finally
+		block — ``port.close()`` internally waits for any in-flight callback
+		to return, so no message is silently lost during teardown.
 
 		Input port selection:
 		  - virtual_midi_port set → create a named virtual port (other apps connect to it)
@@ -1649,44 +1696,77 @@ class MidiPlayer:
 		self._note_map.update(routing_fixes)
 
 		# Callback mode: PortAudio pulls audio from _audio_callback on its own
-		# high-priority thread. The MIDI loop runs independently and adds voices.
-		stream = pa.open(
-			format=subsample.audio.get_pyaudio_format(self._output_bit_depth),
-			channels=self._output_channels,
-			rate=self._output_sample_rate,
-			output=True,
-			output_device_index=output_device_index,
-			stream_callback=self._audio_callback,
-		)
+		# high-priority thread. The MIDI thread runs independently and adds voices.
+		# When player.audio.buffer_frames is set, pass it as frames_per_buffer
+		# to tighten output-side latency.  If the device cannot honour the
+		# requested size at open time, fall back to the device default with a
+		# clear ERROR log so the user knows their tuning value was ignored.
+		open_kwargs: dict[str, typing.Any] = {
+			"format":              subsample.audio.get_pyaudio_format(self._output_bit_depth),
+			"channels":            self._output_channels,
+			"rate":                self._output_sample_rate,
+			"output":              True,
+			"output_device_index": output_device_index,
+			"stream_callback":     self._audio_callback,
+		}
 
-		# Open the MIDI input port — virtual or hardware.
-		# Virtual ports are server destinations that external apps connect to;
-		# they require virtual=True and do not appear in get_input_names().
+		if self._buffer_frames is not None:
+			open_kwargs["frames_per_buffer"] = self._buffer_frames
+			_log.info("PortAudio output buffer: %d frames", self._buffer_frames)
+
+		try:
+			stream = pa.open(**open_kwargs)
+		except OSError as exc:
+			if "frames_per_buffer" in open_kwargs:
+				_log.error(
+					"PortAudio rejected buffer_frames=%d (%s) — falling back "
+					"to the device default.  Lower or omit player.audio."
+					"buffer_frames in config.yaml.",
+					self._buffer_frames, exc,
+				)
+				open_kwargs.pop("frames_per_buffer")
+				stream = pa.open(**open_kwargs)
+			else:
+				raise
+
+		# Open the MIDI input port in callback mode.  rtmidi delivers each
+		# message to ``_safe_handle_message`` on its own dedicated thread the
+		# moment it arrives — no polling loop, no 10 ms jitter floor.  The
+		# kwarg form installs the callback as the last step of port creation,
+		# closing the open-then-assign gap that property-style assignment
+		# would expose.  Virtual ports are server destinations external apps
+		# connect to; they require ``virtual=True`` and do not appear in
+		# ``get_input_names()``.
 		if self._virtual_midi_port is not None:
 			port_label = self._virtual_midi_port
-			port = mido.open_input(self._virtual_midi_port, virtual=True)
+			port = mido.open_input(
+				self._virtual_midi_port,
+				virtual=True,
+				callback=self._safe_handle_message,
+			)
 			_log.info("MIDI player opened virtual port: %s", port_label)
 		else:
 			port_label = self._device_name
-			port = mido.open_input(self._device_name)
+			port = mido.open_input(
+				self._device_name,
+				callback=self._safe_handle_message,
+			)
 			_log.info("MIDI player opened hardware port: %s", port_label)
 
 		try:
-			while not self._shutdown_event.is_set():
-				msg = port.receive(block=False)
-
-				if msg is not None:
-					self._handle_message(msg)
-				else:
-					# No message — yield briefly before polling again.
-					# 10 ms gives ~100 Hz polling rate: responsive yet not busy.
-					self._shutdown_event.wait(timeout=0.01)
+			# Block until shutdown is signalled.  All MIDI work happens on
+			# rtmidi's callback thread; this thread is now purely a lifecycle
+			# coordinator.
+			self._shutdown_event.wait()
 
 		finally:
 			with self._cc_debounce_lock:
 				if self._cc_debounce_timer is not None:
 					self._cc_debounce_timer.cancel()
 
+			# port.close() internally clears the callback under rtmidi's lock
+			# (waits for any in-flight callback to return), then closes the
+			# port.  No separate teardown step needed.
 			port.close()
 			stream.stop_stream()
 			stream.close()
@@ -1785,9 +1865,54 @@ class MidiPlayer:
 		# which caused data/format mismatch for 24-bit and 32-bit streams.
 		return (subsample.audio.float32_to_pcm_bytes(mixed, self._output_bit_depth), pyaudio.paContinue)
 
+	def _snapshot_cc_state (
+		self,
+	) -> tuple[dict[tuple[int, int], int], dict[int, int]]:
+
+		"""Return shallow copies of the live CC state dicts taken under
+		``_state_lock``.
+
+		Pass these to ``spec_from_process`` instead of the live attributes
+		so the spec sees a consistent snapshot even if a CC arrives mid-
+		call from another thread.  Snapshots are 1-128 entries — copy cost
+		is microseconds.
+
+		Required at call sites that run on non-MIDI threads (the CC debounce
+		timer, the watcher's ``update_assignments`` path, the on-complete
+		integration callback).  At call sites on the rtmidi callback thread
+		itself the snapshot is purely defensive symmetry — that thread is
+		the single writer for the CC dicts.
+		"""
+
+		with self._state_lock:
+			return dict(self._cc_state), dict(self._cc_omni)
+
+	def _safe_handle_message (self, msg: mido.Message) -> None:
+
+		"""Defensive wrapper around ``_handle_message`` for rtmidi callback dispatch.
+
+		mido's rtmidi backend invokes user callbacks from a C++ thread.  If a
+		Python exception escapes the callback, the binding clears ``PyErr`` and
+		the rtmidi thread keeps running — but the message is silently lost and
+		the bug never surfaces.  Catch every exception here and log at ERROR
+		so handler bugs are visible in the log instead of presenting as
+		mysteriously-dropped notes.
+		"""
+
+		try:
+			self._handle_message(msg)
+		except Exception as exc:
+			_log.error(
+				"MIDI handler failed for %r: %s", msg, exc, exc_info=True,
+			)
+
 	def _handle_message (self, msg: mido.Message) -> None:
 
 		"""Dispatch a single MIDI message via the select/process pipeline.
+
+		Runs on rtmidi's dedicated callback thread (see ``run()``).  Must stay
+		fast — any slow operation here stalls MIDI dispatch for the lifetime
+		of the port.
 
 		note_off (and note_on with velocity=0) marks matching active voices as
 		releasing so the audio callback fades them out over self._release_fade_frames.
@@ -1812,8 +1937,12 @@ class MidiPlayer:
 			bm = self._bank_manager
 			if bm.bank_channel_mido == -1 or msg.channel == bm.bank_channel_mido:
 				if bm.switch_to(msg.program):
-					self._last_played.clear()
-					self._segment_counters.clear()
+					# Both dicts are guarded by _state_lock — clear them
+					# together so any concurrent reader (e.g. _select_segment
+					# RMW) sees a consistent post-switch state.
+					with self._state_lock:
+						self._last_played.clear()
+						self._segment_counters.clear()
 					# Defensive: a malformed bank map raised at query time
 					# (e.g. similarity order without where.reference) must
 					# not kill the player thread mid-set.
@@ -1823,8 +1952,12 @@ class MidiPlayer:
 		# Control Change: update CC state and debounce re-evaluation for
 		# mapped parameters (CcBinding in the process pipeline).
 		if msg.type == "control_change":
-			self._cc_state[(msg.channel, msg.control)] = msg.value
-			self._cc_omni[msg.control] = msg.value
+			# Hold _state_lock for the CC-state writes so other threads
+			# reading these dicts via _snapshot_cc_state() see a consistent
+			# pair (channel-state + omni-state updated together).
+			with self._state_lock:
+				self._cc_state[(msg.channel, msg.control)] = msg.value
+				self._cc_omni[msg.control] = msg.value
 			self.events.emit("cc", channel=msg.channel, cc_number=msg.control, value=msg.value)
 
 			if msg.control in self._mapped_ccs:
@@ -1834,10 +1967,19 @@ class MidiPlayer:
 				)
 
 				now = time.monotonic()
-				last = self._cc_last_log.get(msg.control, 0.0)
+				# Compute "should we log this CC?" under the lock, then run
+				# the actual log call outside it — _log.info can be slow
+				# (handlers, formatting) and we want to release the lock
+				# before any I/O.
+				with self._state_lock:
+					last = self._cc_last_log.get(msg.control, 0.0)
+					if now - last >= 1.0:
+						self._cc_last_log[msg.control] = now
+						should_log = True
+					else:
+						should_log = False
 
-				if now - last >= 1.0:
-					self._cc_last_log[msg.control] = now
+				if should_log:
 					_log.info(
 						"CC ch%d #%d = %d (mapped)",
 						msg.channel + 1, msg.control, msg.value,
@@ -1954,14 +2096,16 @@ class MidiPlayer:
 				if assignment.process.has_pad_quantize():
 					bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "pad_quantize", self._target_bpm)
 
+				cc_state_snapshot, cc_omni_snapshot = self._snapshot_cc_state()
+
 				spec = subsample.transform.spec_from_process(
 					assignment.process,
 					midi_note=midi_note_for_spec,
 					target_bpm=bpm_for_spec,
 					resolution=grid_for_spec,
 					reference_path=_reference_wav_path(assignment),
-					cc_state=self._cc_state,
-					cc_omni=self._cc_omni,
+					cc_state=cc_state_snapshot,
+					cc_omni=cc_omni_snapshot,
 				)
 
 				if spec.steps:
@@ -1976,7 +2120,8 @@ class MidiPlayer:
 						rendered = self._render_float(seg_audio, seg_level, msg.velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
 							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
-						self._last_played[(msg.channel, msg.note)] = variant
+						with self._state_lock:
+							self._last_played[(msg.channel, msg.note)] = variant
 						_log.debug(
 							"note %d (vel %d) → %r → %r (variant, %d step(s))  (%.2fs)",
 							msg.note, msg.velocity, assignment.name, record.name,
@@ -1986,7 +2131,9 @@ class MidiPlayer:
 
 					# New variant not ready — try the previously played variant
 					# for this note (smooth transition during gradual param changes).
-					prev = self._last_played.get((msg.channel, msg.note))
+					# _state_lock guards against the bank-switch clear.
+					with self._state_lock:
+						prev = self._last_played.get((msg.channel, msg.note))
 
 					if prev is not None and prev.key.sample_id == sample_id:
 						seg_audio, seg_level = self._select_segment(
@@ -2088,6 +2235,12 @@ class MidiPlayer:
 		enqueued = 0
 		seen_ids: set[int] = set()
 
+		# Snapshot CC state once for the whole batch — all variants in this
+		# enqueue share the same parameter values.  Required here because
+		# this runs on whichever thread invoked update_assignments (watcher,
+		# CC debounce, on-complete), not on the rtmidi callback thread.
+		cc_state_snapshot, cc_omni_snapshot = self._snapshot_cc_state()
+
 		for _note, pick_spec in note_picks:
 			for rank in _ranks_for(pick_spec, len(ranked)):
 				sid = ranked[rank - 1].sample_id
@@ -2114,8 +2267,8 @@ class MidiPlayer:
 					target_bpm=bpm,
 					resolution=grid,
 					reference_path=_reference_wav_path(asgn),
-					cc_state=self._cc_state,
-					cc_omni=self._cc_omni,
+					cc_state=cc_state_snapshot,
+					cc_omni=cc_omni_snapshot,
 				)
 				eff_transform.get_variant(sid, spec)
 				enqueued += 1
@@ -2264,11 +2417,12 @@ class MidiPlayer:
 			# Process-only (no repitch, no beat/pad_quantize): pre-compute the
 			# static chain (filters, saturate, reverse, etc.) once per sample.
 			else:
+				cc_state_snapshot, cc_omni_snapshot = self._snapshot_cc_state()
 				spec = subsample.transform.spec_from_process(
 					asgn.process,
 					reference_path=_reference_wav_path(asgn),
-					cc_state=self._cc_state,
-					cc_omni=self._cc_omni,
+					cc_state=cc_state_snapshot,
+					cc_omni=cc_omni_snapshot,
 				)
 
 				if spec.steps:
@@ -2375,9 +2529,12 @@ class MidiPlayer:
 
 		# Validation succeeded — clear caches whose entries reference the
 		# old assignments by identity so the next note_on rebuilds them.
+		# _segment_counters clear is under _state_lock so it serialises
+		# against the round_robin RMW in _select_segment.
 		with self._mix_matrix_lock:
 			self._mix_matrix_cache.clear()
-		self._segment_counters.clear()
+		with self._state_lock:
+			self._segment_counters.clear()
 
 		_log.info(
 			"MIDI map reloaded: %d note(s) (was %d)",
@@ -2408,9 +2565,13 @@ class MidiPlayer:
 			idx = max(0, min(segment_mode - 1, len(segment_bounds) - 1))
 		elif segment_mode == "round_robin":
 			key = (channel, note)
-			counter = self._segment_counters.get(key, 0)
+			# RMW under _state_lock so a concurrent clear (from
+			# reload_midi_map or bank switch) doesn't drop an increment
+			# and two parallel triggers can't lose a step.
+			with self._state_lock:
+				counter = self._segment_counters.get(key, 0)
+				self._segment_counters[key] = counter + 1
 			idx = counter % len(segment_bounds)
-			self._segment_counters[key] = counter + 1
 		elif segment_mode == "random":
 			idx = random.randint(0, len(segment_bounds) - 1)
 		else:

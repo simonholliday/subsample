@@ -5,6 +5,7 @@ import threading
 import typing
 import unittest.mock
 
+import mido
 import numpy
 import pytest
 
@@ -223,23 +224,41 @@ class TestMidiPlayer:
 		}
 		return mock_pa
 
-	def _make_mock_port (self, messages: list[object]) -> unittest.mock.MagicMock:
-		"""Return a mock mido port that yields messages in order then None."""
-		responses = iter(messages + [None] * 1000)
+	def _make_mock_port (self) -> unittest.mock.MagicMock:
+
+		"""Return a mock mido port for callback-mode dispatch.
+
+		``mido.open_input(..., callback=func)`` registers ``func`` for
+		every incoming message.  This mock records whichever callable is
+		passed as ``callback=`` (via the kwarg-capturing patch in each
+		test) and exposes a ``dispatch(msg)`` helper so tests can deliver
+		messages on demand.
+		"""
+
 		port = unittest.mock.MagicMock()
-		port.receive.side_effect = lambda block=True: next(responses)
 		port.__enter__ = unittest.mock.Mock(return_value=port)
 		port.__exit__ = unittest.mock.Mock(return_value=False)
 		return port
 
+	def _patch_open_input (self, port: unittest.mock.MagicMock) -> unittest.mock._patch[typing.Any]:
+
+		"""Patch ``mido.open_input`` so it returns ``port`` and stashes the
+		registered callback on ``port.callback`` for later dispatch."""
+
+		def fake_open_input (*args: typing.Any, **kwargs: typing.Any) -> unittest.mock.MagicMock:
+			port.callback = kwargs.get("callback")
+			return port
+
+		return unittest.mock.patch("mido.open_input", side_effect=fake_open_input)
+
 	def test_exits_on_shutdown_event (self) -> None:
 		shutdown_event = threading.Event()
-		port = self._make_mock_port([])
+		port = self._make_mock_port()
 		mock_pa = self._make_mock_pyaudio()
 
-		with unittest.mock.patch("mido.open_input", return_value=port):
+		with self._patch_open_input(port):
 			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
-				# Set shutdown_event before run() so the loop exits immediately.
+				# Set shutdown_event before run() so the wait returns immediately.
 				shutdown_event.set()
 				player = self._make_player(shutdown_event)
 				player.run()
@@ -247,33 +266,29 @@ class TestMidiPlayer:
 		# run() should have returned without hanging
 		assert not threading.current_thread().daemon
 
-	def test_logs_received_message (self, caplog: pytest.LogCaptureFixture) -> None:
+	def test_logs_port_open (self, caplog: pytest.LogCaptureFixture) -> None:
 		import logging
 
 		shutdown_event = threading.Event()
-		mock_msg = unittest.mock.MagicMock()
-		mock_msg.__str__ = lambda self: "note_on channel=0 note=60 velocity=64 time=0"
-		port = self._make_mock_port([mock_msg])
+		port = self._make_mock_port()
 		mock_pa = self._make_mock_pyaudio()
 
 		with caplog.at_level(logging.INFO, logger="subsample.player"):
-			with unittest.mock.patch("mido.open_input", return_value=port):
+			with self._patch_open_input(port):
 				with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
-					# Set shutdown after one iteration by making wait() set the event.
 					shutdown_event.set()
 					player = self._make_player(shutdown_event)
 					player.run()
 
-		# At minimum the port open/close should be logged; message log may not
-		# fire if event was already set before the loop body ran.
+		# Port open + close should both be logged with the device name.
 		assert any("Test Device" in r.message for r in caplog.records)
 
 	def test_port_closed_on_shutdown (self) -> None:
 		shutdown_event = threading.Event()
-		port = self._make_mock_port([])
+		port = self._make_mock_port()
 		mock_pa = self._make_mock_pyaudio()
 
-		with unittest.mock.patch("mido.open_input", return_value=port):
+		with self._patch_open_input(port):
 			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
 				shutdown_event.set()
 				player = self._make_player(shutdown_event)
@@ -283,10 +298,10 @@ class TestMidiPlayer:
 
 	def test_run_on_thread_exits_cleanly (self) -> None:
 		shutdown_event = threading.Event()
-		port = self._make_mock_port([])
+		port = self._make_mock_port()
 		mock_pa = self._make_mock_pyaudio()
 
-		with unittest.mock.patch("mido.open_input", return_value=port):
+		with self._patch_open_input(port):
 			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
 				player = self._make_player(shutdown_event)
 				t = threading.Thread(target=player.run)
@@ -297,6 +312,265 @@ class TestMidiPlayer:
 				t.join(timeout=2.0)
 
 		assert not t.is_alive()
+
+
+# ---------------------------------------------------------------------------
+# MIDI callback mode — dispatch wiring + safe wrapper
+# ---------------------------------------------------------------------------
+
+class TestMidiCallbackMode:
+
+	"""Verifies the callback-mode dispatch path: that the player wires its
+	safe-handler into mido.open_input via the ``callback=`` kwarg, and that
+	the safe wrapper protects rtmidi's thread from a handler exception
+	(which mido does NOT catch — it silently drops the message)."""
+
+	def _make_player (self, shutdown_event: threading.Event) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			shutdown_event,
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _make_mock_pyaudio (self) -> unittest.mock.MagicMock:
+		mock_stream = unittest.mock.MagicMock()
+		mock_pa = unittest.mock.MagicMock()
+		mock_pa.open.return_value = mock_stream
+		mock_pa.get_device_count.return_value = 1
+		mock_pa.get_device_info_by_index.return_value = {
+			"name": "Mock Output",
+			"maxOutputChannels": 2,
+			"defaultSampleRate": 44100,
+			"index": 0,
+		}
+		return mock_pa
+
+	def test_callback_kwarg_passed_to_open_input (self) -> None:
+
+		"""The hardware-port path must register ``_safe_handle_message``
+		as the ``callback=`` kwarg of ``mido.open_input`` so rtmidi
+		dispatches MIDI messages on its own thread without a polling
+		jitter floor."""
+
+		shutdown_event = threading.Event()
+		shutdown_event.set()
+		captured_kwargs: dict[str, typing.Any] = {}
+
+		def fake_open_input (*args: typing.Any, **kwargs: typing.Any) -> unittest.mock.MagicMock:
+			captured_kwargs.update(kwargs)
+			return unittest.mock.MagicMock()
+
+		with unittest.mock.patch("mido.open_input", side_effect=fake_open_input):
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=self._make_mock_pyaudio()):
+				player = self._make_player(shutdown_event)
+				player.run()
+
+		assert "callback" in captured_kwargs
+		assert captured_kwargs["callback"] == player._safe_handle_message
+
+	def test_virtual_port_callback_kwarg_passed (self) -> None:
+
+		"""The virtual-port path must also pass ``callback=`` + ``virtual=True``."""
+
+		shutdown_event = threading.Event()
+		shutdown_event.set()
+		captured_kwargs: dict[str, typing.Any] = {}
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		player = subsample.player.MidiPlayer(
+			"",
+			shutdown_event,
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+			virtual_midi_port="Subsample Test Virtual",
+		)
+
+		def fake_open_input (*args: typing.Any, **kwargs: typing.Any) -> unittest.mock.MagicMock:
+			captured_kwargs.update(kwargs)
+			return unittest.mock.MagicMock()
+
+		with unittest.mock.patch("mido.open_input", side_effect=fake_open_input):
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=self._make_mock_pyaudio()):
+				player.run()
+
+		assert captured_kwargs.get("virtual") is True
+		assert captured_kwargs.get("callback") == player._safe_handle_message
+
+	def test_safe_handle_message_swallows_exception (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A handler bug must not propagate to rtmidi's callback thread —
+		rtmidi would clear the Python error and silently drop the message,
+		hiding the bug forever.  The safe wrapper logs at ERROR so failures
+		surface."""
+
+		import logging
+
+		shutdown_event = threading.Event()
+		player = self._make_player(shutdown_event)
+
+		# Use a real mido Message so the repr in the ERROR log is the kind
+		# of payload an operator would see in production logs.
+		msg = mido.Message("note_on", channel=0, note=60, velocity=64)
+
+		with unittest.mock.patch.object(
+			player, "_handle_message",
+			side_effect=ValueError("simulated handler failure"),
+		):
+			with caplog.at_level(logging.ERROR, logger="subsample.player"):
+				# Must NOT raise — that would propagate into rtmidi's
+				# callback thread in production and silently drop the msg.
+				player._safe_handle_message(msg)
+
+		messages = [r.message for r in caplog.records]
+		assert any("simulated handler failure" in m for m in messages)
+		# The repr of the failing message is in the log so the bug is debuggable.
+		assert any("note_on" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# State lock — protects _cc_state, _cc_omni, _cc_last_log, _segment_counters,
+# _last_played from concurrent access between the rtmidi callback thread and
+# the threads that read these dicts via update_assignments.
+# ---------------------------------------------------------------------------
+
+class TestStateLock:
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def test_snapshot_cc_state_returns_copies (self) -> None:
+
+		"""Mutating the returned dicts must not affect the live state — the
+		snapshot's whole purpose is to give other threads a stable view."""
+
+		player = self._make_player()
+		player._cc_state[(0, 7)] = 64
+		player._cc_omni[7] = 64
+
+		cc_state, cc_omni = player._snapshot_cc_state()
+
+		cc_state[(0, 7)] = 0
+		cc_omni[7] = 0
+
+		assert player._cc_state[(0, 7)] == 64
+		assert player._cc_omni[7] == 64
+
+	def test_snapshot_cc_state_reflects_live_values (self) -> None:
+
+		"""Each call to the snapshot helper must see the current state."""
+
+		player = self._make_player()
+		player._cc_state[(2, 1)] = 100
+		player._cc_omni[1] = 100
+
+		cc_state, cc_omni = player._snapshot_cc_state()
+		assert cc_state[(2, 1)] == 100
+		assert cc_omni[1] == 100
+
+		# Mutate the live dicts and re-snapshot — the new values must appear.
+		player._cc_state[(2, 1)] = 50
+		player._cc_omni[1] = 50
+
+		cc_state, cc_omni = player._snapshot_cc_state()
+		assert cc_state[(2, 1)] == 50
+		assert cc_omni[1] == 50
+
+	def _make_tracking_lock (self) -> tuple[typing.Any, list[str]]:
+
+		"""Return (lock-like object, events list).  The lock supports
+		``with`` and records 'acquire' / 'release' into events so tests
+		can assert the lock was actually entered around the critical
+		section."""
+
+		events: list[str] = []
+		real_lock = threading.Lock()
+
+		class _TrackingLock:
+			def __enter__(self_inner) -> bool:
+				real_lock.acquire()
+				events.append("acquire")
+				return True
+
+			def __exit__(self_inner, *args: typing.Any) -> None:
+				events.append("release")
+				real_lock.release()
+
+			def acquire(self_inner, *args: typing.Any, **kwargs: typing.Any) -> bool:
+				result = real_lock.acquire(*args, **kwargs)
+				events.append("acquire")
+				return result
+
+			def release(self_inner) -> None:
+				events.append("release")
+				real_lock.release()
+
+		return _TrackingLock(), events
+
+	def test_cc_write_holds_state_lock (self) -> None:
+
+		"""The CC branch of _handle_message must acquire _state_lock for the
+		_cc_state / _cc_omni writes so concurrent snapshots see the pair as
+		one atomic update."""
+
+		player = self._make_player()
+		lock, events = self._make_tracking_lock()
+		player._state_lock = lock
+
+		msg = mido.Message("control_change", channel=0, control=7, value=64)
+		player._handle_message(msg)
+
+		# At least one acquire/release pair must have happened (the CC
+		# write itself).  The log throttle path also takes the lock when
+		# the CC is mapped — that's a bonus, not asserted here.
+		assert events.count("acquire") >= 1
+		assert events.count("acquire") == events.count("release")
+		assert player._cc_state[(0, 7)] == 64
+		assert player._cc_omni[7] == 64
+
+	def test_segment_counter_increment_holds_state_lock (self) -> None:
+
+		"""round_robin RMW must acquire _state_lock so a concurrent clear
+		(from reload_midi_map / bank switch) cannot drop an increment."""
+
+		import subsample.analysis
+
+		player = self._make_player()
+		lock, events = self._make_tracking_lock()
+		player._state_lock = lock
+
+		# Two-segment bounds so round_robin actually advances.
+		bounds = ((0, 100), (100, 200))
+		audio = numpy.zeros((200, 1), dtype=numpy.float32)
+		level = subsample.analysis.LevelResult(peak=0.0, rms=0.0)
+
+		player._select_segment(audio, level, bounds, "round_robin", channel=9, note=36)
+
+		assert events.count("acquire") >= 1
+		assert events.count("acquire") == events.count("release")
+		assert player._segment_counters[(9, 36)] == 1
 
 
 # ---------------------------------------------------------------------------

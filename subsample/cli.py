@@ -674,6 +674,7 @@ def _start_player (
 			target_bpm=cfg.transform.target_bpm,
 			output_channels=cfg.player.audio.channels,
 			ambisonic_config=cfg.ambisonic,
+			buffer_frames=cfg.player.audio.buffer_frames,
 		)
 		player_cell[0] = player
 
@@ -727,6 +728,7 @@ def _start_player (
 		target_bpm=cfg.transform.target_bpm,
 		output_channels=cfg.player.audio.channels,
 		ambisonic_config=cfg.ambisonic,
+		buffer_frames=cfg.player.audio.buffer_frames,
 	)
 	player_cell[0] = player
 

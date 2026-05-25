@@ -1195,6 +1195,38 @@ is never blocked:
 2. **Base variant** - pre-normalised, no DSP (all samples)
 3. **On-the-fly render** - last resort on the very first trigger only
 
+### MIDI dispatch model
+
+Incoming MIDI is dispatched in callback mode: rtmidi delivers each message
+to subsample's handler on its own dedicated thread the moment it arrives.
+There is no polling loop, so there is no fixed input-latency floor. Typical
+end-to-end latency on Linux: under 1 ms of MIDI dispatch, plus one PortAudio
+buffer period.
+
+The PortAudio buffer period is set via `player.audio.buffer_frames`. Setting
+it explicitly trades stability for tighter timing:
+
+| frames | latency at 44.1 kHz | latency at 48 kHz |
+|--------|--------------------:|------------------:|
+| 128    | 2.9 ms              | 2.7 ms            |
+| 256    | 5.8 ms              | 5.3 ms            |
+| 512    | 11.6 ms             | 10.7 ms           |
+| 1024   | 23.2 ms             | 21.3 ms           |
+
+Leave unset (the default) to let the OS choose the device's preferred size —
+usually a safe value. Lower it if you can hear the output trailing your MIDI
+input, and raise it (or remove it) if you hear audible underruns.
+
+You can measure dispatch latency on your hardware with the included script:
+
+```bash
+python scripts/measure_midi_latency.py --count 1000
+```
+
+It opens a virtual MIDI port, sends 1000 timestamped messages, and reports
+median + 95th-percentile dispatch latency. Expect median ≪ 1 ms after the
+callback-mode switch.
+
 ### End-to-end 32-bit float
 
 Every audio sample is converted to float32 immediately after capture and stays in
@@ -1376,6 +1408,7 @@ weights - is optional and rarely needs changing.
 | `player.audio.sample_rate` | auto | Output sample rate; defaults to recorder rate. Do not set higher than source. |
 | `player.audio.bit_depth` | auto | Output bit depth (16, 24, or 32); defaults to recorder bit depth |
 | `player.audio.channels` | `null` | Output channels (2=stereo, 6=5.1, 8=7.1); null defaults to stereo. SMPTE ordering |
+| `player.audio.buffer_frames` | `null` | PortAudio output buffer in frames (power of two, 32-4096); `null` (default) lets the OS pick. Smaller → lower latency; larger → safer under load. See the **MIDI dispatch model** section for the latency table |
 | `player.virtual_midi_port` | `none` | Name for a virtual MIDI input port; overrides `player.midi_device` |
 | `player.watch_midi_map` | `false` | Monitor the `midi_map` file for changes and reload assignments on save (see Live-coding) |
 | `player.strict_midi_map` | `true` | Reject unknown `where:` keys, unknown processor names, and non-bool `pitched:` values at parse time. Set to `false` to silently ignore unknown keys when loading older or hand-edited MIDI maps |

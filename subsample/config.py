@@ -132,6 +132,16 @@ class PlayerAudioConfig:
 	"""Number of output channels.  None (the default) means stereo (2).
 	Set to 6 for 5.1, 8 for 7.1, or any value your device supports.
 	Channel ordering follows SMPTE: FL, FR, FC, LFE, BL, BR, SL, SR."""
+	buffer_frames: typing.Optional[int] = None
+	"""PortAudio output buffer size in frames.  None (the default) lets the
+	OS pick the device-preferred size — usually 256-1024 on Linux ALSA.
+	Set explicitly to trade latency for stability: smaller values cut
+	output-side jitter (e.g. ~5.8 ms at 256 frames @ 44.1 kHz, ~2.9 ms at
+	128 frames) but increase the risk of audible underruns under load.
+	Must be a power of two in [32, 4096]; values outside this range or
+	non-power-of-two are rejected at config load.  If the device cannot
+	honour the requested size at stream open, an ERROR is logged and the
+	stream falls back to the device default automatically."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -803,12 +813,33 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"player.limiter_threshold_db ({player_limiter_threshold_db})."
 		)
 
+	# Validate buffer_frames: must be a power of two in [32, 4096].  Powers
+	# of two play nicely with most USB-class audio drivers; the upper bound
+	# keeps "lower latency than the default" the intended use of this knob
+	# and avoids silently picking a value too large to help.
+	player_buffer_frames_raw = player_audio_raw.get("buffer_frames")
+	player_buffer_frames: typing.Optional[int]
+	if player_buffer_frames_raw is None:
+		player_buffer_frames = None
+	else:
+		player_buffer_frames = int(player_buffer_frames_raw)
+		if (
+			player_buffer_frames < 32
+			or player_buffer_frames > 4096
+			or (player_buffer_frames & (player_buffer_frames - 1)) != 0
+		):
+			raise ValueError(
+				f"player.audio.buffer_frames must be a power of two in "
+				f"[32, 4096] (got {player_buffer_frames})"
+			)
+
 	player = PlayerConfig(
 		audio=PlayerAudioConfig(
 			device=player_device,
 			bit_depth=player_bit_depth,
 			sample_rate=player_sample_rate,
 			channels=int(player_audio_raw["channels"]) if player_audio_raw.get("channels") is not None else None,
+			buffer_frames=player_buffer_frames,
 		),
 		enabled=bool(player_raw.get("enabled", False)),
 		midi_device=player_midi_device,

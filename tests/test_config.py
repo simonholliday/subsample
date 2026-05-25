@@ -3,6 +3,7 @@
 import dataclasses
 import pathlib
 import textwrap
+import typing
 import unittest.mock
 
 import pytest
@@ -1239,3 +1240,54 @@ class TestPreviewsConfig:
 		cfg = subsample.config.load_config(user_config)
 
 		assert cfg.recorder.previews is True
+
+
+# ---------------------------------------------------------------------------
+# player.audio.buffer_frames — PortAudio output buffer size knob
+# ---------------------------------------------------------------------------
+
+class TestBufferFrames:
+
+	"""``player.audio.buffer_frames`` lets advanced users tighten output-side
+	latency at the cost of underrun risk.  Validation rejects non-power-of-
+	two values and out-of-range ones at config load — that's our chance to
+	complain before PortAudio fails at stream open."""
+
+	def _load_with_buffer_frames (self, tmp_path: pathlib.Path, value: typing.Any) -> "subsample.config.Config":
+
+		import shutil
+
+		default     = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		user_config = tmp_path / "config.yaml"
+		shutil.copy(default, user_config)
+
+		with user_config.open("a") as fh:
+			fh.write(f"\nplayer:\n  audio:\n    buffer_frames: {value}\n")
+
+		return subsample.config.load_config(user_config)
+
+	def test_default_is_none (self) -> None:
+		"""Unset → None → PortAudio picks the device default."""
+		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		cfg = subsample.config.load_config(default)
+		assert cfg.player.audio.buffer_frames is None
+
+	def test_valid_power_of_two_accepted (self, tmp_path: pathlib.Path) -> None:
+		for value in (32, 64, 128, 256, 512, 1024, 2048, 4096):
+			cfg = self._load_with_buffer_frames(tmp_path, value)
+			assert cfg.player.audio.buffer_frames == value
+
+	def test_non_power_of_two_rejected (self, tmp_path: pathlib.Path) -> None:
+		for value in (33, 300, 1000, 1500):
+			with pytest.raises(ValueError, match="power of two"):
+				self._load_with_buffer_frames(tmp_path, value)
+
+	def test_below_range_rejected (self, tmp_path: pathlib.Path) -> None:
+		# 16 IS a power of two but below the [32, 4096] floor.
+		with pytest.raises(ValueError, match=r"\[32, 4096\]"):
+			self._load_with_buffer_frames(tmp_path, 16)
+
+	def test_above_range_rejected (self, tmp_path: pathlib.Path) -> None:
+		# 8192 is a power of two but above the [32, 4096] ceiling.
+		with pytest.raises(ValueError, match=r"\[32, 4096\]"):
+			self._load_with_buffer_frames(tmp_path, 8192)
