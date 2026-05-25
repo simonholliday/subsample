@@ -77,14 +77,15 @@ def _regen_one (audio_path: pathlib.Path) -> bool:
 def _iter_audio_files (root: pathlib.Path) -> list[pathlib.Path]:
 
 	"""Return every audio file under root that has an adjacent `.analysis.json`
-	sidecar.  File extensions matched: .wav, .flac, .aiff, .ogg, .mp3."""
+	sidecar.  File extensions matched mirror ``subsample.cache.AUDIO_EXTENSIONS``."""
 
-	audio_files: list[pathlib.Path] = []
-	for suffix in (".wav", ".flac", ".aiff", ".ogg", ".mp3"):
-		for path in sorted(root.rglob(f"*{suffix}")):
-			if subsample.cache.cache_path(path).exists():
-				audio_files.append(path)
-	return audio_files
+	return sorted(
+		path
+		for path in root.rglob("*")
+		if path.is_file()
+		and path.suffix.lower() in subsample.cache.AUDIO_EXTENSIONS
+		and subsample.cache.cache_path(path).exists()
+	)
 
 
 def main () -> None:

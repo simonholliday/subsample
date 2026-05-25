@@ -4,10 +4,13 @@ Ties together config loading, device selection, the circular buffer,
 the level detector, the WAV writer, and the MIDI player. Supports two
 input modes and two run modes:
 
-  File input   — pass WAV file paths as positional arguments; each file
-                 is processed through the detection pipeline and segments
-                 saved to the output directory, then picked up by the
-                 instrument library loader.
+  File input   — pass audio file paths as positional arguments; each
+                 file is processed through the detection pipeline and
+                 segments are written to the output directory as new
+                 ``.wav`` files with their analysis sidecars.  The
+                 process then exits — the chopped segments are picked
+                 up at the next subsample startup, when the recursive
+                 library load discovers them.
 
   Live capture — stream from an audio input device (recorder.enabled: true).
 
@@ -556,6 +559,7 @@ def _start_player (
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	bank_manager: typing.Optional[subsample.bank.BankManager] = None,
 	sv_cell: typing.Optional[list[typing.Any]] = None,
+	preloaded_midi_map_result: typing.Optional[subsample.player.MidiMapResult] = None,
 ) -> None:
 
 	"""Select a MIDI input device (or create a virtual port), then run the player.
@@ -596,15 +600,25 @@ def _start_player (
 		return
 
 	_midi_map_path = pathlib.Path(cfg.player.midi_map)
-	try:
-		midi_map_result = subsample.player.load_midi_map(
-			_midi_map_path,
-			reference_library.names(),
-			strict=cfg.player.strict_midi_map,
-		)
-	except (FileNotFoundError, ValueError) as exc:
-		print(f"Error loading MIDI map: {exc}", file=sys.stderr)
-		return
+
+	# Reuse the parse done at startup for bank detection — the parser is
+	# pure and the reference list it sees is the same here as there
+	# (path-based references go to similarity matrices, not the reference
+	# library, so reference_library.names() stays empty across the two
+	# call sites).  Saves the second parse and the duplicate INFO logs it
+	# emits for similarity auto-injection.
+	if preloaded_midi_map_result is not None:
+		midi_map_result = preloaded_midi_map_result
+	else:
+		try:
+			midi_map_result = subsample.player.load_midi_map(
+				_midi_map_path,
+				reference_library.names(),
+				strict=cfg.player.strict_midi_map,
+			)
+		except (FileNotFoundError, ValueError) as exc:
+			print(f"Error loading MIDI map: {exc}", file=sys.stderr)
+			return
 
 	midi_map = midi_map_result.note_map
 
@@ -628,6 +642,7 @@ def _start_player (
 	subsample.player._resolve_path_references(
 		midi_map, matrices, instrument_library,
 		target_sample_rate=effective_output_sr,
+		with_preview=cfg.recorder.previews,
 	)
 
 	# Validate `extract:` directives now that all candidate samples are
@@ -796,9 +811,10 @@ def _main_impl () -> None:
 	# player startup, which adds them to the similarity matrix dynamically.
 	reference_library = subsample.library.ReferenceLibrary([])
 
-	# Process any input files through the detection pipeline.
-	# Segments are written to the output directory (which is typically the same
-	# as the instrument directory), so they are picked up by the instrument loader below.
+	# Process any input files through the detection pipeline, then exit.
+	# Segments are written to the output directory and analysed; the recursive
+	# library loader will pick them up on the next subsample startup.  This is
+	# deliberate — file-input mode is a batch chop, not a hybrid live session.
 	if args.files:
 		# Recorder banner shows the live-capture config; file-input mode reads
 		# at each source's native format.  Clarify so a 32-bit float source
@@ -814,16 +830,17 @@ def _main_impl () -> None:
 	bank_definitions: list[subsample.bank.BankDefinition] = []
 	bank_channel: int = subsample.bank.DEFAULT_BANK_CHANNEL
 	default_bank: typing.Optional[int] = None
+	preloaded_midi_map_result: typing.Optional[subsample.player.MidiMapResult] = None
 
 	if cfg.player.enabled and cfg.player.midi_map is not None:
 		_midi_map_path = pathlib.Path(cfg.player.midi_map)
 		try:
-			midi_map_result = subsample.player.load_midi_map(
+			preloaded_midi_map_result = subsample.player.load_midi_map(
 				_midi_map_path, [], strict=cfg.player.strict_midi_map,
 			)
-			bank_definitions = midi_map_result.bank_definitions
-			bank_channel = midi_map_result.bank_channel
-			default_bank = midi_map_result.default_bank
+			bank_definitions = preloaded_midi_map_result.bank_definitions
+			bank_channel = preloaded_midi_map_result.bank_channel
+			default_bank = preloaded_midi_map_result.default_bank
 		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
 			_log.warning("Could not pre-load MIDI map for bank detection: %s", exc)
 
@@ -1021,6 +1038,7 @@ def _main_impl () -> None:
 					cfg, shutdown_event, instrument_library,
 					similarity_matrix, reference_library, _player_cell,
 					transform_manager, bank_manager, _sv_cell,
+					preloaded_midi_map_result,
 				),
 				name="player",
 			))
@@ -1116,9 +1134,21 @@ def _main_impl () -> None:
 	):
 		_midi_map_watch_path = pathlib.Path(cfg.player.midi_map)
 
+		# Snapshot the bank state at startup so the live-reload callback can
+		# detect bank-related edits that hot-reload doesn't cover yet.
+		_startup_bank_definitions = list(bank_definitions)
+		_startup_bank_channel     = bank_channel
+		_startup_default_bank     = default_bank
+
 		def _on_midi_map_changed (path: pathlib.Path) -> None:
 
-			"""Reload the MIDI map and deliver it to the active player."""
+			"""Reload the MIDI map and deliver it to the active player.
+
+			Bank-related edits (the `banks:` block, `bank_channel:`, and
+			`default_bank:`) are not hot-reloadable in this version — the
+			callback warns and keeps the current bank state.  Assignments
+			under existing banks reload as normal.
+			"""
 
 			player = _player_cell[0]
 
@@ -1137,6 +1167,20 @@ def _main_impl () -> None:
 					"MIDI map reload failed — keeping current map: %s", exc,
 				)
 				return
+
+			# Detect bank-related changes the live reload can't apply, so the
+			# user isn't left wondering why an edit to banks:/bank_channel:/
+			# default_bank: has no audible effect.
+			if (
+				result.bank_definitions != _startup_bank_definitions
+				or result.bank_channel != _startup_bank_channel
+				or result.default_bank != _startup_default_bank
+			):
+				_log.warning(
+					"MIDI map reload: bank definitions, bank_channel, or "
+					"default_bank changed — these only take effect on restart. "
+					"Assignment-only changes will still apply.",
+				)
 
 			player.reload_midi_map(result.note_map)
 
@@ -1387,6 +1431,18 @@ def _make_on_complete (
 			subsample.analysis.format_level_result(level),
 		)
 
+		# Emit the OSC/dashboard event BEFORE the store_audio gate.  The
+		# event is what external listeners (OSC sender, Supervisor) react
+		# to — gating it on the player being enabled would silently break
+		# the documented recorder-only-with-OSC multi-machine setup.
+		if app_events is not None:
+			app_events.emit(
+				"sample_captured",
+				filepath=filepath, spectral=spectral, rhythm=rhythm,
+				pitch=pitch, timbre=timbre, level=level,
+				band_energy=band_energy, duration=duration, audio=audio,
+			)
+
 		# Only build a SampleRecord and integrate into the live subsystems
 		# when the player is active.  In recorder-only mode nothing reads
 		# from the instrument library, similarity matrix, or transform
@@ -1411,13 +1467,5 @@ def _make_on_complete (
 
 		_integrate_sample(record, instrument_library, similarity_matrix,
 		                  transform_manager, player_cell, app_events)
-
-		if app_events is not None:
-			app_events.emit(
-				"sample_captured",
-				filepath=filepath, spectral=spectral, rhythm=rhythm,
-				pitch=pitch, timbre=timbre, level=level,
-				band_energy=band_energy, duration=duration, audio=audio,
-			)
 
 	return on_complete

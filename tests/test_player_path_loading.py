@@ -51,7 +51,7 @@ class TestLoadInstrumentFromPath:
 	def test_returns_record_when_wav_and_sidecar_present (self, tmp_path: pathlib.Path) -> None:
 		"""Returns a SampleRecord with audio when WAV + sidecar exist."""
 		wav_path, _ = tests.helpers._write_wav_and_sidecar(tmp_path, "my_inst")
-		record = subsample.player._load_instrument_from_path(wav_path)
+		record = subsample.player._load_instrument_from_path(wav_path, with_preview=False)
 		assert record is not None
 		assert record.name == "my_inst"
 		assert record.audio is not None
@@ -60,7 +60,7 @@ class TestLoadInstrumentFromPath:
 		"""Auto-generates sidecar and loads the sample when no sidecar exists."""
 		path = tmp_path / "no_sidecar.wav"
 		tests.helpers._make_wav(path)
-		record = subsample.player._load_instrument_from_path(path)
+		record = subsample.player._load_instrument_from_path(path, with_preview=False)
 		assert record is not None
 		assert record.name == "no_sidecar"
 		# Sidecar should have been written for next time.
@@ -70,12 +70,12 @@ class TestLoadInstrumentFromPath:
 		"""Returns None when WAV file is absent (sidecar only)."""
 		sidecar = tests.helpers._write_sidecar(tmp_path, "sidecar_only")
 		wav_path = sidecar.parent / "sidecar_only.wav"
-		assert subsample.player._load_instrument_from_path(wav_path) is None
+		assert subsample.player._load_instrument_from_path(wav_path, with_preview=False) is None
 
 	def test_sets_name_to_stem (self, tmp_path: pathlib.Path) -> None:
 		"""Record name is the filename stem."""
 		wav_path, _ = tests.helpers._write_wav_and_sidecar(tmp_path, "2026-03-27_09-28-12")
-		record = subsample.player._load_instrument_from_path(wav_path)
+		record = subsample.player._load_instrument_from_path(wav_path, with_preview=False)
 		assert record is not None
 		assert record.name == "2026-03-27_09-28-12"
 
@@ -103,7 +103,7 @@ class TestResolvePathReferences:
 		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		instrument_lib.samples.return_value = []
 
-		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib)
+		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib, with_preview=False)
 
 		matrix.add_reference.assert_called_once()
 
@@ -117,7 +117,7 @@ class TestResolvePathReferences:
 		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
 		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 
-		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib)
+		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib, with_preview=False)
 
 		matrix.add_reference.assert_not_called()
 
@@ -137,7 +137,7 @@ class TestResolvePathReferences:
 		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		instrument_lib.find_by_name.return_value = None  # not already present
 
-		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib)
+		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib, with_preview=False)
 
 		instrument_lib.add.assert_called_once()
 
@@ -160,7 +160,7 @@ class TestResolvePathReferences:
 		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		instrument_lib.samples.return_value = []
 
-		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib)
+		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib, with_preview=False)
 
 		# add_reference should be called exactly once despite two assignments
 		assert matrix.add_reference.call_count == 1

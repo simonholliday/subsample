@@ -2133,7 +2133,13 @@ def _compute_voiced_fraction (
 	"""
 
 	# Fast path: caller already has the pyin result (e.g. from analyze_all).
+	# Guard against an empty voiced_flag — numpy.mean over an empty array
+	# returns NaN (silenced by the module-level "Mean of empty slice" filter),
+	# and the NaN would propagate into AnalysisResult.voiced_fraction, silently
+	# defeating downstream "is this sample pitched?" gates.
 	if pyin_voiced_flag is not None:
+		if pyin_voiced_flag.size == 0:
+			return 0.0
 		return float(numpy.mean(pyin_voiced_flag))
 
 	# Slow path: run pyin independently (e.g. when analyze_mono is called alone).
@@ -2143,5 +2149,8 @@ def _compute_voiced_fraction (
 		return 0.0
 
 	_f0, voiced_flag, _probs = result
+
+	if voiced_flag.size == 0:
+		return 0.0
 
 	return float(numpy.mean(voiced_flag))

@@ -294,11 +294,12 @@ class InstrumentConfig:
 
 	1. Sidecar path — watches for .analysis.json sidecar files (fastest:
 	   the sidecar signals that both the WAV and analysis are ready).
-	2. Audio file path — watches for audio files (.wav, .flac, .aiff,
-	   .ogg, .mp3) from any source.  After a grace period to let a
-	   sidecar arrive (in case the source is another subsample instance),
-	   checks file-size stability, runs the full analysis pipeline,
-	   writes a sidecar, and loads the sample.
+	2. Audio file path — watches for audio files (.wav, .flac, .aiff, .aif,
+	   .ogg, .mp3, .mpeg — see ``subsample.cache.AUDIO_EXTENSIONS``) from any
+	   source.  After a grace period to let a sidecar arrive (in case the
+	   source is another subsample instance), checks file-size stability,
+	   runs the full analysis pipeline, writes a sidecar, and loads the
+	   sample.
 
 	Works with multi-instance setups (recorder on one machine, player on
 	another via a shared directory) and with audio files from any external

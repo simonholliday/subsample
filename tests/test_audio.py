@@ -70,24 +70,6 @@ class TestUnpackAudio24Bit:
 
 		assert result[0, 0] == 0x01020300
 
-	def test_round_trip_with_pack_int24 (self) -> None:
-		"""unpack_audio → _pack_int24 should recover the original 24-bit values."""
-		# Build raw 24-bit bytes for a few known values (little-endian)
-		values_24bit = [0, 100, -100, 8388607, -8388608]  # 24-bit range: -2^23 to 2^23-1
-
-		raw_parts = []
-		for v in values_24bit:
-			# Pack v as signed 24-bit little-endian
-			b = v.to_bytes(3, byteorder="little", signed=True)
-			raw_parts.append(b)
-
-		raw = b"".join(raw_parts)
-
-		unpacked = subsample.audio.unpack_audio(raw, bit_depth=24, channels=1)
-		repacked = subsample.recorder._pack_int24(unpacked)
-
-		assert repacked == raw
-
 	def test_shape_mono (self) -> None:
 		raw = bytes(3 * 8)  # 8 samples × 3 bytes
 		result = subsample.audio.unpack_audio(raw, bit_depth=24, channels=1)

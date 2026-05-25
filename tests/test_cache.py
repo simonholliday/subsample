@@ -218,16 +218,30 @@ class TestCacheInvalidation:
 		sidecar.write_text("this is not json", encoding="utf-8")
 		assert subsample.cache.load_cache(wav) is None
 
-	def test_missing_key_returns_none (self, tmp_path: pathlib.Path) -> None:
+	def test_missing_audio_md5_triggers_reanalysis (self, tmp_path: pathlib.Path) -> None:
+
+		"""A sidecar with a current analysis_version but no audio_md5 used to
+		bypass MD5 validation and return cached data silently — meaning a
+		stale sidecar paired with a different audio file would be accepted as
+		fresh.  ``load_cache`` now re-analyzes from the audio in that case;
+		the audio file is the source of truth."""
+
 		wav = tmp_path / "kick.wav"
 		tests.helpers._make_wav(wav)
 		sidecar = subsample.cache.cache_path(wav)
-		# Valid JSON but missing required keys
+		# Valid JSON, current version, but no audio_md5.
 		sidecar.write_text(
 			json.dumps({"analysis_version": subsample.analysis.ANALYSIS_VERSION}),
 			encoding="utf-8",
 		)
-		assert subsample.cache.load_cache(wav) is None
+
+		result = subsample.cache.load_cache(wav)
+
+		assert result is not None
+		# Sidecar was rewritten with a real MD5.
+		import json as _json
+		payload = _json.loads(sidecar.read_text())
+		assert payload["audio_md5"] == subsample.cache.compute_audio_md5(wav)
 
 
 # ---------------------------------------------------------------------------

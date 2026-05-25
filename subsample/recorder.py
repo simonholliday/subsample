@@ -27,7 +27,6 @@ import os
 import pathlib
 import threading
 import typing
-import wave
 
 import numpy
 import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
@@ -253,12 +252,20 @@ class SampleProcessor:
 			self._futures.append(future)
 			depth = sum(1 for f in self._futures if not f.done())
 
-		if self._warn_backlog and depth >= 3:
+			# Set the backlog flag under the same lock as the depth read.
+			# Outside the lock a worker can complete and _on_future_done can
+			# clear the flag in the window between release and assignment,
+			# losing the "queue drained" log line for an episode that did
+			# happen.
+			backed_up = self._warn_backlog and depth >= 3
+			if backed_up:
+				self._was_backed_up = True
+
+		if backed_up:
 			_log.warning(
 				"sample-processor backlog: %d in-flight — processing may be falling behind captures",
 				depth,
 			)
-			self._was_backed_up = True
 
 	@property
 	def queue_depth (self) -> int:
@@ -574,25 +581,3 @@ class SampleProcessor:
 		return filepath, duration
 
 
-def _pack_int24 (audio: numpy.ndarray) -> bytes:
-
-	"""Pack an int32 array (24-bit values left-shifted by 8) into 3-byte WAV frames.
-
-	Reverses the left-shift applied by unpack_audio() for 24-bit streams,
-	recovering the original 24-bit sample values as 3-byte little-endian integers.
-
-	Args:
-		audio: Shape (n_frames, channels), dtype int32, values occupying
-		       bits 8-31 (the LSB byte is padding zeroes from capture).
-
-	Returns:
-		Raw bytes suitable for wave.writeframes().
-	"""
-
-	# Right-shift by 8 to undo the LSB padding added at capture
-	samples = audio >> 8
-
-	# View each int32 as 4 uint8 bytes (little-endian), then drop byte 3 (MSB padding)
-	b = samples.view(numpy.uint8).reshape(-1, 4)
-
-	return b[:, :3].tobytes()

@@ -3776,7 +3776,7 @@ def spec_from_process (
 			steps.append(Distort(
 				mode=str(proc.get("mode", "hard_clip")),
 				drive_db=float(_drive_raw) if _drive_raw is not None else None,
-				mix=float(_resolve_cc(proc.get("mix"), cc_state, 1.0)),
+				mix=float(_resolve_cc(proc.get("mix"), cc_state, 1.0, cc_omni=cc_omni)),
 				tone=float(_tone_raw) if _tone_raw is not None else None,
 				bit_depth=int(_resolve_cc(proc.get("bit_depth"), cc_state, 8, cc_omni=cc_omni)),
 				downsample_factor=int(_resolve_cc(proc.get("downsample_factor"), cc_state, 4, cc_omni=cc_omni)),
@@ -3790,7 +3790,7 @@ def spec_from_process (
 				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
 				hold_ms=float(_resolve_cc(proc.get("hold"), cc_state, 0.0, cc_omni=cc_omni)),
 				decay_ms=float(_decay_raw) if _decay_raw is not None else None,
-				sustain=float(_resolve_cc(proc.get("sustain"), cc_state, 1.0)),
+				sustain=float(_resolve_cc(proc.get("sustain"), cc_state, 1.0, cc_omni=cc_omni)),
 				release_ms=float(_release_raw) if _release_raw is not None else None,
 			))
 
@@ -3834,7 +3834,7 @@ def spec_from_process (
 				steps.append(Vocoder(
 					carrier_path=carrier_str,
 					bands=int(_resolve_cc(proc.get("bands"), cc_state, 24, cc_omni=cc_omni)),
-					depth=float(_resolve_cc(proc.get("depth"), cc_state, 1.0)),
+					depth=float(_resolve_cc(proc.get("depth"), cc_state, 1.0, cc_omni=cc_omni)),
 					formant_shift=int(_resolve_cc(proc.get("formant_shift"), cc_state, 0, cc_omni=cc_omni)),
 				))
 			else:

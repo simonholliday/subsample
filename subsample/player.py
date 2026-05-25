@@ -139,28 +139,26 @@ def _quantize_params (
 	return (bpm if bpm > 0 else None, grid)
 
 
-def _build_beats_resolver (
+def _build_variant_lookup (
 	process: subsample.query.ProcessSpec,
 	transform_manager: typing.Optional[subsample.transform.TransformManager],
 	session_bpm: float,
-) -> typing.Optional[typing.Callable[[int], typing.Optional[float]]]:
+) -> typing.Optional[typing.Callable[[int], typing.Optional[subsample.transform.TransformResult]]]:
 
-	"""Build a callable that returns the quantized beat count for a sample.
+	"""Shared core for the quantize-aware resolvers below.
 
-	Inspects the assignment's process spec for a ``stretch_quantize`` or
-	``pad_quantize`` step and extracts the effective BPM and grid.  The
-	returned callable looks up the matching variant via the transform
-	manager and reads the ``GridEnergyProfile`` length to derive the
-	number of beats as ``len(energy) * 4 / resolution``.
-
-	Returns None (not a callable) when no valid quantize step is present,
-	no transform manager is available, or the effective BPM is 0.
+	Inspects ``process`` for the active quantize step (``stretch_quantize`` /
+	``pad_quantize``) and falls back to the session-level stretch_quantize
+	when neither is configured but the session has a global ``target_bpm``.
+	Returns a callable that, given a sample_id, returns the matching
+	``TransformResult`` from the transform manager — or ``None`` when no
+	variant exists yet (manager still processing) or when none of the above
+	conditions yield a usable BPM.
 	"""
 
 	if transform_manager is None:
 		return None
 
-	# Determine which quantize step (if any) applies.
 	step: typing.Union[subsample.transform.TimeStretch, subsample.transform.PadQuantize]
 
 	if process.has_stretch_quantize():
@@ -181,8 +179,34 @@ def _build_beats_resolver (
 
 	spec = subsample.transform.TransformSpec(steps=(step,))
 
+	def _lookup (sample_id: int) -> typing.Optional[subsample.transform.TransformResult]:
+		return transform_manager.get_variant(sample_id, spec)
+
+	return _lookup
+
+
+def _build_beats_resolver (
+	process: subsample.query.ProcessSpec,
+	transform_manager: typing.Optional[subsample.transform.TransformManager],
+	session_bpm: float,
+) -> typing.Optional[typing.Callable[[int], typing.Optional[float]]]:
+
+	"""Build a callable returning the quantized beat count for a sample.
+
+	Used by the ``quantized_beats`` order scorer.  Beat count is derived
+	from the variant's ``GridEnergyProfile`` length as
+	``len(energy) * 4 / resolution``.
+
+	Returns None (not a callable) when no valid quantize step is present,
+	no transform manager is available, or the effective BPM is 0.
+	"""
+
+	lookup = _build_variant_lookup(process, transform_manager, session_bpm)
+	if lookup is None:
+		return None
+
 	def _resolver (sample_id: int) -> typing.Optional[float]:
-		result = transform_manager.get_variant(sample_id, spec)
+		result = lookup(sample_id)
 		if result is None or result.energy_profile is None:
 			return None
 		profile = result.energy_profile
@@ -199,44 +223,20 @@ def _build_energy_profile_resolver (
 
 	"""Build a callable returning the full GridEnergyProfile for a sample.
 
-	Twin of ``_build_beats_resolver`` but returns the whole profile
-	(not just the beat count).  Used by the ``beat_match`` order
-	scorer, which needs per-slot energy data.
+	Twin of ``_build_beats_resolver`` but returns the whole profile (not
+	just the beat count).  Used by the ``beat_match`` order scorer, which
+	needs per-slot energy data.
 
-	Same quantize-step inspection logic as _build_beats_resolver:
-	inspects the assignment's process for a ``stretch_quantize`` or
-	``pad_quantize`` step, looks up the matching variant, and returns
-	its ``energy_profile``.
-
-	Returns None (not a callable) when no valid quantize step is
-	present, no transform manager is available, or the effective BPM
-	is 0.
+	Returns None (not a callable) when no valid quantize step is present,
+	no transform manager is available, or the effective BPM is 0.
 	"""
 
-	if transform_manager is None:
+	lookup = _build_variant_lookup(process, transform_manager, session_bpm)
+	if lookup is None:
 		return None
-
-	step: typing.Union[subsample.transform.TimeStretch, subsample.transform.PadQuantize]
-
-	if process.has_stretch_quantize():
-		bpm, grid = _quantize_params(process, "stretch_quantize", session_bpm)
-		if bpm is None or bpm <= 0:
-			return None
-		step = subsample.transform.TimeStretch(target_bpm=float(bpm), resolution=int(grid))
-	elif process.has_pad_quantize():
-		bpm, grid = _quantize_params(process, "pad_quantize", session_bpm)
-		if bpm is None or bpm <= 0:
-			return None
-		step = subsample.transform.PadQuantize(target_bpm=float(bpm), resolution=int(grid))
-	elif session_bpm > 0:
-		step = subsample.transform.TimeStretch(target_bpm=float(session_bpm), resolution=16)
-	else:
-		return None
-
-	spec = subsample.transform.TransformSpec(steps=(step,))
 
 	def _resolver (sample_id: int) -> typing.Optional[subsample.transform.GridEnergyProfile]:
-		result = transform_manager.get_variant(sample_id, spec)
+		result = lookup(sample_id)
 		if result is None:
 			return None
 		return result.energy_profile
@@ -625,16 +625,25 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 def _load_instrument_from_path (
 	path: pathlib.Path,
 	target_sample_rate: typing.Optional[int] = None,
+	*,
+	with_preview: bool,
 ) -> typing.Optional[subsample.library.SampleRecord]:
 
-	"""Load an instrument sample (WAV + sidecar) from a filesystem path.
+	"""Load an instrument sample (audio + sidecar) from a filesystem path.
 
 	The sample's name is set to the filename stem (e.g. "2026-03-27_09-28-12")
-	so that it can be matched by where: { name: ... } predicates.
+	so that it can be matched by where: { name: ... } predicates.  Goes through
+	``cache.ensure_sample_assets`` so the sidecar (and PNG, when previews are
+	enabled) are regenerated on the fly if missing — matching the recursive
+	library loader's self-healing behaviour for samples found this way.
 
 	Args:
-		path:               Absolute path to the WAV file (or sidecar).
+		path:               Absolute path to the audio file.
 		target_sample_rate: When set, resample audio to this rate on load.
+		with_preview:       Threaded from ``cfg.recorder.previews``; when True,
+		                    a missing ``.preview.png`` is regenerated and the
+		                    embedded preview block is kept current in the
+		                    sidecar.
 
 	Returns:
 		SampleRecord with audio loaded, or None if loading fails.
@@ -645,12 +654,12 @@ def _load_instrument_from_path (
 
 	if not path.exists():
 		_log.warning(
-			"Instrument sample WAV not found: %s — this sample will be skipped",
+			"Instrument sample audio not found: %s — this sample will be skipped",
 			path,
 		)
 		return None
 
-	result = subsample.cache.load_or_analyze(path)
+	result = subsample.cache.ensure_sample_assets(path, with_preview=with_preview)
 	if result is None:
 		_log.warning(
 			"Failed to load or analyze %s — this sample will be skipped",
@@ -717,6 +726,8 @@ def _resolve_path_references (
 	matrices: list[subsample.similarity.SimilarityMatrix],
 	instrument_lib: subsample.library.InstrumentLibrary,
 	target_sample_rate: typing.Optional[int] = None,
+	*,
+	with_preview: bool,
 ) -> None:
 
 	"""Load path-based references, instruments, and directory samples from the MIDI map.
@@ -724,13 +735,22 @@ def _resolve_path_references (
 	Scans all assignments in the note map for:
 	  - Path-based references → loaded and added to similarity matrices
 	  - Path-based instruments → loaded and added to instrument library
-	  - Directory predicates → all samples in the directory loaded into instrument library
+	  - Directory predicates → all audio under the directory (recursively) is
+	    loaded into the instrument library
+
+	Directory predicates use the same audio-first, recursive walk as the main
+	instrument-library loader so the two paths see the same set of files —
+	a sample dropped into a subdirectory of a ``directory:`` predicate is
+	picked up just like one in the root.
 
 	Args:
 		note_map:            Note routing table: (mido_channel, midi_note) → (Assignment, PickSpec).
 		matrices:            List of SimilarityMatrix (one per bank) to add references to.
 		instrument_lib:      InstrumentLibrary to add path-based instruments to.
 		target_sample_rate:  When set, resample loaded audio to this rate.
+		with_preview:        Threaded from ``cfg.recorder.previews``; controls
+		                     whether missing PNG sidecars are regenerated for
+		                     samples loaded through this path.
 	"""
 
 	# Collect unique paths for references, instruments, and directories
@@ -772,21 +792,26 @@ def _resolve_path_references (
 		loaded = 0
 
 		try:
-			sidecars = sorted(directory.glob("*.analysis.json"))
+			audio_paths = sorted(
+				p for p in directory.rglob("*")
+				if p.is_file() and p.suffix.lower() in subsample.cache.AUDIO_EXTENSIONS
+			)
 		except (PermissionError, OSError) as exc:
 			_log.warning("Cannot read directory %s: %s — skipped", dir_path, exc)
 			continue
 
-		for sidecar in sidecars:
-			wav_name = sidecar.name.replace(".analysis.json", "")
-			wav_path = directory / wav_name
-			name = pathlib.Path(wav_name).stem
+		for audio_path in audio_paths:
+			name = audio_path.stem
 
-			# Skip if already in the library.
+			# Skip if already in the library — typically because the main
+			# instrument loader already picked this audio up (the predicate
+			# may point at a subtree of cfg.instrument.directory).
 			if instrument_lib.find_by_name(name) is not None:
 				continue
 
-			record = _load_instrument_from_path(wav_path, target_sample_rate)
+			record = _load_instrument_from_path(
+				audio_path, target_sample_rate, with_preview=with_preview,
+			)
 
 			if record is not None:
 				instrument_lib.add(record)
@@ -823,7 +848,9 @@ def _resolve_path_references (
 			)
 			continue
 
-		record = _load_instrument_from_path(path, target_sample_rate)
+		record = _load_instrument_from_path(
+			path, target_sample_rate, with_preview=with_preview,
+		)
 		if record is None:
 			continue
 
@@ -1614,15 +1641,7 @@ class MidiPlayer:
 							assignment.name, ch, note, idx + 1, self._output_channels,
 						)
 						routing_fixes[(ch, note)] = (
-							subsample.query.Assignment(
-								name=assignment.name,
-								select=assignment.select,
-								process=assignment.process,
-								one_shot=assignment.one_shot,
-								gain_db=assignment.gain_db,
-								pan_weights=assignment.pan_weights,
-								output_routing=None,
-							),
+							dataclasses.replace(assignment, output_routing=None),
 							_pick_spec,
 						)
 						break
@@ -2031,6 +2050,70 @@ class MidiPlayer:
 
 		return self._render_float(float_audio, record.level, velocity, mix_matrix, gain_db)
 
+	def _enqueue_quantize_variants (
+		self,
+		asgn: subsample.query.Assignment,
+		step_name: str,
+		note_picks: list[tuple[int, subsample.query.PickSpec]],
+		ranked: list[subsample.library.SampleRecord],
+		eff_library: subsample.library.InstrumentLibrary,
+		eff_transform: subsample.transform.TransformManager,
+		require_tempo: bool,
+	) -> int:
+
+		"""Pre-compute one quantize step's variants for every reachable rank.
+
+		Used by ``update_assignments`` for both ``stretch_quantize`` (the
+		full beat-quantized variant; ``require_tempo=True`` since the
+		algorithm needs a detected source tempo) and ``pad_quantize`` (no
+		tempo requirement — only onset positions matter).  Returns the
+		number of variants actually enqueued (after dedup + filtering).
+
+		Variants are deduplicated by ``sample_id`` because multiple ranks
+		can resolve to the same sample and only one variant is needed per
+		(sample, spec) key — the transform processor itself dedups across
+		calls, but doing it here avoids per-rank ``spec_from_process``
+		work.
+		"""
+
+		bpm, grid = _quantize_params(asgn.process, step_name, self._target_bpm)
+		enqueued = 0
+		seen_ids: set[int] = set()
+
+		for _note, pick_spec in note_picks:
+			for rank in _ranks_for(pick_spec, len(ranked)):
+				sid = ranked[rank - 1].sample_id
+
+				if sid in seen_ids:
+					continue
+
+				seen_ids.add(sid)
+				record = eff_library.get(sid)
+
+				if record is None:
+					continue
+
+				if require_tempo and record.rhythm.tempo_bpm <= 0.0:
+					_log.warning(
+						"%s %s: sample %r (pick %d) has no detected tempo — "
+						"will not be beat-quantized",
+						step_name, asgn.name, record.name, rank,
+					)
+					continue
+
+				spec = subsample.transform.spec_from_process(
+					asgn.process,
+					target_bpm=bpm,
+					resolution=grid,
+					reference_path=_reference_wav_path(asgn),
+					cc_state=self._cc_state,
+					cc_omni=self._cc_omni,
+				)
+				eff_transform.get_variant(sid, spec)
+				enqueued += 1
+
+		return enqueued
+
 	def update_assignments (self) -> None:
 
 		"""Pre-compute transform variants for all assignments that declare processors.
@@ -2137,46 +2220,14 @@ class MidiPlayer:
 			# Beat-quantize: each note may pick a different sample, and a range
 			# PickSpec may resolve to any rank in [lo, hi] at trigger time —
 			# enqueue a variant for every reachable rank.  The full process
-			# chain is included via spec_from_process().
+			# chain is included via spec_from_process().  stretch_quantize
+			# additionally requires the source to have a detected tempo;
+			# pad_quantize does not (it only needs onsets).
 			elif asgn.process.has_stretch_quantize():
-				bpm, grid = _quantize_params(asgn.process, "stretch_quantize", self._target_bpm)
-				enqueued = 0
-
-				# Deduplicate by sample_id — multiple ranks may resolve to the
-				# same sample, and only one variant is needed.
-				seen_ids: set[int] = set()
-
-				for _note, pick_spec in note_picks:
-					for rank in _ranks_for(pick_spec, len(ranked)):
-						sid = ranked[rank - 1].sample_id
-
-						if sid in seen_ids:
-							continue
-
-						seen_ids.add(sid)
-						record = eff_library.get(sid)
-
-						if record is None:
-							continue
-
-						if record.rhythm.tempo_bpm <= 0.0:
-							_log.warning(
-								"stretch_quantize %s: sample %r (pick %d) has no detected tempo — "
-								"will not be beat-quantized",
-								asgn.name, record.name, rank,
-							)
-							continue
-
-						spec = subsample.transform.spec_from_process(
-							asgn.process,
-							target_bpm=bpm,
-							resolution=grid,
-							reference_path=_reference_wav_path(asgn),
-							cc_state=self._cc_state,
-							cc_omni=self._cc_omni,
-						)
-						eff_transform.get_variant(sid, spec)
-						enqueued += 1
+				enqueued = self._enqueue_quantize_variants(
+					asgn, "stretch_quantize", note_picks, ranked,
+					eff_library, eff_transform, require_tempo=True,
+				)
 
 				if enqueued > 0:
 					_total_assignments += 1
@@ -2187,36 +2238,11 @@ class MidiPlayer:
 						asgn.name, enqueued,
 					)
 
-			# Pad-quantize: same dedup pattern as stretch_quantize but no
-			# tempo check — pad_quantize only needs onsets, not source tempo.
 			elif asgn.process.has_pad_quantize():
-				bpm, grid = _quantize_params(asgn.process, "pad_quantize", self._target_bpm)
-				enqueued = 0
-				seen_ids_pad: set[int] = set()
-
-				for _note, pick_spec in note_picks:
-					for rank in _ranks_for(pick_spec, len(ranked)):
-						sid = ranked[rank - 1].sample_id
-
-						if sid in seen_ids_pad:
-							continue
-
-						seen_ids_pad.add(sid)
-						record = eff_library.get(sid)
-
-						if record is None:
-							continue
-
-						spec = subsample.transform.spec_from_process(
-							asgn.process,
-							target_bpm=bpm,
-							resolution=grid,
-							reference_path=_reference_wav_path(asgn),
-							cc_state=self._cc_state,
-							cc_omni=self._cc_omni,
-						)
-						eff_transform.get_variant(sid, spec)
-						enqueued += 1
+				enqueued = self._enqueue_quantize_variants(
+					asgn, "pad_quantize", note_picks, ranked,
+					eff_library, eff_transform, require_tempo=False,
+				)
 
 				if enqueued > 0:
 					_total_assignments += 1

@@ -259,6 +259,13 @@ player:
   # the next MIDI trigger.  Requires midi_map to be set.  Debounced: rapid
   # saves from text editors are coalesced into a single reload.
 
+  # strict_midi_map: true
+  # When true (default), reject unknown `where:` keys, unknown processor
+  # names, and non-bool `pitched:` values at parse time — surfaces typos
+  # early.  Set to false to silently ignore unknown keys, which can help
+  # when loading older or hand-edited MIDI maps that pre-date a renamed
+  # key.
+
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
   # Case-insensitive substring match — "Launch" matches "Launchpad MK3 MIDI 1".

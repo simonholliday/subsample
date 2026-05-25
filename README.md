@@ -1360,7 +1360,7 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
 | `recorder.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
-| `recorder.audio.channels` | auto | 1 = mono, 2 = stereo. Omit (or `null`) to auto-detect from device |
+| `recorder.audio.channels` | `1` | 1 = mono, 2 = stereo. Omit (or set to `null`) to auto-detect from the selected device |
 | `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
 | `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, ~40-60% smaller, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
@@ -1378,6 +1378,7 @@ weights - is optional and rarely needs changing.
 | `player.audio.channels` | `null` | Output channels (2=stereo, 6=5.1, 8=7.1); null defaults to stereo. SMPTE ordering |
 | `player.virtual_midi_port` | `none` | Name for a virtual MIDI input port; overrides `player.midi_device` |
 | `player.watch_midi_map` | `false` | Monitor the `midi_map` file for changes and reload assignments on save (see Live-coding) |
+| `player.strict_midi_map` | `true` | Reject unknown `where:` keys, unknown processor names, and non-bool `pitched:` values at parse time. Set to `false` to silently ignore unknown keys when loading older or hand-edited MIDI maps |
 | `detection.snr_threshold_db` | `12.0` | dB above ambient to trigger recording |
 | `detection.hold_time` | `0.5` | Seconds to hold recording open after signal drops |
 | `detection.warmup_seconds` | `1.0` | Calibration period before detection activates |
@@ -1565,10 +1566,10 @@ Two detection paths run in parallel:
    Subsample instance, which always writes the WAV first and the sidecar second.
 
 2. **Audio file path** - watches for audio files (`.wav`, `.flac`, `.aiff`,
-   `.ogg`, `.mp3`) from any source. After a short grace period to see if a
-   sidecar follows (in case the source is Subsample), checks that the file is
-   no longer being written (file-size stability), runs the full analysis
-   pipeline, writes a sidecar, and loads the sample.
+   `.aif`, `.ogg`, `.mp3`, `.mpeg`) from any source. After a short grace
+   period to see if a sidecar follows (in case the source is Subsample),
+   checks that the file is no longer being written (file-size stability),
+   runs the full analysis pipeline, writes a sidecar, and loads the sample.
 
 The audio file path handles the common case where another application writes
 an audio file without any sidecar. The file-size stability check ensures that
@@ -1882,19 +1883,6 @@ Reference: GM36_BassDrum1
   2.  #7     0.8134  kick_hard       ./samples/kick_hard.wav
   3.  #8     0.7601  kick_soft       ./samples/kick_soft.wav
 ```
-
-### Extracting GM percussion references
-
-Render all 47 General MIDI percussion instruments from a SoundFont file into the
-reference sample directory. Requires `fluidsynth` CLI tool and a GM SoundFont.
-
-```bash
-python scripts/extract_gm_drums.py /path/to/FluidR3_GM.sf2
-python scripts/extract_gm_drums.py /path/to/FluidR3_GM.sf2 --output samples/reference/
-```
-
-Produces WAV files + analysis sidecars. Only the sidecars are committed to the
-repository; audio files are local-only and .gitignored.
 
 ## Roadmap
 

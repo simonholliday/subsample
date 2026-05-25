@@ -222,12 +222,19 @@ class SimilarityMatrix:
 			dtype=numpy.float32,
 		)  # N × D
 
-		# Normalise rows; zero vectors remain zero (cosine score will be 0.0)
+		# Normalise rows; zero-norm vectors stay zero (cosine score is 0.0).
+		# numpy.divide(..., where=, out=) keeps the division off the zero
+		# rows entirely — a numpy.where(..., a/b, 0.0) form would compute
+		# a/b on every row before masking, raising a "divide by zero"
+		# RuntimeWarning on each startup that contained a silent sample.
 		inst_norms = numpy.linalg.norm(inst_matrix, axis=1, keepdims=True)
 		ref_norms  = numpy.linalg.norm(ref_matrix,  axis=1, keepdims=True)
 
-		inst_normed = numpy.where(inst_norms > 0, inst_matrix / inst_norms, 0.0)
-		ref_normed  = numpy.where(ref_norms  > 0, ref_matrix  / ref_norms,  0.0)
+		inst_normed = numpy.zeros_like(inst_matrix)
+		numpy.divide(inst_matrix, inst_norms, where=inst_norms > 0, out=inst_normed)
+
+		ref_normed = numpy.zeros_like(ref_matrix)
+		numpy.divide(ref_matrix, ref_norms, where=ref_norms > 0, out=ref_normed)
 
 		scores_matrix = (inst_normed @ ref_normed.T).astype(numpy.float64)  # N × M
 

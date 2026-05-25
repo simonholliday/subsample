@@ -222,8 +222,8 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 		audio_path: Path to the audio file.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
-		tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
+		channel_format) 9-tuple on success, else None.
 	"""
 
 	sidecar = cache_path(audio_path)
@@ -250,16 +250,22 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 
 	# MD5 check — reads the audio file; done after version check to skip
 	# disk I/O when the version alone invalidates the cache.
-	# Only re-analyze if audio_md5 is actually present and mismatched — a
-	# missing key means the sidecar is corrupt, which falls through to
-	# _deserialize_payload (which fails with a KeyError and returns None).
 	cached_md5 = payload.get("audio_md5")
+
+	# Treat a missing audio_md5 key as "sidecar predates MD5 validation" and
+	# regenerate from the audio.  Previously this branch fell through to
+	# _deserialize_payload and silently returned cached data with no integrity
+	# check at all — a stale sidecar paired with a different audio file would
+	# be accepted as fresh.
+	if cached_md5 is None:
+		return _reanalyze_and_save(audio_path, channel_format=prior_channel_format)
+
 	try:
 		current_md5 = compute_audio_md5(audio_path)
 	except OSError:
 		return _reanalyze_and_save(audio_path, channel_format=prior_channel_format)
 
-	if cached_md5 is not None and cached_md5 != current_md5:
+	if cached_md5 != current_md5:
 		return _reanalyze_and_save(audio_path, channel_format=prior_channel_format)
 
 	return _deserialize_payload(payload, sidecar.name)
@@ -381,8 +387,8 @@ def load_or_analyze (audio_path: pathlib.Path) -> _LoadResult | None:
 		audio_path: Path to the audio file.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
-		tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
+		channel_format) 9-tuple on success, else None.
 	"""
 
 	sidecar = cache_path(audio_path)
@@ -527,8 +533,8 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 		sidecar_path: Path to the .analysis.json sidecar file directly.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy)
-		tuple on success, else None.
+		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
+		channel_format) 9-tuple on success, else None.
 	"""
 
 	# Unlike load_cache(), a missing sidecar is unexpected here — warn explicitly.
