@@ -163,3 +163,32 @@ class TestParseArgs:
 		monkeypatch.setattr(sys, "argv", ["subsample", "some/path/recording.wav"])
 		args = subsample.cli._parse_args()
 		assert all(isinstance(f, pathlib.Path) for f in args.files)
+
+
+class TestFormatMmss:
+
+	"""Tests for subsample.cli._format_mmss() — duration formatter used in file-ingest progress logs."""
+
+	def test_zero_seconds (self) -> None:
+		assert subsample.cli._format_mmss(0.0) == "00:00"
+
+	def test_sub_minute (self) -> None:
+		assert subsample.cli._format_mmss(6.0) == "00:06"
+
+	def test_exactly_one_minute (self) -> None:
+		assert subsample.cli._format_mmss(60.0) == "01:00"
+
+	def test_multi_minute (self) -> None:
+		assert subsample.cli._format_mmss(92.0) == "01:32"
+
+	def test_rounds_to_nearest_second (self) -> None:
+		assert subsample.cli._format_mmss(6.4) == "00:06"
+		assert subsample.cli._format_mmss(6.6) == "00:07"
+
+	def test_minutes_not_capped (self) -> None:
+		"""Durations over 99 minutes render with three-digit minutes."""
+		assert subsample.cli._format_mmss(6000.0) == "100:00"
+
+	def test_negative_clamped_to_zero (self) -> None:
+		"""Negative inputs should clamp to 00:00 rather than render '-1:-1'."""
+		assert subsample.cli._format_mmss(-5.0) == "00:00"

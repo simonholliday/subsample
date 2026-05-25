@@ -28,6 +28,7 @@ import logging
 import pathlib
 import sys
 import threading
+import time
 import typing
 
 import numpy
@@ -60,6 +61,20 @@ _AUDIO_DTYPE: dict[int, numpy.dtype] = {
 	24: numpy.dtype(numpy.int32),
 	32: numpy.dtype(numpy.int32),
 }
+
+# Cadence for in-loop progress logging during file ingestion.
+_PROGRESS_LOG_INTERVAL_SEC: typing.Final[float] = 10.0
+
+
+def _format_mmss (seconds: float) -> str:
+
+	"""Format a non-negative duration in seconds as mm:ss (zero-padded).
+
+	Minutes are not capped — a 100-minute duration renders as '100:00'.
+	"""
+
+	s = int(round(max(0.0, seconds)))
+	return f"{s // 60:02d}:{s % 60:02d}"
 
 
 def _parse_args () -> argparse.Namespace:
@@ -202,7 +217,17 @@ def _process_input_files (
 		segment_index = 1
 		chunk_size = cfg.recorder.audio.chunk_size
 		n_frames = file_info.audio.shape[0]
+		file_duration_sec = n_frames / file_info.sample_rate
 
+		_log.info("File duration: %s", _format_mmss(file_duration_sec))
+
+		start_time = time.monotonic()
+		last_progress_time = start_time
+
+		# Phase 1 — read pass: stream the file through the detector, dispatching
+		# detected segments to the worker pool.  Fast for in-memory files
+		# (essentially memory bandwidth + detector cost), so the periodic tick
+		# below will only fire for very large files.
 		for offset in range(0, n_frames, chunk_size):
 			chunk = file_info.audio[offset : offset + chunk_size]
 
@@ -218,11 +243,58 @@ def _process_input_files (
 				)
 				segment_index += 1
 
+			now = time.monotonic()
+			if now - last_progress_time >= _PROGRESS_LOG_INTERVAL_SEC:
+				position_sec = min(file_duration_sec, (offset + chunk_size) / file_info.sample_rate)
+				pct = 100.0 * position_sec / file_duration_sec if file_duration_sec > 0 else 100.0
+				wall_elapsed = now - start_time
+				# Extrapolate remaining wall time from the ratio of audio read so far.
+				if position_sec > 0:
+					eta_wall = wall_elapsed * (file_duration_sec - position_sec) / position_sec
+				else:
+					eta_wall = 0.0
+				_log.info(
+					"Reading: %.0f%% — elapsed %s, ETA %s",
+					pct, _format_mmss(wall_elapsed), _format_mmss(eta_wall),
+				)
+				last_progress_time = now
+
+		# Phase 2 — drain: wait for the worker pool to finish analysing and
+		# writing every enqueued segment.  For long files this is where most
+		# of the wall time lives, so we poll queue_depth and log progress.
+		total_segments = segment_index - 1
+		if total_segments > 0:
+			drain_start = time.monotonic()
+			while True:
+				depth = writer.queue_depth
+				if depth == 0:
+					break
+
+				now = time.monotonic()
+				if now - last_progress_time >= _PROGRESS_LOG_INTERVAL_SEC:
+					completed = total_segments - depth
+					wall_elapsed = now - start_time
+					drain_elapsed = now - drain_start
+					if completed > 0:
+						eta_wall = drain_elapsed * depth / completed
+					else:
+						eta_wall = 0.0
+					pct = 100.0 * completed / total_segments
+					_log.info(
+						"Processing: %d/%d segments (%.1f%%) — elapsed %s, ETA %s",
+						completed, total_segments, pct,
+						_format_mmss(wall_elapsed), _format_mmss(eta_wall),
+					)
+					last_progress_time = now
+
+				time.sleep(1.0)
+
 		writer.flush()
 		writer.shutdown()
 
+		wall_total = time.monotonic() - start_time
 		count = segment_index - 1
-		print(f"  → {count} segment(s) written from {path.name}")
+		print(f"  → {count} segment(s) written from {path.name} in {_format_mmss(wall_total)}")
 
 
 def _run_recorder (
