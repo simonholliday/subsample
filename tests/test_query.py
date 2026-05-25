@@ -172,6 +172,73 @@ class TestWherePredicate:
 		assert pred.matches(_make_record(name="my-kick"))
 		assert not pred.matches(_make_record(name="other"))
 
+	# -- name_list: bare list of exact stems, case-sensitive --
+
+	def test_name_list_matches_any_of_the_listed_stems (self) -> None:
+		pred = subsample.query.WherePredicate(name_list=("kick_1", "kick_2", "kick_3"))
+		assert     pred.matches(_make_record(name="kick_1"))
+		assert     pred.matches(_make_record(name="kick_2"))
+		assert     pred.matches(_make_record(name="kick_3"))
+
+	def test_name_list_rejects_unlisted_names (self) -> None:
+		pred = subsample.query.WherePredicate(name_list=("kick_1", "kick_2"))
+		assert not pred.matches(_make_record(name="kick_3"))
+		assert not pred.matches(_make_record(name="snare_1"))
+
+	def test_name_list_case_sensitive (self) -> None:
+		"""List form preserves the existing scalar form's case sensitivity."""
+		pred = subsample.query.WherePredicate(name_list=("Kick", "Snare"))
+		assert not pred.matches(_make_record(name="kick"))
+		assert not pred.matches(_make_record(name="KICK"))
+		assert     pred.matches(_make_record(name="Kick"))
+
+	# -- name_glob: fnmatch-style, full-string, case-insensitive --
+
+	def test_name_glob_matches_pattern (self) -> None:
+		pred = subsample.query.WherePredicate(name_glob="*kick*")
+		assert     pred.matches(_make_record(name="my_kick_1"))
+		assert     pred.matches(_make_record(name="kick"))
+		assert not pred.matches(_make_record(name="snare_1"))
+
+	def test_name_glob_full_string (self) -> None:
+		"""A pattern with no wildcards behaves like an exact match."""
+		pred = subsample.query.WherePredicate(name_glob="kick")
+		assert     pred.matches(_make_record(name="kick"))
+		assert not pred.matches(_make_record(name="my_kick_1"))
+
+	def test_name_glob_case_insensitive (self) -> None:
+		pred = subsample.query.WherePredicate(name_glob="*KICK*")
+		assert     pred.matches(_make_record(name="my_kick_1"))
+		assert     pred.matches(_make_record(name="My_Kick_2"))
+
+	def test_name_glob_dot_is_literal (self) -> None:
+		"""Unlike regex, `.` in a glob is a literal dot."""
+		pred = subsample.query.WherePredicate(name_glob="kick.1")
+		assert     pred.matches(_make_record(name="kick.1"))
+		assert not pred.matches(_make_record(name="kick_1"))
+
+	# -- name_regex: re module, fullmatch, case-insensitive --
+
+	def test_name_regex_full_string (self) -> None:
+		"""fullmatch — the pattern must match the entire stem."""
+		pred = subsample.query.WherePredicate(name_regex=r"kick_\d+")
+		assert     pred.matches(_make_record(name="kick_1"))
+		assert     pred.matches(_make_record(name="kick_22"))
+		assert not pred.matches(_make_record(name="kick_1_extra"))
+		assert not pred.matches(_make_record(name="prefix_kick_1"))
+
+	def test_name_regex_case_insensitive (self) -> None:
+		pred = subsample.query.WherePredicate(name_regex=r"kick_\d+")
+		assert     pred.matches(_make_record(name="KICK_1"))
+		assert     pred.matches(_make_record(name="Kick_22"))
+
+	def test_name_regex_dot_matches_any (self) -> None:
+		"""Unlike glob, `.` in a regex matches any single character."""
+		pred = subsample.query.WherePredicate(name_regex=r"kick.\d")
+		assert     pred.matches(_make_record(name="kick_1"))
+		assert     pred.matches(_make_record(name="kick-2"))
+		assert     pred.matches(_make_record(name="kick.3"))
+
 	def test_combined_predicates (self) -> None:
 
 		"""Multiple predicates are AND-ed: all must pass."""
@@ -277,6 +344,49 @@ class TestQuery:
 		result = subsample.query.query(spec, self._samples())
 		assert len(result) == 1
 		assert result[0].name == "medium-tonal"
+
+	def test_name_list_filter (self) -> None:
+		"""`name_list` returns only records whose stem appears in the tuple."""
+		samples = [
+			_make_record(sample_id=1, name="kick_1"),
+			_make_record(sample_id=2, name="kick_2"),
+			_make_record(sample_id=3, name="snare_1"),
+			_make_record(sample_id=4, name="hat_1"),
+		]
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(name_list=("kick_1", "snare_1")),
+		)
+		result = subsample.query.query(spec, samples)
+		assert {r.name for r in result} == {"kick_1", "snare_1"}
+
+	def test_name_glob_filter (self) -> None:
+		"""`name_glob` returns only records whose stem matches the pattern."""
+		samples = [
+			_make_record(sample_id=1, name="kick_1"),
+			_make_record(sample_id=2, name="my_kick_2"),
+			_make_record(sample_id=3, name="snare_1"),
+			_make_record(sample_id=4, name="KICK_3"),
+		]
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(name_glob="*kick*"),
+		)
+		result = subsample.query.query(spec, samples)
+		# All three kicks (case-insensitive); snare excluded.
+		assert {r.name for r in result} == {"kick_1", "my_kick_2", "KICK_3"}
+
+	def test_name_regex_filter (self) -> None:
+		"""`name_regex` returns only records fully matching the pattern."""
+		samples = [
+			_make_record(sample_id=1, name="kick_1"),
+			_make_record(sample_id=2, name="kick_22"),
+			_make_record(sample_id=3, name="kick_abc"),     # \d+ doesn't match
+			_make_record(sample_id=4, name="kick_1_extra"), # fullmatch fails
+		]
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(name_regex=r"kick_\d+"),
+		)
+		result = subsample.query.query(spec, samples)
+		assert {r.name for r in result} == {"kick_1", "kick_22"}
 
 
 # ---------------------------------------------------------------------------
@@ -1316,9 +1426,157 @@ class TestNamePathSplit:
 
 	def test_name_and_path_together_raise (self, tmp_path: pathlib.Path) -> None:
 		"""Using both `name:` and `path:` in one where block is rejected."""
-		with pytest.raises(ValueError, match="mutually exclusive"):
+		with pytest.raises(ValueError, match="only one 'name' form"):
 			subsample.query.parse_select(
 				{"where": {"name": "x", "path": "y.wav"}},
+				"test", tmp_path,
+			)
+
+
+class TestParseNamePatternForms:
+
+	"""Parsing of the new `where.name:` forms — list, glob (`matches:`),
+	and regex (`regex:`).  Existing scalar string form is still covered
+	by TestNamePathSplit."""
+
+	# -- Happy paths --
+
+	def test_list_form_parses_to_tuple (self) -> None:
+		"""`name: [a, b, c]` → WherePredicate.name_list = ('a', 'b', 'c')."""
+		specs = subsample.query.parse_select(
+			{"where": {"name": ["kick_1", "kick_2", "kick_3"]}}, "test",
+		)
+		assert specs[0].where.name_list == ("kick_1", "kick_2", "kick_3")
+		assert specs[0].where.name       is None
+		assert specs[0].where.name_glob  is None
+		assert specs[0].where.name_regex is None
+
+	def test_glob_form_parses (self) -> None:
+		"""`name: { matches: "*kick*" }` → WherePredicate.name_glob."""
+		specs = subsample.query.parse_select(
+			{"where": {"name": {"matches": "*kick*"}}}, "test",
+		)
+		assert specs[0].where.name_glob  == "*kick*"
+		assert specs[0].where.name       is None
+		assert specs[0].where.name_list  is None
+		assert specs[0].where.name_regex is None
+
+	def test_regex_form_parses (self) -> None:
+		"""`name: { regex: "kick_\\d+" }` → WherePredicate.name_regex (raw string)."""
+		specs = subsample.query.parse_select(
+			{"where": {"name": {"regex": r"kick_\d+"}}}, "test",
+		)
+		assert specs[0].where.name_regex == r"kick_\d+"
+		assert specs[0].where.name       is None
+		assert specs[0].where.name_list  is None
+		assert specs[0].where.name_glob  is None
+
+	# -- List rejections --
+
+	def test_empty_list_rejected (self) -> None:
+		with pytest.raises(ValueError, match="non-empty"):
+			subsample.query.parse_select({"where": {"name": []}}, "test")
+
+	def test_duplicate_list_rejected (self) -> None:
+		with pytest.raises(ValueError, match="duplicate"):
+			subsample.query.parse_select(
+				{"where": {"name": ["kick", "kick"]}}, "test",
+			)
+
+	def test_path_like_in_list_rejected (self) -> None:
+		with pytest.raises(ValueError, match="path"):
+			subsample.query.parse_select(
+				{"where": {"name": ["kick", "subdir/snare"]}}, "test",
+			)
+
+	def test_non_string_list_element_rejected (self) -> None:
+		with pytest.raises(ValueError, match="must be strings"):
+			subsample.query.parse_select(
+				{"where": {"name": ["kick", 42]}}, "test",
+			)
+
+	# -- Glob / regex dict rejections --
+
+	def test_path_like_glob_rejected (self) -> None:
+		with pytest.raises(ValueError, match="path"):
+			subsample.query.parse_select(
+				{"where": {"name": {"matches": "samples/*"}}}, "test",
+			)
+
+	def test_path_like_regex_rejected (self) -> None:
+		with pytest.raises(ValueError, match="path"):
+			subsample.query.parse_select(
+				{"where": {"name": {"regex": r"samples/.*"}}}, "test",
+			)
+
+	def test_unknown_operator_rejected (self) -> None:
+		with pytest.raises(ValueError, match="unknown operator"):
+			subsample.query.parse_select(
+				{"where": {"name": {"fuzzy": "*"}}}, "test",
+			)
+
+	def test_unknown_operator_lists_valid (self) -> None:
+		"""The error message lists matches/regex so the user knows what's allowed."""
+		with pytest.raises(ValueError, match="matches"):
+			subsample.query.parse_select(
+				{"where": {"name": {"fuzzy": "*"}}}, "test",
+			)
+
+	def test_multi_operator_rejected (self) -> None:
+		with pytest.raises(ValueError, match="exactly one operator"):
+			subsample.query.parse_select(
+				{"where": {"name": {"matches": "*", "regex": ".*"}}}, "test",
+			)
+
+	def test_empty_dict_rejected (self) -> None:
+		with pytest.raises(ValueError, match="exactly one operator"):
+			subsample.query.parse_select({"where": {"name": {}}}, "test")
+
+	def test_bad_regex_rejected (self) -> None:
+		"""Invalid regex syntax is surfaced at parse time, not at first query."""
+		with pytest.raises(ValueError, match="regex"):
+			subsample.query.parse_select(
+				{"where": {"name": {"regex": "["}}}, "test",
+			)
+
+	def test_empty_string_glob_rejected (self) -> None:
+		with pytest.raises(ValueError, match="non-empty"):
+			subsample.query.parse_select(
+				{"where": {"name": {"matches": ""}}}, "test",
+			)
+
+	def test_empty_string_regex_rejected (self) -> None:
+		with pytest.raises(ValueError, match="non-empty"):
+			subsample.query.parse_select(
+				{"where": {"name": {"regex": ""}}}, "test",
+			)
+
+	def test_non_string_operator_value_rejected (self) -> None:
+		with pytest.raises(ValueError, match="must be a string"):
+			subsample.query.parse_select(
+				{"where": {"name": {"matches": 42}}}, "test",
+			)
+
+	# -- Mutex with path: --
+
+	def test_path_and_list_mutex (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="only one 'name' form"):
+			subsample.query.parse_select(
+				{"where": {"path": "x.wav", "name": ["a", "b"]}},
+				"test", tmp_path,
+			)
+
+	def test_path_and_glob_mutex (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="only one 'name' form"):
+			subsample.query.parse_select(
+				{"where": {"path": "x.wav", "name": {"matches": "*"}}},
+				"test", tmp_path,
+			)
+
+	def test_path_and_regex_mutex (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="only one 'name' form"):
+			subsample.query.parse_select(
+				{"where": {"path": "x.wav", "name": {"regex": ".+"}}},
 				"test", tmp_path,
 			)
 

@@ -36,9 +36,11 @@ this is microseconds and needs no secondary indices.
 """
 
 import dataclasses
+import fnmatch
 import logging
 import pathlib
 import random
+import re
 import typing
 
 import librosa
@@ -123,6 +125,11 @@ _NUMERIC_FIELDS: tuple[str, ...] = (
 )
 
 _VALID_OPERATORS: frozenset[str] = frozenset({"gte", "lte", "gt", "lt", "eq"})
+
+# Operators accepted under the dict form of `where.name:` (matches: glob,
+# regex: re-module pattern).  Parallel to _VALID_OPERATORS, kept separate
+# because the name predicate's value space is strings, not numbers.
+_VALID_NAME_OPERATORS: frozenset[str] = frozenset({"matches", "regex"})
 
 
 # Strict-mode flag.  When True (default), unknown keys in `where:` and
@@ -251,8 +258,13 @@ class WherePredicate:
 	Numeric dimensions (``duration``, ``onsets``, ``tempo``, ``pitch_hz``,
 	``quantized_beats``) each carry a Range; an empty Range means "no
 	filter on this dimension".  Non-numeric fields (``pitched``,
-	``reference``, ``name``, ``name_path``, ``directory``) remain flat
-	Optionals — they aren't comparison predicates."""
+	``reference``, ``name``, ``name_list``, ``name_glob``, ``name_regex``,
+	``name_path``, ``directory``) remain flat Optionals — they aren't
+	comparison predicates.
+
+	The four name-matching forms (``name``, ``name_list``, ``name_glob``,
+	``name_regex``) are mutually exclusive at parse time; at most one is
+	ever populated for a given WherePredicate."""
 
 	duration:        Range = dataclasses.field(default_factory=Range)
 	onsets:          Range = dataclasses.field(default_factory=Range)
@@ -260,9 +272,21 @@ class WherePredicate:
 	pitch_hz:        Range = dataclasses.field(default_factory=Range)
 	quantized_beats: Range = dataclasses.field(default_factory=Range)
 
-	pitched:   typing.Optional[bool] = None
-	reference: typing.Optional[str]  = None
-	name:      typing.Optional[str]  = None
+	pitched:    typing.Optional[bool]              = None
+	reference:  typing.Optional[str]               = None
+	name:       typing.Optional[str]               = None
+	name_list:  typing.Optional[tuple[str, ...]]   = None
+	"""Set of bare stems to match against record.name (case-sensitive).
+	Populated by `where: { name: [a, b, c] }`.  Tuple keeps the frozen
+	dataclass hashable."""
+	name_glob:  typing.Optional[str]               = None
+	"""fnmatch-style glob pattern matched against record.name, full-string,
+	case-insensitive.  Populated by `where: { name: { matches: ... } }`."""
+	name_regex: typing.Optional[str]               = None
+	"""re-module pattern matched against record.name via re.fullmatch with
+	re.IGNORECASE.  Populated by `where: { name: { regex: ... } }`.  The
+	raw string is stored (not a compiled Pattern) so the dataclass stays
+	hashable; the re module caches compiled patterns internally."""
 	name_path: typing.Optional[str]  = None
 	"""Internal field — set by parse_select for path-based name references;
 	used by _resolve_path_references to load samples; never evaluated in
@@ -309,6 +333,17 @@ class WherePredicate:
 
 		if self.name is not None and record.name != self.name:
 			return False
+
+		if self.name_list is not None and record.name not in self.name_list:
+			return False
+
+		if self.name_glob is not None:
+			if not fnmatch.fnmatchcase(record.name.lower(), self.name_glob.lower()):
+				return False
+
+		if self.name_regex is not None:
+			if re.fullmatch(self.name_regex, record.name, flags=re.IGNORECASE) is None:
+				return False
 
 		if self.directory is not None:
 			if record.filepath is None:
@@ -957,6 +992,153 @@ def query (
 # YAML parsing — select block
 # ---------------------------------------------------------------------------
 
+# Names of every WherePredicate field that participates in name matching
+# (exact + list + glob + regex) plus the internal name_path used by path
+# references.  The parser guards mutex against this set when handling
+# either `name:` or `path:`.
+_NAME_FORM_KWARGS: typing.Final[frozenset[str]] = frozenset(
+	{"name", "name_list", "name_glob", "name_regex", "name_path"}
+)
+
+
+def _has_any_name_form (other_kwargs: dict[str, typing.Any]) -> bool:
+
+	"""True if any of the mutually-exclusive name-form fields has been set
+	on the parser's working kwargs dict."""
+
+	return any(k in other_kwargs for k in _NAME_FORM_KWARGS)
+
+
+def _parse_name_list (
+	value: list[typing.Any],
+	assignment_name: str,
+) -> tuple[str, ...]:
+
+	"""Parse a `where: { name: [a, b, c] }` list into a tuple of bare stems.
+
+	Validates:
+	  - Non-empty list.
+	  - Every element is a string (not an int / dict / None — usually a typo).
+	  - No duplicates (likely a typo).
+	  - No path-like elements (call sites should use ``path:`` for path
+	    references; the new list form is pure stem matching).
+	"""
+
+	if not value:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'name' list must be "
+			f"non-empty"
+		)
+
+	stems: list[str] = []
+
+	for element in value:
+		if not isinstance(element, str):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'name' list "
+				f"entries must be strings, got {element!r} "
+				f"({type(element).__name__})"
+			)
+
+		if is_path_like(element):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'name' list "
+				f"entries must be bare stems (no slashes or leading dots); "
+				f"got {element!r}.  Use the 'path:' key for individual "
+				f"file references."
+			)
+
+		if element in stems:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'name' list "
+				f"contains duplicate entry {element!r}"
+			)
+
+		stems.append(element)
+
+	return tuple(stems)
+
+
+def _parse_name_operator_dict (
+	value: dict[str, typing.Any],
+	assignment_name: str,
+) -> tuple[str, str]:
+
+	"""Parse a `where: { name: { matches: ... } }` or `{ regex: ... }` dict.
+
+	Returns ``(field_name, raw_pattern)`` where ``field_name`` is either
+	``"name_glob"`` or ``"name_regex"`` so the caller can stash the result
+	straight into the parser's other_kwargs.
+
+	Validates:
+	  - Exactly one operator key (multiple operators would conflict and
+	    aren't meaningfully combinable for this predicate).
+	  - Operator key in ``_VALID_NAME_OPERATORS``.
+	  - Operator value is a non-empty string.
+	  - Pattern is not path-like (patterns match the stem only).
+	  - For ``regex:``, the pattern compiles (surfaces syntax errors at
+	    parse time rather than the first time the assignment is queried).
+	"""
+
+	if len(value) == 0:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'name' dict must "
+			f"contain exactly one operator "
+			f"({', '.join(sorted(_VALID_NAME_OPERATORS))})"
+		)
+
+	if len(value) > 1:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'name' dict must "
+			f"contain exactly one operator, got "
+			f"{sorted(value.keys())}.  Use a fallback chain "
+			f"(select: list of specs) if you need multiple patterns."
+		)
+
+	op, op_value = next(iter(value.items()))
+
+	if op not in _VALID_NAME_OPERATORS:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unknown operator "
+			f"{op!r} under 'name'.  Valid operators: "
+			f"{', '.join(sorted(_VALID_NAME_OPERATORS))}"
+		)
+
+	if not isinstance(op_value, str):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'name.{op}' value "
+			f"must be a string, got {op_value!r} ({type(op_value).__name__})"
+		)
+
+	if op_value == "":
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'name.{op}' pattern "
+			f"must be non-empty"
+		)
+
+	if is_path_like(op_value):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'name.{op}' pattern "
+			f"is path-like ({op_value!r}); patterns match the filename "
+			f"stem only.  Use 'directory:' for directory containment or "
+			f"'path:' for an individual file."
+		)
+
+	if op == "regex":
+		try:
+			re.compile(op_value)
+		except re.error as exc:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'name.regex' "
+				f"pattern {op_value!r} is not a valid regular expression: {exc}"
+			) from exc
+
+		return ("name_regex", op_value)
+
+	# op == "matches"
+	return ("name_glob", op_value)
+
+
 def _parse_where (
 	raw: typing.Any,
 	assignment_name: str,
@@ -1073,30 +1255,37 @@ def _parse_where (
 				other_kwargs["reference"] = ref
 
 		elif key == "name":
-			if "name" in other_kwargs or "name_path" in other_kwargs:
+			if _has_any_name_form(other_kwargs):
 				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: 'name' and "
-					f"'path' are mutually exclusive within a single where "
-					f"block — use one, not both."
+					f"MIDI map assignment {assignment_name!r}: only one "
+					f"'name' form (exact, list, matches, regex) or 'path' "
+					f"may be used per where block."
 				)
-			raw_name = str(value)
-			if is_path_like(raw_name):
-				# Legacy behaviour: a path-like `name:` value is treated as
-				# an implicit path reference.  Preserved indefinitely; new
-				# YAML should use the explicit `path:` key instead.
-				other_kwargs["name"]      = pathlib.Path(raw_name).stem
-				other_kwargs["name_path"] = str((midi_map_dir / raw_name).resolve())
+
+			if isinstance(value, list):
+				other_kwargs["name_list"] = _parse_name_list(value, assignment_name)
+			elif isinstance(value, dict):
+				field_name, raw_pattern = _parse_name_operator_dict(value, assignment_name)
+				other_kwargs[field_name] = raw_pattern
 			else:
-				other_kwargs["name"] = raw_name
+				raw_name = str(value)
+				if is_path_like(raw_name):
+					# Legacy behaviour: a path-like `name:` value is treated as
+					# an implicit path reference.  Preserved indefinitely; new
+					# YAML should use the explicit `path:` key instead.
+					other_kwargs["name"]      = pathlib.Path(raw_name).stem
+					other_kwargs["name_path"] = str((midi_map_dir / raw_name).resolve())
+				else:
+					other_kwargs["name"] = raw_name
 
 		elif key == "path":
 			# Explicit path reference: load this exact WAV and match only it.
 			# Preferred over the legacy `name: path/to/file` form.
-			if "name" in other_kwargs or "name_path" in other_kwargs:
+			if _has_any_name_form(other_kwargs):
 				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: 'name' and "
-					f"'path' are mutually exclusive within a single where "
-					f"block — use one, not both."
+					f"MIDI map assignment {assignment_name!r}: only one "
+					f"'name' form (exact, list, matches, regex) or 'path' "
+					f"may be used per where block."
 				)
 			raw_path = str(value)
 			other_kwargs["name"]      = pathlib.Path(raw_path).stem

@@ -530,12 +530,36 @@ is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
 | `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
-| `name` | string | Exact filename stem match. Legacy: a path-like value (containing `/` or starting with `.`) is still auto-detected as a `path:` - see below |
+| `name` | string / list / dict | Filename stem match. Four forms — see below. Legacy: a path-like scalar value (containing `/` or starting with `.`) is still auto-detected as a `path:` |
 | `path` | path | Match a specific WAV file at this path (relative paths resolved against the MIDI map's directory). Preferred over `name:` for file references |
 | `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Banks vs directory predicate](#banks-vs-directory-predicate)) |
 
-`name:` and `path:` are mutually exclusive within a single `where` block - use
-one, not both.
+The `name:` predicate accepts four forms:
+
+```yaml
+where:
+  name: my-kick                       # 1. exact stem match (case-sensitive)
+  name: [my-kick-1, my-kick-2]        # 2. list of exact stems (case-sensitive)
+  name: { matches: "*kick*" }         # 3. glob — fnmatch-style, case-insensitive
+  name: { regex: "kick_\\d+" }        # 4. regex — re.fullmatch, case-insensitive
+```
+
+- The **list** form matches if the sample's stem is in the list. Pair with
+  `pick: [1, N]` (or `[1, 999]`) for uniform random selection across the set.
+- The **glob** form (`matches:`) uses `*`, `?`, and `[abc]` character classes;
+  `.` is a literal dot. Full-string match — `kick` matches only `kick`,
+  `*kick*` matches any stem containing `kick`. Case-insensitive.
+- The **regex** form (`regex:`) is `re.fullmatch` with `re.IGNORECASE`. Must
+  match the entire stem. YAML tip: prefer double-quoted strings so `"\\d+"`
+  is interpreted as `\d+`. Bad regex syntax is surfaced at map-load time.
+- All forms match the **stem only** (filename without extension or path).
+  Use `directory:` for directory-containment filtering and `path:` for
+  exact-file references.
+
+`name:` (any form) and `path:` are mutually exclusive within a single `where`
+block — use one, not both. Inside a `where` block, only one of the four `name:`
+forms is allowed; combine multiple patterns via a `select:` fallback chain
+instead.
 
 **Legacy `min_X` / `max_X` syntax**: the pre-2026-04 form
 (`min_duration: 1.0`, `max_pitch: A4`, etc.) still works indefinitely —
