@@ -475,7 +475,7 @@ def _load_bank (
 		directory,
 		max_instrument_bytes,
 		load_audio=True,
-		clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
+		with_preview=cfg.recorder.previews,
 		target_sample_rate=output_sample_rate,
 	)
 
@@ -727,6 +727,25 @@ def _start_player (
 
 def main () -> None:
 
+	"""Entry point — runs the ambient audio sampler with top-level error handling.
+
+	The wrapped ``_main_impl`` does the actual work; this layer exists only to
+	turn an InstrumentLibraryError (raised when the on-disk sample library is
+	structurally invalid, e.g. two audio files with the same filename stem in
+	different subdirectories) into a clean, single-line error message and a
+	non-zero exit code, rather than a Python traceback the end user has to
+	parse.
+	"""
+
+	try:
+		_main_impl()
+	except subsample.library.InstrumentLibraryError as exc:
+		print(f"\nError: {exc}\n", file=sys.stderr)
+		sys.exit(2)
+
+
+def _main_impl () -> None:
+
 	"""Run the ambient audio sampler.
 
 	Processes any input files first (if given on the command line), then
@@ -863,7 +882,7 @@ def main () -> None:
 				pathlib.Path(cfg.instrument.directory),
 				max_instrument_bytes,
 				load_audio=True,
-				clean_orphaned_sidecars=cfg.instrument.clean_orphaned_sidecars,
+				with_preview=cfg.recorder.previews,
 				target_sample_rate=output_sample_rate,
 			)
 			print(

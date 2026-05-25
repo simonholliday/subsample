@@ -39,7 +39,22 @@ import subsample.preview
 
 _log = logging.getLogger(__name__)
 
-_CACHE_SUFFIX: str = ".analysis.json"
+# Compound suffixes for the two sidecars that subsample writes alongside
+# every analysed audio file: the JSON sidecar holds the analysis payload,
+# the PNG sidecar holds a fixed-size visual preview.  Exported as public
+# module-level constants so library, watcher, and recorder all import from
+# one canonical place (rather than redeclaring the same strings).
+SIDECAR_SUFFIX:     typing.Final[str] = ".analysis.json"
+PREVIEW_PNG_SUFFIX: typing.Final[str] = ".preview.png"
+
+# Audio file extensions that subsample considers part of an instrument
+# library.  Used by the recursive library load to discover audio files,
+# and by the watcher to filter directory events.  Lower-case throughout;
+# callers should `.lower()` the candidate extension before lookup.
+AUDIO_EXTENSIONS:   typing.Final[frozenset[str]] = frozenset({
+	".wav", ".flac", ".aiff", ".aif", ".ogg", ".mp3", ".mpeg",
+})
+
 _MD5_CHUNK_BYTES: int = 65536
 
 # Return type shared by load_cache() and load_sidecar().
@@ -66,7 +81,7 @@ def cache_path (audio_path: pathlib.Path) -> pathlib.Path:
 	Example: /recordings/kick.wav → /recordings/kick.wav.analysis.json
 	"""
 
-	return audio_path.with_name(audio_path.name + _CACHE_SUFFIX)
+	return audio_path.with_name(audio_path.name + SIDECAR_SUFFIX)
 
 
 def compute_audio_md5 (audio_path: pathlib.Path) -> str:
@@ -255,6 +270,7 @@ def _reanalyze_and_save (
 	cached_version: typing.Optional[str] = None,
 	silent: bool = False,
 	channel_format: str = "pcm",
+	with_preview: bool = False,
 ) -> _LoadResult | None:
 
 	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
@@ -276,6 +292,11 @@ def _reanalyze_and_save (
 		                are re-analysed from the W channel (ACN 0) only and
 		                remain tagged "b_format_ambix".  Defaults to "pcm" for
 		                callers that create a sidecar from scratch.
+		with_preview:   When True, also compute the PreviewData, embed it in
+		                the rewritten sidecar, and render the .preview.png
+		                sidecar.  Default False preserves the legacy behaviour
+		                used by ``load_cache`` / ``load_or_analyze`` callers
+		                that don't manage PNGs.
 
 	Returns:
 		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
@@ -311,6 +332,19 @@ def _reanalyze_and_save (
 		mono, params, subsample.config.AnalysisConfig(),
 	)
 
+	# Compute the preview data once and embed it in the sidecar so the
+	# `preview` block stays coherent with the freshly-computed analysis.
+	# Without this, an MD5-mismatch regen would silently drop any prior
+	# preview block — and a later PNG render would either fail or, worse,
+	# use stale envelope data captured from a now-different audio file.
+	preview_data: typing.Optional[subsample.preview.PreviewData] = None
+	if with_preview:
+		preview_data = subsample.preview.compute_preview_data(
+			mono, file_info.sample_rate,
+			rhythm, pitch, spectral, level, band_energy,
+			duration=duration,
+		)
+
 	try:
 		audio_md5 = compute_audio_md5(audio_path)
 		save_cache(
@@ -318,9 +352,17 @@ def _reanalyze_and_save (
 			duration, level, band_energy,
 			bit_depth=file_info.bit_depth, channels=file_info.channels,
 			channel_format=channel_format,
+			preview_data=preview_data,
 		)
 	except OSError as exc:
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
+
+	if preview_data is not None:
+		png_path = audio_path.with_name(audio_path.name + PREVIEW_PNG_SUFFIX)
+		try:
+			subsample.preview.render_png(preview_data, png_path)
+		except OSError as exc:
+			_log.warning("Failed to render preview PNG %s: %s", png_path.name, exc)
 
 	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format)
 
@@ -350,6 +392,124 @@ def load_or_analyze (audio_path: pathlib.Path) -> _LoadResult | None:
 		return _reanalyze_and_save(audio_path, silent=True)
 
 	return load_cache(audio_path)
+
+
+def ensure_sample_assets (
+	audio_path: pathlib.Path,
+	*,
+	with_preview: bool,
+) -> _LoadResult | None:
+
+	"""Ensure both the JSON sidecar and (optionally) the PNG preview are present
+	and current for an audio file.
+
+	Used by the recursive instrument-library load to make on-disk metadata
+	self-healing: a user who renames or moves audio in Sononym (or any other
+	tool) doesn't lose analysis — the sidecar and preview are regenerated
+	from the audio on the next startup, in their new location.
+
+	Decision tree, in order:
+
+	1. Full re-analysis when any of: sidecar missing, sidecar payload
+	   unreadable, analysis_version mismatch, audio MD5 mismatch, or (with
+	   ``with_preview=True``) the sidecar lacks an embedded ``preview``
+	   block.  The single audio read drives analysis + preview computation
+	   in one pass, the sidecar is rewritten with the preview block when
+	   wanted, and the PNG is rendered.
+
+	2. Otherwise, if the sidecar is fresh but the PNG is missing and
+	   ``with_preview=True``: render the PNG from the embedded preview
+	   block without re-analysing.  The sidecar is not touched.
+
+	3. Otherwise: deserialize the existing sidecar and return.
+
+	``with_preview`` lets the caller suppress PNG work when previews are
+	disabled in config — the JSON sidecar still tracks audio changes, but
+	no PNG is written and the preview block is not embedded.  Returns the
+	same tuple shape as ``load_cache`` / ``load_sidecar``.
+
+	Args:
+		audio_path:   Path to the audio file.
+		with_preview: When True, also ensure the .preview.png sidecar and
+		              the embedded preview block in the JSON sidecar.
+
+	Returns:
+		``_LoadResult`` tuple on success, ``None`` if the audio is unreadable
+		or the sidecar payload is unrecoverably corrupt.
+	"""
+
+	sidecar  = cache_path(audio_path)
+	png_path = audio_path.with_name(audio_path.name + PREVIEW_PNG_SUFFIX)
+
+	# Probe the sidecar without triggering load_cache's auto-rerun — the
+	# orchestrator owns the regen decision so it can also drive PNG state.
+	payload = _load_payload(sidecar, "sidecar") if sidecar.exists() else None
+
+	prior_channel_format: str = (
+		str(payload.get("channel_format", "pcm"))
+		if payload is not None
+		else "pcm"
+	)
+	cached_version: typing.Optional[str] = (
+		payload.get("analysis_version") if payload is not None else None
+	)
+
+	# Full re-analysis when anything is missing, stale, or (under
+	# with_preview=True) the embedded preview block is absent.
+	if payload is None:
+		return _reanalyze_and_save(
+			audio_path,
+			cached_version    = cached_version,
+			channel_format    = prior_channel_format,
+			with_preview      = with_preview,
+		)
+
+	if cached_version != subsample.analysis.ANALYSIS_VERSION:
+		return _reanalyze_and_save(
+			audio_path,
+			cached_version    = cached_version,
+			channel_format    = prior_channel_format,
+			with_preview      = with_preview,
+		)
+
+	cached_md5 = payload.get("audio_md5")
+	try:
+		current_md5 = compute_audio_md5(audio_path)
+	except OSError as exc:
+		_log.warning("Could not read %s for MD5 check: %s", audio_path.name, exc)
+		return None
+
+	if cached_md5 != current_md5:
+		return _reanalyze_and_save(
+			audio_path,
+			channel_format    = prior_channel_format,
+			with_preview      = with_preview,
+		)
+
+	if with_preview and "preview" not in payload:
+		return _reanalyze_and_save(
+			audio_path,
+			channel_format    = prior_channel_format,
+			with_preview      = with_preview,
+		)
+
+	# Sidecar is fresh and complete.  If a PNG is wanted but missing, re-
+	# render it from the embedded preview block — cheap and avoids touching
+	# the sidecar.  A missing preview block here would have been caught by
+	# the "with_preview and 'preview' not in payload" branch above.
+	if with_preview and not png_path.exists():
+		preview_data = load_preview_data(audio_path)
+
+		if preview_data is not None:
+			try:
+				subsample.preview.render_png(preview_data, png_path)
+			except OSError as exc:
+				_log.warning(
+					"Failed to render preview PNG %s: %s",
+					png_path.name, exc,
+				)
+
+	return _deserialize_payload(payload, sidecar.name)
 
 
 def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
@@ -384,7 +544,7 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 	# If stale, re-analyze from the corresponding audio file when available.
 	cached_version = payload.get("analysis_version")
 	if cached_version != subsample.analysis.ANALYSIS_VERSION:
-		audio_name = sidecar_path.name[: -len(_CACHE_SUFFIX)]
+		audio_name = sidecar_path.name[: -len(SIDECAR_SUFFIX)]
 		audio_path = sidecar_path.parent / audio_name
 
 		if audio_path.exists():

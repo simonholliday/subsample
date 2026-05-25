@@ -68,7 +68,7 @@ def _regen_one (audio_path: pathlib.Path) -> bool:
 		mono, file_info.sample_rate, rhythm, pitch, spectral, level, band_energy,
 		duration=duration,
 	)
-	png_path = audio_path.with_name(audio_path.name + ".preview.png")
+	png_path = audio_path.with_name(audio_path.name + subsample.cache.PREVIEW_PNG_SUFFIX)
 	subsample.preview.render_png(preview_data, png_path)
 	_log.info("wrote %s", png_path.name)
 	return True

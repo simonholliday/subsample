@@ -37,15 +37,9 @@ import subsample.library
 
 _log = logging.getLogger(__name__)
 
-_SIDECAR_SUFFIX: str = ".analysis.json"
 _DEBOUNCE_SECONDS: float = 1.0
 _MAX_RETRIES: int = 3
 _RETRY_DELAY_SECONDS: float = 2.0
-
-# Audio file detection — recognises formats supported by audio.read_audio_file().
-_AUDIO_EXTENSIONS: frozenset[str] = frozenset({
-	".wav", ".flac", ".aiff", ".aif", ".ogg", ".mp3", ".mpeg",
-})
 
 _AUDIO_DEBOUNCE_SECONDS: float = 2.0
 """Initial debounce for audio file events — absorbs editor saves, partial
@@ -99,7 +93,7 @@ class InstrumentWatcher:
 			self._known_audio: frozenset[pathlib.Path] = frozenset(known_audio)
 		else:
 			self._known_audio = frozenset(
-				sc.parent / sc.name[: -len(_SIDECAR_SUFFIX)]
+				sc.parent / sc.name[: -len(subsample.cache.SIDECAR_SUFFIX)]
 				for sc in self._known_sidecars
 			)
 
@@ -199,7 +193,7 @@ class InstrumentWatcher:
 		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
 		# Derive audio file path: strip .analysis.json suffix to get the WAV name.
-		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
+		audio_name = sidecar_path.name[: -len(subsample.cache.SIDECAR_SUFFIX)]
 		audio_path = sidecar_path.parent / audio_name
 
 		if not audio_path.exists():
@@ -492,13 +486,13 @@ class _InstrumentFileHandler (watchdog.events.FileSystemEventHandler):
 
 		path = pathlib.Path(str(event.src_path))
 
-		if path.name.endswith(_SIDECAR_SUFFIX):
+		if path.name.endswith(subsample.cache.SIDECAR_SUFFIX):
 			self._sidecar_callback(path)
 			return
 
 		suffix = path.suffix.lower()
 
-		if suffix in _AUDIO_EXTENSIONS:
+		if suffix in subsample.cache.AUDIO_EXTENSIONS:
 			self._audio_callback(path)
 
 

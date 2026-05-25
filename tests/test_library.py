@@ -496,7 +496,9 @@ class TestLoadInstrumentLibrary:
 
 	def test_loads_wav_and_sidecar (self, tmp_path: pathlib.Path) -> None:
 		_write_wav_and_sidecar(tmp_path, "KICK")
-		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
 		assert len(lib) == 1
 		record = lib.samples()[0]
 		assert record.name == "KICK"
@@ -504,23 +506,28 @@ class TestLoadInstrumentLibrary:
 
 	def test_audio_has_correct_shape (self, tmp_path: pathlib.Path) -> None:
 		_write_wav_and_sidecar(tmp_path, "KICK", n_frames=2048)
-		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
 		record = lib.samples()[0]
 		assert record.audio is not None
 		assert record.audio.shape[0] == 2048  # n_frames
 		assert record.audio.shape[1] == 1     # mono
 
-	def test_deletes_orphaned_sidecar_by_default (
+	def test_deletes_orphaned_sidecar_unconditionally (
 		self,
 		tmp_path: pathlib.Path,
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
 		import logging
-		# Write sidecar only — no WAV.  Default (clean_orphaned_sidecars=True)
-		# should delete it and log an INFO.
+		# Write sidecar only — no WAV.  The orphan sweep is unconditional
+		# (no opt-in flag), so the sidecar should be deleted and an INFO
+		# line emitted.
 		sidecar = _write_sidecar(tmp_path, "KICK")
 		with caplog.at_level(logging.INFO, logger="subsample.library"):
-			lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+			lib = subsample.library.load_instrument_library(
+				tmp_path, 10 * 1024 * 1024, with_preview=False,
+			)
 		assert len(lib) == 0
 		assert not sidecar.exists()
 		messages = [r.message for r in caplog.records]
@@ -529,7 +536,9 @@ class TestLoadInstrumentLibrary:
 	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
 		_write_wav_and_sidecar(tmp_path, "KICK")
 		_write_wav_and_sidecar(tmp_path, "SNARE")
-		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
 		ids = [r.sample_id for r in lib.samples()]
 		assert len(set(ids)) == 2
 
@@ -541,82 +550,31 @@ class TestLoadInstrumentLibrary:
 		import logging
 		missing = tmp_path / "no_such_dir"
 		with caplog.at_level(logging.WARNING, logger="subsample.library"):
-			lib = subsample.library.load_instrument_library(missing, 10 * 1024 * 1024)
+			lib = subsample.library.load_instrument_library(
+				missing, 10 * 1024 * 1024, with_preview=False,
+			)
 		assert len(lib) == 0
 
 	def test_filepath_populated (self, tmp_path: pathlib.Path) -> None:
 		wav_path, _ = _write_wav_and_sidecar(tmp_path, "KICK")
-		lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024)
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
 		record = lib.samples()[0]
 		assert record.filepath == wav_path
 
-	def test_orphan_disabled_logs_warning_and_hint (
-		self,
-		tmp_path: pathlib.Path,
-		caplog: pytest.LogCaptureFixture,
-	) -> None:
-		import logging
-		# Sidecar without WAV — explicitly disabled (clean_orphaned_sidecars=False)
-		sidecar = _write_sidecar(tmp_path, "KICK")
-		with caplog.at_level(logging.DEBUG, logger="subsample.library"):
-			lib = subsample.library.load_instrument_library(
-				tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=False,
-			)
-
-		assert len(lib) == 0
-		assert sidecar.exists(), "Sidecar must NOT be deleted when feature is disabled"
-		messages = [r.message for r in caplog.records]
-		assert any("not found" in m.lower() for m in messages), "Expected WARNING about missing audio"
-		assert any("clean_orphaned_sidecars" in m for m in messages), "Expected one-time hint"
-
-	def test_orphan_disabled_hint_appears_only_once (
-		self,
-		tmp_path: pathlib.Path,
-		caplog: pytest.LogCaptureFixture,
-	) -> None:
-		import logging
-		# Multiple orphans — hint should appear only once
-		_write_sidecar(tmp_path, "KICK")
-		_write_sidecar(tmp_path, "SNARE")
-		_write_sidecar(tmp_path, "HAT")
-		with caplog.at_level(logging.DEBUG, logger="subsample.library"):
-			subsample.library.load_instrument_library(
-				tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=False,
-			)
-
-		hint_count = sum(1 for r in caplog.records if "clean_orphaned_sidecars" in r.message)
-		assert hint_count == 1, f"Hint should appear exactly once, got {hint_count}"
-
-	def test_orphan_enabled_deletes_sidecar (
-		self,
-		tmp_path: pathlib.Path,
-		caplog: pytest.LogCaptureFixture,
-	) -> None:
-		import logging
-		sidecar = _write_sidecar(tmp_path, "KICK")
-		with caplog.at_level(logging.DEBUG, logger="subsample.library"):
-			lib = subsample.library.load_instrument_library(
-				tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=True,
-			)
-
-		assert len(lib) == 0
-		assert not sidecar.exists(), "Sidecar should have been deleted"
-		messages = [r.message for r in caplog.records]
-		assert any("orphaned" in m.lower() for m in messages), "Expected INFO about deletion"
-		assert not any("clean_orphaned_sidecars" in m for m in messages), "No hint when feature is enabled"
-
-	def test_orphan_enabled_keeps_good_samples (self, tmp_path: pathlib.Path) -> None:
-		# One orphan + one valid pair — valid sample loads; orphan is cleaned up
+	def test_orphan_sweep_keeps_good_samples (self, tmp_path: pathlib.Path) -> None:
+		# One orphan sidecar + one valid pair — valid sample loads; orphan is cleaned up.
 		sidecar_orphan = _write_sidecar(tmp_path, "ORPHAN")
 		_write_wav_and_sidecar(tmp_path, "KICK")
 		lib = subsample.library.load_instrument_library(
-			tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=True,
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
 		)
 		assert len(lib) == 1
 		assert lib.samples()[0].name == "KICK"
 		assert not sidecar_orphan.exists()
 
-	def test_orphan_enabled_logs_error_on_permission_failure (
+	def test_orphan_sweep_logs_error_on_permission_failure (
 		self,
 		tmp_path: pathlib.Path,
 		caplog: pytest.LogCaptureFixture,
@@ -631,11 +589,230 @@ class TestLoadInstrumentLibrary:
 		):
 			with caplog.at_level(logging.DEBUG, logger="subsample.library"):
 				subsample.library.load_instrument_library(
-					tmp_path, 10 * 1024 * 1024, clean_orphaned_sidecars=True,
+					tmp_path, 10 * 1024 * 1024, with_preview=False,
 				)
 
 		assert sidecar.exists(), "Sidecar must survive when deletion fails"
 		assert any(r.levelname == "ERROR" for r in caplog.records), "Expected ERROR log"
+
+
+# ---------------------------------------------------------------------------
+# TestLoadInstrumentLibraryRecursive
+# ---------------------------------------------------------------------------
+
+class TestLoadInstrumentLibraryRecursive:
+
+	"""Behaviour added by the recursive, audio-first library load:
+	subdirectory discovery, automatic sidecar/PNG regeneration on startup,
+	the orphan sweep, and stem-collision detection."""
+
+	def _png_path (self, audio_path: pathlib.Path) -> pathlib.Path:
+
+		"""Compound-suffix PNG path for an audio file (mirrors recorder logic)."""
+
+		return audio_path.with_name(audio_path.name + subsample.cache.PREVIEW_PNG_SUFFIX)
+
+	def test_recurses_into_subdirectories (self, tmp_path: pathlib.Path) -> None:
+		(tmp_path / "kicks").mkdir()
+		(tmp_path / "snares").mkdir()
+		_write_wav_and_sidecar(tmp_path / "kicks", "K1")
+		_write_wav_and_sidecar(tmp_path / "snares", "S1")
+
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
+
+		names = {s.name for s in lib.samples()}
+		assert names == {"K1", "S1"}
+
+	def test_missing_sidecar_regenerated (self, tmp_path: pathlib.Path) -> None:
+		# Audio only — no sidecar — should trigger ensure_sample_assets to
+		# analyse and write the sidecar on the way through.
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		sidecar_path = subsample.cache.cache_path(wav_path)
+		assert not sidecar_path.exists()
+
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
+
+		assert len(lib) == 1
+		assert sidecar_path.exists()
+
+	def test_missing_png_regenerated_with_previews_on (self, tmp_path: pathlib.Path) -> None:
+		# Seed a complete sidecar (preview block + PNG) via the orchestrator,
+		# delete just the PNG, then confirm the load restores the PNG without
+		# rewriting the sidecar.
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		sidecar_path = subsample.cache.cache_path(wav_path)
+		png_path     = self._png_path(wav_path)
+		sidecar_mtime_before = sidecar_path.stat().st_mtime_ns
+		png_path.unlink()
+
+		subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=True,
+		)
+
+		assert png_path.exists()
+		assert sidecar_path.stat().st_mtime_ns == sidecar_mtime_before
+
+	def test_missing_png_not_regenerated_with_previews_off (
+		self,
+		tmp_path: pathlib.Path,
+	) -> None:
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+
+		png_path = self._png_path(wav_path)
+		assert not png_path.exists()
+
+		subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
+
+		assert not png_path.exists()
+
+	def test_missing_preview_block_triggers_sidecar_rewrite (
+		self,
+		tmp_path: pathlib.Path,
+	) -> None:
+		# _write_wav_and_sidecar produces a sidecar WITHOUT a preview block.
+		# To isolate the "missing preview block" trigger, first patch the
+		# sidecar's audio_md5 to match the audio (so the load doesn't fall
+		# back to MD5-mismatch full regen for unrelated reasons).
+		import json
+		wav_path, sidecar_path = _write_wav_and_sidecar(tmp_path, "kick")
+		payload = json.loads(sidecar_path.read_text())
+		payload["audio_md5"] = subsample.cache.compute_audio_md5(wav_path)
+		sidecar_path.write_text(json.dumps(payload))
+		assert "preview" not in payload
+
+		subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=True,
+		)
+
+		updated = json.loads(sidecar_path.read_text())
+		assert "preview" in updated, "Sidecar should now embed a preview block"
+		assert self._png_path(wav_path).exists()
+
+	def test_md5_mismatch_refreshes_preview_block (self, tmp_path: pathlib.Path) -> None:
+
+		"""Regression: _reanalyze_and_save previously dropped the preview block
+		on MD5 mismatch.  ensure_sample_assets must re-embed it so the on-disk
+		sidecar stays consistent with the audio it describes."""
+
+		import json
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path, n_frames=2048)
+
+		# Seed a complete sidecar with the preview block via the orchestrator.
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+		sidecar_path = subsample.cache.cache_path(wav_path)
+		original = json.loads(sidecar_path.read_text())
+		assert "preview" in original
+
+		# Mutate audio bytes (different n_frames → different MD5).
+		tests.helpers._make_wav(wav_path, n_frames=4096)
+
+		subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=True,
+		)
+
+		updated = json.loads(sidecar_path.read_text())
+		assert "preview" in updated, "Preview block must survive an MD5 regen"
+		assert updated["duration"] != original["duration"], (
+			"Duration field should reflect the longer audio"
+		)
+
+	def test_orphan_png_deleted_in_root (self, tmp_path: pathlib.Path) -> None:
+		# A PNG named for an audio file that doesn't exist is an orphan —
+		# the sweep should delete it regardless of with_preview, since stale
+		# PNGs mislead visual auditioning.
+		orphan_png = tmp_path / ("missing.wav" + subsample.cache.PREVIEW_PNG_SUFFIX)
+		orphan_png.write_bytes(b"not really a png")
+
+		subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
+
+		assert not orphan_png.exists()
+
+	def test_orphan_in_nested_directory (self, tmp_path: pathlib.Path) -> None:
+		# Orphans deep in the tree should be discovered by the recursive
+		# sweep just like top-level ones.
+		deep = tmp_path / "a" / "b" / "c"
+		deep.mkdir(parents=True)
+		sidecar = _write_sidecar(deep, "ghost")
+		png = deep / ("ghost.wav" + subsample.cache.PREVIEW_PNG_SUFFIX)
+		png.write_bytes(b"x")
+
+		subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
+
+		assert not sidecar.exists()
+		assert not png.exists()
+		assert deep.exists(), "Empty directory is left in place; we never created it"
+
+	def test_directory_with_only_orphans (self, tmp_path: pathlib.Path) -> None:
+		_write_sidecar(tmp_path, "ghost1")
+		_write_sidecar(tmp_path, "ghost2")
+
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
+
+		assert len(lib) == 0
+		assert tmp_path.exists()
+		assert list(tmp_path.iterdir()) == []
+
+	def test_stem_collision_raises (self, tmp_path: pathlib.Path) -> None:
+		# Two audio files with the same filename stem in different
+		# subdirectories would silently overwrite each other in the stem-
+		# keyed _name_index — fail loud instead so the user can fix it.
+		(tmp_path / "kicks").mkdir()
+		(tmp_path / "snares").mkdir()
+		_write_wav_and_sidecar(tmp_path / "kicks", "01")
+		_write_wav_and_sidecar(tmp_path / "snares", "01")
+
+		with pytest.raises(subsample.library.InstrumentLibraryError) as excinfo:
+			subsample.library.load_instrument_library(
+				tmp_path, 10 * 1024 * 1024, with_preview=False,
+			)
+
+		msg = str(excinfo.value)
+		assert "01" in msg
+		assert "kicks" in msg
+		assert "snares" in msg
+
+	def test_collision_across_banks_is_allowed (self, tmp_path: pathlib.Path) -> None:
+		# Banks are independent InstrumentLibrary instances, so the same
+		# stem appearing once in each bank is fine — only within-library
+		# collisions are an error.  Verified by loading two separate
+		# directories with the same stem and asserting both succeed.
+		bank_a = tmp_path / "bank_a"
+		bank_b = tmp_path / "bank_b"
+		bank_a.mkdir()
+		bank_b.mkdir()
+		_write_wav_and_sidecar(bank_a, "kick")
+		_write_wav_and_sidecar(bank_b, "kick")
+
+		lib_a = subsample.library.load_instrument_library(
+			bank_a, 10 * 1024 * 1024, with_preview=False,
+		)
+		lib_b = subsample.library.load_instrument_library(
+			bank_b, 10 * 1024 * 1024, with_preview=False,
+		)
+
+		assert len(lib_a) == 1
+		assert len(lib_b) == 1
+		assert lib_a.samples()[0].name == "kick"
+		assert lib_b.samples()[0].name == "kick"
 
 
 # ---------------------------------------------------------------------------

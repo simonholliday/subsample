@@ -42,7 +42,14 @@ import subsample.cache
 
 _log = logging.getLogger(__name__)
 
-_SIDECAR_SUFFIX: str = ".analysis.json"
+
+class InstrumentLibraryError (Exception):
+
+	"""Raised when the on-disk instrument library is structurally invalid in a
+	way that the user must fix (e.g. two audio files with the same filename
+	stem in different subdirectories).  Distinct from "no samples found" or
+	"audio unreadable", which are recoverable conditions logged and skipped."""
+
 
 # Session-unique ID counter. itertools.count is thread-safe (C extension;
 # next() is atomic under the GIL), so callbacks on the writer thread and
@@ -333,7 +340,7 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 		_log.warning("Reference directory not found: %s — library will be empty", directory)
 		return ReferenceLibrary([])
 
-	sidecar_paths = sorted(directory.glob(f"*{_SIDECAR_SUFFIX}"))
+	sidecar_paths = sorted(directory.glob(f"*{subsample.cache.SIDECAR_SUFFIX}"))
 
 	if not sidecar_paths:
 		return ReferenceLibrary([])
@@ -362,7 +369,7 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 
 		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
-		audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
+		audio_name = sidecar_path.name[: -len(subsample.cache.SIDECAR_SUFFIX)]
 		name = pathlib.Path(audio_name).stem
 
 		records.append(SampleRecord(
@@ -410,73 +417,81 @@ class _LoadedSample:
 	channel_format: str = "pcm"
 
 
+def _sweep_orphans (directory: pathlib.Path) -> None:
+
+	"""Recursively delete .analysis.json and .preview.png sidecars whose
+	audio counterpart is absent in the same directory.
+
+	Subsample only writes these two compound suffixes itself, so the sweep
+	never touches user-created files: a `.preview.png` named like ours but
+	written by a third-party tool would still be deleted, but that's the
+	same name collision the user is responsible for avoiding.
+
+	Failures (e.g. permission denied) are logged at ERROR and skipped;
+	never aborts the wider library load.
+	"""
+
+	for path in directory.rglob("*"):
+		if not path.is_file():
+			continue
+
+		name = path.name
+
+		if name.endswith(subsample.cache.SIDECAR_SUFFIX):
+			audio_name = name[: -len(subsample.cache.SIDECAR_SUFFIX)]
+		elif name.endswith(subsample.cache.PREVIEW_PNG_SUFFIX):
+			audio_name = name[: -len(subsample.cache.PREVIEW_PNG_SUFFIX)]
+		else:
+			continue
+
+		audio_path = path.parent / audio_name
+
+		if audio_path.exists():
+			continue
+
+		try:
+			path.unlink()
+			_log.info("Deleted orphaned %s (audio %s not found)", path, audio_name)
+		except OSError as exc:
+			_log.error("Failed to delete orphan %s: %s", path, exc)
+
+
 def _load_one_sample (
-	sidecar_path: pathlib.Path,
+	audio_path: pathlib.Path,
 	load_audio: bool,
-	clean_orphaned_sidecars: bool,
-	orphan_hint_shown: threading.Event,
+	with_preview: bool,
 	target_sample_rate: typing.Optional[int] = None,
 ) -> typing.Optional[_LoadedSample]:
 
-	"""Load one instrument sample (sidecar + optional audio) from disk.
+	"""Load one instrument sample (audio + sidecar) from disk.
 
-	Designed to run on a worker thread. Each file is fully independent, so
-	multiple calls can safely execute concurrently.
+	Designed to run on a worker thread.  Each call is fully independent
+	(separate audio read, separate re-analysis if needed), so multiple
+	calls can safely execute concurrently.
 
 	Args:
-		sidecar_path:            Path to the .analysis.json sidecar file.
-		load_audio:              When True, load PCM data from the WAV file.
-		clean_orphaned_sidecars: When True (default), delete sidecars whose WAV
-		                         is missing. When False, log a warning and skip.
-		orphan_hint_shown:       Shared event; set after the hint is logged so
-		                         it appears at most once across all workers.
-		target_sample_rate:      When set, resample audio to this rate on load
-		                         (soxr_hq quality). None = keep native rate.
+		audio_path:         Path to the audio file (the sidecar/PNG are derived
+		                    from this — the audio is the source of truth).
+		load_audio:         When True, also load PCM data into the result for
+		                    playback.  False leaves audio=None to save memory.
+		with_preview:       Threaded through to ``ensure_sample_assets`` so the
+		                    PNG sidecar and embedded preview block stay in
+		                    sync with the audio when previews are enabled.
+		target_sample_rate: When set, resample audio to this rate on load
+		                    (soxr_hq quality).  None keeps the native rate.
 
 	Returns a _LoadedSample on success, or None if any step fails (the
 	reason will have already been logged by the callee).
 	"""
 
-	result = subsample.cache.load_sidecar(sidecar_path)
+	result = subsample.cache.ensure_sample_assets(audio_path, with_preview=with_preview)
 
 	if result is None:
 		return None
 
 	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
 
-	audio_name = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
-	audio_path = sidecar_path.parent / audio_name
-	name = pathlib.Path(audio_name).stem
-
-	if not audio_path.exists():
-
-		if clean_orphaned_sidecars:
-			try:
-				sidecar_path.unlink()
-				_log.info(
-					"Deleted orphaned sidecar for %s — audio file not found: %s",
-					name, audio_path,
-				)
-			except OSError as exc:
-				_log.error(
-					"Failed to delete orphaned sidecar %s: %s",
-					sidecar_path, exc,
-				)
-
-		else:
-			_log.warning(
-				"Skipping instrument sample %s — audio file not found: %s",
-				name, audio_path,
-			)
-
-			if not orphan_hint_shown.is_set():
-				orphan_hint_shown.set()
-				_log.info(
-					"To automatically remove orphaned sidecars, set "
-					"instrument.clean_orphaned_sidecars: true in config.yaml"
-				)
-
-		return None
+	name = audio_path.stem
 
 	if load_audio:
 		audio: typing.Optional[numpy.ndarray] = load_wav_audio(audio_path, target_sample_rate)
@@ -497,35 +512,48 @@ def _load_one_sample (
 def load_instrument_library (
 	directory: pathlib.Path,
 	max_memory_bytes: int,
+	*,
+	with_preview: bool,
 	load_audio: bool = True,
-	clean_orphaned_sidecars: bool = True,
 	target_sample_rate: typing.Optional[int] = None,
 ) -> InstrumentLibrary:
 
-	"""Discover and load instrument samples (WAV + sidecar) from a directory.
+	"""Discover and load instrument samples from ``directory`` (recursive).
 
-	Like load_reference_library(), but also loads the audio data from each WAV
-	file (unless load_audio=False). Unlike reference samples, instrument samples
-	require the WAV to be present — sidecars without a matching WAV are deleted
-	by default (clean_orphaned_sidecars=True) or skipped with a warning.
+	Walks the directory tree audio-first: every supported audio file becomes
+	a candidate sample, with its ``.analysis.json`` sidecar and (when
+	``with_preview=True``) ``.preview.png`` regenerated on the fly if missing
+	or stale.  Before the walk, an orphan sweep removes any sidecar or PNG
+	whose audio counterpart is absent — keeping the directory tidy after the
+	user renames or moves files outside subsample.
 
-	Scans the top level of directory only (non-recursive). Samples are added in
-	sorted filename order; the memory limit is respected using FIFO eviction.
+	Samples are added in lexicographic path order; the memory limit is
+	respected using FIFO eviction.  Each loaded record is assigned a
+	session-unique ID.
 
-	Each loaded record is assigned a session-unique ID.
+	Two samples sharing the same filename stem in different subdirectories
+	is rejected with ``InstrumentLibraryError`` — the library is stem-keyed
+	internally and a silent overwrite would route MIDI lookups to the wrong
+	sample.
 
 	Args:
-		directory:                Path to search for .analysis.json sidecar files.
-		max_memory_bytes:         Memory limit passed to the returned InstrumentLibrary.
-		load_audio:               When True (default), load PCM data into each record's
-		                          audio field. When False, audio is left as None to save
-		                          memory — use this when playback is not required.
-		clean_orphaned_sidecars:  When True (default), delete sidecars whose WAV
-		                          is missing. When False, log a warning and skip.
+		directory:          Root of the recursive sample search.
+		max_memory_bytes:   Memory limit passed to the returned InstrumentLibrary.
+		with_preview:       Threaded from ``cfg.recorder.previews``; when False
+		                    the orchestrator skips PNG generation and the
+		                    embedded preview block (orphan PNGs are still
+		                    swept unconditionally).
+		load_audio:         When True (default), load PCM data into each
+		                    record's audio field.  Set False to load metadata
+		                    only (e.g. for an analysis-only run).
+		target_sample_rate: When set, resample on load to this rate.
 
 	Returns:
-		InstrumentLibrary containing all successfully loaded samples.
-		If the directory does not exist or is empty, returns an empty library.
+		InstrumentLibrary containing all successfully loaded samples.  If the
+		directory does not exist, returns an empty library.
+
+	Raises:
+		InstrumentLibraryError: when two audio files share a filename stem.
 	"""
 
 	lib = InstrumentLibrary(max_memory_bytes)
@@ -534,9 +562,17 @@ def load_instrument_library (
 		_log.warning("Instrument directory not found: %s — library will be empty", directory)
 		return lib
 
-	sidecar_paths = sorted(directory.glob(f"*{_SIDECAR_SUFFIX}"))
+	# Tidy up before working.  Orphan sweep runs unconditionally so the
+	# directory state at the end of load reflects exactly the audio files
+	# present at the start — no stale sidecar/PNG ghosts.
+	_sweep_orphans(directory)
 
-	if not sidecar_paths:
+	audio_paths = sorted(
+		p for p in directory.rglob("*")
+		if p.is_file() and p.suffix.lower() in subsample.cache.AUDIO_EXTENSIONS
+	)
+
+	if not audio_paths:
 		return lib
 
 	# Worker count: same formula as SampleProcessor — reserve 2 cores for
@@ -545,41 +581,49 @@ def load_instrument_library (
 
 	_log.info(
 		"Loading %d instrument sample(s) from %s using %d worker(s)…",
-		len(sidecar_paths), directory, n_workers,
+		len(audio_paths), directory, n_workers,
 	)
 
-	# Phase 1 — parallel: load sidecar + audio for each file concurrently.
-	# Each file is fully independent (separate disk reads, separate re-analysis),
-	# so parallelism is safe. Results are associated with their original sorted
-	# position via the futures list so Phase 2 can add records in order.
-	#
-	# orphan_hint_shown is shared across workers so the one-time config hint
-	# is emitted at most once regardless of how many orphans are found.
-	orphan_hint_shown = threading.Event()
-
+	# Phase 1 — parallel: load each sample (sidecar regen + audio read) in
+	# its own worker.  Each file is fully independent so parallelism is
+	# safe.  Results are returned in submission order so Phase 2 can add
+	# records deterministically.
 	with concurrent.futures.ThreadPoolExecutor(
 		max_workers=n_workers,
 		thread_name_prefix="lib-loader",
 	) as executor:
 		futures = [
 			executor.submit(
-				_load_one_sample, path, load_audio,
-				clean_orphaned_sidecars, orphan_hint_shown,
+				_load_one_sample, path, load_audio, with_preview,
 				target_sample_rate,
 			)
-			for path in sidecar_paths
+			for path in audio_paths
 		]
 		# Block until all workers finish; results arrive in submitted order.
 		raw_results = [f.result() for f in futures]
 
 	# Phase 2 — sequential: construct SampleRecords and add to the library in
-	# sorted filename order. allocate_id() is called here (not in workers) so
+	# sorted path order. allocate_id() is called here (not in workers) so
 	# IDs are assigned in a deterministic order and FIFO eviction works correctly.
+	# Collision detection lives here too — by the time Phase 2 runs we know
+	# every successfully-loaded sample's stem, so a duplicate is a fatal
+	# user error rather than a load-order race.
 	loaded = 0
 
 	for loaded_sample in raw_results:
 		if loaded_sample is None:
 			continue
+
+		existing_id = lib.find_by_name(loaded_sample.name)
+		if existing_id is not None:
+			existing = lib.get(existing_id)
+			existing_path = existing.filepath if existing is not None else None
+			raise InstrumentLibraryError(
+				f"Stem collision: '{loaded_sample.name}' appears at both "
+				f"{existing_path} and {loaded_sample.audio_path}. "
+				f"The instrument library is keyed by filename stem; rename "
+				f"or move one file so each stem is unique across the library."
+			)
 
 		record = SampleRecord(
 			sample_id      = allocate_id(),

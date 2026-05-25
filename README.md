@@ -1390,8 +1390,7 @@ weights - is optional and rarely needs changing.
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `instrument.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
-| `instrument.directory` | `samples/captures` | Directory of instrument samples to load at startup (overridden by `banks:` in the MIDI map when present) |
-| `instrument.clean_orphaned_sidecars` | `true` | Auto-delete `.analysis.json` sidecars whose audio file has been deleted |
+| `instrument.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Overridden by `banks:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
 | `instrument.watch` | `false` | Monitor `instrument.directory` (or each bank directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio (see Watching for new samples) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
@@ -1533,10 +1532,23 @@ instrument:
   directory: samples/captures
 ```
 
-On startup, Subsample pre-loads all existing WAV files from `./samples/captures`.
-As new recordings arrive they are written to disk and added to memory in one step.
-The memory cap keeps only the most recent window of captures in RAM; the full
-archive on disk is unaffected.
+On startup, Subsample walks `./samples/captures` recursively, so samples can be
+organised into subdirectories - `kicks/`, `snares/`, `percussion/clangs/`, or
+whatever scheme suits the user. Each audio file is identified by its filename
+stem and treated as one instrument sample; stems must be unique across the
+entire library (subsample fails loudly at startup if two audio files in
+different subdirectories share a stem, since the in-memory index is stem-keyed).
+
+The library is self-healing across sessions: if the user renames, moves, or
+removes audio files between runs (for example in an external auditioning tool
+like Sononym), subsample's startup pass regenerates missing `.analysis.json`
+sidecars and `.preview.png` previews from the audio at its current location, and
+deletes any sidecars or preview images whose audio counterpart has gone away.
+The on-disk state always reflects the audio present at startup.
+
+As new recordings arrive they are written to disk and added to memory in one
+step. The memory cap keeps only the most recent window of captures in RAM; the
+full archive on disk is unaffected.
 
 ### Watching for new samples
 

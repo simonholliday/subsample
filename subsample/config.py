@@ -279,17 +279,11 @@ class InstrumentConfig:
 
 	directory: str = "samples/captures"
 	"""Path to the directory of instrument samples to load at startup.
-	Each sample requires both a WAV file and an .analysis.json sidecar.
-	Defaults to the captures directory so newly recorded samples are
-	immediately available for playback."""
-
-	clean_orphaned_sidecars: bool = True
-	"""When True (default), automatically delete .analysis.json sidecar files
-	whose corresponding audio file has been deleted. When False, orphaned
-	sidecars are skipped with a warning.
-
-	Note: this only applies to instrument samples. Reference samples are
-	intentionally allowed to exist as sidecar-only (no audio required)."""
+	Subsample walks this directory recursively, so samples can be organised
+	into subdirectories (e.g. `kicks/`, `snares/`) however suits the user.
+	Each sample is identified by its audio file; matching `.analysis.json`
+	and `.preview.png` sidecars are regenerated on startup if missing, and
+	any orphaned sidecars are deleted automatically."""
 
 	watch: bool = False
 	"""When True, monitor instrument.directory at runtime for new audio
@@ -871,7 +865,6 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	instrument = InstrumentConfig(
 		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
 		directory=str(instrument_raw.get("directory", "samples/captures")),
-		clean_orphaned_sidecars=bool(instrument_raw.get("clean_orphaned_sidecars", True)),
 		watch=bool(instrument_raw.get("watch", False)),
 	)
 

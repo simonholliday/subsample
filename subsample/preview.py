@@ -25,7 +25,9 @@ import base64
 import colorsys
 import dataclasses
 import math
+import os
 import pathlib
+import tempfile
 import typing
 import xml.sax.saxutils
 
@@ -472,6 +474,12 @@ def render_png (data: PreviewData, path: pathlib.Path) -> None:
 
 	The composition is entirely opaque RGB (no alpha) so the output file
 	is universally readable by OS file managers and image viewers.
+
+	The write is atomic — the PNG goes to a temp file in the same
+	directory, then ``os.replace`` swaps it into place.  A killed render
+	therefore never leaves a half-written PNG that a parallel subsample
+	process (or a file manager scanning the directory) would treat as
+	valid for the current audio.
 	"""
 
 	img  = Image.new("RGB", (PNG_WIDTH, PNG_HEIGHT), _BG_COLOR)
@@ -487,7 +495,28 @@ def render_png (data: PreviewData, path: pathlib.Path) -> None:
 
 	_png_draw_badge(draw, data)
 
-	img.save(path, format="PNG", optimize=True)
+	fd, tmp_path = tempfile.mkstemp(
+		dir    = path.parent,
+		prefix = path.name + ".tmp",
+		suffix = ".png",
+	)
+
+	try:
+		with os.fdopen(fd, "wb") as f:
+			img.save(f, format="PNG", optimize=True)
+
+		os.replace(tmp_path, path)
+
+	except Exception:
+		# Clean up the temp file if anything went wrong; never leak it
+		# next to the legitimate PNG, where it could confuse the user
+		# or be misread by tooling.
+		try:
+			os.unlink(tmp_path)
+		except OSError:
+			pass
+
+		raise
 
 
 def _png_draw_band_skyline (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:

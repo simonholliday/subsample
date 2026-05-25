@@ -469,6 +469,125 @@ class TestLoadOrAnalyze:
 		assert result1[0] == result2[0]
 
 
+class TestEnsureSampleAssets:
+
+	"""Tests for the audio-first orchestrator that drives the recursive
+	instrument library load.  Covers the four decision branches: full regen
+	(sidecar/PNG cold or stale), PNG-only regen, and the no-op path; plus
+	the with_preview=False behaviour and unreadable-audio error path."""
+
+	def _png_path (self, audio_path: pathlib.Path) -> pathlib.Path:
+		return audio_path.with_name(audio_path.name + subsample.cache.PREVIEW_PNG_SUFFIX)
+
+	def test_cold_no_sidecar_no_png_regen_both_with_preview_on (
+		self,
+		tmp_path: pathlib.Path,
+	) -> None:
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+
+		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		assert result is not None
+		sidecar = subsample.cache.cache_path(wav_path)
+		assert sidecar.exists()
+		# Sidecar carries the preview block when with_preview=True.
+		payload = json.loads(sidecar.read_text())
+		assert "preview" in payload
+		assert self._png_path(wav_path).exists()
+
+	def test_cold_no_sidecar_no_png_with_preview_off (
+		self,
+		tmp_path: pathlib.Path,
+	) -> None:
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+
+		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+
+		assert result is not None
+		sidecar = subsample.cache.cache_path(wav_path)
+		assert sidecar.exists()
+		# No preview block when previews are disabled.
+		payload = json.loads(sidecar.read_text())
+		assert "preview" not in payload
+		assert not self._png_path(wav_path).exists()
+
+	def test_warm_everything_present_is_noop (self, tmp_path: pathlib.Path) -> None:
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		# Cold seed produces sidecar + PNG.
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		sidecar = subsample.cache.cache_path(wav_path)
+		png     = self._png_path(wav_path)
+		sidecar_mtime_before = sidecar.stat().st_mtime_ns
+		png_mtime_before     = png.stat().st_mtime_ns
+
+		# Warm call should not rewrite either file.
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		assert sidecar.stat().st_mtime_ns == sidecar_mtime_before
+		assert png.stat().st_mtime_ns     == png_mtime_before
+
+	def test_png_only_regen_keeps_sidecar (self, tmp_path: pathlib.Path) -> None:
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		sidecar = subsample.cache.cache_path(wav_path)
+		png     = self._png_path(wav_path)
+		sidecar_mtime_before = sidecar.stat().st_mtime_ns
+		png.unlink()
+		assert not png.exists()
+
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		# PNG re-rendered from the embedded preview block; sidecar untouched.
+		assert png.exists()
+		assert sidecar.stat().st_mtime_ns == sidecar_mtime_before
+
+	def test_md5_mismatch_with_previews_on_refreshes_both (
+		self,
+		tmp_path: pathlib.Path,
+	) -> None:
+
+		"""Regression: the preview block was previously silently dropped on
+		MD5 mismatch.  ensure_sample_assets must re-embed it."""
+
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path, n_frames=2048)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		sidecar = subsample.cache.cache_path(wav_path)
+		original_payload = json.loads(sidecar.read_text())
+		assert "preview" in original_payload
+
+		# Mutate audio bytes — different n_frames → different MD5 → triggers
+		# the regen path inside ensure_sample_assets.
+		tests.helpers._make_wav(wav_path, n_frames=4096)
+
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		updated_payload = json.loads(sidecar.read_text())
+		assert "preview" in updated_payload, "Preview block must survive an MD5 regen"
+		assert updated_payload["duration"] != original_payload["duration"]
+		# And the PNG was rewritten alongside the sidecar.
+		assert self._png_path(wav_path).exists()
+
+	def test_unreadable_audio_returns_none (self, tmp_path: pathlib.Path) -> None:
+		# Audio file looks valid by extension but contains garbage — the
+		# underlying audio reader raises ValueError, which the orchestrator
+		# logs and converts to a None return so the library load can skip
+		# this sample and continue with the rest.
+		wav_path = tmp_path / "broken.wav"
+		wav_path.write_bytes(b"not a wav file at all")
+
+		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+
+		assert result is None
+
+
 class TestV11SidecarBackwardCompat:
 
 	"""Sidecars written before v12 lack spectral_rolloff, spectral_slope,

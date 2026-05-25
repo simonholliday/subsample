@@ -455,20 +455,14 @@ analysis:
 #   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_instrument_values
 #
 #   directory: samples/captures
-#   # Directory of instrument samples to load at startup. Each sample
-#   # requires both a WAV file and an .analysis.json sidecar. This is the
-#   # pool of samples that MIDI map rules evaluate against. New samples
-#   # arriving in this directory (via capture or import) trigger
-#   # re-evaluation of all assignments.
+#   # Directory of instrument samples to load at startup.  Walked recursively,
+#   # so samples can be organised into subdirectories (kicks/, snares/, …)
+#   # however suits the user.  Each sample is identified by its audio file;
+#   # subsample regenerates missing `.analysis.json` and `.preview.png`
+#   # sidecars at startup, and automatically deletes any sidecar/PNG whose
+#   # audio counterpart has gone away.
 #   # Overridden when banks: is declared in the MIDI map (see README).
 #   # Default: samples/captures (same as output.directory).
-#
-#   clean_orphaned_sidecars: true
-#   # When true (default), .analysis.json sidecar files whose corresponding
-#   # audio file has been deleted are automatically removed at startup. When
-#   # false, orphaned sidecars are skipped with a warning.
-#   # Note: this only applies to instrument samples. Reference sidecars are
-#   # intentionally allowed to exist without their audio file.
 #
 #   watch: false
 #   # When true, monitor instrument.directory at runtime for new audio files

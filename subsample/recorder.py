@@ -565,7 +565,7 @@ class SampleProcessor:
 		# master `recorder.previews` toggle in _process gates both the data
 		# block and the PNG sidecar in a single decision.
 		if preview_data is not None:
-			png_path = filepath.with_name(filepath.name + ".preview.png")
+			png_path = filepath.with_name(filepath.name + subsample.cache.PREVIEW_PNG_SUFFIX)
 			try:
 				subsample.preview.render_png(preview_data, png_path)
 			except OSError as exc:
