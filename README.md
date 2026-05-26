@@ -456,6 +456,7 @@ when you want to try something the tutorial didn't show.
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
+| `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
 
 ### Note syntax
 
@@ -956,6 +957,80 @@ pad:
 Set `player.audio.channels` in config to match your device (e.g. 8 for a
 Focusrite Scarlett 18i20). When `output` is omitted, instruments route to the
 first N outputs as before - stereo users see no change.
+
+### Velocity layering - multiple sounds per MIDI note
+
+A single `(channel, note)` can host multiple assignments, each declaring a
+distinct velocity range. The player picks the matching layer at note-on based
+on the incoming velocity. Two common uses:
+
+- **Velocity-switched libraries** — soft taps trigger the soft-recorded sample,
+  hard hits trigger the hard-recorded one (standard pattern in drum and piano
+  libraries since the 1980s).
+- **Trigger multiplication** — turn a single MIDI key into two or more distinct
+  triggers by splitting its velocity range. Trades velocity resolution for
+  more sounds per pad.
+
+#### List shortcut - filter only
+
+```yaml
+- name: Hard snare hit
+  channel: 10
+  notes: 38
+  velocity: [100, 127]
+  select:
+    where:
+      reference: SNARE_HARD
+```
+
+This assignment fires only for velocities 100-127. The original velocity reaches
+the gain calculation unchanged.
+
+#### Dict form - filter with optional rescale
+
+```yaml
+- name: Soft hat
+  channel: 10
+  notes: 42
+  velocity:
+    trigger: [0, 63]
+    rescale: true                # → output range [0, 127]
+  select:
+    where: { reference: HAT_SOFT }
+
+- name: Hard hat
+  channel: 10
+  notes: 42
+  velocity:
+    trigger: [64, 127]
+    rescale: [10, 100]           # custom output range
+  select:
+    where: { reference: HAT_HARD }
+```
+
+`rescale: true` is shorthand for `[0, 127]`. With rescale on, each layer
+plays through its own full dynamic envelope: a vel-30 input on the
+0-63 layer is treated as if it were 60 out of 127, so the sample doesn't
+sound permanently quiet just because the layer only sees the low half of
+the velocity range.
+
+Omit `rescale` (or set it to `false`) to keep the input velocity literal —
+useful when each layer's sample is already calibrated for the velocity range
+it covers, so rescaling would inflate the loudness inappropriately.
+
+#### Validation
+
+| Condition | Behaviour |
+|---|---|
+| Velocity field omitted | Default — single layer covering all velocities (no change from pre-layering) |
+| Overlapping ranges on the same note | `ValueError` at load — overlap is almost always a typo |
+| Coverage gap (some velocities mapped to no layer) | `WARNING` listing the gap — velocities in the gap silently play nothing |
+| `trigger`/`rescale` lo > hi, or out of `[0, 127]` | `ValueError` at load |
+| Unknown inner key (e.g. `trggier` typo) | `ValueError` at load |
+
+Layers maintain independent `round_robin` segment counters and independent
+variant-transition fallback caches, so two layers on the same note never
+interfere with each other's state.
 
 ### Extract - present a multi-channel sample as a sub-pattern
 

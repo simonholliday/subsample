@@ -83,13 +83,18 @@ def _make_note_map (
 	per_note_pick: bool = False,
 ) -> subsample.player.NoteMap:
 
-	"""Build a NoteMap for one assignment across multiple notes."""
+	"""Build a NoteMap for one assignment across multiple notes.
+
+	Returns a single-layer NoteMap (one entry per note) with the full
+	default velocity range — matches the pre-velocity-layering behaviour
+	so legacy tests stay correct after the value-type migration.
+	"""
 
 	note_map: subsample.player.NoteMap = {}
 
 	for i, note in enumerate(notes):
 		rank = (i + 1) if per_note_pick else 1
-		note_map[(channel, note)] = (assignment, subsample.query.PickSpec(rank, rank))
+		note_map[(channel, note)] = [(assignment, subsample.query.PickSpec(rank, rank))]
 
 	return note_map
 
@@ -572,11 +577,17 @@ class TestStateLock:
 		audio = numpy.zeros((200, 1), dtype=numpy.float32)
 		level = subsample.analysis.LevelResult(peak=0.0, rms=0.0)
 
-		player._select_segment(audio, level, bounds, "round_robin", channel=9, note=36)
+		player._select_segment(
+			audio, level, bounds, "round_robin",
+			channel=9, note=36, velocity_trigger=(0, 127),
+		)
 
 		assert events.count("acquire") >= 1
 		assert events.count("acquire") == events.count("release")
-		assert player._segment_counters[(9, 36)] == 1
+		# Default velocity layer hashes to (ch, note, 0, 127) — the
+		# uniform 4-tuple key shape that keeps layered and non-layered
+		# notes on the same code path.
+		assert player._segment_counters[(9, 36, 0, 127)] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1047,7 +1058,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert (9, 36) in note_map
-		asgn, pick = note_map[(9, 36)]
+		asgn, pick = note_map[(9, 36)][0]
 		assert asgn.select[0].where.reference == "BD0025"
 		assert asgn.one_shot is True
 		assert pick == subsample.query.PickSpec(1, 1)
@@ -1067,8 +1078,8 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
-		assert note_map[(9, 36)][1] == subsample.query.PickSpec(1, 1)   # pick 1
-		assert note_map[(9, 35)][1] == subsample.query.PickSpec(2, 2)   # pick 2
+		assert note_map[(9, 36)][0][1] == subsample.query.PickSpec(1, 1)   # pick 1
+		assert note_map[(9, 35)][0][1] == subsample.query.PickSpec(2, 2)   # pick 2
 
 	def test_channel_conversion (self, tmp_path: pathlib.Path) -> None:
 		"""User-facing channel 10 converts to mido channel 9."""
@@ -1099,7 +1110,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
-		asgn, _ = note_map[(9, 36)]
+		asgn, _ = note_map[(9, 36)][0]
 		assert asgn.one_shot is True
 
 	def test_unknown_reference_skipped (
@@ -1206,8 +1217,8 @@ assignments:
 
 		assert (9, 36) in note_map
 		assert (9, 38) in note_map
-		assert note_map[(9, 36)][0].select[0].where.reference == "BD0025"
-		assert note_map[(9, 38)][0].select[0].where.reference == "SD5075"
+		assert note_map[(9, 36)][0][0].select[0].where.reference == "BD0025"
+		assert note_map[(9, 38)][0][0].select[0].where.reference == "SD5075"
 
 	def test_name_filter (self, tmp_path: pathlib.Path) -> None:
 		"""where: { name: stem } is parsed correctly."""
@@ -1224,7 +1235,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (9, 36) in note_map
-		asgn, _ = note_map[(9, 36)]
+		asgn, _ = note_map[(9, 36)][0]
 		assert asgn.select[0].where.name == "2026-03-24_14-37-14"
 		assert asgn.one_shot is True
 
@@ -1251,7 +1262,7 @@ assignments:
 		assert (9, 36) in note_map
 
 		# Path-based reference: resolved to absolute path at parse time.
-		ref = note_map[(9, 36)][0].select[0].where.reference
+		ref = note_map[(9, 36)][0][0].select[0].where.reference
 		assert ref is not None
 		assert "GM36_BassDrum1" in ref
 		assert "/" in ref  # path-based, not bare name
@@ -1269,7 +1280,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
-		asgn, _ = note_map[(9, 36)]
+		asgn, _ = note_map[(9, 36)][0]
 		# No pan specified → pan_weights is None (default routing).
 		assert asgn.pan_weights is None
 
@@ -1286,7 +1297,7 @@ assignments:
     pan: [75, 25]
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
-		asgn, _ = note_map[(9, 36)]
+		asgn, _ = note_map[(9, 36)][0]
 		assert asgn.pan_weights is not None
 		numpy.testing.assert_allclose(asgn.pan_weights, [75.0, 25.0], atol=1e-5)
 
@@ -1303,7 +1314,7 @@ assignments:
     pan: [100, 0]
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
-		asgn, _ = note_map[(9, 36)]
+		asgn, _ = note_map[(9, 36)][0]
 		assert asgn.pan_weights is not None
 		numpy.testing.assert_allclose(asgn.pan_weights, [100.0, 0.0], atol=1e-5)
 
@@ -1340,7 +1351,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"]).note_map
 
 		for midi_note in [48, 50, 52]:
-			asgn, pick = note_map[(0, midi_note)]
+			asgn, pick = note_map[(0, midi_note)][0]
 			assert pick == subsample.query.PickSpec(1, 1)
 			assert asgn.process.has_repitch()
 
@@ -1359,9 +1370,9 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
-		assert note_map[(9, 36)][1] == subsample.query.PickSpec(1, 1)
-		assert note_map[(9, 35)][1] == subsample.query.PickSpec(2, 2)
-		assert not note_map[(9, 36)][0].process.has_repitch()
+		assert note_map[(9, 36)][0][1] == subsample.query.PickSpec(1, 1)
+		assert note_map[(9, 35)][0][1] == subsample.query.PickSpec(2, 2)
+		assert not note_map[(9, 36)][0][0].process.has_repitch()
 
 	def test_note_name_in_map (self, tmp_path: pathlib.Path) -> None:
 		"""Note names (C2) are accepted in assignments."""
@@ -1396,6 +1407,379 @@ assignments:
 		assert len(note_map) == 25
 		assert (0, 36) in note_map
 		assert (0, 60) in note_map
+
+
+# ---------------------------------------------------------------------------
+# Velocity layering — _parse_velocity, _validate_velocity_layers, end-to-end
+# routing, rescale arithmetic, and per-layer state isolation.
+# ---------------------------------------------------------------------------
+
+class TestParseVelocity:
+
+	"""Unit tests for the YAML parser _parse_velocity()."""
+
+	def test_omitted_returns_full_range_no_rescale (self) -> None:
+		trigger, rescale_to = subsample.player._parse_velocity(None, "asgn")
+		assert trigger == (0, 127)
+		assert rescale_to is None
+
+	def test_list_shortcut (self) -> None:
+		"""velocity: [0, 63] is shorthand for trigger only, no rescale."""
+		trigger, rescale_to = subsample.player._parse_velocity([0, 63], "asgn")
+		assert trigger == (0, 63)
+		assert rescale_to is None
+
+	def test_dict_form_trigger_only (self) -> None:
+		trigger, rescale_to = subsample.player._parse_velocity(
+			{"trigger": [10, 100]}, "asgn",
+		)
+		assert trigger == (10, 100)
+		assert rescale_to is None
+
+	def test_dict_form_rescale_false (self) -> None:
+		"""rescale: false is identical to omitting rescale."""
+		trigger, rescale_to = subsample.player._parse_velocity(
+			{"trigger": [0, 63], "rescale": False}, "asgn",
+		)
+		assert trigger == (0, 63)
+		assert rescale_to is None
+
+	def test_dict_form_rescale_true (self) -> None:
+		"""rescale: true means rescale to the full MIDI range."""
+		trigger, rescale_to = subsample.player._parse_velocity(
+			{"trigger": [0, 63], "rescale": True}, "asgn",
+		)
+		assert trigger == (0, 63)
+		assert rescale_to == (0, 127)
+
+	def test_dict_form_rescale_custom_range (self) -> None:
+		trigger, rescale_to = subsample.player._parse_velocity(
+			{"trigger": [0, 63], "rescale": [10, 100]}, "asgn",
+		)
+		assert trigger == (0, 63)
+		assert rescale_to == (10, 100)
+
+	def test_trigger_out_of_range_rejected (self) -> None:
+		with pytest.raises(ValueError, match=r"\[0, 127\]"):
+			subsample.player._parse_velocity([0, 200], "asgn")
+
+	def test_trigger_lo_greater_than_hi_rejected (self) -> None:
+		with pytest.raises(ValueError, match="lo > hi"):
+			subsample.player._parse_velocity([100, 50], "asgn")
+
+	def test_unknown_inner_key_rejected (self) -> None:
+		"""Typo guard: trggier is not trigger."""
+		with pytest.raises(ValueError, match="unknown velocity key"):
+			subsample.player._parse_velocity({"trggier": [0, 63]}, "asgn")
+
+	def test_dict_form_without_trigger_rejected (self) -> None:
+		"""rescale without trigger is a malformed velocity dict."""
+		with pytest.raises(ValueError, match="requires a 'trigger' field"):
+			subsample.player._parse_velocity({"rescale": True}, "asgn")
+
+	def test_single_point_trigger_with_rescale_list_rejected (self) -> None:
+		"""Rescaling a 1-velocity trigger has no defined mapping (div-by-0)."""
+		with pytest.raises(ValueError, match="non-point trigger"):
+			subsample.player._parse_velocity(
+				{"trigger": [50, 50], "rescale": [0, 127]}, "asgn",
+			)
+
+	def test_single_point_trigger_without_rescale_allowed (self) -> None:
+		"""A single-velocity trigger filter (rescale off) is fine — it just
+		fires for exactly that velocity."""
+		trigger, rescale_to = subsample.player._parse_velocity([64, 64], "asgn")
+		assert trigger == (64, 64)
+		assert rescale_to is None
+
+	def test_assignment_name_in_error_messages (self) -> None:
+		"""Errors must name the assignment for locatability."""
+		with pytest.raises(ValueError, match="'Soft hat'"):
+			subsample.player._parse_velocity([200, 100], "Soft hat")
+
+
+class TestVelocityLayering:
+
+	"""End-to-end tests for velocity layering through ``load_midi_map`` and
+	the runtime layer selection in ``_select_velocity_layer``."""
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_default_velocity_when_omitted (self, tmp_path: pathlib.Path) -> None:
+		"""Assignment without velocity field still routes for all velocities."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		assert (9, 36) in note_map
+		assert len(note_map[(9, 36)]) == 1
+		asgn, _ = note_map[(9, 36)][0]
+		assert asgn.velocity_trigger == (0, 127)
+		assert asgn.velocity_rescale_to is None
+
+	def test_two_layers_load_into_one_note (self, tmp_path: pathlib.Path) -> None:
+		"""Two assignments on the same (ch, note) with non-overlapping ranges
+		coexist as separate list entries."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Soft hat
+    channel: 10
+    notes: 42
+    velocity: [0, 63]
+    select:
+      where:
+        reference: BD0025
+  - name: Hard hat
+    channel: 10
+    notes: 42
+    velocity: [64, 127]
+    select:
+      where:
+        reference: BD0025
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		assert (9, 42) in note_map
+		entries = note_map[(9, 42)]
+		assert len(entries) == 2
+
+		names = {e[0].name for e in entries}
+		assert names == {"Soft hat", "Hard hat"}
+
+	def test_overlapping_layers_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""Overlap is almost always a typo; reject loudly at load."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Soft hat
+    channel: 10
+    notes: 42
+    velocity: [0, 63]
+    select:
+      where:
+        reference: BD0025
+  - name: Wider hat
+    channel: 10
+    notes: 42
+    velocity: [50, 100]
+    select:
+      where:
+        reference: BD0025
+""")
+		with pytest.raises(ValueError, match="overlap"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_coverage_gap_warned (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""Gaps in velocity coverage log a WARNING but don't reject — the
+		user may legitimately want certain velocities to be silent."""
+
+		import logging
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Soft hat
+    channel: 10
+    notes: 42
+    velocity: [0, 30]
+    select:
+      where:
+        reference: BD0025
+  - name: Hard hat
+    channel: 10
+    notes: 42
+    velocity: [60, 127]
+    select:
+      where:
+        reference: BD0025
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		# Map loads (length-2 list for the layered note).
+		assert len(note_map[(9, 42)]) == 2
+
+		# Warning names the gap.
+		assert any("gap" in r.message.lower() for r in caplog.records)
+		assert any("[31, 59]" in r.message for r in caplog.records)
+
+
+class TestSelectVelocityLayer:
+
+	"""Tests for MidiPlayer._select_velocity_layer — the runtime lookup
+	that picks the matching velocity layer at note-on time."""
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _entries (
+		self,
+		ranges_and_rescales: list[tuple[tuple[int, int], typing.Optional[tuple[int, int]]]],
+	) -> list[tuple[subsample.query.Assignment, subsample.query.PickSpec]]:
+		"""Build a list of velocity-layered entries from (trigger, rescale_to) pairs."""
+		entries = []
+		for i, (trig, resc) in enumerate(ranges_and_rescales):
+			asgn = subsample.query.Assignment(
+				name=f"layer_{i}",
+				select=(subsample.query.SelectSpec(),),
+				velocity_trigger=trig,
+				velocity_rescale_to=resc,
+			)
+			entries.append((asgn, subsample.query.PickSpec(1, 1)))
+		return entries
+
+	def test_single_default_layer_matches_any_velocity (self) -> None:
+		"""A single full-range layer matches every velocity from 1 to 127."""
+
+		player = self._make_player()
+		entries = self._entries([((0, 127), None)])
+
+		for v in (1, 32, 64, 100, 127):
+			result = player._select_velocity_layer(entries, v)
+			assert result is not None
+			asgn, _, effective = result
+			assert asgn.name == "layer_0"
+			# No rescale_to → effective velocity == input velocity.
+			assert effective == v
+
+	def test_two_layers_route_by_velocity (self) -> None:
+		"""Low-velocity input picks layer 0, high-velocity picks layer 1."""
+
+		player = self._make_player()
+		entries = self._entries([((0, 63), None), ((64, 127), None)])
+
+		soft = player._select_velocity_layer(entries, 30)
+		assert soft is not None
+		assert soft[0].name == "layer_0"
+
+		hard = player._select_velocity_layer(entries, 100)
+		assert hard is not None
+		assert hard[0].name == "layer_1"
+
+	def test_returns_none_for_uncovered_velocity (self) -> None:
+		"""A velocity in a coverage gap returns None — handler then plays
+		nothing, matching the existing 'no mapping for this note' path."""
+
+		player = self._make_player()
+		# Gap from 31-59 inclusive.
+		entries = self._entries([((0, 30), None), ((60, 127), None)])
+
+		assert player._select_velocity_layer(entries, 45) is None
+
+	def test_rescale_true_endpoints (self) -> None:
+		"""rescale: true → output spans 0-127 over the trigger range."""
+
+		player = self._make_player()
+		entries = self._entries([((0, 63), (0, 127))])
+
+		_, _, eff_lo = player._select_velocity_layer(entries, 0) or (None, None, None)
+		_, _, eff_hi = player._select_velocity_layer(entries, 63) or (None, None, None)
+
+		assert eff_lo == 0
+		assert eff_hi == 127
+
+	def test_rescale_custom_range_endpoints (self) -> None:
+		"""rescale: [10, 100] → output endpoints land exactly on the target range."""
+
+		player = self._make_player()
+		entries = self._entries([((0, 63), (10, 100))])
+
+		_, _, eff_lo = player._select_velocity_layer(entries, 0) or (None, None, None)
+		_, _, eff_hi = player._select_velocity_layer(entries, 63) or (None, None, None)
+
+		assert eff_lo == 10
+		assert eff_hi == 100
+
+	def test_rescale_midpoint_is_midpoint (self) -> None:
+		"""Linear mapping: a midpoint input lands at the midpoint of the output."""
+
+		player = self._make_player()
+		# Trigger 0-100, rescale to 0-127 — input 50 → output 63 or 64.
+		entries = self._entries([((0, 100), (0, 127))])
+
+		_, _, eff = player._select_velocity_layer(entries, 50) or (None, None, None)
+		# Linear: 0 + 50/100 * 127 = 63.5 → rounds to 64 (banker's-rounding
+		# matters here, but Python rounds half to even → 64).
+		assert eff in (63, 64)
+
+	def test_passthrough_when_no_rescale (self) -> None:
+		"""Without rescale_to, the input velocity reaches the handler unchanged."""
+
+		player = self._make_player()
+		entries = self._entries([((10, 100), None)])
+
+		_, _, eff = player._select_velocity_layer(entries, 50) or (None, None, None)
+		assert eff == 50
+
+
+class TestPerLayerSegmentCounter:
+
+	"""Two velocity layers on the same note must keep independent
+	round_robin counters (and independent _last_played fallbacks)."""
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def test_round_robin_counters_independent_per_layer (self) -> None:
+		"""Two layers on the same (channel, note) advance their own counters."""
+
+		import subsample.analysis
+
+		player = self._make_player()
+		bounds = ((0, 100), (100, 200))
+		audio  = numpy.zeros((200, 1), dtype=numpy.float32)
+		level  = subsample.analysis.LevelResult(peak=0.0, rms=0.0)
+
+		# Layer A: trigger (0, 63).  Two triggers advance its counter to 2.
+		for _ in range(2):
+			player._select_segment(
+				audio, level, bounds, "round_robin",
+				channel=9, note=36, velocity_trigger=(0, 63),
+			)
+
+		# Layer B: trigger (64, 127).  One trigger advances its counter to 1.
+		player._select_segment(
+			audio, level, bounds, "round_robin",
+			channel=9, note=36, velocity_trigger=(64, 127),
+		)
+
+		# Verified the keys are distinct and the counts are independent.
+		assert player._segment_counters[(9, 36, 0, 63)]   == 2
+		assert player._segment_counters[(9, 36, 64, 127)] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1536,7 +1920,7 @@ assignments:
 
 		# mido channel 9 = MIDI channel 10 (user-facing 1-indexed → 0-indexed)
 		assert (9, 36) in note_map
-		assert note_map[(9, 36)][0].name == "Kick"
+		assert note_map[(9, 36)][0][0].name == "Kick"
 
 
 # ---------------------------------------------------------------------------
@@ -1798,7 +2182,7 @@ class TestUpdatePitchedAssignments:
 			one_shot=False,
 		)
 		note_map: subsample.player.NoteMap = {
-			(0, 60): (asgn, subsample.query.PickSpec(1, 3)),
+			(0, 60): [(asgn, subsample.query.PickSpec(1, 3))],
 		}
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
@@ -1851,7 +2235,7 @@ class TestUpdatePitchedAssignments:
 			)),
 			one_shot=False,
 		)
-		note_map: subsample.player.NoteMap = {(0, 60): (asgn, subsample.query.PickSpec(1, 1))}
+		note_map: subsample.player.NoteMap = {(0, 60): [(asgn, subsample.query.PickSpec(1, 1))]}
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
@@ -1918,7 +2302,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (0, 36) in note_map
-		asgn, pick = note_map[(0, 36)]
+		asgn, pick = note_map[(0, 36)][0]
 		assert asgn.select[0].where.pitched is True
 		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="asc"),)
 		assert asgn.process.has_repitch()
@@ -1943,7 +2327,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (1, 60) in note_map
-		asgn, _ = note_map[(1, 60)]
+		asgn, _ = note_map[(1, 60)][0]
 		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="desc"),)
 		assert asgn.process.has_repitch()
 
@@ -1965,7 +2349,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (0, 60) in note_map
-		asgn, pick = note_map[(0, 60)]
+		asgn, pick = note_map[(0, 60)][0]
 		assert asgn.select[0].pick == subsample.query.PickSpec(2, 2)
 		assert pick == subsample.query.PickSpec(2, 2)
 
@@ -1988,7 +2372,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		for midi_note in [48, 50, 52]:
-			asgn, pick = note_map[(0, midi_note)]
+			asgn, pick = note_map[(0, midi_note)][0]
 			assert pick == subsample.query.PickSpec(1, 1)
 			assert asgn.process.has_repitch()
 
@@ -2037,7 +2421,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
-		asgn, pick_spec = note_map[(9, 36)]
+		asgn, pick_spec = note_map[(9, 36)][0]
 		assert asgn.select[0].pick == subsample.query.PickSpec(1, 3)
 		assert pick_spec == subsample.query.PickSpec(1, 3)
 
@@ -2055,7 +2439,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
-		_asgn, pick_spec = note_map[(9, 36)]
+		_asgn, pick_spec = note_map[(9, 36)][0]
 		assert pick_spec == subsample.query.PickSpec(1, 3)
 
 	def test_pick_range_suppresses_auto_distribute (self, tmp_path: pathlib.Path) -> None:
@@ -2077,7 +2461,7 @@ assignments:
 
 		# All three notes should share the same PickSpec(1, 3).
 		for note in (36, 37, 38):
-			_asgn, pick_spec = note_map[(9, note)]
+			_asgn, pick_spec = note_map[(9, note)][0]
 			assert pick_spec == subsample.query.PickSpec(1, 3)
 
 
@@ -2134,7 +2518,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (1, 36) in note_map
-		asgn, pick = note_map[(1, 36)]
+		asgn, pick = note_map[(1, 36)][0]
 		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="desc"),)
 		assert asgn.process.has_repitch()
 		assert asgn.one_shot is False
@@ -2154,7 +2538,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (2, 36) in note_map
-		asgn, _ = note_map[(2, 36)]
+		asgn, _ = note_map[(2, 36)][0]
 		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="asc"),)
 		assert asgn.one_shot is False
 
@@ -2204,7 +2588,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert (9, 36) in note_map
-		asgn, _ = note_map[(9, 36)]
+		asgn, _ = note_map[(9, 36)][0]
 		assert len(asgn.select) == 2
 		assert asgn.select[0].where.name == "my-kick"
 		assert asgn.select[1].where.reference == "BD0025"
@@ -2225,7 +2609,7 @@ assignments:
 """)
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
-		asgn, _ = note_map[(0, 60)]
+		asgn, _ = note_map[(0, 60)][0]
 		assert len(asgn.select) == 3
 		assert asgn.select[0].where.name == "first-choice"
 		assert asgn.select[1].order == (subsample.query.OrderClause(by="age", dir="asc"),)
@@ -2250,7 +2634,7 @@ assignments:
 
 		for midi_note in range(36, 49):
 			assert (0, midi_note) in note_map
-			asgn, pick = note_map[(0, midi_note)]
+			asgn, pick = note_map[(0, midi_note)][0]
 			assert pick == subsample.query.PickSpec(1, 1)
 			assert asgn.process.has_repitch()
 
@@ -2299,7 +2683,7 @@ class TestFallbackResolution:
 			select=select_specs,
 		)
 
-		note_map: subsample.player.NoteMap = {(0, 60): (asgn, subsample.query.PickSpec(1, 1))}
+		note_map: subsample.player.NoteMap = {(0, 60): [(asgn, subsample.query.PickSpec(1, 1))]}
 
 		return subsample.player.MidiPlayer(
 			"Test Device",
@@ -2854,7 +3238,7 @@ class TestValidateAssignmentExtracts:
 		record = self._make_record("a", 2)
 		lib    = self._populated_library([record])
 		assignment = subsample.query.Assignment(name="a", select=(subsample.query.SelectSpec(),))
-		note_map = {(0, 60): (assignment, subsample.query.PickSpec(1, 1))}
+		note_map = {(0, 60): [(assignment, subsample.query.PickSpec(1, 1))]}
 
 		# Should not raise.
 		subsample.player._validate_assignment_extracts(note_map, lib)
@@ -2869,7 +3253,7 @@ class TestValidateAssignmentExtracts:
 			select=(subsample.query.SelectSpec(),),
 			extract=subsample.query.ExtractSpec(kind="omni"),
 		)
-		note_map = {(0, 36): (assignment, subsample.query.PickSpec(1, 1))}
+		note_map = {(0, 36): [(assignment, subsample.query.PickSpec(1, 1))]}
 
 		# Should not raise.
 		subsample.player._validate_assignment_extracts(note_map, lib)
@@ -2884,7 +3268,7 @@ class TestValidateAssignmentExtracts:
 			select=(subsample.query.SelectSpec(),),
 			extract=subsample.query.ExtractSpec(kind="depth"),
 		)
-		note_map = {(0, 36): (assignment, subsample.query.PickSpec(1, 1))}
+		note_map = {(0, 36): [(assignment, subsample.query.PickSpec(1, 1))]}
 
 		with pytest.raises(ValueError, match="bass_drum"):
 			subsample.player._validate_assignment_extracts(note_map, lib)
@@ -2897,7 +3281,7 @@ class TestValidateAssignmentExtracts:
 			select=(subsample.query.SelectSpec(),),
 			extract=subsample.query.ExtractSpec(kind="depth"),
 		)
-		note_map = {(0, 36): (assignment, subsample.query.PickSpec(1, 1))}
+		note_map = {(0, 36): [(assignment, subsample.query.PickSpec(1, 1))]}
 
 		# Should not raise — depth has no candidates to test.
 		subsample.player._validate_assignment_extracts(note_map, lib)
@@ -2915,7 +3299,7 @@ class TestValidateAssignmentExtracts:
 			select=(subsample.query.SelectSpec(),),
 			extract=subsample.query.ExtractSpec(kind="front"),
 		)
-		note_map = {(0, 36): (assignment, subsample.query.PickSpec(1, 1))}
+		note_map = {(0, 36): [(assignment, subsample.query.PickSpec(1, 1))]}
 
 		# Should not raise.
 		subsample.player._validate_assignment_extracts(note_map, lib)
@@ -2935,9 +3319,9 @@ class TestValidateAssignmentExtracts:
 		)
 		# Same Assignment object on three notes.
 		note_map = {
-			(0, 36): (assignment, subsample.query.PickSpec(1, 1)),
-			(0, 37): (assignment, subsample.query.PickSpec(1, 1)),
-			(0, 38): (assignment, subsample.query.PickSpec(1, 1)),
+			(0, 36): [(assignment, subsample.query.PickSpec(1, 1))],
+			(0, 37): [(assignment, subsample.query.PickSpec(1, 1))],
+			(0, 38): [(assignment, subsample.query.PickSpec(1, 1))],
 		}
 
 		# Should not raise and should complete without exception.
@@ -2972,7 +3356,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, result_level = player._select_segment(audio, level, bounds, "", 0, 60)
+		result_audio, result_level = player._select_segment(audio, level, bounds, "", 0, 60, velocity_trigger=(0, 127))
 
 		assert result_audio is audio
 		assert result_level is level
@@ -2983,7 +3367,7 @@ class TestSelectSegment:
 		audio = numpy.random.randn(1000, 1).astype(numpy.float32)
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, result_level = player._select_segment(audio, level, None, "round_robin", 0, 60)
+		result_audio, result_level = player._select_segment(audio, level, None, "round_robin", 0, 60, velocity_trigger=(0, 127))
 
 		assert result_audio is audio
 		assert result_level is level
@@ -2994,7 +3378,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, _ = player._select_segment(audio, level, bounds, 3, 0, 60)
+		result_audio, _ = player._select_segment(audio, level, bounds, 3, 0, 60, velocity_trigger=(0, 127))
 
 		assert result_audio.shape[0] == 1000
 		numpy.testing.assert_array_equal(result_audio, audio[2000:3000])
@@ -3005,7 +3389,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, _ = player._select_segment(audio, level, bounds, 99, 0, 60)
+		result_audio, _ = player._select_segment(audio, level, bounds, 99, 0, 60, velocity_trigger=(0, 127))
 
 		numpy.testing.assert_array_equal(result_audio, audio[3000:4000])
 
@@ -3017,12 +3401,13 @@ class TestSelectSegment:
 
 		results = []
 		for _ in range(6):
-			seg, _ = player._select_segment(audio, level, bounds, "round_robin", 0, 60)
+			seg, _ = player._select_segment(audio, level, bounds, "round_robin", 0, 60, velocity_trigger=(0, 127))
 			results.append(seg.shape[0])
 
 		# 4 segments, 6 triggers: should cycle 0,1,2,3,0,1
 		assert results == [1000, 1000, 1000, 1000, 1000, 1000]
-		assert player._segment_counters[(0, 60)] == 6
+		# Default (no velocity layering) hashes to (ch, note, 0, 127).
+		assert player._segment_counters[(0, 60, 0, 127)] == 6
 
 	def test_random_stays_in_bounds (self) -> None:
 		"""Random mode always selects a valid segment."""
@@ -3031,7 +3416,7 @@ class TestSelectSegment:
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
 		for _ in range(20):
-			seg, _ = player._select_segment(audio, level, bounds, "random", 0, 60)
+			seg, _ = player._select_segment(audio, level, bounds, "random", 0, 60, velocity_trigger=(0, 127))
 			assert seg.shape[0] == 1000
 
 	def test_segment_mode_parsed_from_yaml_string (self) -> None:
@@ -3413,7 +3798,7 @@ class TestBeatMatchEndToEnd:
 			)),
 			one_shot=False,
 		)
-		note_map: subsample.player.NoteMap = {(0, 60): (asgn, subsample.query.PickSpec(1, 1))}
+		note_map: subsample.player.NoteMap = {(0, 60): [(asgn, subsample.query.PickSpec(1, 1))]}
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)

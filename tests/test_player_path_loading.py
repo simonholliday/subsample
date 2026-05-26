@@ -97,7 +97,9 @@ class TestResolvePathReferences:
 			name="test",
 			select=(select,),
 		)
-		note_map: subsample.player.NoteMap = {(9, 36): (assignment, 1)}
+		note_map: subsample.player.NoteMap = {
+			(9, 36): [(assignment, subsample.query.PickSpec(1, 1))],
+		}
 
 		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
 		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
@@ -112,7 +114,9 @@ class TestResolvePathReferences:
 		where = subsample.query.WherePredicate(reference="GM36_BassDrum1")
 		select = subsample.query.SelectSpec(where=where, order=(subsample.query.OrderClause(by="similarity", dir="desc"),))
 		assignment = subsample.query.Assignment(name="test", select=(select,))
-		note_map: subsample.player.NoteMap = {(9, 36): (assignment, 1)}
+		note_map: subsample.player.NoteMap = {
+			(9, 36): [(assignment, subsample.query.PickSpec(1, 1))],
+		}
 
 		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
 		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
@@ -131,7 +135,9 @@ class TestResolvePathReferences:
 		)
 		select = subsample.query.SelectSpec(where=where)
 		assignment = subsample.query.Assignment(name="test", select=(select,))
-		note_map: subsample.player.NoteMap = {(9, 38): (assignment, 1)}
+		note_map: subsample.player.NoteMap = {
+			(9, 38): [(assignment, subsample.query.PickSpec(1, 1))],
+		}
 
 		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
 		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
@@ -152,8 +158,8 @@ class TestResolvePathReferences:
 		assignment2 = subsample.query.Assignment(name="test2", select=(select,))
 
 		note_map: subsample.player.NoteMap = {
-			(9, 36): (assignment1, 1),
-			(9, 38): (assignment2, 1),
+			(9, 36): [(assignment1, subsample.query.PickSpec(1, 1))],
+			(9, 38): [(assignment2, subsample.query.PickSpec(1, 1))],
 		}
 
 		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)

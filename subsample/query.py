@@ -830,7 +830,9 @@ class Assignment:
 	"""A compiled MIDI map entry for one or more notes.
 
 	Combines selection criteria, processing pipeline, and playback/output
-	settings.  Stored in the note map keyed by (mido_channel, midi_note).
+	settings.  Stored in the note map keyed by (mido_channel, midi_note);
+	multiple Assignments may share a (channel, note) when each declares a
+	distinct ``velocity_trigger`` range (velocity layering).
 	"""
 
 	name:      str
@@ -847,6 +849,22 @@ class Assignment:
 	"round_robin" = cycle through segments sequentially.
 	"random" = random segment each trigger.
 	int (1-indexed) = always play that specific segment."""
+
+	velocity_trigger:    tuple[int, int]                       = (0, 127)
+	"""Velocity range (inclusive, 0-127) that triggers this assignment.
+	Default (0, 127) — every velocity fires the assignment, identical to
+	the pre-velocity-layering behaviour.  When two or more Assignments
+	share a (channel, note), each must declare a non-overlapping trigger
+	range; the player picks the matching layer at note-on by scanning
+	the list for the range that contains ``msg.velocity``."""
+
+	velocity_rescale_to: typing.Optional[tuple[int, int]]      = None
+	"""Optional output range for in-band velocity rescaling.
+	When None (default), the incoming velocity is used unchanged.  When
+	set, the velocity is linearly remapped from ``velocity_trigger`` to
+	this range before it reaches the gain calculation — so a layer that
+	only sees velocities 0-63 can still play through a full 0-127 dynamic
+	envelope.  Both bounds inclusive, 0-127."""
 
 
 # ---------------------------------------------------------------------------

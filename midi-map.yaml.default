@@ -58,6 +58,29 @@
 #       - repitch: true
 #     one_shot: false
 #
+#   # 4. Velocity layering - two sounds on the same MIDI key.  Soft hits
+#   #    (vel 0-63) play a soft sample; hard hits (vel 64-127) play a
+#   #    different sample.  rescale: true remaps each layer's input
+#   #    velocity to the full 0-127 range so each sample still gets full
+#   #    dynamic expression.  See README "Velocity layering" for the dict
+#   #    form, custom rescale ranges, and validation rules.
+#   - name: Soft hat
+#     channel: 10
+#     notes: drum.closed_hi_hat
+#     velocity:
+#       trigger: [0, 63]
+#       rescale: true
+#     select:
+#       where: { name_glob: "*soft_hat*" }
+#   - name: Hard hat
+#     channel: 10
+#     notes: drum.closed_hi_hat
+#     velocity:
+#       trigger: [64, 127]
+#       rescale: true
+#     select:
+#       where: { name_glob: "*hard_hat*" }
+#
 # The rest of this file is:
 #   EXAMPLES        commented-out assignments, ordered simple to
 #                   advanced - uncomment any to try
