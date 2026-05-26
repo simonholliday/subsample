@@ -1291,3 +1291,16 @@ class TestBufferFrames:
 		# 8192 is a power of two but above the [32, 4096] ceiling.
 		with pytest.raises(ValueError, match=r"\[32, 4096\]"):
 			self._load_with_buffer_frames(tmp_path, 8192)
+
+	def test_out_of_range_message_does_not_blame_power_of_two (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+		"""16 is a valid power of two but below the floor — the error must
+		surface the range failure, not a misleading 'power of two' note,
+		so the user doesn't waste time looking for a bit-pattern problem."""
+
+		with pytest.raises(ValueError) as exc:
+			self._load_with_buffer_frames(tmp_path, 16)
+
+		assert "[32, 4096]" in str(exc.value)
+		assert "power of two" not in str(exc.value)

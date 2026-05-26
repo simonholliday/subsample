@@ -280,8 +280,14 @@ class TestMidiPlayer:
 					player = self._make_player(shutdown_event)
 					player.run()
 
-		# Port open + close should both be logged with the device name.
-		assert any("Test Device" in r.message for r in caplog.records)
+		# Port open AND close must both name the device — the "opened" log
+		# confirms the right port was selected; the "closed" log confirms
+		# the finally block ran cleanly and didn't leak the handle.
+		device_log_messages = [r.message for r in caplog.records if "Test Device" in r.message]
+		assert any("opened" in m for m in device_log_messages), \
+			f"expected an 'opened' log naming the device, got: {device_log_messages}"
+		assert any("closed" in m for m in device_log_messages), \
+			f"expected a 'closed' log naming the device, got: {device_log_messages}"
 
 	def test_port_closed_on_shutdown (self) -> None:
 		shutdown_event = threading.Event()

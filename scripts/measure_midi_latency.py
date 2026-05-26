@@ -72,69 +72,74 @@ def main () -> int:
 
 	# Open the virtual port that simulates an external controller.
 	# rtmidi creates this port as a system-level destination so we can
-	# also open a sender attached to it.
-	in_port = mido.open_input(_VIRTUAL_PORT_NAME, virtual=True)
+	# also open a sender attached to it.  Both ports are tracked through
+	# a try/finally so a Ctrl+C mid-run doesn't leave the virtual port
+	# registered with ALSA (visible in `aconnect -l` until the process
+	# exits).
+	in_port  = mido.open_input(_VIRTUAL_PORT_NAME, virtual=True)
 	out_port = mido.open_output(_VIRTUAL_PORT_NAME)
 
-	# We can't carry a timestamp inside the MIDI message itself — mido
-	# reconstructs the receiving Message from raw MIDI bytes, which don't
-	# carry timestamps.  Instead, push each send timestamp into a FIFO
-	# deque and pop the oldest on receive.  Safe because mido + rtmidi
-	# deliver messages in order on a single port.
-	sent_times_ns: collections.deque[int] = collections.deque()
-	sent_lock = threading.Lock()
+	try:
+		# We can't carry a timestamp inside the MIDI message itself — mido
+		# reconstructs the receiving Message from raw MIDI bytes, which
+		# don't carry timestamps.  Instead, push each send timestamp into
+		# a FIFO deque and pop the oldest on receive.  Safe because mido +
+		# rtmidi deliver messages in order on a single port.
+		sent_times_ns: collections.deque[int] = collections.deque()
+		sent_lock = threading.Lock()
 
-	timings_ns: list[int] = []
-	timings_lock = threading.Lock()
+		timings_ns: list[int] = []
+		timings_lock = threading.Lock()
 
-	def _callback (msg: mido.Message) -> None:
-		now_ns = time.perf_counter_ns()
-		with sent_lock:
-			if not sent_times_ns:
-				return
-			sent_ns = sent_times_ns.popleft()
+		def _callback (msg: mido.Message) -> None:
+			now_ns = time.perf_counter_ns()
+			with sent_lock:
+				if not sent_times_ns:
+					return
+				sent_ns = sent_times_ns.popleft()
+			with timings_lock:
+				timings_ns.append(now_ns - sent_ns)
+
+		in_port.callback = _callback
+
+		interval_s = args.interval_ms / 1000.0
+
+		print(f"Sending {args.count} message(s) at {args.interval_ms:.2f} ms spacing…")
+
+		send_start = time.perf_counter()
+
+		for i in range(args.count):
+			msg = mido.Message(
+				"note_on",
+				channel=0,
+				note=60 + (i % 12),
+				velocity=64,
+			)
+			sent_ns = time.perf_counter_ns()
+			with sent_lock:
+				sent_times_ns.append(sent_ns)
+			out_port.send(msg)
+
+			# Sleep the configured interval (busy-wait the small remainder
+			# so the schedule is honoured tightly).
+			target = send_start + (i + 1) * interval_s
+			while True:
+				remaining = target - time.perf_counter()
+				if remaining <= 0:
+					break
+				if remaining > 0.001:
+					time.sleep(remaining - 0.0005)
+
+		# Give rtmidi a generous window to deliver the last few messages.
+		time.sleep(0.5)
+
 		with timings_lock:
-			timings_ns.append(now_ns - sent_ns)
+			samples = list(timings_ns)
 
-	in_port.callback = _callback
-
-	interval_s = args.interval_ms / 1000.0
-
-	print(f"Sending {args.count} message(s) at {args.interval_ms:.2f} ms spacing…")
-
-	send_start = time.perf_counter()
-
-	for i in range(args.count):
-		msg = mido.Message(
-			"note_on",
-			channel=0,
-			note=60 + (i % 12),
-			velocity=64,
-		)
-		sent_ns = time.perf_counter_ns()
-		with sent_lock:
-			sent_times_ns.append(sent_ns)
-		out_port.send(msg)
-
-		# Sleep the configured interval (busy-wait the small remainder so
-		# the schedule is honoured tightly).
-		target = send_start + (i + 1) * interval_s
-		while True:
-			remaining = target - time.perf_counter()
-			if remaining <= 0:
-				break
-			if remaining > 0.001:
-				time.sleep(remaining - 0.0005)
-
-	# Give rtmidi a generous window to deliver the last few messages.
-	time.sleep(0.5)
-
-	in_port.callback = None
-	in_port.close()
-	out_port.close()
-
-	with timings_lock:
-		samples = list(timings_ns)
+	finally:
+		in_port.callback = None
+		in_port.close()
+		out_port.close()
 
 	if not samples:
 		print("ERROR: No messages received — check that rtmidi virtual ports work on this system.", file=sys.stderr)

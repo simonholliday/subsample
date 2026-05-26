@@ -1366,8 +1366,9 @@ class MidiPlayer:
 	Mixing: triggered notes are added as _Voice objects to a shared list.
 	A PyAudio callback stream reads from all active voices simultaneously,
 	sums them into one output buffer, applies the safety limiter, and returns
-	the mixed audio.  This runs independently of the MIDI polling loop so
-	notes overlap naturally.
+	the mixed audio.  This runs independently of the rtmidi callback thread
+	(which dispatches MIDI messages and appends voices), so notes overlap
+	naturally.
 	"""
 
 	def __init__ (
@@ -1654,106 +1655,116 @@ class MidiPlayer:
 		  - otherwise → open the hardware device by device_name
 		"""
 
-		pa = subsample.audio.create_pyaudio()
-
-		# Resolve output device — mirrors the input device selection pattern.
-		output_devices = subsample.audio.list_output_devices(pa)
-
-		if self._output_device_name is not None:
-			try:
-				output_device_index: int = subsample.audio.find_output_device_by_name(
-					pa, self._output_device_name,
-				)
-			except ValueError:
-				_log.warning(
-					"Configured audio output device %r not found — prompting for selection",
-					self._output_device_name,
-				)
-				output_device_index = subsample.audio.select_output_device(output_devices)
-		else:
-			output_device_index = subsample.audio.select_output_device(output_devices)
-
-		# Validate output routing indices against the resolved device channel count.
-		# Collect replacements first to avoid mutating the dict during iteration.
-		routing_fixes: dict[tuple[int, int], tuple[subsample.query.Assignment, subsample.query.PickSpec]] = {}
-
-		for (ch, note), (assignment, _pick_spec) in self._note_map.items():
-			routing = assignment.output_routing
-			if routing is not None:
-				for idx in routing:
-					if idx >= self._output_channels:
-						_log.warning(
-							"Assignment %r (ch %d, note %d): output index %d exceeds "
-							"device channel count (%d) — using default routing",
-							assignment.name, ch, note, idx + 1, self._output_channels,
-						)
-						routing_fixes[(ch, note)] = (
-							dataclasses.replace(assignment, output_routing=None),
-							_pick_spec,
-						)
-						break
-
-		self._note_map.update(routing_fixes)
-
-		# Callback mode: PortAudio pulls audio from _audio_callback on its own
-		# high-priority thread. The MIDI thread runs independently and adds voices.
-		# When player.audio.buffer_frames is set, pass it as frames_per_buffer
-		# to tighten output-side latency.  If the device cannot honour the
-		# requested size at open time, fall back to the device default with a
-		# clear ERROR log so the user knows their tuning value was ignored.
-		open_kwargs: dict[str, typing.Any] = {
-			"format":              subsample.audio.get_pyaudio_format(self._output_bit_depth),
-			"channels":            self._output_channels,
-			"rate":                self._output_sample_rate,
-			"output":              True,
-			"output_device_index": output_device_index,
-			"stream_callback":     self._audio_callback,
-		}
-
-		if self._buffer_frames is not None:
-			open_kwargs["frames_per_buffer"] = self._buffer_frames
-			_log.info("PortAudio output buffer: %d frames", self._buffer_frames)
+		# Resources are initialised to None upfront so the finally block can
+		# clean up partial state if any open step raises (e.g. PortAudio
+		# rejecting the requested format, or mido failing to bind the MIDI
+		# device).  Without this any half-open stream or MIDI port would leak
+		# its OS-level handle, blocking subsequent attempts to use the device
+		# until the process restarted.
+		pa                                            = subsample.audio.create_pyaudio()
+		stream:     typing.Optional[typing.Any]       = None
+		port:       typing.Optional[mido.ports.BaseInput] = None
+		port_label:                          str      = ""
 
 		try:
-			stream = pa.open(**open_kwargs)
-		except OSError as exc:
-			if "frames_per_buffer" in open_kwargs:
-				_log.error(
-					"PortAudio rejected buffer_frames=%d (%s) — falling back "
-					"to the device default.  Lower or omit player.audio."
-					"buffer_frames in config.yaml.",
-					self._buffer_frames, exc,
-				)
-				open_kwargs.pop("frames_per_buffer")
-				stream = pa.open(**open_kwargs)
+			# Resolve output device — mirrors the input device selection pattern.
+			output_devices = subsample.audio.list_output_devices(pa)
+
+			if self._output_device_name is not None:
+				try:
+					output_device_index: int = subsample.audio.find_output_device_by_name(
+						pa, self._output_device_name,
+					)
+				except ValueError:
+					_log.warning(
+						"Configured audio output device %r not found — prompting for selection",
+						self._output_device_name,
+					)
+					output_device_index = subsample.audio.select_output_device(output_devices)
 			else:
-				raise
+				output_device_index = subsample.audio.select_output_device(output_devices)
 
-		# Open the MIDI input port in callback mode.  rtmidi delivers each
-		# message to ``_safe_handle_message`` on its own dedicated thread the
-		# moment it arrives — no polling loop, no 10 ms jitter floor.  The
-		# kwarg form installs the callback as the last step of port creation,
-		# closing the open-then-assign gap that property-style assignment
-		# would expose.  Virtual ports are server destinations external apps
-		# connect to; they require ``virtual=True`` and do not appear in
-		# ``get_input_names()``.
-		if self._virtual_midi_port is not None:
-			port_label = self._virtual_midi_port
-			port = mido.open_input(
-				self._virtual_midi_port,
-				virtual=True,
-				callback=self._safe_handle_message,
-			)
-			_log.info("MIDI player opened virtual port: %s", port_label)
-		else:
-			port_label = self._device_name
-			port = mido.open_input(
-				self._device_name,
-				callback=self._safe_handle_message,
-			)
-			_log.info("MIDI player opened hardware port: %s", port_label)
+			# Validate output routing indices against the resolved device channel count.
+			# Collect replacements first to avoid mutating the dict during iteration.
+			routing_fixes: dict[tuple[int, int], tuple[subsample.query.Assignment, subsample.query.PickSpec]] = {}
 
-		try:
+			for (ch, note), (assignment, _pick_spec) in self._note_map.items():
+				routing = assignment.output_routing
+				if routing is not None:
+					for idx in routing:
+						if idx >= self._output_channels:
+							_log.warning(
+								"Assignment %r (ch %d, note %d): output index %d exceeds "
+								"device channel count (%d) — using default routing",
+								assignment.name, ch, note, idx + 1, self._output_channels,
+							)
+							routing_fixes[(ch, note)] = (
+								dataclasses.replace(assignment, output_routing=None),
+								_pick_spec,
+							)
+							break
+
+			self._note_map.update(routing_fixes)
+
+			# Callback mode: PortAudio pulls audio from _audio_callback on its
+			# own high-priority thread.  The rtmidi callback thread runs
+			# independently and adds voices.  When player.audio.buffer_frames
+			# is set, pass it as frames_per_buffer to tighten output-side
+			# latency.  If the device cannot honour the requested size at open
+			# time, fall back to the device default with a clear ERROR log so
+			# the user knows their tuning value was ignored.
+			open_kwargs: dict[str, typing.Any] = {
+				"format":              subsample.audio.get_pyaudio_format(self._output_bit_depth),
+				"channels":            self._output_channels,
+				"rate":                self._output_sample_rate,
+				"output":              True,
+				"output_device_index": output_device_index,
+				"stream_callback":     self._audio_callback,
+			}
+
+			if self._buffer_frames is not None:
+				open_kwargs["frames_per_buffer"] = self._buffer_frames
+				_log.info("PortAudio output buffer: %d frames", self._buffer_frames)
+
+			try:
+				stream = pa.open(**open_kwargs)
+			except OSError as exc:
+				if "frames_per_buffer" in open_kwargs:
+					_log.error(
+						"PortAudio rejected buffer_frames=%d (%s) — falling back "
+						"to the device default.  Lower or omit player.audio."
+						"buffer_frames in config.yaml.",
+						self._buffer_frames, exc,
+					)
+					open_kwargs.pop("frames_per_buffer")
+					stream = pa.open(**open_kwargs)
+				else:
+					raise
+
+			# Open the MIDI input port in callback mode.  rtmidi delivers each
+			# message to ``_safe_handle_message`` on its own dedicated thread
+			# the moment it arrives — no polling loop, no 10 ms jitter floor.
+			# The kwarg form installs the callback as the last step of port
+			# creation, closing the open-then-assign gap that property-style
+			# assignment would expose.  Virtual ports are server destinations
+			# external apps connect to; they require ``virtual=True`` and do
+			# not appear in ``get_input_names()``.
+			if self._virtual_midi_port is not None:
+				port_label = self._virtual_midi_port
+				port = mido.open_input(
+					self._virtual_midi_port,
+					virtual=True,
+					callback=self._safe_handle_message,
+				)
+				_log.info("MIDI player opened virtual port: %s", port_label)
+			else:
+				port_label = self._device_name
+				port = mido.open_input(
+					self._device_name,
+					callback=self._safe_handle_message,
+				)
+				_log.info("MIDI player opened hardware port: %s", port_label)
+
 			# Block until shutdown is signalled.  All MIDI work happens on
 			# rtmidi's callback thread; this thread is now purely a lifecycle
 			# coordinator.
@@ -1764,14 +1775,24 @@ class MidiPlayer:
 				if self._cc_debounce_timer is not None:
 					self._cc_debounce_timer.cancel()
 
-			# port.close() internally clears the callback under rtmidi's lock
-			# (waits for any in-flight callback to return), then closes the
-			# port.  No separate teardown step needed.
-			port.close()
-			stream.stop_stream()
-			stream.close()
+			# Tear down whichever resources were successfully opened.  None
+			# checks guard the partial-open paths: a mido failure leaves
+			# ``port is None`` but ``stream`` may already be open; an early
+			# pa.open failure leaves both None but ``pa`` itself still needs
+			# terminate.  port.close() internally clears the callback under
+			# rtmidi's lock (waits for any in-flight callback to return),
+			# then closes the port.
+			if port is not None:
+				port.close()
+
+			if stream is not None:
+				stream.stop_stream()
+				stream.close()
+
 			pa.terminate()
-			_log.info("MIDI player closed port: %s", port_label)
+
+			if port_label:
+				_log.info("MIDI player closed port: %s", port_label)
 
 	def _audio_callback (
 		self,
@@ -2061,8 +2082,10 @@ class MidiPlayer:
 			return
 
 		# ── Variant lookup based on ProcessSpec ───────────────────────────
-
-		eff_transform = self._effective_transform_manager
+		# eff_transform was captured at the top of the handler alongside
+		# eff_library and eff_similarity so all three reference the same
+		# bank for the lifetime of this note-on, even if a Program Change
+		# swaps the active bank mid-handler.
 
 		if eff_transform is not None:
 

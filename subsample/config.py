@@ -816,21 +816,28 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	# Validate buffer_frames: must be a power of two in [32, 4096].  Powers
 	# of two play nicely with most USB-class audio drivers; the upper bound
 	# keeps "lower latency than the default" the intended use of this knob
-	# and avoids silently picking a value too large to help.
+	# and avoids silently picking a value too large to help.  Range and
+	# power-of-two checks are surfaced as distinct messages so a user who
+	# tries buffer_frames: 16 (a valid power of two but below the floor) is
+	# told the range failed rather than mis-guided to look for a bit-pattern
+	# problem.
 	player_buffer_frames_raw = player_audio_raw.get("buffer_frames")
 	player_buffer_frames: typing.Optional[int]
 	if player_buffer_frames_raw is None:
 		player_buffer_frames = None
 	else:
 		player_buffer_frames = int(player_buffer_frames_raw)
-		if (
-			player_buffer_frames < 32
-			or player_buffer_frames > 4096
-			or (player_buffer_frames & (player_buffer_frames - 1)) != 0
-		):
+
+		if player_buffer_frames < 32 or player_buffer_frames > 4096:
 			raise ValueError(
-				f"player.audio.buffer_frames must be a power of two in "
-				f"[32, 4096] (got {player_buffer_frames})"
+				f"player.audio.buffer_frames must be in [32, 4096] "
+				f"(got {player_buffer_frames})"
+			)
+
+		if (player_buffer_frames & (player_buffer_frames - 1)) != 0:
+			raise ValueError(
+				f"player.audio.buffer_frames must be a power of two "
+				f"(got {player_buffer_frames})"
 			)
 
 	player = PlayerConfig(
