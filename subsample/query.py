@@ -57,6 +57,36 @@ if typing.TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
+# Memo for resolved sample paths.  The ``directory:`` filter compares a
+# sample's absolute, symlink-resolved path against the (already-resolved)
+# target directory.  ``Path.resolve()`` issues a realpath() — one lstat
+# syscall per path component — so resolving every candidate's path on every
+# note-on was a syscall storm that dominated MIDI-to-audio latency (hundreds
+# of thousands of lstat calls per second under a steady groove).  A sample's
+# on-disk path is stable for the life of a session, so the resolution is
+# memoised here; the cache is bounded by the number of distinct sample files.
+# dict get/set are atomic under the GIL and a duplicate concurrent resolve
+# yields the same value, so no lock is needed.
+_RESOLVED_PATH_CACHE: dict[pathlib.Path, pathlib.Path] = {}
+
+
+def _resolved_sample_path (path: pathlib.Path) -> pathlib.Path:
+
+	"""Return ``path`` resolved to absolute, symlink-free form, memoised.
+
+	Keeps the per-note-on ``directory:`` filter off the filesystem — see the
+	note on _RESOLVED_PATH_CACHE for why this matters on the trigger path.
+	"""
+
+	resolved = _RESOLVED_PATH_CACHE.get(path)
+
+	if resolved is None:
+		resolved = path.resolve()
+		_RESOLVED_PATH_CACHE[path] = resolved
+
+	return resolved
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -348,10 +378,12 @@ class WherePredicate:
 		if self.directory is not None:
 			if record.filepath is None:
 				return False
+
+			# self.directory is already absolute + resolved (parse_select stores
+			# it that way), so only the sample path needs resolving — and that
+			# is memoised, so a steady groove issues no filesystem syscalls here.
 			try:
-				pathlib.Path(record.filepath).resolve().relative_to(
-					pathlib.Path(self.directory).resolve(),
-				)
+				_resolved_sample_path(record.filepath).relative_to(self.directory)
 			except ValueError:
 				return False
 
@@ -698,6 +730,41 @@ class SelectSpec:
 	where: WherePredicate              = dataclasses.field(default_factory=WherePredicate)
 	order: tuple[OrderClause, ...]     = ()
 	pick:  PickSpec                    = dataclasses.field(default_factory=lambda: PickSpec(1, 1))
+
+
+# Order/filter keys whose ranking is derived from transform variants, which
+# finish baking asynchronously.  A select using any of these can re-rank
+# between note-ons as variants become ready, so its result must not be cached
+# — see MidiPlayer._rebuild_candidate_cache / _resolve_sample_id.  Every other
+# selection key (directory, name, duration, pitch, similarity, age, …) is
+# stable until the library itself changes.
+_VARIANT_STATE_KEYS: typing.Final[frozenset[str]] = frozenset({
+	"quantized_beats", "beat_match",
+})
+
+
+def select_uses_variant_state (select_specs: tuple[SelectSpec, ...]) -> bool:
+
+	"""Return True if any select spec orders or filters by variant-derived state.
+
+	``quantized_beats`` (as a ``where`` filter or an ``order`` key) and
+	``beat_match`` (an ``order`` key) read the per-sample beat/energy profile
+	of a transform variant.  Those variants are produced in the background, so
+	the ranking shifts as they finish — such a select must be evaluated live on
+	every trigger rather than pre-computed.  All other selects resolve to the
+	same ranked list until the active library changes and are safe to cache.
+	"""
+
+	for spec in select_specs:
+
+		if not spec.where.quantized_beats.is_empty():
+			return True
+
+		for clause in spec.order:
+			if clause.by in _VARIANT_STATE_KEYS:
+				return True
+
+	return False
 
 
 # ---------------------------------------------------------------------------

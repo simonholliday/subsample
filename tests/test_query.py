@@ -992,6 +992,78 @@ class TestDirectoryPredicate:
 		)
 		assert pred.directory == "/project/samples/captures"
 
+	def test_directory_filter_memoises_path_resolution (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""The directory filter resolves a sample's path once, then reuses the memo.
+
+		Regression guard for the MIDI-timing bug: matches() used to call
+		Path.resolve() (a realpath() syscall storm) for every candidate on every
+		note-on.  Resolution is now memoised, so repeated matches against the same
+		sample issue no further filesystem calls.
+		"""
+		import dataclasses, pathlib
+
+		subsample.query._RESOLVED_PATH_CACHE.clear()
+
+		resolve_calls = {"n": 0}
+		original_resolve = pathlib.Path.resolve
+
+		def _counting_resolve (self: pathlib.Path, *args: typing.Any, **kwargs: typing.Any) -> pathlib.Path:
+			resolve_calls["n"] += 1
+			return original_resolve(self, *args, **kwargs)
+
+		monkeypatch.setattr(pathlib.Path, "resolve", _counting_resolve)
+
+		record = dataclasses.replace(
+			_make_record(name="t"), filepath=pathlib.Path("/samples/captures/t.wav"),
+		)
+		pred = subsample.query.WherePredicate(directory="/samples/captures")
+
+		for _ in range(50):
+			assert pred.matches(record)
+
+		assert resolve_calls["n"] == 1
+
+
+class TestSelectUsesVariantState:
+
+	"""select_uses_variant_state — distinguishes cacheable selects from those
+	that must be re-queried live because their ranking depends on
+	asynchronously-baked variant state."""
+
+	def _spec (self, **kwargs: typing.Any) -> subsample.query.SelectSpec:
+		return subsample.query.SelectSpec(**kwargs)
+
+	def test_plain_filter_and_default_order_is_cacheable (self) -> None:
+		specs = (self._spec(where=subsample.query.WherePredicate(directory="/x")),)
+		assert not subsample.query.select_uses_variant_state(specs)
+
+	def test_similarity_order_is_cacheable (self) -> None:
+		specs = (self._spec(order=(subsample.query.OrderClause(by="similarity", dir="desc"),)),)
+		assert not subsample.query.select_uses_variant_state(specs)
+
+	def test_duration_order_is_cacheable (self) -> None:
+		specs = (self._spec(order=(subsample.query.OrderClause(by="duration", dir="asc"),)),)
+		assert not subsample.query.select_uses_variant_state(specs)
+
+	def test_quantized_beats_filter_is_live (self) -> None:
+		specs = (self._spec(where=subsample.query.WherePredicate(quantized_beats=subsample.query.Range(gte=1.0, lte=4.0))),)
+		assert subsample.query.select_uses_variant_state(specs)
+
+	def test_quantized_beats_order_is_live (self) -> None:
+		specs = (self._spec(order=(subsample.query.OrderClause(by="quantized_beats", dir="asc"),)),)
+		assert subsample.query.select_uses_variant_state(specs)
+
+	def test_beat_match_order_is_live (self) -> None:
+		specs = (self._spec(order=(subsample.query.OrderClause(by="beat_match", dir="desc"),)),)
+		assert subsample.query.select_uses_variant_state(specs)
+
+	def test_any_variant_dependent_spec_in_chain_is_live (self) -> None:
+		specs = (
+			self._spec(where=subsample.query.WherePredicate(directory="/x")),
+			self._spec(order=(subsample.query.OrderClause(by="beat_match", dir="desc"),)),
+		)
+		assert subsample.query.select_uses_variant_state(specs)
+
 	def test_has_vocoder (self) -> None:
 		"""ProcessSpec.has_vocoder() returns True when vocoder step present."""
 		process = subsample.query.ProcessSpec(steps=(

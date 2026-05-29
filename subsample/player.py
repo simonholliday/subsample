@@ -1978,6 +1978,17 @@ class MidiPlayer:
 		# (ch, note, 0, 127) — uniform key shape, no special-case branch.
 		self._last_played: dict[tuple[int, int, int, int], subsample.transform.TransformResult] = {}
 
+		# Pre-computed sample selection.  An ordinary select (filters + an
+		# order such as age / similarity / duration) resolves to the same
+		# ranked candidate list on every note-on until the active library
+		# changes, so the list is pre-computed off the trigger thread and the
+		# trigger only draws a pick index — no per-note query, sort, or
+		# filesystem access.  Keyed by id(Assignment); rebuilt by
+		# _rebuild_candidate_cache() on every re-evaluation.  Assignments whose
+		# select depends on asynchronously-baked variant state (quantized_beats
+		# / beat_match) are deliberately absent and resolved live instead.
+		self._candidate_cache: dict[int, list[int]] = {}
+
 		# Event emitter for integrations (Supervisor dashboard, etc.).
 		# Currently emits 'cc' on control_change messages.
 		self.events = subsample.events.EventEmitter()
@@ -2064,6 +2075,14 @@ class MidiPlayer:
 		# path (reload, _integrate_sample, bank switch).
 		if self._zone_templates:
 			self._materialize_zones()
+
+		# Pre-compute the selection cache so the very first note-on already
+		# takes the fast indexed-pick path.  cli also calls
+		# update_pitched_assignments() right after construction (which rebuilds
+		# this), but building it here keeps the player correct for callers that
+		# don't — and against an empty cache the trigger path simply falls back
+		# to a live query, so this is an optimisation, never a correctness gate.
+		self._rebuild_candidate_cache()
 
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
@@ -2653,35 +2672,15 @@ class MidiPlayer:
 		# fallback and round_robin counters.
 		state_key = (msg.channel, msg.note, velocity_trigger[0], velocity_trigger[1])
 
-		# ── Sample selection via query engine ─────────────────────────────
+		# ── Sample selection ──────────────────────────────────────────────
+		# eff_transform is captured here (not just where the variant lookup
+		# below needs it) so the whole note-on sees one consistent bank even
+		# if a Program Change swaps the active bank mid-handler.
 
-		eff_library    = self._effective_instrument_library
-		eff_similarity = self._effective_similarity_matrix
-		eff_transform  = self._effective_transform_manager
-		all_samples    = eff_library.samples()
-		sample_id: typing.Optional[int] = None
+		eff_library   = self._effective_instrument_library
+		eff_transform = self._effective_transform_manager
 
-		beats_resolver = _build_beats_resolver(
-			assignment.process, eff_transform, self._target_bpm,
-		)
-		energy_profile_resolver = _build_energy_profile_resolver(
-			assignment.process, eff_transform, self._target_bpm,
-		)
-
-		for select_spec in assignment.select:
-
-			ranked = subsample.query.query(
-				select_spec, all_samples, eff_similarity, beats_resolver,
-				energy_profile_resolver=energy_profile_resolver,
-			)
-
-			if ranked:
-				# PickSpec.resolve_index draws a 0-indexed rank from [lo, hi],
-				# clamping hi to len(ranked).  Single-rank PickSpecs are
-				# deterministic; range PickSpecs re-roll on every note-on.
-				idx = pick_spec.resolve_index(len(ranked))
-				sample_id = ranked[idx].sample_id
-				break
+		sample_id = self._resolve_sample_id(assignment, pick_spec, eff_library)
 
 		if sample_id is None:
 			_log.debug(
@@ -2698,9 +2697,8 @@ class MidiPlayer:
 
 		# ── Variant lookup based on ProcessSpec ───────────────────────────
 		# eff_transform was captured at the top of the handler alongside
-		# eff_library and eff_similarity so all three reference the same
-		# bank for the lifetime of this note-on, even if a Program Change
-		# swaps the active bank mid-handler.
+		# eff_library so both reference the same bank for the lifetime of this
+		# note-on, even if a Program Change swaps the active bank mid-handler.
 
 		if eff_transform is not None:
 
@@ -3071,6 +3069,136 @@ class MidiPlayer:
 		# old map or the new map, never a half-applied state.
 		self._note_map = new_map
 
+	def _resolve_sample_id (
+		self,
+		assignment:  subsample.query.Assignment,
+		pick_spec:   subsample.query.PickSpec,
+		eff_library: subsample.library.InstrumentLibrary,
+	) -> typing.Optional[int]:
+
+		"""Resolve an assignment to one concrete sample id for a single trigger.
+
+		Fast path: the assignment's ranked candidate list was pre-computed by
+		_rebuild_candidate_cache (it changes only when the active library
+		changes), so the trigger just draws a pick index — no query, no sort,
+		no filesystem access.  An empty cached list means "nothing matched";
+		returns None.
+
+		Slow path (cache miss): the select orders or filters by asynchronously
+		baked variant state (quantized_beats / beat_match), whose ranking
+		shifts as variants finish, so it is resolved live against the current
+		library here.  ``PickSpec.resolve_index`` draws a 0-indexed rank from
+		[lo, hi] (clamped to the list length); a range pick re-rolls per call.
+		"""
+
+		candidates = self._candidate_cache.get(id(assignment))
+
+		if candidates is not None:
+			if not candidates:
+				return None
+
+			return candidates[pick_spec.resolve_index(len(candidates))]
+
+		# Variant-dependent select — resolve live (see _rebuild_candidate_cache).
+		eff_similarity = self._effective_similarity_matrix
+		eff_transform  = self._effective_transform_manager
+		all_samples    = eff_library.samples()
+
+		beats_resolver = _build_beats_resolver(
+			assignment.process, eff_transform, self._target_bpm,
+		)
+		energy_profile_resolver = _build_energy_profile_resolver(
+			assignment.process, eff_transform, self._target_bpm,
+		)
+
+		for select_spec in assignment.select:
+
+			ranked = subsample.query.query(
+				select_spec, all_samples, eff_similarity, beats_resolver,
+				energy_profile_resolver=energy_profile_resolver,
+			)
+
+			if ranked:
+				return ranked[pick_spec.resolve_index(len(ranked))].sample_id
+
+		return None
+
+	def _rebuild_candidate_cache (self) -> dict[int, list[subsample.library.SampleRecord]]:
+
+		"""Pre-compute each assignment's ranked candidate list off the trigger thread.
+
+		The ranked list an assignment resolves to depends only on the active
+		library and similarity index — not on the triggering note, velocity, or
+		the per-trigger pick draw — so it is stable between note-ons until the
+		library changes.  Resolving it here turns sample selection at note-on
+		into a single indexed pick (see _resolve_sample_id), removing the
+		per-trigger query, sort, and ``directory:`` filesystem scan from the
+		rtmidi callback thread.
+
+		Stores variant-independent results (as sample ids) in
+		``self._candidate_cache`` via an atomic rebind.  Selects that order or
+		filter by quantized_beats / beat_match are left out of the cache —
+		their ranking changes as variants finish baking, so the trigger path
+		re-queries them live.
+
+		Returns the full id → ranked-records map (every assignment, cached or
+		not) so update_assignments can reuse it for variant pre-computation
+		without querying the library a second time.
+
+		Called from update_assignments (after zone materialisation) so every
+		re-evaluation path — startup, new sample, eviction, bank switch, MIDI
+		map reload, CC debounce — refreshes the cache against the live library.
+		"""
+
+		eff_library    = self._effective_instrument_library
+		eff_similarity = self._effective_similarity_matrix
+		eff_transform  = self._effective_transform_manager
+		all_samples    = eff_library.samples()
+
+		ranked_by_assignment: dict[int, list[subsample.library.SampleRecord]] = {}
+		new_cache: dict[int, list[int]] = {}
+		seen: set[int] = set()
+
+		for entries in self._note_map.values():
+			for assignment, _pick_spec in entries:
+				assignment_id = id(assignment)
+
+				if assignment_id in seen:
+					continue
+
+				seen.add(assignment_id)
+
+				beats_resolver = _build_beats_resolver(
+					assignment.process, eff_transform, self._target_bpm,
+				)
+				energy_profile_resolver = _build_energy_profile_resolver(
+					assignment.process, eff_transform, self._target_bpm,
+				)
+
+				ranked: list[subsample.library.SampleRecord] = []
+
+				for select_spec in assignment.select:
+					ranked = subsample.query.query(
+						select_spec, all_samples, eff_similarity, beats_resolver,
+						energy_profile_resolver=energy_profile_resolver,
+					)
+
+					if ranked:
+						break
+
+				ranked_by_assignment[assignment_id] = ranked
+
+				# Variant-dependent selects re-rank as variants bake, so the
+				# trigger path must re-query them live — keep them uncached.
+				if not subsample.query.select_uses_variant_state(assignment.select):
+					new_cache[assignment_id] = [record.sample_id for record in ranked]
+
+		# Atomic dict rebind: in-flight rtmidi handlers see either the old or
+		# the new cache, never a half-built one.
+		self._candidate_cache = new_cache
+
+		return ranked_by_assignment
+
 	def update_assignments (self) -> None:
 
 		"""Pre-compute transform variants for all assignments that declare processors.
@@ -3098,17 +3226,23 @@ class MidiPlayer:
 		"""
 
 		# Re-derive zone-tuned entries against the current library before
-		# the variant pre-computation walks the NoteMap.  Cheap when no
-		# templates are declared (early return inside).
+		# the candidate cache and variant pre-computation walk the NoteMap.
+		# Cheap when no templates are declared (early return inside).
 		self._materialize_zones()
+
+		# Refresh the hot-path sample-selection cache against the current
+		# library, and reuse the ranked lists it computed for the variant
+		# pre-computation below — one query per assignment, not two.  This
+		# runs even without a transform manager, so selection works when only
+		# the player (and no transforms) is configured.
+		candidate_records = self._rebuild_candidate_cache()
 
 		eff_transform = self._effective_transform_manager
 
 		if eff_transform is None:
 			return
 
-		eff_library    = self._effective_instrument_library
-		eff_similarity = self._effective_similarity_matrix
+		eff_library = self._effective_instrument_library
 
 		# Group notes by Assignment identity (object id) — all notes in the same
 		# assignment share the same select/process spec.  Collect (note, PickSpec)
@@ -3134,30 +3268,14 @@ class MidiPlayer:
 		if not groups:
 			return
 
-		all_samples = eff_library.samples()
 		_total_assignments = 0
 		_total_variants = 0
 
 		for asgn, note_picks in groups.values():
 
-			# Resolve the full ranked list via the query engine.
-			ranked: list[subsample.library.SampleRecord] = []
-
-			beats_resolver = _build_beats_resolver(
-				asgn.process, eff_transform, self._target_bpm,
-			)
-			energy_profile_resolver = _build_energy_profile_resolver(
-				asgn.process, eff_transform, self._target_bpm,
-			)
-
-			for select_spec in asgn.select:
-				ranked = subsample.query.query(
-					select_spec, all_samples, eff_similarity, beats_resolver,
-					energy_profile_resolver=energy_profile_resolver,
-				)
-
-				if ranked:
-					break
+			# Reuse the ranked list _rebuild_candidate_cache already resolved
+			# for this assignment — no second query against the library.
+			ranked = candidate_records.get(id(asgn), [])
 
 			if not ranked:
 				continue

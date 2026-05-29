@@ -4503,3 +4503,168 @@ class TestBeatMatchEndToEnd:
 		# by the variant-precompute path). The key assertion is that it
 		# ran — which only happens when the resolver is built and passed.
 		assert transform_manager.get_variant.called
+
+
+# ---------------------------------------------------------------------------
+# Candidate cache — sample selection pre-computed off the trigger thread
+# ---------------------------------------------------------------------------
+
+class TestCandidateCache:
+
+	"""MidiPlayer pre-computes each assignment's ranked candidate list when the
+	library changes, so note-on selection is an indexed pick rather than a
+	per-trigger query + sort + ``directory:`` filesystem scan (the cause of the
+	original MIDI-timing regression).  Variant-dependent selects
+	(quantized_beats / beat_match) are excluded and resolved live."""
+
+	def _make_record (self, name: str, sample_id: int) -> subsample.library.SampleRecord:
+		return subsample.library.SampleRecord(
+			sample_id   = sample_id,
+			name        = name,
+			spectral    = tests.helpers._make_spectral(),
+			rhythm      = tests.helpers._make_rhythm(),
+			pitch       = tests.helpers._make_pitch(),
+			timbre      = tests.helpers._make_timbre(),
+			level       = tests.helpers._make_level(),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = tests.helpers._make_params(),
+			duration    = 1.0,
+			audio       = numpy.zeros((100, 2), dtype=numpy.int32),
+		)
+
+	def _make_player (
+		self,
+		records:  list[subsample.library.SampleRecord],
+		note_map: subsample.player.NoteMap,
+	) -> tuple[subsample.player.MidiPlayer, unittest.mock.MagicMock]:
+
+		"""Build a player over a mock library whose sample set is controllable
+		via ``lib.samples.return_value`` — so a new capture or an eviction is a
+		single assignment in the test."""
+
+		lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		lib.samples.return_value = records
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=lib,
+			similarity_matrix=similarity,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		return player, lib
+
+	def _name_glob_assignment (self, name: str = "Hats", glob: str = "hat*") -> subsample.query.Assignment:
+		return subsample.query.Assignment(
+			name=name,
+			select=(subsample.query.SelectSpec(where=subsample.query.WherePredicate(name_glob=glob)),),
+		)
+
+	def test_cache_built_at_construction (self) -> None:
+		"""A variant-independent select is resolved and cached during __init__."""
+		records = [self._make_record("hat_a", 1), self._make_record("kick", 2)]
+		asgn = self._name_glob_assignment()
+		note_map = {(0, 42): [(asgn, subsample.query.PickSpec(1, 1))]}
+
+		player, _lib = self._make_player(records, note_map)
+
+		assert player._candidate_cache[id(asgn)] == [1]
+
+	def test_resolve_sample_id_uses_cache_without_querying (self) -> None:
+		"""_resolve_sample_id returns the cached pick and never calls the query engine."""
+		records = [self._make_record("hat_a", 7)]
+		asgn = self._name_glob_assignment()
+		note_map = {(0, 42): [(asgn, subsample.query.PickSpec(1, 1))]}
+
+		player, lib = self._make_player(records, note_map)
+
+		with unittest.mock.patch("subsample.query.query") as mock_query:
+			result = player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib)
+
+		assert result == 7
+		mock_query.assert_not_called()
+
+	def test_empty_candidates_resolve_to_none (self) -> None:
+		"""A select that matches nothing caches an empty list and resolves to None."""
+		records = [self._make_record("kick", 1)]
+		asgn = self._name_glob_assignment()   # "hat*" matches no "kick"
+		note_map = {(0, 42): [(asgn, subsample.query.PickSpec(1, 1))]}
+
+		player, lib = self._make_player(records, note_map)
+
+		assert player._candidate_cache[id(asgn)] == []
+		assert player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib) is None
+
+	def test_range_pick_re_rolls_across_cached_list (self) -> None:
+		"""A range pick draws varying ranks from the cached candidate list."""
+		records = [self._make_record(f"hat_{i}", i + 1) for i in range(3)]
+		asgn = self._name_glob_assignment()
+		note_map = {(0, 42): [(asgn, subsample.query.PickSpec(1, 3))]}
+
+		player, lib = self._make_player(records, note_map)
+
+		assert set(player._candidate_cache[id(asgn)]) == {1, 2, 3}
+
+		drawn = {
+			player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 3), lib)
+			for _ in range(200)
+		}
+
+		assert drawn <= {1, 2, 3}
+		assert len(drawn) >= 2
+
+	def test_variant_dependent_select_not_cached (self) -> None:
+		"""A quantized_beats-ordered select is excluded from the cache and
+		resolved live, because its ranking depends on async variant state."""
+		records = [self._make_record("loop", 1)]
+		asgn = subsample.query.Assignment(
+			name="BeatSynced",
+			select=(subsample.query.SelectSpec(
+				order=(subsample.query.OrderClause(by="quantized_beats", dir="asc"),),
+			),),
+		)
+		note_map = {(0, 60): [(asgn, subsample.query.PickSpec(1, 1))]}
+
+		player, lib = self._make_player(records, note_map)
+
+		assert id(asgn) not in player._candidate_cache
+
+		with unittest.mock.patch("subsample.query.query", wraps=subsample.query.query) as spy:
+			result = player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib)
+
+		assert result == 1
+		spy.assert_called()
+
+	def test_update_assignments_picks_up_new_sample (self) -> None:
+		"""update_assignments — the central re-evaluation hub — rebuilds the
+		cache so a newly-arrived matching sample becomes selectable."""
+		records = [self._make_record("hat_a", 1)]
+		asgn = self._name_glob_assignment()
+		note_map = {(0, 42): [(asgn, subsample.query.PickSpec(1, 1))]}
+
+		player, lib = self._make_player(records, note_map)
+		assert set(player._candidate_cache[id(asgn)]) == {1}
+
+		lib.samples.return_value = records + [self._make_record("hat_b", 2)]
+		player.update_assignments()
+
+		assert set(player._candidate_cache[id(asgn)]) == {1, 2}
+
+	def test_update_assignments_drops_evicted_sample (self) -> None:
+		"""When a sample leaves the library, the next rebuild removes it from
+		the cached candidates."""
+		records = [self._make_record("hat_a", 1), self._make_record("hat_b", 2)]
+		asgn = self._name_glob_assignment()
+		note_map = {(0, 42): [(asgn, subsample.query.PickSpec(1, 1))]}
+
+		player, lib = self._make_player(records, note_map)
+		assert set(player._candidate_cache[id(asgn)]) == {1, 2}
+
+		lib.samples.return_value = [records[0]]
+		player.update_assignments()
+
+		assert set(player._candidate_cache[id(asgn)]) == {1}
