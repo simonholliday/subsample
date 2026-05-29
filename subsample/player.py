@@ -101,24 +101,81 @@ NoteMap = dict[
 
 
 @dataclasses.dataclass(frozen=True)
+class ZoneTemplate:
+
+	"""A declared zone-tuned assignment.
+
+	Held as a template (rather than baked into the NoteMap at load time)
+	because the concrete (channel, note) → (Assignment, PickSpec) entries
+	must be re-derived whenever the active library changes — new sample
+	imports, watcher pickups, library evictions, bank switches, MIDI map
+	reloads.  The materialisation step runs the template's ``select`` over
+	the active library, filters to pitched samples via
+	``has_stable_pitch``, sorts by detected pitch, and lays each sample
+	across a contiguous slice of the keyboard centred on its pitch with
+	zones meeting at midpoints.
+
+	Every Assignment-style configuration (process, gain, pan, output
+	routing, extract, segment_mode, velocity layering) flows through
+	verbatim into the materialised Assignments — the template is the
+	prototype that's cloned per derived (channel, note) entry.
+
+	Fields:
+		name:                Label shown in logs; derived Assignments are
+		                     named ``"<template name> → <sample stem>"``.
+		channel:             mido 0-indexed channel.  Owned exclusively
+		                     by this template + any sibling zone-tuned
+		                     templates with non-overlapping keyboard ranges.
+		keyboard_range:      (lo, hi) inclusive MIDI note range that this
+		                     template's samples will be spread across.
+		select:              User's select block — filters which samples
+		                     are candidates for zone derivation.
+		process:             User's process block — MUST contain repitch.
+		one_shot ... velocity_rescale_to:  Inherited verbatim by each
+		                     derived Assignment.
+	"""
+
+	name:                str
+	channel:             int
+	keyboard_range:      tuple[int, int]
+	select:              tuple[subsample.query.SelectSpec, ...]
+	process:             subsample.query.ProcessSpec
+	one_shot:            bool
+	gain_db:             float
+	pan_weights:         typing.Optional[numpy.ndarray]
+	output_routing:      typing.Optional[tuple[int, ...]]
+	extract:             typing.Optional[subsample.query.ExtractSpec]
+	segment_mode:        typing.Union[str, int]
+	velocity_trigger:    tuple[int, int]
+	velocity_rescale_to: typing.Optional[tuple[int, int]]
+
+
+@dataclasses.dataclass(frozen=True)
 class MidiMapResult:
 
 	"""Complete result of parsing a MIDI map YAML file.
 
 	Fields:
-		note_map:         Note routing table: (mido_channel, midi_note) → (Assignment, PickSpec).
+		note_map:         Manual note routing entries — (mido_channel, midi_note) →
+		                  list of (Assignment, PickSpec) layers.  Zone-tuned
+		                  templates are NOT materialised here; the player builds
+		                  the working map by merging this with derived entries
+		                  on every (re-)materialisation.
 		bank_definitions: Parsed bank declarations from the optional ``banks:`` key.
 		                  Empty list when no banks are declared (single-directory mode).
 		bank_channel:     MIDI channel for Program Change bank switching (user-facing 1-16,
 		                  0 = omni).  Only meaningful when bank_definitions is non-empty.
 		default_bank:     MIDI program number of the bank to activate at startup.
 		                  None means use the first bank in the list.
+		zone_templates:   Declared zone-tuned assignments.  Empty tuple when no
+		                  ``notes: zone-tuned`` entries are present.
 	"""
 
 	note_map:         NoteMap
 	bank_definitions: list[subsample.bank.BankDefinition]
 	bank_channel:     int
-	default_bank:     typing.Optional[int] = None
+	default_bank:     typing.Optional[int]    = None
+	zone_templates:   tuple[ZoneTemplate, ...] = ()
 
 
 def _ranks_for (pick_spec: subsample.query.PickSpec, ranked_len: int) -> range:
@@ -621,6 +678,72 @@ def _validate_velocity_layers (note_map: NoteMap) -> None:
 			)
 
 
+def _validate_zone_assignments (
+	zone_templates:  list["ZoneTemplate"],
+	manual_channels: set[int],
+) -> None:
+
+	"""Cross-validate zone-tuned templates after every assignment is parsed.
+
+	Two invariants enforced (raise ValueError on either):
+	  - **Channel exclusivity** — a channel that carries a zone-tuned
+	    template must not also have any manual ``notes: …`` assignments.
+	    Zone-tuned owns its channel so the keyboard layout is fully
+	    derived without conflicting fixed-note assignments.
+	  - **Range non-overlap** — two zone-tuned templates on the same
+	    channel must declare non-overlapping ``keyboard_range`` spans.
+	    Mirrors the velocity-layering overlap rule and the same musical
+	    rationale: overlap is almost always a copy-paste mistake and
+	    silently picking one would surprise the user mid-performance.
+
+	The keyboard_range bounds on each template are already validated
+	(0-127 and lo <= hi) by ``_parse_zone_notes``; this function checks
+	only the cross-template invariants.
+	"""
+
+	zone_channels: set[int] = {t.channel for t in zone_templates}
+
+	# Channel-exclusivity check.
+	collisions = zone_channels & manual_channels
+	if collisions:
+		offenders = sorted(collisions)
+		offending_zone_names = [
+			t.name for t in zone_templates if t.channel in collisions
+		]
+		raise ValueError(
+			f"MIDI map: channel(s) {[c + 1 for c in offenders]!r} have both "
+			f"zone-tuned templates and manual note assignments — zone-tuned "
+			f"owns its channel exclusively.  Offending zone-tuned "
+			f"assignment(s): {offending_zone_names!r}"
+		)
+
+	# Range non-overlap check, per channel.
+	by_channel: dict[int, list["ZoneTemplate"]] = {}
+	for t in zone_templates:
+		by_channel.setdefault(t.channel, []).append(t)
+
+	for ch, templates in by_channel.items():
+		if len(templates) <= 1:
+			continue
+
+		# Sort by lo so the adjacency walk is linear.
+		sorted_templates = sorted(templates, key=lambda t: t.keyboard_range)
+
+		for i in range(len(sorted_templates) - 1):
+			a = sorted_templates[i]
+			b = sorted_templates[i + 1]
+			lo_a, hi_a = a.keyboard_range
+			lo_b, hi_b = b.keyboard_range
+
+			if hi_a >= lo_b:
+				raise ValueError(
+					f"MIDI map ch{ch + 1}: zone-tuned keyboard ranges of "
+					f"templates {a.name!r} [{lo_a}, {hi_a}] and "
+					f"{b.name!r} [{lo_b}, {hi_b}] overlap — adjust ranges so "
+					f"each MIDI note belongs to exactly one zone-tuned template."
+				)
+
+
 # Note name conversion — delegated to pymididefs.
 _midi_to_note_name = pymididefs.notes.note_to_name
 _parse_note_name = pymididefs.notes.name_to_note
@@ -634,6 +757,135 @@ _parse_note_name = pymididefs.notes.name_to_note
 _SYMBOL_NAMESPACES: typing.Final[dict[str, typing.Mapping[str, int]]] = {
 	"drum": pymididefs.drums.GM_DRUM_MAP,
 }
+
+
+def _parse_single_note (item: typing.Any, assignment_name: str) -> int:
+
+	"""Resolve one note value: int, numeric string, note-name string, or
+	symbolic form like ``drum.kick_1``.
+
+	Extracted from ``_parse_note_spec`` so other parsers (e.g. the
+	``range:`` field of ``notes: { mode: zone-tuned, range: [C4, G9] }``)
+	can reuse the same accept-anything-then-validate dispatch.
+	"""
+
+	if isinstance(item, int):
+		if not 0 <= item <= 127:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: note {item} is outside [0, 127]"
+			)
+		return item
+
+	if isinstance(item, str):
+
+		# Symbolic form ("drum.kick_1") — single dot, no range separator.
+		# Looked up case-insensitively in _SYMBOL_NAMESPACES.  Unknown
+		# namespaces fall through to the int / note-name path so a typo
+		# like "C.4" still gets the existing note-name error.
+		if "." in item and ".." not in item:
+			prefix, _, sym = item.partition(".")
+			table = _SYMBOL_NAMESPACES.get(prefix.lower())
+
+			if table is not None:
+				try:
+					return table[sym.lower()]
+				except KeyError:
+					valid = sorted(table)
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: "
+						f"unknown {prefix!r} symbol {sym!r} "
+						f"(valid: {', '.join(valid[:5])}…)"
+					)
+
+		# Try parsing as a bare integer first ("36"), then as a note name ("C3").
+		try:
+			n = int(item)
+		except ValueError:
+			n = None
+
+		if n is not None:
+			if not 0 <= n <= 127:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: note {n} is outside [0, 127]"
+				)
+			return n
+
+		try:
+			return _parse_note_name(item)
+		except ValueError as exc:
+			raise ValueError(f"MIDI map assignment {assignment_name!r}: {exc}") from exc
+
+	raise ValueError(
+		f"MIDI map assignment {assignment_name!r}: unexpected note value {item!r}"
+	)
+
+
+_ZONE_TUNED_SENTINEL: typing.Final[str] = "zone-tuned"
+
+_VALID_NOTES_INNER_KEYS: typing.Final[frozenset[str]] = frozenset({"mode", "range"})
+
+
+def _parse_zone_notes (
+	notes_raw:       typing.Any,
+	assignment_name: str,
+) -> typing.Optional[tuple[int, int]]:
+
+	"""Detect the ``zone-tuned`` form on the ``notes:`` field.
+
+	Returns:
+	  - ``(lo, hi)`` keyboard range when the field is zone-tuned (string
+	    sentinel ``"zone-tuned"`` or dict form ``{mode: zone-tuned, …}``).
+	  - ``None`` when the field is a regular note spec (int, name, range,
+	    list, symbolic); the caller falls through to ``_parse_note_spec``.
+
+	Validation (raises ValueError on failure):
+	  - Unknown inner keys under the dict form (typo guard mirroring
+	    ``_VELOCITY_INNER_KEYS``).
+	  - ``mode`` missing or not equal to ``zone-tuned``.
+	  - ``range:`` not a 2-element list, lo > hi, or out of [0, 127].
+	"""
+
+	if notes_raw == _ZONE_TUNED_SENTINEL:
+		return (0, 127)
+
+	if not isinstance(notes_raw, dict):
+		return None
+
+	unknown = set(notes_raw) - _VALID_NOTES_INNER_KEYS
+	if unknown:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unknown notes key(s) "
+			f"{sorted(unknown)!r} (valid: {sorted(_VALID_NOTES_INNER_KEYS)!r})"
+		)
+
+	mode = notes_raw.get("mode")
+	if mode != _ZONE_TUNED_SENTINEL:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: notes dict requires "
+			f"mode: {_ZONE_TUNED_SENTINEL!r} (got {mode!r})"
+		)
+
+	range_raw = notes_raw.get("range")
+
+	if range_raw is None:
+		return (0, 127)
+
+	if not isinstance(range_raw, list) or len(range_raw) != 2:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: notes range must be a "
+			f"2-element list [lo, hi], got {range_raw!r}"
+		)
+
+	lo = _parse_single_note(range_raw[0], assignment_name)
+	hi = _parse_single_note(range_raw[1], assignment_name)
+
+	if lo > hi:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: notes range [{lo}, {hi}] "
+			f"has lo > hi"
+		)
+
+	return (lo, hi)
 
 
 def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
@@ -651,6 +903,11 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 	Range syntax is intentionally not supported for symbolic notes — drum
 	names aren't sequential, use a list instead.
 
+	Does NOT accept the zone-tuned forms (``"zone-tuned"`` or
+	``{mode: zone-tuned, …}``); callers must dispatch through
+	``_parse_zone_notes`` first to detect those and route to the zone-tuned
+	template path.
+
 	Args:
 		notes_raw:       Raw YAML value for the 'notes' field.
 		assignment_name: Assignment name used in error messages.
@@ -662,63 +919,9 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 		ValueError: If any note value is malformed or outside [0, 127].
 	"""
 
-	def _single (item: typing.Any) -> int:
-		"""Resolve one note value: int, numeric string, note-name string, or
-		symbolic form like "drum.kick_1"."""
-
-		if isinstance(item, int):
-			if not 0 <= item <= 127:
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: note {item} is outside [0, 127]"
-				)
-			return item
-
-		if isinstance(item, str):
-
-			# Symbolic form ("drum.kick_1") — single dot, no range separator.
-			# Looked up case-insensitively in _SYMBOL_NAMESPACES.  Unknown
-			# namespaces fall through to the int / note-name path so a typo
-			# like "C.4" still gets the existing note-name error.
-			if "." in item and ".." not in item:
-				prefix, _, sym = item.partition(".")
-				table = _SYMBOL_NAMESPACES.get(prefix.lower())
-
-				if table is not None:
-					try:
-						return table[sym.lower()]
-					except KeyError:
-						valid = sorted(table)
-						raise ValueError(
-							f"MIDI map assignment {assignment_name!r}: "
-							f"unknown {prefix!r} symbol {sym!r} "
-							f"(valid: {', '.join(valid[:5])}…)"
-						)
-
-			# Try parsing as a bare integer first ("36"), then as a note name ("C3").
-			try:
-				n = int(item)
-			except ValueError:
-				n = None
-
-			if n is not None:
-				if not 0 <= n <= 127:
-					raise ValueError(
-						f"MIDI map assignment {assignment_name!r}: note {n} is outside [0, 127]"
-					)
-				return n
-
-			try:
-				return _parse_note_name(item)
-			except ValueError as exc:
-				raise ValueError(f"MIDI map assignment {assignment_name!r}: {exc}") from exc
-
-		raise ValueError(
-			f"MIDI map assignment {assignment_name!r}: unexpected note value {item!r}"
-		)
-
 	# Range syntax: "C2..C4" or "36..60".  Reject symbolic ranges explicitly so
 	# the user gets a targeted error pointing at list syntax, rather than the
-	# generic "not a valid note name" from the inner _single() call.
+	# generic "not a valid note name" from the inner _parse_single_note() call.
 	if isinstance(notes_raw, str) and ".." in notes_raw:
 
 		if "." in notes_raw.split("..")[0]:
@@ -729,8 +932,8 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 			)
 
 		lo_str, hi_str = notes_raw.split("..", 1)
-		lo = _single(lo_str.strip())
-		hi = _single(hi_str.strip())
+		lo = _parse_single_note(lo_str.strip(), assignment_name)
+		hi = _parse_single_note(hi_str.strip(), assignment_name)
 
 		if lo > hi:
 			raise ValueError(
@@ -742,10 +945,10 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 
 	# Single value (int or string).
 	if isinstance(notes_raw, (int, str)):
-		return [_single(notes_raw)]
+		return [_parse_single_note(notes_raw, assignment_name)]
 
 	# List of mixed values.
-	return [_single(item) for item in notes_raw]
+	return [_parse_single_note(item, assignment_name) for item in notes_raw]
 
 
 def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.library.SampleRecord]:
@@ -1229,6 +1432,15 @@ def load_midi_map (
 	            Multiple non-overlapping layers on the same (channel, note)
 	            form a velocity-switched note.  Omit for the legacy
 	            single-assignment-per-note behaviour.
+	  notes:    The MIDI note(s) the assignment covers.  In addition to the
+	            usual int / name / range / list forms, accepts ``zone-tuned``
+	            (string sentinel — auto-zone over MIDI 0-127) or
+	            ``{mode: zone-tuned, range: [lo, hi]}`` (auto-zone over a
+	            restricted keyboard range).  Zone-tuned assignments require
+	            ``process: [- repitch: true]`` and own their channel
+	            exclusively.  The actual (channel, note) coverage is derived
+	            at materialisation time from each matching pitched sample's
+	            detected pitch.
 
 	reference predicates whose name is not in reference_names are skipped
 	with a WARNING — this prevents silent failures when using a map built
@@ -1287,6 +1499,8 @@ def load_midi_map (
 
 	reference_set = {name.upper() for name in reference_names}
 	note_map: NoteMap = {}
+	zone_templates: list[ZoneTemplate] = []
+	manual_channels: set[int] = set()
 
 	for assignment_index, assignment_raw in enumerate(raw["assignments"], start=1):
 		name = assignment_raw.get("name", "<unnamed>")
@@ -1310,7 +1524,11 @@ def load_midi_map (
 		if notes_raw is None:
 			raise ValueError(f"MIDI map assignment {name!r}: missing 'notes'")
 
-		notes = _parse_note_spec(notes_raw, name)
+		# Detect zone-tuned mode (string sentinel or dict form).  When detected,
+		# the assignment is routed to the ZoneTemplate path instead of producing
+		# concrete NoteMap entries; materialisation happens at runtime against
+		# the active library.
+		zone_range = _parse_zone_notes(notes_raw, name)
 
 		# Parse select block (required).
 		select_raw = assignment_raw.get("select")
@@ -1381,6 +1599,39 @@ def load_midi_map (
 
 				break
 
+		# Zone-tuned path: emit a ZoneTemplate; concrete NoteMap entries
+		# are derived at materialisation time.
+		if zone_range is not None:
+
+			if not process.has_repitch():
+				raise ValueError(
+					f"MIDI map assignment {name!r}: zone-tuned requires "
+					f"``process: [- repitch: true]`` so each derived sample "
+					f"is pitch-shifted to the note being played.  Add a "
+					f"repitch step to the process block."
+				)
+
+			zone_templates.append(ZoneTemplate(
+				name=name,
+				channel=mido_channel,
+				keyboard_range=zone_range,
+				select=select_specs,
+				process=process,
+				one_shot=one_shot,
+				gain_db=gain_db,
+				pan_weights=pan_weights,
+				output_routing=output_routing,
+				extract=extract,
+				segment_mode=segment_mode,
+				velocity_trigger=velocity_trigger,
+				velocity_rescale_to=velocity_rescale_to,
+			))
+			continue
+
+		# Regular path: parse notes and emit one or more NoteMap entries.
+		notes = _parse_note_spec(notes_raw, name)
+		manual_channels.add(mido_channel)
+
 		assignment = subsample.query.Assignment(
 			name=name,
 			select=select_specs,
@@ -1426,13 +1677,15 @@ def load_midi_map (
 			)
 
 	_validate_velocity_layers(note_map)
+	_validate_zone_assignments(zone_templates, manual_channels)
 
 	_log.info(
-		"MIDI map loaded from %s: %d note(s) across %d assignment(s)%s",
+		"MIDI map loaded from %s: %d note(s) across %d assignment(s)%s%s",
 		path,
 		len(note_map),
 		len(raw.get("assignments", [])),
 		f", {len(bank_definitions)} bank(s)" if bank_definitions else "",
+		f", {len(zone_templates)} zone-tuned template(s)" if zone_templates else "",
 	)
 
 	return MidiMapResult(
@@ -1440,6 +1693,7 @@ def load_midi_map (
 		bank_definitions=bank_definitions,
 		bank_channel=bank_channel,
 		default_bank=default_bank,
+		zone_templates=tuple(zone_templates),
 	)
 
 
@@ -1633,6 +1887,7 @@ class MidiPlayer:
 		output_channels: typing.Optional[int] = None,
 		ambisonic_config: typing.Optional[subsample.config.AmbisonicConfig] = None,
 		buffer_frames: typing.Optional[int] = None,
+		zone_templates: tuple[ZoneTemplate, ...] = (),
 	) -> None:
 
 		self._device_name        = device_name
@@ -1703,9 +1958,15 @@ class MidiPlayer:
 		# at config load.  See PlayerAudioConfig.buffer_frames docstring.
 		self._buffer_frames: typing.Optional[int] = buffer_frames
 
-		# Note routing map: (mido_channel, midi_note) → (Assignment, PickSpec).
-		# Loaded from the MIDI map YAML file by the caller (cli.py) via load_midi_map().
-		self._note_map: NoteMap = midi_map
+		# Note routing map: (mido_channel, midi_note) → list of velocity layers.
+		# The "base" map holds the manual entries declared in YAML; the working
+		# self._note_map is materialised from base + derived zone-tuned entries
+		# at every (re-)materialisation.  At startup we begin with base as the
+		# working map; _materialize_zones() below rebuilds it including any
+		# zone-tuned entries the YAML declared.
+		self._base_note_map:  NoteMap                       = midi_map
+		self._zone_templates: tuple[ZoneTemplate, ...]      = zone_templates
+		self._note_map:       NoteMap                       = dict(midi_map)
 
 		# Most recently played variant per (channel, note).  Used as a fallback
 		# during MIDI map transitions: when a new variant is still processing,
@@ -1795,6 +2056,14 @@ class MidiPlayer:
 		# _state_lock is outermost.  Never acquire it while holding
 		# _voices_lock, _mix_matrix_lock, or _cc_debounce_lock.
 		self._state_lock: threading.Lock = threading.Lock()
+
+		# Materialise zone-tuned templates against the active library so
+		# the startup log shows the derived per-sample zones rather than
+		# an empty NoteMap.  Subsequent re-materialisation happens at the
+		# top of update_assignments() — picked up by every re-evaluation
+		# path (reload, _integrate_sample, bank switch).
+		if self._zone_templates:
+			self._materialize_zones()
 
 		# Group consecutive notes that share the same Assignment into ranges
 		# so that a 128-note pitched assignment becomes a single log line.
@@ -2648,6 +2917,160 @@ class MidiPlayer:
 
 		return enqueued
 
+	def _materialize_zones (self) -> None:
+
+		"""Rebuild ``self._note_map`` from base entries + zone-derived entries.
+
+		Walks every declared ZoneTemplate, runs its select against the active
+		library, filters to pitched samples (``has_stable_pitch``), filters
+		to samples whose detected MIDI pitch lies inside the template's
+		keyboard range, sorts by pitch, and lays each sample across a
+		contiguous keyboard zone centred on its detected pitch.  Each
+		derived (channel, note) entry gets an Assignment that is a clone
+		of the template with its select replaced by an exact-stem-name
+		predicate so the query engine resolves to that specific sample at
+		note-on.
+
+		Called from ``__init__`` (so the startup log shows the materialised
+		layout) and from the top of ``update_assignments`` (so every
+		re-evaluation path — reload, _integrate_sample, bank switch, CC
+		debounce — picks up library changes without inventing new plumbing).
+
+		Concurrent calls from different threads produce the same result
+		(deterministic from the same input) so the dict-rebind atomicity
+		guarantee that the rest of the player relies on still holds.
+		"""
+
+		if not self._zone_templates:
+			# No templates — the base map IS the working map.  Copy so any
+			# subsequent runtime mutation (output-routing fix-up in run())
+			# doesn't bleed into the base.
+			self._note_map = dict(self._base_note_map)
+			return
+
+		# Start from a fresh copy of the manual entries; derived entries
+		# are appended per-template below.
+		new_map: NoteMap = {k: list(v) for k, v in self._base_note_map.items()}
+
+		eff_library    = self._effective_instrument_library
+		eff_similarity = self._effective_similarity_matrix
+
+		# Lazy import: librosa is already a hard dep but the import is
+		# slow on cold start; defer until first materialise so module
+		# import stays fast.
+		import librosa
+
+		for template in self._zone_templates:
+
+			# Run the template's select against the library.  Use the
+			# first select spec only — zone-tuned doesn't support
+			# fallback chains because the materialiser needs a stable
+			# candidate list (a fallback firing mid-pattern would shuffle
+			# every note's assigned sample).
+			candidates = subsample.query.query(
+				template.select[0],
+				eff_library.samples(),
+				eff_similarity,
+			)
+
+			# Filter to pitched candidates.  The 7-criterion gate is the
+			# same one the player uses elsewhere to decide which samples
+			# can be pitch-shifted at all — applying it implicitly here
+			# means an unpitched sample never sneaks into a zone where
+			# the repitch would produce nonsense.
+			pitched: list[tuple[int, subsample.library.SampleRecord]] = []
+			lo_note, hi_note = template.keyboard_range
+
+			for record in candidates:
+
+				if not subsample.analysis.has_stable_pitch(
+					record.spectral, record.pitch, record.duration,
+				):
+					continue
+
+				centre_midi = int(round(
+					float(librosa.hz_to_midi(record.pitch.dominant_pitch_hz)),
+				))
+
+				if lo_note <= centre_midi <= hi_note:
+					pitched.append((centre_midi, record))
+				else:
+					_log.debug(
+						"zone-tuned %r: sample %r detected at MIDI %d is "
+						"outside range [%d, %d] — excluded",
+						template.name, record.name, centre_midi, lo_note, hi_note,
+					)
+
+			if not pitched:
+				_log.info(
+					"zone-tuned %r: no matching pitched samples in range [%d, %d] "
+					"— no notes materialised on ch%d",
+					template.name, lo_note, hi_note, template.channel + 1,
+				)
+				continue
+
+			# Sort by (pitch, name) — ties broken alphabetically for a
+			# deterministic layout that's reproducible across runs.
+			pitched.sort(key=lambda x: (x[0], x[1].name))
+
+			n = len(pitched)
+
+			for i, (centre_midi, record) in enumerate(pitched):
+
+				# Lower-pitched sample claims the floor of any non-integer
+				# midpoint (and any integer midpoint too) — consistent
+				# rule across both cases keeps the coverage gap-free at
+				# the cost of a small asymmetry at integer midpoints
+				# (e.g. midi 60+64 → 62, claimed by the lower).
+				if i == 0:
+					zone_lo = lo_note
+				else:
+					prev_centre = pitched[i - 1][0]
+					zone_lo = (prev_centre + centre_midi) // 2 + 1
+
+				if i == n - 1:
+					zone_hi = hi_note
+				else:
+					next_centre = pitched[i + 1][0]
+					zone_hi = (centre_midi + next_centre) // 2
+
+				# Build the derived Assignment for this sample.  The
+				# select is replaced with an exact stem-name predicate so
+				# the query engine at note-on resolves to THIS sample
+				# regardless of how the template's filter would rank
+				# things this trigger.
+				sample_where  = subsample.query.WherePredicate(name=record.name)
+				sample_select = (subsample.query.SelectSpec(where=sample_where),)
+
+				derived = subsample.query.Assignment(
+					name                = f"{template.name} → {record.name}",
+					select              = sample_select,
+					process             = template.process,
+					one_shot            = template.one_shot,
+					gain_db             = template.gain_db,
+					pan_weights         = template.pan_weights,
+					output_routing      = template.output_routing,
+					extract             = template.extract,
+					segment_mode        = template.segment_mode,
+					velocity_trigger    = template.velocity_trigger,
+					velocity_rescale_to = template.velocity_rescale_to,
+				)
+				pick = subsample.query.PickSpec(1, 1)
+
+				for note in range(zone_lo, zone_hi + 1):
+					new_map.setdefault(
+						(template.channel, note), [],
+					).append((derived, pick))
+
+			_log.debug(
+				"zone-tuned %r: %d sample(s) laid out across ch%d notes [%d, %d]",
+				template.name, n, template.channel + 1, lo_note, hi_note,
+			)
+
+		# Atomic dict rebind: in-flight rtmidi handlers see either the
+		# old map or the new map, never a half-applied state.
+		self._note_map = new_map
+
 	def update_assignments (self) -> None:
 
 		"""Pre-compute transform variants for all assignments that declare processors.
@@ -2665,9 +3088,19 @@ class MidiPlayer:
 		  - In the on_complete callback after a new sample arrives — ensures
 		    variants are ready before the next trigger.
 
+		Also re-materialises zone-tuned templates before pre-computing
+		variants, so any change to the active library (new captures,
+		evictions, bank switches) is reflected in the working NoteMap
+		before the variant pre-computation walks it.
+
 		No-ops if no transform manager is configured or no processable
 		assignments exist.
 		"""
+
+		# Re-derive zone-tuned entries against the current library before
+		# the variant pre-computation walks the NoteMap.  Cheap when no
+		# templates are declared (early return inside).
+		self._materialize_zones()
 
 		eff_transform = self._effective_transform_manager
 
@@ -2855,53 +3288,68 @@ class MidiPlayer:
 				context, exc,
 			)
 
-	def reload_midi_map (self, new_map: NoteMap) -> None:
+	def reload_midi_map (self, new_result: MidiMapResult) -> None:
 
-		"""Replace the active note map and re-compute transform variants.
+		"""Replace the active note map (and zone-tuned templates) and re-compute variants.
 
 		Atomic in the sense that matters for live performance: if the new
 		map is structurally valid but semantically broken (e.g. an order
 		clause like ``similarity`` whose required ``where.reference:`` was
-		accidentally commented out), ``update_assignments()`` raises on the
-		first offending assignment.  This method catches that, restores the
-		previous map, and re-raises so the watcher caller can log and stay
-		live under the old map — playback never stops mid-performance for
-		a YAML typo.
+		accidentally commented out, or a zone-tuned template whose query
+		raises), ``update_assignments()`` raises on the first offending
+		assignment.  This method catches that, restores the previous map
+		AND zone templates, and re-raises so the watcher caller can log
+		and stay live under the old configuration — playback never stops
+		mid-performance for a YAML typo.
 
-		Thread-safety: dict rebinds are atomic under the GIL, so any in-
-		flight ``_handle_message()`` call sees either the old map or the
-		new map, never a half-applied state.
+		Thread-safety: dict rebinds and tuple rebinds are atomic under the
+		GIL, so any in-flight ``_handle_message()`` call sees either the
+		old configuration or the new, never a half-applied state.
 
 		Args:
-			new_map: Parsed NoteMap from load_midi_map().note_map.  Must be a
-			         complete replacement (not a diff).
+			new_result: Parsed MidiMapResult from load_midi_map().  Must be
+			            a complete replacement (not a diff).  Both
+			            ``note_map`` (manual entries) and
+			            ``zone_templates`` are swapped in.
 
 		Raises:
-			Exception: whatever update_assignments() surfaces while
-			validating the new map.  The active map is restored before
-			propagating, so the player remains usable.
+			Exception: whatever update_assignments() / _materialize_zones()
+			surfaces while validating the new map.  The active
+			configuration is restored before propagating, so the player
+			remains usable.
 		"""
 
-		old_note_map    = self._note_map
-		old_mapped_ccs  = self._mapped_ccs
-		old_count       = len(self._note_map)
+		old_base_note_map  = self._base_note_map
+		old_note_map       = self._note_map
+		old_zone_templates = self._zone_templates
+		old_mapped_ccs     = self._mapped_ccs
+		old_count          = len(self._note_map)
 
-		# Apply the new map first so update_assignments() validates against
-		# the configuration the player would actually run with.  This is the
-		# canonical validation path — we don't duplicate query logic for a
-		# separate dry-run.
-		self._note_map   = new_map
-		self._mapped_ccs = _collect_mapped_ccs(new_map)
+		# Apply the new configuration first so update_assignments()
+		# validates against what the player would actually run with.  This
+		# is the canonical validation path — we don't duplicate query
+		# logic for a separate dry-run.
+		self._base_note_map  = new_result.note_map
+		self._note_map       = dict(new_result.note_map)
+		self._zone_templates = new_result.zone_templates
+		self._mapped_ccs     = _collect_mapped_ccs(new_result.note_map)
 
 		try:
+			# update_assignments() calls _materialize_zones() at its top,
+			# which exercises every zone template against the active
+			# library.  A bad template (e.g. select referencing an unknown
+			# scorer) surfaces here.
 			self.update_assignments()
 		except Exception:
 			# Roll back so the caller's catch leaves the player on the
-			# previously-good map.  Any variants update_assignments() may
-			# have enqueued before raising are harmless — they sit in the
-			# transform manager's cache for future calls.
-			self._note_map   = old_note_map
-			self._mapped_ccs = old_mapped_ccs
+			# previously-good configuration.  Any variants
+			# update_assignments() may have enqueued before raising are
+			# harmless — they sit in the transform manager's cache for
+			# future calls.
+			self._base_note_map  = old_base_note_map
+			self._note_map       = old_note_map
+			self._zone_templates = old_zone_templates
+			self._mapped_ccs     = old_mapped_ccs
 			raise
 
 		# Validation succeeded — clear caches whose entries reference the
@@ -2914,8 +3362,10 @@ class MidiPlayer:
 			self._segment_counters.clear()
 
 		_log.info(
-			"MIDI map reloaded: %d note(s) (was %d)",
-			len(new_map), old_count,
+			"MIDI map reloaded: %d note(s)%s (was %d)",
+			len(self._note_map),
+			f", {len(self._zone_templates)} zone-tuned template(s)" if self._zone_templates else "",
+			old_count,
 		)
 
 	def _select_segment (

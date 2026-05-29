@@ -675,6 +675,7 @@ def _start_player (
 			output_channels=cfg.player.audio.channels,
 			ambisonic_config=cfg.ambisonic,
 			buffer_frames=cfg.player.audio.buffer_frames,
+			zone_templates=midi_map_result.zone_templates,
 		)
 		player_cell[0] = player
 
@@ -729,6 +730,7 @@ def _start_player (
 		output_channels=cfg.player.audio.channels,
 		ambisonic_config=cfg.ambisonic,
 		buffer_frames=cfg.player.audio.buffer_frames,
+		zone_templates=midi_map_result.zone_templates,
 	)
 	player_cell[0] = player
 
@@ -1186,12 +1188,13 @@ def _main_impl () -> None:
 				)
 
 			# reload_midi_map runs update_assignments() against the new map
-			# and rolls back to the previous map on any exception — broad
-			# catch here so a runtime-validated YAML error (e.g. similarity
-			# ordering without where.reference set, only detectable when the
-			# query actually runs) never stops live playback.
+			# and rolls back to the previous map + zone templates on any
+			# exception — broad catch here so a runtime-validated YAML
+			# error (e.g. similarity ordering without where.reference set,
+			# only detectable when the query actually runs) never stops
+			# live playback.
 			try:
-				player.reload_midi_map(result.note_map)
+				player.reload_midi_map(result)
 			except Exception as exc:
 				_log.error(
 					"MIDI map reload failed validation — keeping current map: %s",

@@ -1,5 +1,6 @@
 """Tests for subsample.player — MIDI device selection and MidiPlayer lifecycle."""
 
+import dataclasses
 import pathlib
 import threading
 import typing
@@ -9,6 +10,7 @@ import mido
 import numpy
 import pytest
 
+import subsample.bank
 import subsample.library
 import subsample.player
 import subsample.query
@@ -1783,6 +1785,646 @@ class TestPerLayerSegmentCounter:
 
 
 # ---------------------------------------------------------------------------
+# Zone-tuned MIDI mapping — _parse_zone_notes, load_midi_map integration,
+# materialisation against the active library, and end-to-end note_on dispatch.
+# ---------------------------------------------------------------------------
+
+class TestParseZoneNotes:
+
+	"""Unit tests for the YAML parser _parse_zone_notes()."""
+
+	def test_string_sentinel_returns_full_range (self) -> None:
+		assert subsample.player._parse_zone_notes("zone-tuned", "asgn") == (0, 127)
+
+	def test_regular_notes_passthrough_returns_none (self) -> None:
+		"""Bare int / name / list / range string all fall through —
+		_parse_zone_notes returns None and the caller routes to
+		_parse_note_spec for the regular mapping path."""
+
+		assert subsample.player._parse_zone_notes(36, "asgn") is None
+		assert subsample.player._parse_zone_notes("C4", "asgn") is None
+		assert subsample.player._parse_zone_notes("36..60", "asgn") is None
+		assert subsample.player._parse_zone_notes([36, 38], "asgn") is None
+		assert subsample.player._parse_zone_notes("drum.kick_1", "asgn") is None
+
+	def test_dict_form_without_range_returns_full_range (self) -> None:
+		"""The dict form without a `range:` key is the same as the string
+		shortcut — auto-zone over the full keyboard."""
+
+		result = subsample.player._parse_zone_notes(
+			{"mode": "zone-tuned"}, "asgn",
+		)
+		assert result == (0, 127)
+
+	def test_dict_form_with_note_name_range (self) -> None:
+		"""Note names like C4 / G9 work as range bounds, via the shared
+		_parse_single_note helper."""
+
+		result = subsample.player._parse_zone_notes(
+			{"mode": "zone-tuned", "range": ["C4", "G9"]}, "asgn",
+		)
+		# C4 = 60, G9 = 127
+		assert result == (60, 127)
+
+	def test_dict_form_with_integer_range (self) -> None:
+		result = subsample.player._parse_zone_notes(
+			{"mode": "zone-tuned", "range": [0, 50]}, "asgn",
+		)
+		assert result == (0, 50)
+
+	def test_dict_form_mixed_int_and_name_range (self) -> None:
+		result = subsample.player._parse_zone_notes(
+			{"mode": "zone-tuned", "range": [60, "C5"]}, "asgn",
+		)
+		assert result == (60, 72)
+
+	def test_dict_form_unknown_inner_key_rejected (self) -> None:
+		"""Typo guard mirroring _VELOCITY_INNER_KEYS — `mdoe` is not `mode`."""
+
+		with pytest.raises(ValueError, match="unknown notes key"):
+			subsample.player._parse_zone_notes(
+				{"mdoe": "zone-tuned"}, "asgn",
+			)
+
+	def test_dict_form_wrong_mode_rejected (self) -> None:
+		"""Dict form with a mode that isn't zone-tuned is rejected
+		(future-proofs the dict form so it can grow other modes later
+		without silently accepting nonsense today)."""
+
+		with pytest.raises(ValueError, match="mode"):
+			subsample.player._parse_zone_notes(
+				{"mode": "auto-zone"}, "asgn",
+			)
+
+	def test_range_out_of_bounds_rejected (self) -> None:
+		with pytest.raises(ValueError):
+			subsample.player._parse_zone_notes(
+				{"mode": "zone-tuned", "range": [0, 200]}, "asgn",
+			)
+
+	def test_range_lo_greater_than_hi_rejected (self) -> None:
+		with pytest.raises(ValueError, match="lo > hi"):
+			subsample.player._parse_zone_notes(
+				{"mode": "zone-tuned", "range": [100, 50]}, "asgn",
+			)
+
+	def test_range_wrong_length_rejected (self) -> None:
+		with pytest.raises(ValueError, match="2-element"):
+			subsample.player._parse_zone_notes(
+				{"mode": "zone-tuned", "range": [60]}, "asgn",
+			)
+
+	def test_assignment_name_in_error_messages (self) -> None:
+		with pytest.raises(ValueError, match="'Pitched keyboard'"):
+			subsample.player._parse_zone_notes(
+				{"mode": "zone-tuned", "range": [200, 50]}, "Pitched keyboard",
+			)
+
+
+class TestLoadMidiMapZoneTuned:
+
+	"""``load_midi_map`` integration: a zone-tuned assignment produces
+	no concrete NoteMap entries at load time (those are materialised
+	against the library at runtime) but appears as a ZoneTemplate in
+	the returned MidiMapResult."""
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_zone_tuned_loaded_as_template (self, tmp_path: pathlib.Path) -> None:
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Pitched library
+    channel: 1
+    notes: zone-tuned
+    process:
+      - repitch: true
+    select:
+      where: { pitched: true }
+""")
+		result = subsample.player.load_midi_map(path, [])
+
+		# No manual entries — zone-tuned doesn't materialise at load.
+		assert result.note_map == {}
+		# Exactly one template recorded.
+		assert len(result.zone_templates) == 1
+		template = result.zone_templates[0]
+		assert template.name == "Pitched library"
+		assert template.channel == 0
+		assert template.keyboard_range == (0, 127)
+
+	def test_repitch_required (self, tmp_path: pathlib.Path) -> None:
+		"""Zone-tuned without ``process: [- repitch: true]`` is rejected
+		at load — the feature is meaningless without repitching."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Bad zone-tuned
+    channel: 1
+    notes: zone-tuned
+    select:
+      where: { pitched: true }
+""")
+		with pytest.raises(ValueError, match="repitch"):
+			subsample.player.load_midi_map(path, [])
+
+	def test_dict_form_with_range (self, tmp_path: pathlib.Path) -> None:
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Bass zone
+    channel: 1
+    notes:
+      mode: zone-tuned
+      range: [C2, B3]
+    process:
+      - repitch: true
+    select:
+      where: { pitched: true }
+""")
+		result = subsample.player.load_midi_map(path, [])
+
+		assert len(result.zone_templates) == 1
+		# C2 = 36, B3 = 59
+		assert result.zone_templates[0].keyboard_range == (36, 59)
+
+	def test_manual_on_same_channel_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""A manual assignment on a channel owned by a zone-tuned is
+		rejected — zone-tuned owns its channel exclusively."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Auto zone
+    channel: 1
+    notes: zone-tuned
+    process:
+      - repitch: true
+    select:
+      where: { pitched: true }
+  - name: Manual override
+    channel: 1
+    notes: C4
+    select:
+      where: { name: my-sample }
+""")
+		with pytest.raises(ValueError, match="zone-tuned owns"):
+			subsample.player.load_midi_map(path, [])
+
+	def test_overlapping_zone_ranges_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""Two zone-tuned on the same channel with overlapping ranges
+		are rejected — same overlap-is-almost-always-a-typo rule as for
+		velocity layering."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Bass
+    channel: 1
+    notes:
+      mode: zone-tuned
+      range: [0, 64]
+    process:
+      - repitch: true
+    select:
+      where: { pitched: true }
+  - name: Lead
+    channel: 1
+    notes:
+      mode: zone-tuned
+      range: [50, 127]
+    process:
+      - repitch: true
+    select:
+      where: { pitched: true }
+""")
+		with pytest.raises(ValueError, match="overlap"):
+			subsample.player.load_midi_map(path, [])
+
+	def test_non_overlapping_zone_ranges_accepted (self, tmp_path: pathlib.Path) -> None:
+		"""Two zone-tuned on the same channel with adjacent (not
+		overlapping) ranges load cleanly — the split-keyboard pattern."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Bass
+    channel: 1
+    notes:
+      mode: zone-tuned
+      range: [0, 50]
+    process:
+      - repitch: true
+    select:
+      where: { pitched: true }
+  - name: Lead
+    channel: 1
+    notes:
+      mode: zone-tuned
+      range: [51, 127]
+    process:
+      - repitch: true
+    select:
+      where: { pitched: true }
+""")
+		result = subsample.player.load_midi_map(path, [])
+
+		assert len(result.zone_templates) == 2
+		names = {t.name for t in result.zone_templates}
+		assert names == {"Bass", "Lead"}
+
+
+class TestMaterializeZones:
+
+	"""End-to-end materialisation of ZoneTemplates against a populated
+	instrument library, including the in-range filter, the sort order,
+	the zone-boundary algorithm, and the re-materialisation behaviour on
+	library changes."""
+
+	def _make_pitched_record (
+		self,
+		name:    str,
+		pitch_hz: float,
+		sample_id: typing.Optional[int] = None,
+	) -> subsample.library.SampleRecord:
+		"""Build a SampleRecord that passes has_stable_pitch with the given
+		detected pitch.  All other analysis fields are stubbed (via the
+		test helpers) to values that satisfy the 7-criterion gate."""
+
+		# pitch fields chosen to clear has_stable_pitch:
+		#   voiced_fraction > 0.5, voiced_frame_count >= 5, pitch_confidence > 0.5,
+		#   pitch_stability < 0.5, harmonic_ratio > 0.4.
+		pitch = tests.helpers._make_pitch(
+			dominant_pitch_hz=pitch_hz,
+			pitch_confidence=0.8,
+			pitch_stability=0.1,
+			voiced_frame_count=100,
+		)
+		spectral = dataclasses.replace(
+			tests.helpers._make_spectral(),
+			voiced_fraction=0.8, harmonic_ratio=0.7,
+		)
+
+		return subsample.library.SampleRecord(
+			sample_id   = sample_id if sample_id is not None else subsample.library.allocate_id(),
+			name        = name,
+			spectral    = spectral,
+			rhythm      = tests.helpers._make_rhythm(),
+			pitch       = pitch,
+			timbre      = tests.helpers._make_timbre(),
+			level       = tests.helpers._make_level(),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = tests.helpers._make_params(),
+			duration    = 1.0,
+			audio       = numpy.zeros((44100, 1), dtype=numpy.int16),
+		)
+
+	def _make_unpitched_record (self, name: str) -> subsample.library.SampleRecord:
+		"""Build a SampleRecord that fails has_stable_pitch — dominant_pitch_hz=0
+		violates the first of the 7 criteria, which is enough to fail the gate."""
+		return subsample.library.SampleRecord(
+			sample_id   = subsample.library.allocate_id(),
+			name        = name,
+			spectral    = tests.helpers._make_spectral(),
+			rhythm      = tests.helpers._make_rhythm(),
+			pitch       = tests.helpers._make_pitch(dominant_pitch_hz=0.0),
+			timbre      = tests.helpers._make_timbre(),
+			level       = tests.helpers._make_level(),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = tests.helpers._make_params(),
+			duration    = 1.0,
+			audio       = numpy.zeros((44100, 1), dtype=numpy.int16),
+		)
+
+	def _make_player_with_library (
+		self,
+		records:         list[subsample.library.SampleRecord],
+		zone_templates:  tuple[subsample.player.ZoneTemplate, ...] = (),
+	) -> subsample.player.MidiPlayer:
+		"""Build a MidiPlayer with a real InstrumentLibrary populated
+		from the given records and zone-tuned templates installed."""
+		import threading
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10_000_000)
+		for r in records:
+			lib.add(r)
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=lib,
+			similarity_matrix=similarity,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+			zone_templates=zone_templates,
+		)
+
+	def _make_template (
+		self,
+		name: str = "Auto",
+		channel: int = 0,
+		keyboard_range: tuple[int, int] = (0, 127),
+	) -> subsample.player.ZoneTemplate:
+		"""Build a minimal ZoneTemplate with an empty filter (matches everything)."""
+		return subsample.player.ZoneTemplate(
+			name=name,
+			channel=channel,
+			keyboard_range=keyboard_range,
+			select=(subsample.query.SelectSpec(),),
+			process=subsample.query.ProcessSpec(
+				steps=(subsample.query.ProcessorStep(name="repitch"),),
+			),
+			one_shot=False,
+			gain_db=0.0,
+			pan_weights=None,
+			output_routing=None,
+			extract=None,
+			segment_mode="",
+			velocity_trigger=(0, 127),
+			velocity_rescale_to=None,
+		)
+
+	def test_no_templates_leaves_map_unchanged (self) -> None:
+		"""When no templates are declared the working map is just a copy
+		of the base."""
+		player = self._make_player_with_library([])
+		# Empty templates → _materialize_zones is a no-op beyond the
+		# dict-copy of the base.
+		assert player._note_map == {}
+
+	def test_single_sample_covers_full_range (self) -> None:
+		"""One pitched sample on a full-keyboard template owns every note."""
+
+		import librosa
+
+		# Centre pitch deliberately well inside the keyboard.
+		pitch_hz = float(librosa.midi_to_hz(60))
+		record = self._make_pitched_record("only_one", pitch_hz=pitch_hz)
+		template = self._make_template(channel=0, keyboard_range=(0, 127))
+
+		player = self._make_player_with_library([record], (template,))
+
+		# Every note 0-127 should map to the single sample.
+		for note in (0, 60, 127):
+			assert (0, note) in player._note_map
+			entries = player._note_map[(0, note)]
+			assert len(entries) == 1
+
+	def test_two_samples_split_at_midpoint (self) -> None:
+		"""Two samples at MIDI 60 and 64 → sample 0 covers [0, 62],
+		sample 1 covers [63, 127].  Lower-pitched claims the midpoint."""
+
+		import librosa
+
+		lo_record  = self._make_pitched_record("sample_lo",
+			pitch_hz=float(librosa.midi_to_hz(60)))
+		hi_record  = self._make_pitched_record("sample_hi",
+			pitch_hz=float(librosa.midi_to_hz(64)))
+		template = self._make_template(channel=0, keyboard_range=(0, 127))
+
+		player = self._make_player_with_library([lo_record, hi_record], (template,))
+
+		# Note 62 — midpoint — should belong to the lower sample.
+		assert player._note_map[(0, 62)][0][0].name.endswith("sample_lo")
+		# Note 63 — next note — should belong to the higher sample.
+		assert player._note_map[(0, 63)][0][0].name.endswith("sample_hi")
+
+	def test_lowest_sample_extends_to_range_lo (self) -> None:
+		"""Lowest sample's zone reaches the keyboard's lo (not just its
+		own detected pitch) — user's stated requirement."""
+
+		import librosa
+
+		# Two samples at MIDI 60 and 80.
+		records = [
+			self._make_pitched_record("low",  pitch_hz=float(librosa.midi_to_hz(60))),
+			self._make_pitched_record("high", pitch_hz=float(librosa.midi_to_hz(80))),
+		]
+		template = self._make_template(channel=0, keyboard_range=(0, 127))
+		player = self._make_player_with_library(records, (template,))
+
+		# Note 0 — far below either sample's centre — should belong to low.
+		assert player._note_map[(0, 0)][0][0].name.endswith("low")
+
+	def test_highest_sample_extends_to_range_hi (self) -> None:
+		import librosa
+
+		records = [
+			self._make_pitched_record("low",  pitch_hz=float(librosa.midi_to_hz(40))),
+			self._make_pitched_record("high", pitch_hz=float(librosa.midi_to_hz(50))),
+		]
+		template = self._make_template(channel=0, keyboard_range=(0, 127))
+		player = self._make_player_with_library(records, (template,))
+
+		# Note 127 — far above either centre — belongs to the high sample.
+		assert player._note_map[(0, 127)][0][0].name.endswith("high")
+
+	def test_restricted_keyboard_range (self) -> None:
+		"""range: [60, 80] excludes pitches outside that range from the
+		template's coverage."""
+
+		import librosa
+
+		records = [
+			# 36 — outside, should be excluded.
+			self._make_pitched_record("out_low", pitch_hz=float(librosa.midi_to_hz(36))),
+			# 65 — inside.
+			self._make_pitched_record("inside",  pitch_hz=float(librosa.midi_to_hz(65))),
+			# 90 — outside.
+			self._make_pitched_record("out_hi",  pitch_hz=float(librosa.midi_to_hz(90))),
+		]
+		template = self._make_template(channel=0, keyboard_range=(60, 80))
+		player = self._make_player_with_library(records, (template,))
+
+		# Notes 60-80 covered by "inside"; notes outside that range not mapped.
+		assert (0, 65) in player._note_map
+		assert player._note_map[(0, 65)][0][0].name.endswith("inside")
+		# Nothing outside the keyboard range.
+		assert (0, 0)   not in player._note_map
+		assert (0, 127) not in player._note_map
+
+	def test_no_matching_samples_logs_info (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""When the filter excludes everything, the template contributes
+		no entries and an INFO log explains the situation."""
+		import logging
+
+		template = self._make_template(channel=0, keyboard_range=(0, 127))
+		# No records in the library at all.
+		player = self._make_player_with_library([], (template,))
+
+		with caplog.at_level(logging.INFO, logger="subsample.player"):
+			player._materialize_zones()
+
+		# Map has no entries on the zone channel.
+		assert (0, 60) not in player._note_map
+		# An INFO line names the template.
+		assert any(
+			"no matching pitched samples" in r.message and "Auto" in r.message
+			for r in caplog.records
+		)
+
+	def test_unpitched_samples_excluded (self) -> None:
+		"""has_stable_pitch is the implicit filter — unpitched samples
+		are never included even if they pass the user's select."""
+
+		# Build one pitched sample and one unpitched.
+		import librosa
+		pitched_record   = self._make_pitched_record(
+			"pitched_one", pitch_hz=float(librosa.midi_to_hz(60)),
+		)
+		unpitched_record = self._make_unpitched_record("unpitched_one")
+
+		template = self._make_template(channel=0, keyboard_range=(0, 127))
+		player = self._make_player_with_library(
+			[pitched_record, unpitched_record], (template,),
+		)
+
+		# The pitched sample owns every note on the channel.
+		assert player._note_map[(0, 60)][0][0].name.endswith("pitched_one")
+		# The unpitched sample's name should NOT appear in any derived Assignment.
+		for entries in player._note_map.values():
+			for asgn, _ in entries:
+				assert "unpitched_one" not in asgn.name
+
+	def test_re_materialization_picks_up_new_sample (self) -> None:
+		"""Adding a new pitched sample to the library + calling
+		_materialize_zones rebuilds the layout including the new one."""
+
+		import librosa
+
+		first  = self._make_pitched_record(
+			"first", pitch_hz=float(librosa.midi_to_hz(40)),
+		)
+		template = self._make_template(channel=0, keyboard_range=(0, 127))
+		player = self._make_player_with_library([first], (template,))
+
+		# Initially only the first sample covers the keyboard.
+		assert player._note_map[(0, 60)][0][0].name.endswith("first")
+
+		# Add a higher-pitched sample.
+		second = self._make_pitched_record(
+			"second", pitch_hz=float(librosa.midi_to_hz(80)),
+		)
+		player._instrument_library.add(second)
+		player._materialize_zones()
+
+		# Now the higher half of the keyboard belongs to "second".
+		assert player._note_map[(0, 100)][0][0].name.endswith("second")
+		# And the lower half still belongs to "first".
+		assert player._note_map[(0, 0)][0][0].name.endswith("first")
+
+	def test_tied_pitches_tiebreak_by_name (self) -> None:
+		"""Two samples at the same detected pitch — deterministic
+		alphabetical-by-name tiebreak."""
+
+		import librosa
+
+		a_record = self._make_pitched_record(
+			"alpha", pitch_hz=float(librosa.midi_to_hz(60)),
+		)
+		b_record = self._make_pitched_record(
+			"bravo", pitch_hz=float(librosa.midi_to_hz(60)),
+		)
+		template = self._make_template(channel=0, keyboard_range=(0, 127))
+		player = self._make_player_with_library([a_record, b_record], (template,))
+
+		# Both samples are at MIDI 60.  Alphabetical order → "alpha" sorts
+		# first; the materialiser treats it as the "lower" sample.  Lower
+		# claims the midpoint of (60, 60) = 60.  So note 60 → alpha,
+		# note 61+ → bravo.
+		assert player._note_map[(0, 60)][0][0].name.endswith("alpha")
+		assert player._note_map[(0, 127)][0][0].name.endswith("bravo")
+
+
+class TestZoneTunedRuntime:
+
+	"""End-to-end note_on dispatch through a zone-tuned MidiPlayer —
+	confirms the materialised entries route correctly."""
+
+	def _make_player_with_zone (
+		self,
+		records: list[subsample.library.SampleRecord],
+	) -> subsample.player.MidiPlayer:
+		"""Single-zone-template player covering MIDI 0-127 on channel 0."""
+		import threading
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10_000_000)
+		for r in records:
+			lib.add(r)
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		template = subsample.player.ZoneTemplate(
+			name="Auto",
+			channel=0,
+			keyboard_range=(0, 127),
+			select=(subsample.query.SelectSpec(),),
+			process=subsample.query.ProcessSpec(
+				steps=(subsample.query.ProcessorStep(name="repitch"),),
+			),
+			one_shot=False,
+			gain_db=0.0,
+			pan_weights=None,
+			output_routing=None,
+			extract=None,
+			segment_mode="",
+			velocity_trigger=(0, 127),
+			velocity_rescale_to=None,
+		)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=lib,
+			similarity_matrix=similarity,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+			zone_templates=(template,),
+		)
+
+	def test_note_in_zone_resolves_correct_sample (self) -> None:
+		"""A note in a sample's zone should resolve to that sample's name
+		via the materialised exact-stem-name where predicate."""
+
+		import librosa
+
+		# Build a pitched record using tests.helpers to keep this test
+		# self-contained (no inheritance from TestMaterializeZones).
+		pitch = tests.helpers._make_pitch(
+			dominant_pitch_hz=float(librosa.midi_to_hz(60)),
+			pitch_confidence=0.8,
+			pitch_stability=0.1,
+			voiced_frame_count=100,
+		)
+		spectral = dataclasses.replace(
+			tests.helpers._make_spectral(),
+			voiced_fraction=0.8, harmonic_ratio=0.7,
+		)
+		record = subsample.library.SampleRecord(
+			sample_id=subsample.library.allocate_id(),
+			name="tonal",
+			spectral=spectral,
+			rhythm=tests.helpers._make_rhythm(),
+			pitch=pitch,
+			timbre=tests.helpers._make_timbre(),
+			level=tests.helpers._make_level(),
+			band_energy=tests.helpers._make_band_energy(),
+			params=tests.helpers._make_params(),
+			duration=1.0,
+			audio=numpy.zeros((44100, 1), dtype=numpy.int16),
+		)
+
+		player = self._make_player_with_zone([record])
+
+		# Entries on note 60 point at an Assignment whose select where.name
+		# matches "tonal" exactly.
+		entries = player._note_map[(0, 60)]
+		assert len(entries) == 1
+		asgn, _ = entries[0]
+		assert asgn.select[0].where.name == "tonal"
+		# And that Assignment's process inherits repitch from the template.
+		assert asgn.process.has_repitch()
+
+
+# ---------------------------------------------------------------------------
 # _parse_note_name and _parse_note_spec
 # ---------------------------------------------------------------------------
 
@@ -2726,6 +3368,20 @@ class TestFallbackResolution:
 
 class TestReloadMidiMap:
 
+	def _wrap (self, note_map: subsample.player.NoteMap) -> subsample.player.MidiMapResult:
+		"""Wrap a NoteMap in a MidiMapResult for reload_midi_map() calls.
+
+		Since the velocity-layering + zone-tuned work, reload_midi_map()
+		takes the full MidiMapResult so it can swap zone_templates too.
+		Tests that only care about the note-map portion use this helper
+		to keep the call sites readable."""
+
+		return subsample.player.MidiMapResult(
+			note_map=note_map,
+			bank_definitions=[],
+			bank_channel=subsample.bank.DEFAULT_BANK_CHANNEL,
+		)
+
 	def test_replaces_note_map (self) -> None:
 
 		"""reload_midi_map() atomically replaces _note_map with the new map."""
@@ -2746,14 +3402,18 @@ class TestReloadMidiMap:
 			bit_depth=16,
 		)
 
-		assert player._note_map is old_map
+		# __init__ stores _base_note_map = old_map and creates a working
+		# _note_map as dict(old_map) so the runtime materialisation step
+		# can mutate it without bleeding into the base.  Equality, not
+		# identity, is the right check after the zone-tuned migration.
+		assert player._note_map == old_map
 
 		asgn_b = _make_assignment(name="Snares", reference="SD0010")
 		new_map = _make_note_map(asgn_b, channel=9, notes=[38])
 
-		player.reload_midi_map(new_map)
+		player.reload_midi_map(self._wrap(new_map))
 
-		assert player._note_map is new_map
+		assert player._note_map == new_map
 		assert (9, 38) in player._note_map
 		assert (9, 36) not in player._note_map
 
@@ -2778,7 +3438,7 @@ class TestReloadMidiMap:
 		)
 
 		with unittest.mock.patch.object(player, "update_assignments") as mock_update:
-			player.reload_midi_map(note_map)
+			player.reload_midi_map(self._wrap(note_map))
 			mock_update.assert_called_once()
 
 	def test_try_update_assignments_swallows_exception (
@@ -2855,10 +3515,10 @@ class TestReloadMidiMap:
 			side_effect=ValueError("simulated query-time validation failure"),
 		):
 			with pytest.raises(ValueError, match="simulated"):
-				player.reload_midi_map(new_map)
+				player.reload_midi_map(self._wrap(new_map))
 
 		# Active map and CC set restored to the previous good state.
-		assert player._note_map is old_map
+		assert player._note_map == old_map
 		assert (9, 36) in player._note_map
 		assert (9, 38) not in player._note_map
 		assert player._mapped_ccs == mapped_ccs_before

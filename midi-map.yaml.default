@@ -81,6 +81,49 @@
 #     select:
 #       where: { name_glob: "*hard_hat*" }
 #
+#   # 5. Zone-tuned - auto-distribute pitched samples across a keyboard.
+#   #    Subsample filters the library to pitched samples (has_stable_pitch),
+#   #    sorts by their detected pitches, and lays each sample across a
+#   #    contiguous slice of MIDI keys centred on its own pitch.  Zone
+#   #    boundaries meet at midpoints; the lowest sample extends down to
+#   #    the keyboard floor and the highest extends up to the ceiling.
+#   #    re-derived live whenever a new sample arrives, a bank switches,
+#   #    or the MIDI map reloads.  See README "Zone-tuned" for details.
+#   #
+#   #    a) Full keyboard:
+#   - name: Pitched library
+#     channel: 1
+#     notes: zone-tuned                 # shortcut — covers MIDI 0-127
+#     process:
+#       - repitch: true                 # required
+#     select:
+#       where:
+#         duration: { gte: 0.5 }        # optional additional filters
+#     one_shot: false                   # keyboard playing usually wants note-off
+#
+#   #    b) Split keyboard — two zone-tuned templates on one channel with
+#   #       non-overlapping ranges:
+#   - name: Bass zone
+#     channel: 1
+#     notes:
+#       mode: zone-tuned
+#       range: [0, 50]                  # MIDI ints or note names ("C-1".."G9")
+#     process:
+#       - repitch: true
+#     select:
+#       where: { name_glob: "*bass*" }
+#     one_shot: false
+#   - name: Lead zone
+#     channel: 1
+#     notes:
+#       mode: zone-tuned
+#       range: [51, 127]
+#     process:
+#       - repitch: true
+#     select:
+#       where: { name_glob: "*lead*" }
+#     one_shot: false
+#
 # The rest of this file is:
 #   EXAMPLES        commented-out assignments, ordered simple to
 #                   advanced - uncomment any to try

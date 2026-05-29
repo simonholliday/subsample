@@ -449,7 +449,7 @@ when you want to try something the tutorial didn't show.
 |-------|----------|-------------|
 | `name` | yes | Label shown in logs |
 | `channel` | yes | MIDI channel 1-16 (standard numbering) |
-| `notes` | yes | Single note, list, or range (see Note syntax below) |
+| `notes` | yes | Single note, list, range, or `zone-tuned` for auto-derived keyboard layout (see Note syntax + Zone-tuned below) |
 | `select` | yes | Which sample to play (see Select below) |
 | `process` | no | How to present it (see Process below) |
 | `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
@@ -1031,6 +1031,87 @@ it covers, so rescaling would inflate the loudness inappropriately.
 Layers maintain independent `round_robin` segment counters and independent
 variant-transition fallback caches, so two layers on the same note never
 interfere with each other's state.
+
+### Zone-tuned - auto-distribute pitched samples across a keyboard
+
+Instead of writing one assignment per MIDI note, declare a single assignment
+that filters the library and lets Subsample lay each matching pitched sample
+across a contiguous slice of the keyboard centred on its detected pitch.
+Zones meet at the midpoint between adjacent samples' pitches; the
+lowest-pitched sample's zone extends down to the keyboard floor and the
+highest extends up to the ceiling.
+
+The classic use case: you've captured 30 tuned synth hits, or recorded a
+shelf of pitched percussion, and want them all playable across a keyboard
+without manually writing 30 assignments.
+
+#### Shortcut form - full keyboard
+
+```yaml
+- name: Pitched library
+  channel: 1
+  notes: zone-tuned                # covers MIDI 0-127
+  process:
+    - repitch: true                # required
+  select:
+    where:
+      duration: { gte: 0.5 }       # optional additional filters
+```
+
+`repitch` is **required** — each sample is pitch-shifted at note-on to the
+note being played, with its declared pitch as the source. Without it, every
+note would play the same sample at the same pitch, which is never what
+zone-tuned is for.
+
+`pitched: true` is **implicit** — Subsample filters via the same
+`has_stable_pitch` gate used elsewhere (`pitch_confidence`, `pitch_stability`,
+`harmonic_ratio`, etc.). Unpitched samples never sneak into a zone.
+
+#### Dict form - restricted keyboard range and split keyboards
+
+```yaml
+- name: Bass zone
+  channel: 1
+  notes:
+    mode: zone-tuned
+    range: [0, 50]                 # MIDI ints OR note names ("C-1".."G9")
+  process:
+    - repitch: true
+  select:
+    where:
+      name_glob: "*bass*"
+
+- name: Lead zone
+  channel: 1
+  notes:
+    mode: zone-tuned
+    range: [51, 127]
+  process:
+    - repitch: true
+  select:
+    where:
+      name_glob: "*lead*"
+```
+
+Multiple `zone-tuned` assignments on the same channel are allowed as long
+as their keyboard ranges don't overlap.
+
+#### Live re-derivation
+
+Whenever the active library changes — a new sample captured, a watcher
+import, a library eviction, a bank switch, or a MIDI map reload —
+Subsample re-derives the zones. There's no manual refresh step.
+
+#### Validation
+
+| Condition | Behaviour |
+|---|---|
+| Zone-tuned assignment without `process: [- repitch: true]` | `ValueError` at load |
+| Regular `notes: 36` assignment on a channel already owned by a `zone-tuned` | `ValueError` at load |
+| Two `zone-tuned` on the same channel whose `range:` spans overlap | `ValueError` at load |
+| Unknown inner key under the dict form (e.g. typo `mdoe:`) | `ValueError` at load |
+| No matching pitched samples for a template | INFO log; the channel plays nothing until a matching sample is added |
+| Sample's detected pitch falls outside the template's `range:` | Sample excluded from that template; logged at DEBUG |
 
 ### Extract - present a multi-channel sample as a sub-pattern
 
