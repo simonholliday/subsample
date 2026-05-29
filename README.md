@@ -1355,33 +1355,53 @@ is never blocked:
 
 Incoming MIDI is dispatched in callback mode: rtmidi delivers each message
 to subsample's handler on its own dedicated thread the moment it arrives.
-There is no polling loop, so there is no fixed input-latency floor. Typical
-end-to-end latency on Linux: under 1 ms of MIDI dispatch, plus one PortAudio
-buffer period.
+There is no polling loop, so there is no fixed input-latency floor. The
+end-to-end path that a player feels as latency is three parts:
 
-The PortAudio buffer period is set via `player.audio.buffer_frames`. Setting
-it explicitly trades stability for tighter timing:
+1. **MIDI dispatch** — under 1 ms (rtmidi callback).
+2. **Per-note handling** — well under 1 ms (sample selection is pre-computed
+   when the library changes, so a trigger is an indexed pick, not a query).
+3. **Output latency** — the buffer→DAC floor. This is the dominant term, and
+   it's what you hear as a uniform delay against a hardware instrument.
 
-| frames | latency at 44.1 kHz | latency at 48 kHz |
-|--------|--------------------:|------------------:|
-| 128    | 2.9 ms              | 2.7 ms            |
-| 256    | 5.8 ms              | 5.3 ms            |
-| 512    | 11.6 ms             | 10.7 ms           |
-| 1024   | 23.2 ms             | 21.3 ms           |
+The output buffer period is set via `player.audio.buffer_frames`:
 
-Leave unset (the default) to let the OS choose the device's preferred size —
-usually a safe value. Lower it if you can hear the output trailing your MIDI
-input, and raise it (or remove it) if you hear audible underruns.
+| frames | buffer period at 44.1 kHz | at 48 kHz |
+|--------|--------------------------:|----------:|
+| 128    | 2.9 ms                    | 2.7 ms    |
+| 256    | 5.8 ms                    | 5.3 ms    |
+| 512    | 11.6 ms                   | 10.7 ms   |
+| 1024   | 23.2 ms                   | 21.3 ms   |
 
-You can measure dispatch latency on your hardware with the included script:
+These are the *period*, not the total latency: PortAudio's ALSA backend keeps
+several periods in flight, so actual output latency is a small multiple of the
+figure above. The real number your device negotiated is printed at startup:
+
+```
+PortAudio output latency: 11.6 ms
+```
+
+That line is ground truth — tune against it, not the table. Lower
+`buffer_frames` (e.g. 128, 64) to shrink it; the player logs an `Audio xrun`
+warning if the buffer is too low for your machine to sustain (audible as
+clicks), so reduce until you see those, then step back up. Leave it unset to
+let the OS pick a safe default.
+
+You can measure the two software terms on your hardware with the included
+scripts — MIDI dispatch:
 
 ```bash
 python scripts/measure_midi_latency.py --count 1000
 ```
 
-It opens a virtual MIDI port, sends 1000 timestamped messages, and reports
-median + 95th-percentile dispatch latency. Expect median ≪ 1 ms after the
-callback-mode switch.
+and per-note handling cost (selection + variant lookup + render):
+
+```bash
+python scripts/measure_handler_timing.py
+```
+
+Both should report well under 1 ms; if they don't, that's a bug, not a buffer
+setting.
 
 ### End-to-end 32-bit float
 

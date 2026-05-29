@@ -1932,6 +1932,14 @@ class MidiPlayer:
 		# to at most one log message every 5 seconds during dense passages.
 		self._last_clip_warn: float = 0.0
 
+		# Output xrun (buffer underflow) detection.  PortAudio reports an
+		# underflow via status_flags when the callback can't supply samples in
+		# time — audible as a click/dropout.  We count them and log at most
+		# once every 5 seconds so the user knows when buffer_frames has been
+		# tuned too low for the machine to sustain.
+		self._xrun_count:     int   = 0
+		self._last_xrun_warn: float = 0.0
+
 		# Optional transform pipeline. When provided, _handle_message() checks
 		# for a pre-computed pitched variant before falling back to _render().
 		# Pass a TransformManager instance to enable pitched playback;
@@ -2313,6 +2321,21 @@ class MidiPlayer:
 				else:
 					raise
 
+			# Report the latency PortAudio actually negotiated for the stream —
+			# the floor between a queued voice and sound at the DAC.  This is
+			# what a player feels as "delay" relative to a hardware instrument,
+			# and is the number to watch when tuning player.audio.buffer_frames.
+			# It is usually several times the buffer period (the ALSA backend
+			# runs multiple periods), so it stays visible even when the buffer
+			# size looks small.
+			try:
+				_log.info(
+					"PortAudio output latency: %.1f ms",
+					stream.get_output_latency() * 1000.0,
+				)
+			except Exception as exc:
+				_log.debug("Could not query output latency: %s", exc)
+
 			# Open the MIDI input port in callback mode.  rtmidi delivers each
 			# message to ``_safe_handle_message`` on its own dedicated thread
 			# the moment it arrives — no polling loop, no 10 ms jitter floor.
@@ -2388,6 +2411,24 @@ class MidiPlayer:
 		min(remaining, self._release_fade_frames) frames, then the voice is retired.
 		This prevents an audible click on hard cutoff for tonal samples.
 		"""
+
+		# Output underflow (xrun): PortAudio sets this flag when the previous
+		# callback didn't return samples in time, so the device played a gap —
+		# audible as a click/dropout.  Count every one; log at most every 5 s
+		# (we're on the audio thread) so a too-low buffer_frames is visible
+		# while tuning latency, without flooding the log.
+		if status_flags & pyaudio.paOutputUnderflow:
+			self._xrun_count += 1
+			now = time.monotonic()
+
+			if now - self._last_xrun_warn >= 5.0:
+				self._last_xrun_warn = now
+				_log.warning(
+					"Audio xrun: %d output underflow(s) — buffer_frames=%s is too low for "
+					"this machine to sustain; raise it if you hear clicks.",
+					self._xrun_count,
+					self._buffer_frames if self._buffer_frames is not None else "device-default",
+				)
 
 		output = numpy.zeros((frame_count, self._output_channels), dtype=numpy.float32)
 

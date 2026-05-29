@@ -817,11 +817,15 @@ class TestMaxPolyphony:
 	) -> unittest.mock.MagicMock:
 		"""Return a minimal MagicMock wired for _audio_callback testing."""
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices              = []
 		player._voices_lock         = threading.Lock()
 		player._output_channels     = 2
 		player._output_bit_depth    = 16
 		player._release_fade_frames = 441
 		player._last_clip_warn      = 0.0
+		player._xrun_count          = 0
+		player._last_xrun_warn      = 0.0
+		player._buffer_frames       = 256
 		player._max_polyphony       = 8
 		player._limiter_threshold   = 10.0 ** (limiter_threshold_db / 20.0)
 		player._limiter_ceiling     = 10.0 ** (limiter_ceiling_db / 20.0)
@@ -923,6 +927,56 @@ class TestMaxPolyphony:
 			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
 
 		assert not any("clipping" in r.message.lower() for r in caplog.records)
+
+	def test_output_underflow_counts_and_warns (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A PortAudio output-underflow flag increments the xrun counter and
+		surfaces a throttled WARNING so a too-low buffer_frames is diagnosable."""
+		import logging
+		import pyaudio
+
+		player = self._make_callback_player()
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			subsample.player.MidiPlayer._audio_callback(
+				player, None, 256, {}, pyaudio.paOutputUnderflow,
+			)
+
+		assert player._xrun_count == 1
+		assert any("xrun" in r.message.lower() for r in caplog.records)
+
+	def test_clean_callback_records_no_xrun (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""status_flags=0 (the normal case) neither counts an xrun nor warns."""
+		import logging
+
+		player = self._make_callback_player()
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			subsample.player.MidiPlayer._audio_callback(player, None, 256, {}, 0)
+
+		assert player._xrun_count == 0
+		assert not any("xrun" in r.message.lower() for r in caplog.records)
+
+	def test_xrun_warning_throttled (self) -> None:
+		"""Repeated underflows keep counting but warn at most once per 5 s."""
+		import pyaudio
+
+		player = self._make_callback_player()
+
+		subsample.player.MidiPlayer._audio_callback(player, None, 256, {}, pyaudio.paOutputUnderflow)
+		first_warn_time: float = player._last_xrun_warn
+
+		with unittest.mock.patch.object(subsample.player._log, "warning") as mock_warn:
+			subsample.player.MidiPlayer._audio_callback(player, None, 256, {}, pyaudio.paOutputUnderflow)
+
+		mock_warn.assert_not_called()
+		assert player._last_xrun_warn == first_warn_time
+		assert player._xrun_count == 2
 
 
 # ---------------------------------------------------------------------------
