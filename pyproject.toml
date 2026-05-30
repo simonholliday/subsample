@@ -26,7 +26,7 @@ dependencies = [
 	"pyrubberband>=0.4",
 	"watchdog>=4.0",
 	"Pillow>=10.0",
-	"pymididefs @ git+https://github.com/simonholliday/PyMidiDefs.git",
+	"pymididefs @ git+https://github.com/simonholliday/PyMidiDefs.git@v0.2.3",
 ]
 
 [project.optional-dependencies]

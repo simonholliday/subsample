@@ -19,6 +19,9 @@
 #              Sharps: C#4, D#4    Flats: Db4, Eb4
 #   Drum names drum.kick_1, drum.snare_1, drum.hi_hat_closed, etc.
 #              Full set: pymididefs.drums.GM_DRUM_MAP (GM percussion 27-87).
+#              Bare aliases drum.kick/snare/crash/ride point at the GM
+#              primary (the "1" variant) - use them when you just want
+#              "the kick" rather than choosing kick_1 vs kick_2.
 #              Drum names aren't sequential, so ranges (drum.x..drum.y)
 #              aren't supported - use a list instead.
 #

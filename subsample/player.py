@@ -783,8 +783,14 @@ _parse_note_name = pymididefs.notes.name_to_note
 # symbol (case-insensitive) is the dict key.  The dict shape is the
 # extension point — adding "program" → pymididefs.gm.GM_INSTRUMENT_MAP later
 # requires only one entry, no parser changes.
+#
+# The drum table merges GM_DRUM_MAP (the canonical one-name-per-note key map)
+# with GM_DRUM_PRIMARY_ALIASES (the unnumbered kick / snare / crash / ride
+# aliases PyMidiDefs keeps separate), so "drum.kick" resolves to the GM primary
+# (Bass Drum 1 = 36) right alongside the explicit "drum.kick_1".  The two maps
+# are disjoint by construction, so neither shadows the other.
 _SYMBOL_NAMESPACES: typing.Final[dict[str, typing.Mapping[str, int]]] = {
-	"drum": pymididefs.drums.GM_DRUM_MAP,
+	"drum": {**pymididefs.drums.GM_DRUM_MAP, **pymididefs.drums.GM_DRUM_PRIMARY_ALIASES},
 }
 
 

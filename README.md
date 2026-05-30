@@ -483,6 +483,13 @@ deliberately not supported because drum names aren't a musical sequence.
 Equivalent: `notes: drum.low_floor_tom` and `notes: 41` produce the same
 result; the symbolic form simply makes intent visible.
 
+The four instruments GM defines in numbered pairs — kick, snare, crash, ride —
+also accept the **bare alias** `drum.kick`, `drum.snare`, `drum.crash`,
+`drum.ride`, each pointing at the GM-designated primary (`drum.kick` =
+`drum.kick_1` = Bass Drum 1 = 36). Reach for the bare name when you just want
+"the kick" rather than choosing between the two variants; use the numbered
+form when you specifically want `_2`.
+
 ### Select - which sample to play
 
 The `select` block defines how to choose a sample from the instrument library.

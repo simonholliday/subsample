@@ -2650,6 +2650,26 @@ class TestParseNoteSpec:
 		"""A list can mix symbolic, integer, and note-name forms."""
 		assert subsample.player._parse_note_spec(["drum.kick_1", 38, "C3"], "test") == [36, 38, 48]
 
+	def test_drum_primary_aliases (self) -> None:
+		"""v0.2.3 unnumbered aliases resolve to the GM primary note (the '1'
+		variant): kick=36, snare=38, crash=49, ride=51 — merged into the drum
+		namespace from pymididefs.drums.GM_DRUM_PRIMARY_ALIASES."""
+		assert subsample.player._parse_note_spec("drum.kick", "test") == [36]
+		assert subsample.player._parse_note_spec("drum.snare", "test") == [38]
+		assert subsample.player._parse_note_spec("drum.crash", "test") == [49]
+		assert subsample.player._parse_note_spec("drum.ride", "test") == [51]
+
+	def test_drum_primary_alias_matches_numbered (self) -> None:
+		"""The bare alias and its numbered form resolve to the same note."""
+		assert (
+			subsample.player._parse_note_spec("drum.kick", "test")
+			== subsample.player._parse_note_spec("drum.kick_1", "test")
+		)
+
+	def test_drum_primary_alias_case_insensitive (self) -> None:
+		"""The bare aliases are case-insensitive like every other drum symbol."""
+		assert subsample.player._parse_note_spec("drum.KICK", "test") == [36]
+
 	def test_unknown_namespace_falls_through (self) -> None:
 		"""An unknown namespace falls through to the note-name parser, which
 		then raises the existing 'not a valid note name' error — no special
