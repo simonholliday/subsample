@@ -10,6 +10,7 @@ break others.
 """
 
 import logging
+import threading
 import typing
 
 
@@ -18,17 +19,25 @@ _log = logging.getLogger(__name__)
 
 class EventEmitter:
 
-	"""Subscribe to named events and dispatch kwargs to all registered handlers."""
+	"""Subscribe to named events and dispatch kwargs to all registered handlers.
+
+	Thread-safe: ``on()`` and ``emit()`` are guarded by a lock, and ``emit()``
+	snapshots the handler list before calling (so a subscriber registering
+	mid-dispatch can't corrupt the iteration).  Registration typically happens
+	at startup while emits come from worker threads.
+	"""
 
 	def __init__ (self) -> None:
 
 		self._handlers: dict[str, list[typing.Callable[..., None]]] = {}
+		self._lock:     threading.Lock = threading.Lock()
 
 	def on (self, event: str, handler: typing.Callable[..., None]) -> None:
 
 		"""Register a handler for the given event name."""
 
-		self._handlers.setdefault(event, []).append(handler)
+		with self._lock:
+			self._handlers.setdefault(event, []).append(handler)
 
 	def emit (self, event: str, **kwargs: typing.Any) -> None:
 
@@ -38,7 +47,12 @@ class EventEmitter:
 		the exception is logged and remaining handlers still run.
 		"""
 
-		for handler in self._handlers.get(event, []):
+		# Snapshot under the lock, then call handlers outside it — a handler
+		# must not be able to deadlock by (un)subscribing during dispatch.
+		with self._lock:
+			handlers = list(self._handlers.get(event, []))
+
+		for handler in handlers:
 			try:
 				handler(**kwargs)
 			except Exception:

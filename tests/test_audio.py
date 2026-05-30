@@ -365,6 +365,58 @@ class TestFloat32ToPcmBytes:
 		result = subsample.audio.float32_to_pcm_bytes(audio, 16)
 		assert len(result) == 10 * 2 * 2  # 10 frames, 2 channels, 2 bytes each
 
+	def test_full_scale_does_not_wrap_at_any_depth (self) -> None:
+		"""A full-scale +1.0 peak must stay positive at 16/24/32-bit.
+
+		Regression: the 32-bit path scaled by 2147483647 in float32, which
+		rounds up to 2**31 and wraps to full-scale NEGATIVE on the int32 cast —
+		a loud click on the loudest material.
+		"""
+		full_scale = numpy.ones((4, 1), dtype=numpy.float32)   # +1.0 peak
+
+		for bit_depth in (16, 24, 32):
+			raw = subsample.audio.float32_to_pcm_bytes(full_scale, bit_depth)
+			restored = subsample.audio.unpack_audio(raw, bit_depth, 1)
+
+			assert numpy.all(restored > 0), f"{bit_depth}-bit full-scale wrapped to negative"
+
+	def test_negative_full_scale_does_not_wrap (self) -> None:
+		"""A full-scale -1.0 trough stays negative at every depth."""
+		trough = -numpy.ones((4, 1), dtype=numpy.float32)
+
+		for bit_depth in (16, 24, 32):
+			raw = subsample.audio.float32_to_pcm_bytes(trough, bit_depth)
+			restored = subsample.audio.unpack_audio(raw, bit_depth, 1)
+
+			assert numpy.all(restored < 0), f"{bit_depth}-bit -full-scale wrapped"
+
+	def test_round_trip_24bit (self) -> None:
+		"""24-bit float→PCM→float round-trips within 24-bit resolution (was untested)."""
+		floats = numpy.array([[0.1, -0.1], [0.999, -0.999]], dtype=numpy.float32)
+		raw = subsample.audio.float32_to_pcm_bytes(floats, 24)
+		# unpack_audio returns int32-range values; normalise back to [-1, 1].
+		restored = subsample.audio.unpack_audio(raw, 24, 2).astype(numpy.float64) / 2147483648.0
+		numpy.testing.assert_allclose(restored, floats, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# get_pyaudio_format
+# ---------------------------------------------------------------------------
+
+class TestGetPyaudioFormat:
+
+	def test_known_depths_map_to_constants (self) -> None:
+		"""16/24/32 map to the matching PyAudio format constants."""
+		import pyaudio
+		assert subsample.audio.get_pyaudio_format(16) == pyaudio.paInt16
+		assert subsample.audio.get_pyaudio_format(24) == pyaudio.paInt24
+		assert subsample.audio.get_pyaudio_format(32) == pyaudio.paInt32
+
+	def test_unsupported_depth_raises (self) -> None:
+		"""An unsupported bit depth raises ValueError naming the supported set."""
+		with pytest.raises(ValueError, match="Unsupported bit depth"):
+			subsample.audio.get_pyaudio_format(8)
+
 
 # ---------------------------------------------------------------------------
 # get_device_channels

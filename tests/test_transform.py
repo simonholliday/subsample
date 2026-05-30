@@ -3821,3 +3821,132 @@ class TestGridEnergyProfile:
 		assert profile.energy[5] == pytest.approx(1.0)
 		assert profile.energy[6] == pytest.approx(0.0)
 		assert profile.energy[7] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Code-review regressions — DSP correctness and cache accounting
+# ---------------------------------------------------------------------------
+
+class TestReviewRegressions:
+
+	"""Guards for the bugs surfaced by the full code review: directional and
+	edge behaviour that the prior tests asserted too loosely to catch."""
+
+	def test_gate_auto_attack_percussive_is_faster_than_gradual (self) -> None:
+
+		"""Auto gate attack: percussive (spectral.attack=0) opens FAST (1 ms),
+		gradual (spectral.attack=1) opens slower (5 ms).  The mapping was
+		inverted, softening exactly the transients gating is meant to protect."""
+
+		base = _make_record(sample_id=1)
+		percussive = dataclasses.replace(base, spectral=dataclasses.replace(base.spectral, attack=0.0))
+		gradual    = dataclasses.replace(base, spectral=dataclasses.replace(base.spectral, attack=1.0))
+
+		step = subsample.transform.Gate()  # all auto
+
+		_, a_perc, _, _, _ = subsample.transform._resolve_gate_params(percussive, step)
+		_, a_grad, _, _, _ = subsample.transform._resolve_gate_params(gradual, step)
+
+		assert a_perc < a_grad
+		assert a_perc == pytest.approx(1.0)
+		assert a_grad == pytest.approx(5.0)
+
+	def test_distort_fold_is_identity_in_band (self) -> None:
+
+		"""With unity drive an in-band signal passes through fold unchanged
+		(positively correlated), not polarity-inverted as the old +1.0 phase
+		offset produced."""
+
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = (numpy.sin(numpy.linspace(0, 20, 4410)) * 0.5).astype(numpy.float32)
+
+		step = subsample.transform.Distort(mode="fold", drive_db=0.0, tone=1.0, mix=1.0)
+		result = subsample.transform._apply_distort(audio, 44100, record, step)
+
+		corr = float(numpy.corrcoef(audio[:, 0], result[:, 0])[0, 1])
+		assert corr > 0.99   # in-phase, not inverted (was ~ -1.0)
+
+	def test_distort_fold_mix_does_not_cancel (self) -> None:
+
+		"""mix=0.5 on an in-band fold must not cancel dry against an inverted
+		wet toward silence."""
+
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = (numpy.sin(numpy.linspace(0, 20, 4410)) * 0.5).astype(numpy.float32)
+
+		step = subsample.transform.Distort(mode="fold", drive_db=0.0, tone=1.0, mix=0.5)
+		result = subsample.transform._apply_distort(audio, 44100, record, step)
+
+		in_peak  = float(numpy.max(numpy.abs(audio)))
+		out_peak = float(numpy.max(numpy.abs(result)))
+		assert out_peak > 0.5 * in_peak   # was ~0.0 (total cancellation)
+
+	def test_limit_short_sample_not_silenced (self) -> None:
+
+		"""A sample shorter than the default 5 ms look-ahead window must keep
+		its signal — it used to be zeroed entirely by the delay-then-truncate."""
+
+		record = _make_record(sample_id=1)
+		# 200 frames < 220-sample (5 ms @ 44.1 kHz) default look-ahead window.
+		audio = numpy.full((200, 1), 0.9, dtype=numpy.float32)
+
+		step = subsample.transform.Limit(threshold_db=-6.0)   # default lookahead_ms=5.0
+		result = subsample.transform._apply_limit(audio, 44100, record, step)
+
+		assert result.shape == audio.shape
+		assert float(numpy.max(numpy.abs(result))) > 0.0   # not silent
+
+	def test_transform_cache_reput_does_not_inflate_memory (self) -> None:
+
+		"""Re-putting the same key (disk-promote + worker on_complete) must not
+		double-count bytes — the running total stays at one buffer."""
+
+		cache = subsample.transform.TransformCache(max_memory_bytes=10_000_000)
+		result = _make_result(sample_id=1)
+
+		cache.put(result)
+		one = cache.memory_used
+		cache.put(result)
+		cache.put(result)
+
+		assert cache.memory_used == one
+		assert one == result.audio.nbytes
+
+	def test_snap_onsets_more_onsets_than_grid_no_crash (self) -> None:
+
+		"""More onsets than grid points (greedy pointer can exhaust the grid)
+		must not IndexError; extra onsets pile onto the last point."""
+
+		onsets = (0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30)
+		grid   = [0.0, 0.25]
+
+		assigned = subsample.transform._snap_onsets_to_grid(onsets, grid)
+
+		assert len(assigned) == len(onsets)
+		assert assigned[-1] == grid[-1]
+
+	def test_filter_empty_input_returns_empty (self) -> None:
+
+		"""Filters no-op on zero-length audio rather than aborting in scipy."""
+
+		empty = numpy.zeros((0, 1), dtype=numpy.float32)
+
+		for btype in ("lowpass", "highpass", "bandpass"):
+			out = subsample.transform._apply_filter(empty, 44100, 1000.0, 0.0, btype)
+			assert out.shape[0] == 0
+
+	def test_pitch_noop_when_target_equals_source (self) -> None:
+
+		"""target_midi_note equal to the source pitch returns the audio
+		untouched (no lossy offline re-render)."""
+
+		record = _make_record(sample_id=1)   # dominant_pitch_hz = 440.0 → MIDI 69
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = (numpy.sin(numpy.linspace(0, 20, 4410)) * 0.5).astype(numpy.float32)
+
+		step = subsample.transform.PitchShift(target_midi_note=69)
+		result = subsample.transform._apply_pitch(audio, 44100, record, step)
+
+		assert result is audio   # identity passthrough, pyrubberband not invoked

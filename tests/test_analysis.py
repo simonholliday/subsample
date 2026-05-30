@@ -1763,3 +1763,45 @@ class TestSpectralRolloffAndSlope:
 		assert 0.0 <= spectral.spectral_slope <= 1.0
 		# Also verify level has crest factor from analyze_all path
 		assert level.crest_factor > 0.0
+
+
+class TestTinyInputDegrades:
+
+	"""Code-review regression: a 1-/2-/3-sample capture must degrade to the
+	empty result rather than crashing the analysis (the clamped n_fft drove
+	librosa's rfftfreq into a 1/(n*d) ZeroDivisionError / 'Parameter Nx=0')."""
+
+	def test_analyze_all_tiny_inputs_do_not_crash_or_warn (self) -> None:
+		params = subsample.analysis.compute_params(44100)
+		cfg = subsample.config.AnalysisConfig()
+
+		# n=1 is below _MIN_ANALYSIS_FRAMES (degrades to empty); n=2,3 now run
+		# without crashing and without the polyfit RankWarning.
+		for n in (1, 2, 3):
+			mono = numpy.full(n, 0.1, dtype=numpy.float32)
+
+			with warnings.catch_warnings():
+				warnings.simplefilter("error")   # any warning (incl. RankWarning) fails
+				spectral, rhythm, pitch, timbre, level, band = subsample.analysis.analyze_all(mono, params, cfg)
+
+			assert pitch.dominant_pitch_hz == 0.0          # too short for a stable pitch
+			assert 0.0 <= spectral.spectral_slope <= 1.0
+
+	def test_one_sample_analyze_all_is_empty (self) -> None:
+		params = subsample.analysis.compute_params(44100)
+		cfg = subsample.config.AnalysisConfig()
+
+		spectral, _r, _p, _t, _l, band = subsample.analysis.analyze_all(
+			numpy.full(1, 0.1, dtype=numpy.float32), params, cfg,
+		)
+
+		assert spectral == subsample.analysis._EMPTY_ANALYSIS_RESULT
+		assert band.energy_fractions == (0.0,) * subsample.analysis._N_BANDS
+
+	def test_analyze_one_sample_returns_empty (self) -> None:
+		params = subsample.analysis.compute_params(44100)
+		audio = numpy.full((1, 1), 1000, dtype=numpy.int16)
+
+		result = subsample.analysis.analyze(audio, params, 16)
+
+		assert result == subsample.analysis._EMPTY_ANALYSIS_RESULT

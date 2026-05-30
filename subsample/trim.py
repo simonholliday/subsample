@@ -29,9 +29,12 @@ def trim_silence (
 	(inclusive), extended by pre_samples before and post_samples after.
 
 	When pre_samples or post_samples are non-zero, an S-curve (half-cosine)
-	fade is applied over the padding region. The fade runs from 0.0 at the
-	outermost edge to 1.0 at the boundary of the detected signal, so the
-	signal content itself is always unaffected.
+	fade is applied over the padding region.  When real silence precedes the
+	signal, the fade-in covers only that silence and the signal's own attack is
+	preserved.  When the signal is loud from the first sample (a fast-attack
+	hi-hat/snare whose transient falls inside the pre-read), there is no silence
+	to fade, so a fixed pre_samples window is ramped instead — gently
+	attenuating the leading samples of real signal to avoid a hard click.
 
 	If no sample meets the threshold (which should not normally occur, since
 	the detector validated the segment), the original array is returned
@@ -91,7 +94,10 @@ def trim_silence (
 	# being silently skipped when individual sample peaks exceed the threshold
 	# during the detector's hold period — a peak-vs-RMS mismatch that causes
 	# above[-1] to land at the very last sample, giving fade_out_len = 0.
-	fade_out_len = min(post_samples, len(result))
+	# Reserve the fade-in region: a very short all-loud buffer where
+	# fade_in_len + post_samples > len(result) would otherwise double-attenuate
+	# the overlapping samples (two ramps multiplied) and could zero them out.
+	fade_out_len = min(post_samples, max(0, len(result) - fade_in_len))
 	if fade_out_len > 1:
 		ramp = (1 + numpy.cos(numpy.linspace(0, numpy.pi, fade_out_len))) / 2
 		result[-fade_out_len:] = (result[-fade_out_len:] * ramp[:, numpy.newaxis]).astype(audio.dtype)

@@ -227,77 +227,83 @@ def _process_input_files (
 		start_time = time.monotonic()
 		last_progress_time = start_time
 
-		# Phase 1 — read pass: stream the file through the detector, dispatching
-		# detected segments to the worker pool.  Fast for in-memory files
-		# (essentially memory bandwidth + detector cost), so the periodic tick
-		# below will only fire for very large files.
-		for offset in range(0, n_frames, chunk_size):
-			chunk = file_info.audio[offset : offset + chunk_size]
+		# try/finally so an error in the read/drain loop still shuts down the
+		# worker pool (this is the one SampleProcessor owner without the
+		# teardown guarantee its siblings have).
+		try:
 
-			trimmed = _process_chunk(chunk, buf, detector, cfg.detection)
+			# Phase 1 — read pass: stream the file through the detector, dispatching
+			# detected segments to the worker pool.  Fast for in-memory files
+			# (essentially memory bandwidth + detector cost), so the periodic tick
+			# below will only fire for very large files.
+			for offset in range(0, n_frames, chunk_size):
+				chunk = file_info.audio[offset : offset + chunk_size]
 
-			if trimmed is not None:
-				writer.enqueue(
-					trimmed,
-					datetime.datetime.now(),
-					filename_base=f"{path.stem}_{segment_index}",
-					sample_rate=file_info.sample_rate,
-					bit_depth=file_info.bit_depth,
-				)
-				segment_index += 1
+				trimmed = _process_chunk(chunk, buf, detector, cfg.detection)
 
-			now = time.monotonic()
-			if now - last_progress_time >= _PROGRESS_LOG_INTERVAL_SEC:
-				position_sec = min(file_duration_sec, (offset + chunk_size) / file_info.sample_rate)
-				pct = 100.0 * position_sec / file_duration_sec if file_duration_sec > 0 else 100.0
-				wall_elapsed = now - start_time
-				# Extrapolate remaining wall time from the ratio of audio read so far.
-				if position_sec > 0:
-					eta_wall = wall_elapsed * (file_duration_sec - position_sec) / position_sec
-				else:
-					eta_wall = 0.0
-				_log.info(
-					"Reading: %.0f%% — elapsed %s, ETA %s",
-					pct, _format_mmss(wall_elapsed), _format_mmss(eta_wall),
-				)
-				last_progress_time = now
-
-		# Phase 2 — drain: wait for the worker pool to finish analysing and
-		# writing every enqueued segment.  For long files this is where most
-		# of the wall time lives, so we poll queue_depth and log progress.
-		total_segments = segment_index - 1
-		if total_segments > 0:
-			drain_start = time.monotonic()
-			while True:
-				depth = writer.queue_depth
-				if depth == 0:
-					break
+				if trimmed is not None:
+					writer.enqueue(
+						trimmed,
+						datetime.datetime.now(),
+						filename_base=f"{path.stem}_{segment_index}",
+						sample_rate=file_info.sample_rate,
+						bit_depth=file_info.bit_depth,
+					)
+					segment_index += 1
 
 				now = time.monotonic()
 				if now - last_progress_time >= _PROGRESS_LOG_INTERVAL_SEC:
-					completed = total_segments - depth
+					position_sec = min(file_duration_sec, (offset + chunk_size) / file_info.sample_rate)
+					pct = 100.0 * position_sec / file_duration_sec if file_duration_sec > 0 else 100.0
 					wall_elapsed = now - start_time
-					drain_elapsed = now - drain_start
-					if completed > 0:
-						eta_wall = drain_elapsed * depth / completed
+					# Extrapolate remaining wall time from the ratio of audio read so far.
+					if position_sec > 0:
+						eta_wall = wall_elapsed * (file_duration_sec - position_sec) / position_sec
 					else:
 						eta_wall = 0.0
-					pct = 100.0 * completed / total_segments
 					_log.info(
-						"Processing: %d/%d segments (%.1f%%) — elapsed %s, ETA %s",
-						completed, total_segments, pct,
-						_format_mmss(wall_elapsed), _format_mmss(eta_wall),
+						"Reading: %.0f%% — elapsed %s, ETA %s",
+						pct, _format_mmss(wall_elapsed), _format_mmss(eta_wall),
 					)
 					last_progress_time = now
 
-				time.sleep(1.0)
+			# Phase 2 — drain: wait for the worker pool to finish analysing and
+			# writing every enqueued segment.  For long files this is where most
+			# of the wall time lives, so we poll queue_depth and log progress.
+			total_segments = segment_index - 1
+			if total_segments > 0:
+				drain_start = time.monotonic()
+				while True:
+					depth = writer.queue_depth
+					if depth == 0:
+						break
 
-		writer.flush()
-		writer.shutdown()
+					now = time.monotonic()
+					if now - last_progress_time >= _PROGRESS_LOG_INTERVAL_SEC:
+						completed = total_segments - depth
+						wall_elapsed = now - start_time
+						drain_elapsed = now - drain_start
+						if completed > 0:
+							eta_wall = drain_elapsed * depth / completed
+						else:
+							eta_wall = 0.0
+						pct = 100.0 * completed / total_segments
+						_log.info(
+							"Processing: %d/%d segments (%.1f%%) — elapsed %s, ETA %s",
+							completed, total_segments, pct,
+							_format_mmss(wall_elapsed), _format_mmss(eta_wall),
+						)
+						last_progress_time = now
 
-		wall_total = time.monotonic() - start_time
-		count = segment_index - 1
-		print(f"  → {count} segment(s) written from {path.name} in {_format_mmss(wall_total)}")
+					time.sleep(1.0)
+
+			writer.flush()
+
+			wall_total = time.monotonic() - start_time
+			count = segment_index - 1
+			print(f"  → {count} segment(s) processed from {path.name} in {_format_mmss(wall_total)}")
+		finally:
+			writer.shutdown()
 
 
 def _run_recorder (
@@ -446,8 +452,20 @@ def _run_recorder (
 				reader.overflow_count,
 			)
 
-		reader.stop()
-		pa.terminate()
+		# Isolate each teardown step: if reader.stop() raises (e.g. PortAudio
+		# error on an unplugged USB device), pa.terminate() and the writer's
+		# drain/flush must still run rather than leak the stream and lose
+		# in-flight recordings.
+		try:
+			reader.stop()
+		except Exception as exc:
+			_log.error("Recorder: reader.stop() failed during shutdown: %s", exc)
+
+		try:
+			pa.terminate()
+		except Exception as exc:
+			_log.error("Recorder: pa.terminate() failed during shutdown: %s", exc)
+
 		writer.shutdown()
 
 
@@ -685,7 +703,11 @@ def _start_player (
 		player.update_pitched_assignments()
 		try:
 			player.run()
-		except ValueError as exc:
+		except (ValueError, OSError) as exc:
+			# OSError covers PortAudio rejecting the device/format and mido
+			# failing to bind the port — without it a device-open failure would
+			# escape this thread target as a raw traceback while the main loop
+			# blocks on shutdown_event, hanging the app.
 			print(f"\nError starting player: {exc}", file=sys.stderr)
 
 		return
@@ -740,7 +762,9 @@ def _start_player (
 	player.update_pitched_assignments()
 	try:
 		player.run()
-	except ValueError as exc:
+	except (ValueError, OSError) as exc:
+		# OSError: PortAudio/mido device-open failure — see the virtual-port
+		# branch above for why this thread target must not let it escape.
 		print(f"\nError starting player: {exc}", file=sys.stderr)
 
 
@@ -1264,13 +1288,18 @@ def _main_impl () -> None:
 			osc_receiver = subsample.osc.OscReceiver(
 				port=cfg.osc.receive_port,
 				on_import=_on_osc_import,
-				shutdown_event=shutdown_event,
+				host=cfg.osc.receive_host,
 			)
 			osc_receiver.start()
 			print(f"  OSC receiver : listening on port {cfg.osc.receive_port}")
 
 		except ImportError:
 			_log.warning("OSC receive enabled but python-osc not installed. pip install subsample[osc]")
+		except OSError as exc:
+			# OscReceiver binds the UDP socket in its constructor, so a busy port
+			# raises OSError here (not ImportError).  Log and continue rather
+			# than letting it escape and skip the rest of startup.
+			_log.warning("OSC receiver could not bind port %d: %s — OSC receive disabled", cfg.osc.receive_port, exc)
 
 	for t in threads:
 		t.start()

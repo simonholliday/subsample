@@ -25,8 +25,10 @@ BankManager
 Usage flow
 ----------
 
-1. ``load_midi_map()`` extracts the optional ``banks:`` and ``bank_channel:``
-   keys from the MIDI map YAML and returns them in a ``MidiMapResult``.
+1. ``load_midi_map()`` extracts the optional ``banks:``, ``bank_channel:``,
+   and ``default_bank:`` keys from the MIDI map YAML and returns them in a
+   ``MidiMapResult``.  ``default_bank`` selects which bank is active at startup
+   (``cli.py`` passes it as ``default_program`` to ``BankManager``).
 
 2. ``cli.py`` calls ``load_bank()`` for each ``BankDefinition``, then
    constructs a ``BankManager`` and passes it to ``MidiPlayer``.
@@ -292,7 +294,13 @@ class BankManager:
 
 	def update_banks (self, banks: list[Bank], bank_channel: int = DEFAULT_BANK_CHANNEL) -> None:
 
-		"""Replace the bank set (used during MIDI map hot-reload).
+		"""Replace the bank set (intended for MIDI map hot-reload).
+
+		NOT wired into the live reload path: bank changes on a watched MIDI map
+		are warn-only (cli.py), so this has no production caller today.  Two
+		caveats to fix before wiring it up: ``bank_channel`` defaults to
+		DEFAULT_BANK_CHANNEL (silently overwriting a configured channel if the
+		caller omits it), and there is no ``default_program`` parameter.
 
 		If the previously active bank's program number still exists in the
 		new set, it remains active.  Otherwise the first bank becomes active.

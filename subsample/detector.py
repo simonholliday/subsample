@@ -117,10 +117,13 @@ class LevelDetector:
 		"""
 
 		chunk_rms = _compute_rms(chunk)
-		if self._state != DetectorState.RECORDING:
-			self._update_ambient(chunk_rms)
 
+		# Ambient is updated during WARMUP (calibration) and — in IDLE — only
+		# for chunks that do NOT trigger, so a loud transient is never folded
+		# into the noise floor before its own SNR test (which would deflate the
+		# measured SNR and miss sharp hits).  RECORDING never updates ambient.
 		if self._state == DetectorState.WARMUP:
+			self._update_ambient(chunk_rms)
 			return self._handle_warmup()
 
 		if self._state == DetectorState.IDLE:
@@ -151,13 +154,21 @@ class LevelDetector:
 		current_frame: int,
 	) -> typing.Optional[tuple[int, int]]:
 
-		"""Check whether the current chunk exceeds the SNR threshold."""
+		"""Check whether the current chunk exceeds the SNR threshold.
+
+		The SNR test runs against the ambient floor as measured *before* this
+		chunk.  Only a non-triggering (genuinely background) chunk then updates
+		the ambient EMA — a trigger is excluded so the transient never raises
+		the floor it is being compared against.
+		"""
 
 		if self._exceeds_threshold(chunk_rms):
 			self._state = DetectorState.RECORDING
 			self._recording_start_frame = max(0, current_frame - self._chunk_size)
 			self._hold_chunks_remaining = self._hold_chunks_total
+			return None
 
+		self._update_ambient(chunk_rms)
 		return None
 
 	def _handle_recording (
@@ -239,9 +250,11 @@ def _compute_rms (chunk: numpy.ndarray) -> float:
 
 	"""Compute the root-mean-square of an audio chunk.
 
-	Converts to float32 before squaring to avoid int16/int32 overflow while
-	using half the memory of float64 (int16 max is 32767, fits in float32's
-	23-bit mantissa without loss).
+	Converts to float32 before squaring to avoid integer overflow while using
+	half the memory of float64.  int16 values fit float32's 23-bit mantissa
+	exactly; int32 (24/32-bit capture) magnitudes near 2**31 exceed it, so the
+	cast is lossy there — but the error is far below the SNR threshold's
+	resolution, so it is immaterial to the level comparison.
 	"""
 
 	samples = chunk.astype(numpy.float32)

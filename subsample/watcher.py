@@ -12,7 +12,8 @@ Two detection paths run in parallel:
    re-analysis needed.
 
 2. **Audio file path** (for files from any source) — watches for audio
-   files with recognised extensions (.wav, .flac, .aiff, .ogg, .mp3).
+   files whose extension is in cache.AUDIO_EXTENSIONS (the authoritative
+   dispatch set: .wav, .flac, .aiff, .aif, .ogg, .mp3, .mpeg).
    After an initial debounce, waits a grace period for a sidecar to
    appear (in case the source is another subsample instance).  If none
    appears, checks that the file is no longer being written (file-size

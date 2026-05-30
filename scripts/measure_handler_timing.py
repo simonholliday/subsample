@@ -7,8 +7,10 @@ other half: how long ``MidiPlayer._handle_message`` actually takes to
 turn a note_on into a queued voice, against the real config, the real
 instrument library, and the real MIDI map.
 
-It builds the player exactly as ``cli._start_player`` does (single-
-directory mode), but never opens an audio or MIDI device — it calls
+It builds the player as ``cli._main_impl`` does for single-directory mode
+(loading the library, similarity matrix, and transform manager itself —
+``_start_player`` receives those as parameters), but never opens an audio or
+MIDI device — it calls
 ``_handle_message`` directly on this thread, so the numbers are pure
 selection + variant-lookup + render compute, with no rtmidi delivery
 jitter and no audio-callback lock contention mixed in.

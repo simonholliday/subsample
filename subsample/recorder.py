@@ -2,7 +2,8 @@
 
 Decouples audio capture from analysis and disk I/O by running per-sample
 work on a thread-pool executor. The recorder thread hands off completed
-recordings via submit(); each worker independently runs the full pipeline:
+recordings via enqueue() (submit() is the internal executor call); each
+worker independently runs the full pipeline:
   convert → analyze → write WAV → save sidecar → invoke on_complete callback
 
 Worker count is auto-scaled from os.cpu_count() at construction time — no
@@ -406,7 +407,21 @@ class SampleProcessor:
 
 			if self._on_complete is not None and write_result is not None:
 				filepath, duration = write_result
-				self._on_complete(filepath, result, rhythm, pitch, timbre, level, band_energy, duration, req.audio)
+
+				# The handoff gets its own except so a downstream integration
+				# failure (or a callback arity mismatch) is reported distinctly
+				# — not swallowed under the analysis/write "WAV may be intact"
+				# message, which would hide a sample that never reached the
+				# library / similarity index / transform pipeline.
+				try:
+					self._on_complete(filepath, result, rhythm, pitch, timbre, level, band_energy, duration, req.audio)
+				except Exception as exc:
+					_log.error(
+						"Sample handoff (on_complete) failed for %s: %s — the audio and "
+						"analysis were written, but the sample was NOT integrated into the "
+						"live library",
+						filepath, exc, exc_info=True,
+					)
 
 		except Exception as exc:
 			_log.error("Failed to process recording: %s — WAV may be intact", exc, exc_info=True)
@@ -455,6 +470,8 @@ class SampleProcessor:
 			pitch:         Pitch analysis computed before this call.
 			timbre:        Timbral fingerprint computed before this call.
 			level:         Peak and RMS amplitude of the recording.
+			band_energy:   Per-band energy fractions / decay rates — part of the
+			               58-dim fingerprint, written into the sidecar.
 			filename_base: If provided, used as the filename stem instead of the
 			               timestamp format. Collision handling still applies.
 			sample_rate:   Sample rate for writing. Defaults to config value.
@@ -462,6 +479,8 @@ class SampleProcessor:
 			channel_format: "pcm" or "b_format_ambix"; passed through to the
 			                sidecar so the player knows whether to apply the
 			                ambisonic decoder on playback.
+			preview_data:  Pre-computed preview block; when set, gates writing
+			               the .preview.png and the sidecar preview JSON.
 		"""
 
 		# Resolve effective format values; per-request overrides take precedence.

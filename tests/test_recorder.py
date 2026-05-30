@@ -219,7 +219,11 @@ class TestSampleProcessorQueueDepth:
 		audio = numpy.zeros((4410, 1), dtype=numpy.int16)
 		received: list[subsample.analysis.AnalysisResult] = []
 
-		def on_complete (path, spectral, rhythm, pitch, timbre, level, duration, raw_audio):
+		# 9-arg signature must match production (band_energy is the 7th arg);
+		# an 8-arg stub raised TypeError on every call, swallowed by the
+		# recorder's broad except, so this test never actually exercised the
+		# handoff and `received` stayed empty.
+		def on_complete (path, spectral, rhythm, pitch, timbre, level, band_energy, duration, raw_audio):
 			received.append(spectral)
 
 		with tempfile.TemporaryDirectory() as tmp:
@@ -253,6 +257,8 @@ class TestSampleProcessorQueueDepth:
 		assert any("backlog" in m for m in warning_messages), (
 			f"Expected a backlog WARNING; got: {warning_messages}"
 		)
+		# The handoff actually ran for every segment (the 9-arg contract holds).
+		assert len(received) == 4
 
 	def test_drain_info_logged_after_backlog (
 		self, caplog: pytest.LogCaptureFixture

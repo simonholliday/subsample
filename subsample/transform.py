@@ -712,13 +712,30 @@ class TransformCache:
 
 		with self._lock:
 
-			# Evict whole parent sets until there is room.
+			# Re-putting an existing key (a disk-cache promote and a worker's
+			# on_complete legitimately store the same key) replaces its copy
+			# rather than adding a second one.  Track the prior size so both the
+			# eviction check and the running total reflect the NET change, not a
+			# cumulative sum that would inflate _total_bytes and force spurious
+			# eviction of warm parents.
+			existing_bytes = self._index[result.key].audio.nbytes if result.key in self._index else 0
+
+			# Evict whole parent sets until there is room for the net addition.
+			# Skip eviction entirely when a single variant exceeds the whole
+			# budget: discarding warm parents cannot make it fit, so it is
+			# stored over-budget either way — keep the warm variants instead of
+			# flushing them for nothing.
 			while (
 				self._parent_order
-				and self._total_bytes + new_bytes > self._max_bytes
+				and new_bytes <= self._max_bytes
+				and self._total_bytes - existing_bytes + new_bytes > self._max_bytes
 			):
 				oldest_parent = self._parent_order[0]
 				evicted += self._evict_parent_locked(oldest_parent)
+
+				# Eviction may have removed the very copy we were replacing.
+				if result.key not in self._index:
+					existing_bytes = 0
 
 			if new_bytes > self._max_bytes:
 				_log.warning(
@@ -733,6 +750,10 @@ class TransformCache:
 				self._parent_order.append(sample_id)
 
 			self._parent_index[sample_id].add(result.key)
+
+			if result.key in self._index:
+				self._total_bytes -= self._index[result.key].audio.nbytes
+
 			self._index[result.key] = result
 			self._total_bytes += new_bytes
 
@@ -986,6 +1007,12 @@ class VariantDiskCache:
 		self._max_bytes   = max_bytes
 		self._sample_rate = sample_rate
 
+		# Serialises eviction across the transform worker pool — without it two
+		# concurrent evictions scandir/sort/unlink the same files and a losing
+		# unlink (OSError, swallowed) drops that file's size from the running
+		# total, over-evicting warm variants.
+		self._lock:       threading.Lock = threading.Lock()
+
 		if max_bytes > 0:
 			self._directory.mkdir(parents=True, exist_ok=True)
 
@@ -1183,45 +1210,50 @@ class VariantDiskCache:
 
 	def _evict_if_needed (self) -> None:
 
-		"""Delete oldest variant files until total size is within budget."""
+		"""Delete oldest variant files until total size is within budget.
 
-		try:
-			entries = []
+		Held under ``self._lock`` so concurrent worker-thread evictions don't
+		each scan and unlink the same files (which over-evicts — see __init__).
+		"""
 
-			for entry in os.scandir(self._directory):
-				if entry.name.endswith(".variant") and entry.is_file():
-					stat = entry.stat()
-					entries.append((stat.st_mtime, stat.st_size, entry.path))
+		with self._lock:
+			try:
+				entries = []
 
-			total = sum(size for _, size, _ in entries)
+				for entry in os.scandir(self._directory):
+					if entry.name.endswith(".variant") and entry.is_file():
+						stat = entry.stat()
+						entries.append((stat.st_mtime, stat.st_size, entry.path))
 
-			if total <= self._max_bytes:
-				return
+				total = sum(size for _, size, _ in entries)
 
-			# Sort oldest first.
-			entries.sort()
-
-			evicted = 0
-
-			for _mtime, size, filepath in entries:
 				if total <= self._max_bytes:
-					break
+					return
 
-				try:
-					os.unlink(filepath)
-					total -= size
-					evicted += 1
-				except OSError:
-					pass
+				# Sort oldest first.
+				entries.sort()
 
-			if evicted > 0:
-				_log.info(
-					"Variant disk cache: evicted %d file(s), %.1f MB remaining",
-					evicted, total / (1024 * 1024),
-				)
+				evicted = 0
 
-		except OSError as exc:
-			_log.warning("Variant disk cache eviction error: %s", exc)
+				for _mtime, size, filepath in entries:
+					if total <= self._max_bytes:
+						break
+
+					try:
+						os.unlink(filepath)
+						total -= size
+						evicted += 1
+					except OSError:
+						pass
+
+				if evicted > 0:
+					_log.info(
+						"Variant disk cache: evicted %d file(s), %.1f MB remaining",
+						evicted, total / (1024 * 1024),
+					)
+
+			except OSError as exc:
+				_log.warning("Variant disk cache eviction error: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1410,6 +1442,12 @@ class TransformProcessor:
 		"""
 
 		try:
+			# Reset the thread-local segment bounds at the start of every job:
+			# if a previous job's chain raised *after* a quantize handler set
+			# them, the success-path clear below was skipped and the stale bounds
+			# would otherwise attach to this (reused worker's) result.
+			_segment_bounds_local.bounds = None
+
 			# enqueue() guards against None audio, but the type system can't see that.
 			if record.audio is None:
 				return
@@ -1991,6 +2029,12 @@ def _apply_pitch (
 	source_midi = float(librosa.hz_to_midi(record.pitch.dominant_pitch_hz))
 	n_steps     = float(step.target_midi_note) - source_midi
 
+	# No-op passthrough when the target equals the source pitch (reachable,
+	# e.g. repitch note: 'A4' on an A4 sample).  Skips a lossy offline
+	# re-render — the sibling _apply_time_stretch guards its no-op the same way.
+	if abs(n_steps) < 1e-6:
+		return audio
+
 	return pyrubberband.pitch_shift(  # type: ignore[no-any-return]  # pyrubberband ships no stubs
 		audio,
 		sample_rate,
@@ -2058,6 +2102,16 @@ def _snap_onsets_to_grid (onset_times: tuple[float, ...], grid: list[float]) -> 
 	next_min_idx = 0
 
 	for onset in onset_times:
+
+		# The greedy pointer can advance by more than one per onset (when an
+		# onset snaps several points forward), so the grid can be exhausted
+		# while onsets remain.  Pile the rest onto the last point rather than
+		# indexing past the end — downstream _build_time_map drops the
+		# resulting equal-target entries via its strict-increase check.
+		if next_min_idx >= len(grid):
+			assigned.append(grid[-1])
+			continue
+
 		best_idx = next_min_idx
 		best_dist = abs(onset - grid[best_idx])
 
@@ -2067,8 +2121,8 @@ def _snap_onsets_to_grid (onset_times: tuple[float, ...], grid: list[float]) -> 
 			if dist < best_dist:
 				best_idx = j
 				best_dist = dist
-			elif dist >= best_dist:
-				# Grid is sorted — distances will only increase from here.
+			else:
+				# Grid is sorted — distances only increase from here.
 				break
 
 		best_idx = max(best_idx, next_min_idx)
@@ -2111,8 +2165,17 @@ def _build_time_map (
 		if src > prev_src and tgt > prev_tgt:
 			time_map.append((src, tgt))
 
-	# Final anchor: source and target endpoints.
-	time_map.append((source_length, target_length))
+	# Final anchor: the source/target endpoints.  If the last onset already
+	# lands on (or past) the endpoint, overwrite that entry rather than append
+	# a non-increasing duplicate — the map must stay strictly increasing.
+	prev_src, prev_tgt = time_map[-1]
+
+	if source_length > prev_src and target_length > prev_tgt:
+		time_map.append((source_length, target_length))
+	elif len(time_map) > 1:
+		time_map[-1] = (source_length, target_length)
+	else:
+		time_map.append((source_length, target_length))
 
 	return time_map
 
@@ -2173,7 +2236,11 @@ def _apply_time_stretch (
 	crop_start_sec   = max(0.0, first_attack_sec - _PRE_ONSET_SECONDS)
 	crop_start_frame = int(crop_start_sec * sample_rate)
 
-	audio = audio[crop_start_frame:]
+	# .copy(): the crop is a view, and the fade-in below mutates it in place.
+	# The dispatcher hands this function a private intermediate today, but the
+	# sibling _apply_pad_quantize copies for the same reason — match it so an
+	# in-place fade can never reach back into a caller's buffer.
+	audio = audio[crop_start_frame:].copy()
 
 	# S-curve fade-in over the crop boundary to eliminate clicks.
 	fade_in_len = int(_CROP_FADE_IN_SECONDS * sample_rate)
@@ -2300,6 +2367,12 @@ def _apply_filter (
 	stability.  Band-pass bandwidth is derived from Q (quality factor):
 	lower Q = wider band, higher Q = narrower band.
 	"""
+
+	# Empty input is a no-op — scipy.signal.sosfilt raises on a zero-length
+	# array, while the rest of the processor family (compress, reverse,
+	# saturate) already passes empty audio straight through.
+	if audio.shape[0] == 0:
+		return audio
 
 	nyquist = sample_rate / 2.0
 
@@ -2530,6 +2603,14 @@ def _compress (
 
 	lookahead_samples = int(round(lookahead_ms / 1000.0 * sample_rate))
 
+	# Cap the delay to half the buffer.  Truncating the delayed signal back to
+	# n_frames discards the last `lookahead_samples`; if the window meets or
+	# exceeds the sample length the kept portion is all zero-pad and the whole
+	# output goes silent (a real hazard for short clicks / hat ticks at the
+	# default 5 ms look-ahead).  Capping keeps the bulk of a short sample
+	# audible — anticipation is meaningless once the window rivals the content.
+	lookahead_samples = min(lookahead_samples, n_frames // 2)
+
 	if lookahead_samples > 0:
 		# Delay the audio relative to the gain curve.  The gain curve was
 		# computed from the original signal, so gain reduction begins
@@ -2724,10 +2805,12 @@ def _resolve_gate_params (
 		threshold_db = 20.0 * math.log10(floor + _GATE_EPSILON) + 6.0
 
 	# Attack: percussive → fast gate open (1 ms), sustained → slower (5 ms).
+	# spectral.attack is 0 for instant/percussive onsets and 1 for gradual
+	# ones, so the fast end (1 ms) must sit at attack=0.
 	if step.attack_ms is not None:
 		attack_ms = step.attack_ms
 	else:
-		attack_ms = 5.0 - 4.0 * record.spectral.attack
+		attack_ms = 1.0 + 4.0 * record.spectral.attack
 
 	# Release: short-decay → fast close (20 ms), long-tail → slower (100 ms).
 	if step.release_ms is not None:
@@ -2903,7 +2986,10 @@ def _apply_distort (
 
 	elif mode == "fold":
 		# Foldback: signal wraps around ±1 instead of clipping.
-		wet = numpy.abs(numpy.mod(driven + 1.0, 4.0) - 2.0) - 1.0
+		# Phase offset must be -1.0: with +1.0 the triangle is shifted half a
+		# period and degenerates to -x across the in-band range (a polarity
+		# inverter that also cancels toward silence when blended under mix < 1).
+		wet = numpy.abs(numpy.mod(driven - 1.0, 4.0) - 2.0) - 1.0
 
 	elif mode == "bit_crush":
 		levels = float(2 ** max(1, min(16, step.bit_depth)))
@@ -3484,11 +3570,24 @@ def _apply_vocoder (
 	transients.
 	"""
 
+	# Fully dry: the wet/dry mix at the end would return the modulator
+	# unchanged, so skip the (most-expensive-in-the-pipeline) filter-bank +
+	# Hilbert work entirely.  depth == 0.0 is a documented, CC-sweepable value.
+	if step.depth <= 0.0:
+		return audio
+
 	# Load carrier.
 	try:
 		carrier_mono = _load_carrier(step.carrier_path, sample_rate)
 	except (OSError, soundfile.SoundFileError) as exc:
 		_log.warning("Vocoder: could not load carrier %r: %s — returning dry", step.carrier_path, exc)
+		return audio
+
+	# A readable-but-empty (or sub-filter-length) carrier would divide by zero
+	# at the tile step / trip sosfiltfilt's padlen check — return dry with a
+	# clear message instead of a generic worker traceback.
+	if len(carrier_mono) == 0:
+		_log.warning("Vocoder: carrier %r decoded to zero frames — returning dry", step.carrier_path)
 		return audio
 
 	n_frames, n_channels = audio.shape

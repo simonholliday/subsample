@@ -37,8 +37,11 @@ class OscEventSender:
 	configurable host:port so that sequencers, visualisers, or other
 	OSC-compatible applications can react in real time.
 
-	Both callback methods are exception-safe — a failed send logs a
-	warning and never raises, since callbacks run on worker threads.
+	The public on_sample_captured / on_sample_loaded callbacks are
+	send-exception-safe — a failed UDP send logs a warning and never raises,
+	since they run on worker threads.  (The internal event-bus adapters that
+	unpack kwargs are not wrapped; they assume the emitter supplies the
+	documented keys.)
 	"""
 
 	def __init__ (self, host: str = "127.0.0.1", port: int = 9000) -> None:
@@ -126,26 +129,31 @@ class OscReceiver:
 	Runs a threaded UDP server on a daemon thread.  The on_import callback
 	is invoked from the server's handler thread with the file path string
 	extracted from the OSC message arguments.
+
+	SECURITY: ``/sample/import`` reads/loads an arbitrary filesystem path
+	supplied by the sender, so the server binds to loopback (127.0.0.1) by
+	default — only local senders can reach it.  Pass host="0.0.0.0" (via
+	``osc.receive_host`` in config.yaml) to accept messages from other hosts
+	on a trusted LAN, understanding that this exposes unauthenticated remote
+	file read/load.
 	"""
 
 	def __init__ (
 		self,
 		port: int,
 		on_import: typing.Callable[[str], None],
-		shutdown_event: threading.Event,
+		host: str = "127.0.0.1",
 	) -> None:
 
 		import pythonosc.dispatcher
 		import pythonosc.osc_server
-
-		self._shutdown_event = shutdown_event
 
 		dispatcher = pythonosc.dispatcher.Dispatcher()
 		dispatcher.map("/sample/import", self._handle_import)
 
 		self._on_import = on_import
 		self._server = pythonosc.osc_server.ThreadingOSCUDPServer(
-			("0.0.0.0", port), dispatcher,
+			(host, port), dispatcher,
 		)
 		self._thread: typing.Optional[threading.Thread] = None
 

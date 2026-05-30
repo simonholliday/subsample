@@ -2167,3 +2167,22 @@ class TestBeatMatchScorer:
 		)
 		# Only first 2 beats compared → perfect match → sample included
 		assert len(result) == 1
+
+
+class TestIsPathLike:
+
+	"""Code-review regression: is_path_like gates path-vs-bare-name detection
+	at six call sites; pin its non-obvious dotfile / extension edges."""
+
+	def test_slash_is_path (self) -> None:
+		assert subsample.query.is_path_like("samples/kick.wav")
+		assert subsample.query.is_path_like("../ref/x.wav")
+
+	def test_leading_dot_is_path (self) -> None:
+		assert subsample.query.is_path_like(".hidden")
+		assert subsample.query.is_path_like("./x")
+
+	def test_bare_stem_and_extension_are_not_paths (self) -> None:
+		assert not subsample.query.is_path_like("kick_1")
+		assert not subsample.query.is_path_like("foo.wav")     # extension alone is not a path
+		assert not subsample.query.is_path_like("BD0025")

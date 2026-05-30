@@ -45,7 +45,9 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 	cached = subsample.cache.load_cache(filepath)
 
 	if cached is not None:
-		result, rhythm, pitch, timbre, params, duration, level, band_energy = cached
+		# load_cache returns a 9-tuple (_LoadResult); the trailing element is
+		# the channel_format tag, unused here.
+		result, rhythm, pitch, timbre, params, duration, level, band_energy, _channel_format = cached
 
 	else:
 		try:

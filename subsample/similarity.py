@@ -143,8 +143,10 @@ class SimilarityMatrix:
 	ordered by cosine similarity (most similar first). Pairwise scores are
 	cached in _scores so they are never recomputed.
 
-	Thread-safe: bulk_add(), add(), and remove() are called from the writer
-	thread; get_match() and get_scores() may be called from any thread.
+	Thread-safe: the writers (bulk_add(), add(), remove(), add_reference())
+	and the readers (get_matches() — the player's hot-path lookup — and
+	get_scores()) all hold _lock, so reads see whole, consistent snapshots and
+	may be called from any thread.
 
 	Attributes:
 		_lock:          Mutex protecting all mutable state.

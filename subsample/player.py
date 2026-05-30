@@ -1724,6 +1724,9 @@ class _Voice:
 	position:  int  = 0
 	releasing: bool = False
 	one_shot:  bool = False
+	fade_pos:  int  = 0
+	"""Frames of release fade already applied.  Lets the cosine fade-out span
+	multiple audio callbacks so small buffer_frames don't truncate it."""
 
 
 def list_midi_input_devices () -> list[str]:
@@ -1814,7 +1817,10 @@ def select_midi_device (devices: list[str]) -> str:
 _CC_DEBOUNCE_SECONDS: float = 0.2
 
 
-def _collect_mapped_ccs (note_map: NoteMap) -> set[int]:
+def _collect_mapped_ccs (
+	note_map: NoteMap,
+	zone_templates: tuple["ZoneTemplate", ...] = (),
+) -> set[int]:
 
 	"""Return the set of CC numbers used by CcBinding params in the note map.
 
@@ -1822,16 +1828,27 @@ def _collect_mapped_ccs (note_map: NoteMap) -> set[int]:
 	considered "mapped" for the whole player so that the relevant
 	control_change traffic triggers debounced re-evaluation regardless of
 	which layer the user is currently triggering.
+
+	Zone-tuned templates are walked too: their concrete entries are created
+	later in _materialize_zones (so they are absent from the manual note_map at
+	collection time), but a CcBinding in a zone-tuned ``process`` chain must
+	still arm the proactive pre-bake.
 	"""
 
 	ccs: set[int] = set()
 
+	def _scan_process (process: subsample.query.ProcessSpec) -> None:
+		for step in process.steps:
+			for _, value in step.params:
+				if isinstance(value, subsample.query.CcBinding):
+					ccs.add(value.cc)
+
 	for entries in note_map.values():
 		for assignment, _ in entries:
-			for step in assignment.process.steps:
-				for _, value in step.params:
-					if isinstance(value, subsample.query.CcBinding):
-						ccs.add(value.cc)
+			_scan_process(assignment.process)
+
+	for template in zone_templates:
+		_scan_process(template.process)
 
 	return ccs
 
@@ -2013,7 +2030,9 @@ class MidiPlayer:
 
 		# Set of CC numbers that are mapped to processor parameters in the
 		# current MIDI map.  Used for O(1) "is this CC relevant?" checks.
-		self._mapped_ccs: set[int] = _collect_mapped_ccs(midi_map)
+		# Includes zone-tuned template process chains, whose concrete entries
+		# don't exist in midi_map yet.
+		self._mapped_ccs: set[int] = _collect_mapped_ccs(midi_map, self._zone_templates)
 
 		# Debounce timer for CC-triggered re-evaluation.
 		self._cc_debounce_timer: typing.Optional[threading.Timer] = None
@@ -2261,30 +2280,61 @@ class MidiPlayer:
 				output_device_index = subsample.audio.select_output_device(output_devices)
 
 			# Validate output routing indices against the resolved device
-			# channel count.  With velocity layering, each (channel, note)
-			# holds a list of layers — rebuild each list in place so any
-			# layer whose routing exceeds the device gets stripped to
-			# default routing without disturbing its peers.
-			for (ch, note), entries in self._note_map.items():
-				new_entries: list[tuple[subsample.query.Assignment, subsample.query.PickSpec]] = []
+			# channel count.  The device count is only known here (after device
+			# selection), so this fix-up runs at startup.  It must be applied to
+			# the BASE map and the zone-tuned templates — the sources every
+			# re-materialisation rebuilds _note_map from — otherwise the next
+			# update_assignments() would revert the strip and a note that worked
+			# at startup would start raising in route_to_device (dropped by
+			# _safe_handle_message) after the first capture / knob / bank switch.
 
-				for assignment, pick_spec in entries:
-					routing = assignment.output_routing
+			def _strip_oob_routing (
+				routing: typing.Optional[tuple[int, ...]],
+				label:   str,
+			) -> typing.Optional[tuple[int, ...]]:
 
-					if routing is not None:
-						for idx in routing:
-							if idx >= self._output_channels:
-								_log.warning(
-									"Assignment %r (ch %d, note %d): output index %d exceeds "
-									"device channel count (%d) — using default routing",
-									assignment.name, ch, note, idx + 1, self._output_channels,
-								)
-								assignment = dataclasses.replace(assignment, output_routing=None)
-								break
+				"""Return None (default routing) if any index exceeds the device,
+				logging once; otherwise return the routing unchanged."""
 
-					new_entries.append((assignment, pick_spec))
+				if routing is None:
+					return None
 
-				self._note_map[(ch, note)] = new_entries
+				for idx in routing:
+					if idx >= self._output_channels:
+						_log.warning(
+							"%s: output index %d exceeds device channel count (%d) — "
+							"using default routing",
+							label, idx + 1, self._output_channels,
+						)
+						return None
+
+				return routing
+
+			fixed_base: NoteMap = {}
+
+			for (ch, note), entries in self._base_note_map.items():
+				fixed_base[(ch, note)] = [
+					(
+						dataclasses.replace(asgn, output_routing=stripped)
+						if (stripped := _strip_oob_routing(asgn.output_routing, f"Assignment {asgn.name!r} (ch {ch}, note {note})")) is not asgn.output_routing
+						else asgn,
+						pick_spec,
+					)
+					for asgn, pick_spec in entries
+				]
+
+			self._base_note_map = fixed_base
+
+			self._zone_templates = tuple(
+				dataclasses.replace(t, output_routing=stripped)
+				if (stripped := _strip_oob_routing(t.output_routing, f"Zone template {t.name!r}")) is not t.output_routing
+				else t
+				for t in self._zone_templates
+			)
+
+			# Rebuild the working map and selection cache from the fixed sources.
+			self._materialize_zones()
+			self._rebuild_candidate_cache()
 
 			# Callback mode: PortAudio pulls audio from _audio_callback on its
 			# own high-priority thread.  The rtmidi callback thread runs
@@ -2439,14 +2489,25 @@ class MidiPlayer:
 				remaining = len(voice.audio) - voice.position
 
 				if voice.releasing:
-					# Fade out over at most self._release_fade_frames frames, then retire.
-					# Also clamped to frame_count — the output buffer is never larger.
-					fade_n = min(remaining, self._release_fade_frames, frame_count)
-					if fade_n > 0:
-						chunk = voice.audio[voice.position : voice.position + fade_n].copy()
-						ramp = ((1.0 + numpy.cos(numpy.linspace(0.0, numpy.pi, fade_n))) / 2.0).astype(numpy.float32)
-						output[:fade_n] += chunk * ramp[:, numpy.newaxis]
-					# Voice is done — not added to active.
+					# Cosine fade-out over self._release_fade_frames, spread across
+					# however many callbacks that takes — voice.fade_pos tracks the
+					# progress.  A previous single-callback fade collapsed the whole
+					# 10 ms ramp into one buffer, so at small buffer_frames the
+					# note-off cut off abruptly (e.g. ~1.5 ms at 64 frames).
+					fade_total = max(1, self._release_fade_frames)
+					n = min(frame_count, remaining, fade_total - voice.fade_pos)
+
+					if n > 0:
+						idx  = numpy.arange(voice.fade_pos, voice.fade_pos + n, dtype=numpy.float32)
+						ramp = ((1.0 + numpy.cos(numpy.pi * idx / fade_total)) / 2.0).astype(numpy.float32)
+						output[:n] += voice.audio[voice.position : voice.position + n] * ramp[:, numpy.newaxis]
+						voice.position += n
+						voice.fade_pos += n
+
+					# Keep fading on subsequent callbacks until the ramp completes
+					# (or the audio runs out); otherwise the voice is retired.
+					if voice.fade_pos < fade_total and voice.position < len(voice.audio):
+						active.append(voice)
 
 				else:
 					n = min(frame_count, remaining)
@@ -2715,8 +2776,12 @@ class MidiPlayer:
 
 		# ── Sample selection ──────────────────────────────────────────────
 		# eff_transform is captured here (not just where the variant lookup
-		# below needs it) so the whole note-on sees one consistent bank even
-		# if a Program Change swaps the active bank mid-handler.
+		# below needs it) so the whole note-on reads one consistent bank.
+		# Safety rests on single-threaded dispatch: program_change and note_on
+		# are both handled by _handle_message on the one rtmidi thread, so no
+		# bank swap can interleave within a handler.  (These are two separate
+		# lock-taking property reads, not one atomic snapshot — anyone who adds
+		# a concurrent switch_to() caller must revisit this.)
 
 		eff_library   = self._effective_instrument_library
 		eff_transform = self._effective_transform_manager
@@ -2738,8 +2803,8 @@ class MidiPlayer:
 
 		# ── Variant lookup based on ProcessSpec ───────────────────────────
 		# eff_transform was captured at the top of the handler alongside
-		# eff_library so both reference the same bank for the lifetime of this
-		# note-on, even if a Program Change swaps the active bank mid-handler.
+		# eff_library so both read the same bank for this note-on — guaranteed
+		# by single-threaded rtmidi dispatch (see the capture site above).
 
 		if eff_transform is not None:
 
@@ -2764,7 +2829,12 @@ class MidiPlayer:
 					if record.rhythm.tempo_bpm > 0.0:
 						bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "stretch_quantize", self._target_bpm)
 					else:
-						_log.warning(
+						# DEBUG, not WARNING: this is the rtmidi callback thread and
+						# fires on EVERY note-on for a tempo-less sample.  The
+						# once-per-rebuild WARNING in update_assignments already
+						# surfaces this; an unthrottled per-trigger WARNING would
+						# spam the latency-critical path.
+						_log.debug(
 							"stretch_quantize %s: sample %r has no detected tempo — "
 							"playing without beat-quantizing",
 							assignment.name, record.name,
@@ -3491,7 +3561,7 @@ class MidiPlayer:
 		self._base_note_map  = new_result.note_map
 		self._note_map       = dict(new_result.note_map)
 		self._zone_templates = new_result.zone_templates
-		self._mapped_ccs     = _collect_mapped_ccs(new_result.note_map)
+		self._mapped_ccs     = _collect_mapped_ccs(new_result.note_map, new_result.zone_templates)
 
 		try:
 			# update_assignments() calls _materialize_zones() at its top,

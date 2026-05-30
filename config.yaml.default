@@ -53,6 +53,10 @@
 #   send_port: 9000
 #   receive_enabled: false
 #   receive_port: 9002
+#   receive_host: "127.0.0.1"   # loopback by default; the /sample/import handler
+#                               # reads an arbitrary path, so binding to
+#                               # "0.0.0.0" exposes unauthenticated remote file
+#                               # read/load — only do so on a trusted LAN.
 
 # ---------------------------------------------------------------------------
 # ambisonic — first-order B-format (AmbiX) rotation and decoding

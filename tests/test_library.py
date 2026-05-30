@@ -359,6 +359,39 @@ class TestInstrumentLibrary:
 		lib.add(_make_instrument_record("B"))
 		assert len(lib) == 2
 
+	def test_duplicate_name_readd_stays_findable (self) -> None:
+		"""Code-review regression: re-adding a same-name sample (fresh id) must
+		replace the prior one and keep find_by_name resolving to the live
+		record — not leave a stale duplicate or a dangling name key."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		first  = _make_instrument_record("kick")
+		second = _make_instrument_record("kick")   # same name, new sample_id
+
+		assert first.sample_id != second.sample_id
+
+		lib.add(first)
+		evicted = lib.add(second)
+
+		# Prior record replaced and reported so callers cascade-clean it.
+		assert first.sample_id in evicted
+		assert lib.get(first.sample_id) is None
+		# Name still resolves — to the live record, not None.
+		assert lib.find_by_name("kick") == second.sample_id
+		# No stale duplicate lingering.
+		assert [r.name for r in lib.samples()].count("kick") == 1
+
+	def test_eviction_after_same_name_readd_keeps_name (self) -> None:
+		"""After a same-name re-add, evicting other samples must not delete the
+		name key the live record now owns."""
+		# limit fits exactly two 2000-byte records.
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=4000)
+		lib.add(_make_instrument_record("kick", n_frames=1000))
+		live = _make_instrument_record("kick", n_frames=1000)
+		lib.add(live)                                   # replaces the first kick
+		lib.add(_make_instrument_record("snare", n_frames=1000))   # may evict
+
+		assert lib.find_by_name("kick") == live.sample_id
+
 	def test_memory_used_reflects_audio_bytes (self) -> None:
 		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
 		record = _make_instrument_record("KICK", n_frames=1000)

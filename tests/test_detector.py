@@ -95,6 +95,24 @@ class TestIdleToRecording:
 		assert result is None  # Recording started but not yet ended
 		assert detector.state == subsample.detector.DetectorState.RECORDING
 
+	def test_trigger_chunk_does_not_pollute_ambient (self) -> None:
+		"""Code-review regression: the triggering chunk must NOT be folded into
+		the ambient floor before its own SNR test (which deflated the measured
+		SNR and could miss sharp drum hits)."""
+		detector = _make_detector(ema_alpha=0.5)
+
+		for i in range(3):
+			detector.process_chunk(_silent_chunk(), current_frame=(i + 1) * 100)
+
+		ambient_before = detector._ambient_rms
+
+		result = detector.process_chunk(_loud_chunk(), current_frame=400)
+
+		assert result is None
+		assert detector.state == subsample.detector.DetectorState.RECORDING
+		# The loud trigger chunk left the ambient floor untouched.
+		assert detector._ambient_rms == ambient_before
+
 	def test_quiet_chunk_stays_idle (self) -> None:
 		detector = _make_detector()
 

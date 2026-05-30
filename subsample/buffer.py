@@ -59,7 +59,12 @@ class CircularBuffer:
 	@property
 	def is_full (self) -> bool:
 
-		"""True once the buffer has been filled at least once."""
+		"""True once the buffer has been filled at least once.
+
+		Introspection only (used by tests).  Overflow protection in the live
+		pipeline is the detector's ``max_recording_frames`` force-end, NOT this
+		flag — don't wire shutdown/segment logic to it.
+		"""
 
 		return self.frames_written >= self._max_frames
 

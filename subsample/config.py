@@ -337,9 +337,11 @@ class TransformConfig:
 	Set to False to disable all pitch variant production."""
 
 	target_bpm: float = 0.0
-	"""Target BPM for automatic time-stretch variants.  0.0 = disabled.
-	When > 0, a time-stretch variant is produced for samples that have a
-	detected tempo (rhythm.tempo_bpm > 0)."""
+	"""Default target BPM for the ``stretch_quantize`` / ``pad_quantize``
+	processors when an assignment does not give its own ``tempo:``.  0.0 means
+	no default — those processors are then skipped unless they carry an explicit
+	tempo.  There is no auto-stretch-every-rhythmic-sample behaviour; quantizing
+	only happens for assignments that declare the processor."""
 
 	quantize_resolution: int = 16
 	"""Grid subdivision for beat-quantized time-stretch.
@@ -392,6 +394,13 @@ class OscConfig:
 
 	receive_port: int = 9002
 	"""UDP port the OSC receiver listens on."""
+
+	receive_host: str = "127.0.0.1"
+	"""Interface the OSC receiver binds to.  Defaults to loopback so the
+	arbitrary-path /sample/import handler is not exposed to the network.
+	Set to "0.0.0.0" to accept messages from other hosts on a trusted LAN
+	(unauthenticated remote file read/load — only do this on a network you
+	control)."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -599,16 +608,36 @@ def _require (section: dict[str, typing.Any], key: str, section_name: str) -> ty
 	return section[key]
 
 
+def _section (container: dict[str, typing.Any], key: str) -> dict[str, typing.Any]:
+
+	"""Return the named sub-section as a dict, or {} when absent.
+
+	Raises a clear ValueError naming the key when the section is present but
+	not a mapping (e.g. a scalar from an indentation typo), instead of letting
+	a later ``.get`` fail with an opaque "'str' object has no attribute 'get'".
+	"""
+
+	value = container.get(key, {})
+
+	if not isinstance(value, dict):
+		raise ValueError(
+			f"Config section {key!r} must be a mapping (got {type(value).__name__}: {value!r}). "
+			"Check your config.yaml indentation."
+		)
+
+	return value
+
+
 def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	"""Construct the Config dataclass tree from a raw YAML dict."""
 
-	recorder_raw: dict[str, typing.Any] = raw.get("recorder", {})
-	audio_raw: dict[str, typing.Any] = recorder_raw.get("audio", {})
-	buffer_raw: dict[str, typing.Any] = recorder_raw.get("buffer", {})
-	detection_raw: dict[str, typing.Any] = raw.get("detection", {})
-	output_raw: dict[str, typing.Any] = raw.get("output", {})
-	analysis_raw: dict[str, typing.Any] = raw.get("analysis", {})
+	recorder_raw   = _section(raw, "recorder")
+	audio_raw      = _section(recorder_raw, "audio")
+	buffer_raw     = _section(recorder_raw, "buffer")
+	detection_raw  = _section(raw, "detection")
+	output_raw     = _section(raw, "output")
+	analysis_raw   = _section(raw, "analysis")
 
 	device_raw = audio_raw.get("device")
 	if device_raw is not None and not isinstance(device_raw, str):
@@ -747,8 +776,8 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		previews=bool(recorder_raw.get("previews", True)),
 	)
 
-	player_raw: dict[str, typing.Any] = raw.get("player", {})
-	player_audio_raw: dict[str, typing.Any] = player_raw.get("audio", {})
+	player_raw      = _section(raw, "player")
+	player_audio_raw = _section(player_raw, "audio")
 	player_device = player_audio_raw.get("device")
 	if player_device is not None and not isinstance(player_device, str):
 		raise ValueError(
@@ -766,6 +795,13 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	if player_virtual_midi_port is not None and not isinstance(player_virtual_midi_port, str):
 		raise ValueError(
 			f"player.virtual_midi_port must be a string (got {type(player_virtual_midi_port).__name__}: {player_virtual_midi_port!r}). "
+			"Check your config.yaml."
+		)
+
+	player_midi_map = player_raw.get("midi_map")
+	if player_midi_map is not None and not isinstance(player_midi_map, str):
+		raise ValueError(
+			f"player.midi_map must be a string path (got {type(player_midi_map).__name__}: {player_midi_map!r}). "
 			"Check your config.yaml."
 		)
 
@@ -854,7 +890,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		max_polyphony=player_max_polyphony,
 		limiter_threshold_db=player_limiter_threshold_db,
 		limiter_ceiling_db=player_limiter_ceiling_db,
-		midi_map=player_raw.get("midi_map"),
+		midi_map=player_midi_map,
 		watch_midi_map=bool(player_raw.get("watch_midi_map", False)),
 		strict_midi_map=bool(player_raw.get("strict_midi_map", True)),
 	)
@@ -900,14 +936,14 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"(got {analysis.tempo_min} >= {analysis.tempo_max})"
 		)
 
-	instrument_raw: dict[str, typing.Any] = raw.get("instrument", {})
+	instrument_raw  = _section(raw, "instrument")
 	instrument = InstrumentConfig(
 		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
 		directory=str(instrument_raw.get("directory", "samples/captures")),
 		watch=bool(instrument_raw.get("watch", False)),
 	)
 
-	similarity_raw: dict[str, typing.Any] = raw.get("similarity", {})
+	similarity_raw  = _section(raw, "similarity")
 	similarity = SimilarityConfig(
 		weight_spectral=float(similarity_raw.get("weight_spectral", 1.0)),
 		weight_timbre=float(similarity_raw.get("weight_timbre", 1.0)),
@@ -929,7 +965,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 				"Set to 0.0 to disable a feature group entirely."
 			)
 
-	transform_raw: dict[str, typing.Any] = raw.get("transform", {})
+	transform_raw   = _section(raw, "transform")
 	quantize_resolution = int(transform_raw.get("quantize_resolution", 16))
 
 	if quantize_resolution not in {1, 2, 4, 8, 16}:
@@ -947,9 +983,11 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),
 	)
 
-	# Resolve the unified memory budget.  Per-cache overrides take precedence;
-	# when both instrument and transform have explicit values the global budget
-	# is unused.
+	# Resolve the memory budget.  Per-cache overrides take precedence for the
+	# instrument and transform memory caches.  The carrier cache (which has no
+	# per-cache config key) and the variant disk cache derive from the budget
+	# UNCONDITIONALLY — that is the documented 5%/3x contract, so it must hold
+	# even when both instrument and transform are given explicit values.
 	instrument_explicit = "max_memory_mb" in instrument_raw
 	transform_explicit  = "max_memory_mb" in transform_raw
 	disk_explicit       = "max_disk_mb" in transform_raw
@@ -957,42 +995,51 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	global_raw = raw.get("max_memory_mb")
 	global_budget: typing.Optional[float] = None
 
-	if not (instrument_explicit and transform_explicit):
-		global_budget = float(global_raw) if global_raw is not None else _auto_detect_memory_mb()
+	if global_raw is not None:
+		# An explicit global value is both the reported unified budget and the
+		# basis for every derivation.
+		global_budget    = float(global_raw)
+		effective_budget = global_budget
+	else:
+		# No explicit global: auto-detect the basis.  Report it as the unified
+		# budget only when at least one per-cache value actually falls back to
+		# it (when both are explicit there is no unifying budget to report, but
+		# the carrier/disk caches still need a basis).
+		effective_budget = _auto_detect_memory_mb()
+		global_budget    = None if (instrument_explicit and transform_explicit) else effective_budget
 
-		if not instrument_explicit:
-			instrument = dataclasses.replace(instrument, max_memory_mb=global_budget * 0.60)
+	if not instrument_explicit:
+		instrument = dataclasses.replace(instrument, max_memory_mb=effective_budget * 0.60)
 
-		if not transform_explicit:
-			transform = dataclasses.replace(transform, max_memory_mb=global_budget * 0.35)
+	if not transform_explicit:
+		transform = dataclasses.replace(transform, max_memory_mb=effective_budget * 0.35)
 
-		if not disk_explicit:
-			transform = dataclasses.replace(transform, max_disk_mb=global_budget * 3.0)
+	if not disk_explicit:
+		transform = dataclasses.replace(transform, max_disk_mb=effective_budget * 3.0)
 
-		transform = dataclasses.replace(transform, carrier_memory_mb=global_budget * 0.05)
-
-	elif global_raw is not None:
-		global_budget = float(global_raw)
+	# The carrier cache has no per-cache override path — always 5% of the budget.
+	transform = dataclasses.replace(transform, carrier_memory_mb=effective_budget * 0.05)
 
 	# --- OSC ---
-	osc_raw: dict[str, typing.Any] = raw.get("osc", {})
+	osc_raw         = _section(raw, "osc")
 	osc = OscConfig(
 		enabled=bool(osc_raw.get("enabled", False)),
 		send_host=str(osc_raw.get("send_host", "127.0.0.1")),
 		send_port=int(osc_raw.get("send_port", 9000)),
 		receive_enabled=bool(osc_raw.get("receive_enabled", False)),
 		receive_port=int(osc_raw.get("receive_port", 9002)),
+		receive_host=str(osc_raw.get("receive_host", "127.0.0.1")),
 	)
 
 	# --- Supervisor ---
-	supervisor_raw: dict[str, typing.Any] = raw.get("supervisor", {})
+	supervisor_raw  = _section(raw, "supervisor")
 	supervisor = SupervisorConfig(
 		enabled=bool(supervisor_raw.get("enabled", False)),
 		port=int(supervisor_raw.get("port", 9003)),
 	)
 
 	# --- Ambisonic ---
-	ambisonic_raw: dict[str, typing.Any] = raw.get("ambisonic", {})
+	ambisonic_raw   = _section(raw, "ambisonic")
 	import subsample.ambisonic
 	ambi_decoder = str(ambisonic_raw.get("decoder", "basic"))
 

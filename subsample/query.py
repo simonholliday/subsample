@@ -10,7 +10,8 @@ Architecture
 
 SelectSpec
     Parsed from the ``select:`` block in a MIDI map assignment.  Contains
-    filter predicates (``where``), an ordering key (``order_by``), and a pick
+    filter predicates (``where``), an ``order`` tuple of OrderClause (composed
+    multi-key sort; ``order_by`` is only a legacy YAML alias), and a pick
     position.
 
 ProcessSpec
@@ -27,7 +28,7 @@ Query evaluation
 
   InstrumentLibrary.samples()
       → filter by SelectSpec.where predicates (all must pass)
-      → sort by SelectSpec.order_by key
+      → sort by the composed SelectSpec.order clauses
       → return ranked list
       → caller picks Nth position (or per-note rank distribution)
 
@@ -64,9 +65,16 @@ _log = logging.getLogger(__name__)
 # note-on was a syscall storm that dominated MIDI-to-audio latency (hundreds
 # of thousands of lstat calls per second under a steady groove).  A sample's
 # on-disk path is stable for the life of a session, so the resolution is
-# memoised here; the cache is bounded by the number of distinct sample files.
-# dict get/set are atomic under the GIL and a duplicate concurrent resolve
-# yields the same value, so no lock is needed.
+# memoised here.  dict get/set are atomic under the GIL and a duplicate
+# concurrent resolve yields the same value, so no lock is needed.
+#
+# Entries for evicted samples are never individually removed (the library
+# eviction path doesn't reach in here, and the recorder mints a fresh
+# timestamped path per capture), so over a long headless-capture session this
+# would otherwise grow with the cumulative number of distinct files seen, not
+# the live library size.  A hard cap bounds it: when exceeded the memo is
+# cleared wholesale (cheap to repopulate — one realpath per live sample).
+_RESOLVED_PATH_CACHE_MAX: typing.Final[int] = 4096
 _RESOLVED_PATH_CACHE: dict[pathlib.Path, pathlib.Path] = {}
 
 
@@ -82,6 +90,10 @@ def _resolved_sample_path (path: pathlib.Path) -> pathlib.Path:
 
 	if resolved is None:
 		resolved = path.resolve()
+
+		if len(_RESOLVED_PATH_CACHE) >= _RESOLVED_PATH_CACHE_MAX:
+			_RESOLVED_PATH_CACHE.clear()
+
 		_RESOLVED_PATH_CACHE[path] = resolved
 
 	return resolved
@@ -631,8 +643,6 @@ _register_scorer("beat_match", _beat_match_scorer, on_missing="exclude")
 _LEGACY_ORDER_TOKENS: dict[str, "OrderClause"] = {}   # populated after OrderClause is defined
 
 
-_VALID_ORDER_NAMES: frozenset[str] = frozenset()  # rebuilt after OrderClause; see below
-
 
 # ---------------------------------------------------------------------------
 # OrderClause + SelectSpec
@@ -977,6 +987,10 @@ def query (
 		                   available.  Required by the ``quantized_beats``
 		                   scorer and by ``where.min_quantized_beats`` /
 		                   ``where.max_quantized_beats``.
+		energy_profile_resolver: Callable returning a sample's
+		                   ``GridEnergyProfile`` (or None).  Required by the
+		                   ``beat_match`` order scorer, which excludes every
+		                   candidate when it is absent.
 
 	Returns:
 		List of matching SampleRecord objects, ordered by the requested
@@ -1227,7 +1241,7 @@ def _parse_name_operator_dict (
 def _parse_where (
 	raw: typing.Any,
 	assignment_name: str,
-	midi_map_dir: pathlib.Path = pathlib.Path.cwd(),
+	midi_map_dir: typing.Optional[pathlib.Path] = None,   # resolved to cwd in _parse_where
 ) -> WherePredicate:
 
 	"""Parse a ``where:`` dict from a MIDI map assignment into a WherePredicate.
@@ -1243,8 +1257,15 @@ def _parse_where (
 		raw:                The raw YAML value of the 'where' block.
 		assignment_name:    Human-readable name of the assignment (for error messages).
 		midi_map_dir:       Directory of the MIDI map file; used to resolve relative paths.
-		                    Defaults to current working directory.
+		                    None (the default) resolves to the current working
+		                    directory at call time — not at import, so a later
+		                    cwd change is honoured.
 	"""
+
+	# Resolve the None sentinel here (per call), so the base directory is never
+	# frozen to the cwd captured at module import.
+	if midi_map_dir is None:
+		midi_map_dir = pathlib.Path.cwd()
 
 	if raw is None:
 		return WherePredicate()
@@ -1745,7 +1766,7 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 def _parse_select_spec (
 	raw: typing.Any,
 	assignment_name: str,
-	midi_map_dir: pathlib.Path = pathlib.Path.cwd(),
+	midi_map_dir: typing.Optional[pathlib.Path] = None,   # resolved to cwd in _parse_where
 ) -> SelectSpec:
 
 	"""Parse a single ``select:`` dict into a SelectSpec.
@@ -1821,7 +1842,7 @@ def _parse_select_spec (
 def parse_select (
 	raw: typing.Any,
 	assignment_name: str,
-	midi_map_dir: pathlib.Path = pathlib.Path.cwd(),
+	midi_map_dir: typing.Optional[pathlib.Path] = None,   # resolved to cwd in _parse_where
 ) -> tuple[SelectSpec, ...]:
 
 	"""Parse the ``select:`` block, which can be a single spec or a fallback list.

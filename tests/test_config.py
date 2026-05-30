@@ -834,6 +834,28 @@ class TestMemoryBudget:
 		assert cfg.instrument.max_memory_mb == 300.0
 		assert cfg.transform.max_memory_mb == 80.0
 
+	def test_both_per_cache_still_derives_carrier_and_disk_from_global (self, tmp_path: pathlib.Path) -> None:
+		"""Code-review regression: carrier (5%) and disk (3x) derive from the
+		global budget even when BOTH instrument and transform memory are
+		explicit — they used to be silently left at their dataclass defaults."""
+		cfg = self._make_config(
+			tmp_path,
+			"max_memory_mb: 1000\n"
+			"instrument:\n"
+			"  max_memory_mb: 300\n"
+			"transform:\n"
+			"  max_memory_mb: 80\n",
+		)
+		assert cfg.transform.carrier_memory_mb == pytest.approx(1000.0 * 0.05)   # 50, not the 10 default
+		assert cfg.transform.max_disk_mb == pytest.approx(1000.0 * 3.0)          # 3000, not the 500 default
+
+	def test_scalar_section_raises_clear_error (self, tmp_path: pathlib.Path) -> None:
+		"""A section given a scalar (indentation typo) raises a keyed ValueError."""
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text("recorder: oops\n")
+		with pytest.raises(ValueError, match="recorder"):
+			subsample.config.load_config(config_file)
+
 	def test_disk_override_wins (self, tmp_path: pathlib.Path) -> None:
 		"""Explicit max_disk_mb overrides the 3x global default."""
 		cfg = self._make_config(

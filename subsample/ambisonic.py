@@ -453,9 +453,12 @@ def decoder_matrix (
 	angles   = _LAYOUT_ANGLES[out_channels]
 	n_active = sum(1 for a in angles if a is not None)
 
-	# W gain per speaker: 1/N_active so that unit W produces unity RMS
-	# across the speaker array (total squared gain Σ(1/N)² = 1/N,
-	# times N speakers = 1).
+	# W gain per speaker: 1/N_active.  For an LFE-less layout this gives
+	# Σ(1/N)² × N = 1/N × N = 1 (unit W → unity summed power across the array).
+	# When the layout has an LFE slot it ALSO receives g_w (see below), so the
+	# sum runs over N_active + 1 rows and the total exceeds 1/N — e.g. 5.1 has
+	# 6 rows at 0.2, Σ = 0.24, not 0.2.  That extra LFE contribution is
+	# intentional; only this energy identity is approximate for LFE layouts.
 	g_w = 1.0 / n_active
 
 	matrix = numpy.zeros((out_channels, _AMBI_CHANNELS_FIRST_ORDER), dtype=numpy.float32)

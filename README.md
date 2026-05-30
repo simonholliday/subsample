@@ -87,7 +87,7 @@ you focus on playing.
   a seven-criterion stability gate and pitch-shifted across the keyboard range
   at the highest available quality (Rubber Band offline finer mode). Drums,
   melodic, and effect samples share one library and one workflow.
-- **17-processor DSP chain with intelligent defaults.** Compression, gating,
+- **16-processor DSP chain with intelligent defaults.** Compression, gating,
   transient shaping, filters, distortion, saturation, vocoder cross-synthesis,
   beat-quantize, pitch-shift, time-stretch, reverse, envelope reshape, and
   HPSS harmonic/percussive separation. Every parameter auto-adapts to each
@@ -140,7 +140,7 @@ you focus on playing.
 | **Live capture** | Adaptive noise floor, zero-gap back-to-back detection, S-curve fades |
 | **Analysis** | 58 dimensions across 5 feature groups; cached `.analysis.json` sidecars |
 | **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
-| **DSP processors** | 17 (filter, comp, gate, distort, saturate, reshape, transient, HPSS, vocoder, repitch, beat-quantize, pad-quantize, ...) |
+| **DSP processors** | 16 (filter, comp, gate, distort, saturate, reshape, transient, HPSS, vocoder, repitch, beat-quantize, pad-quantize, ...) |
 | **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
 | **Pitch shifting** | Rubber Band offline finer (highest available quality), pre-rendered |
 | **Time stretch** | Beat-quantized with onset-aligned timemaps, partial-quantize amount, pad-quantize alternative for speech |
@@ -846,6 +846,13 @@ process:
 
 Set any parameter explicitly to override its auto value. Fixed parameters
 (ratio, knee, makeup, lookahead) always use their defaults unless set.
+
+Look-ahead has a cost worth knowing: the rendered variant is delayed by the
+look-ahead window (prepended silence) and loses the same amount off its tail,
+so `limit: true` (5 ms default) shifts a one-shot's attack ~5 ms later and
+trims ~5 ms of decay. Set `lookahead: 0` to disable it for short percussive
+one-shots where that delay matters. The gate uses the same pad-and-truncate
+look-ahead.
 
 The noise gate, distortion, and envelope reshaper follow the same pattern -
 `true` gives you intelligent auto defaults, explicit parameters override:
@@ -2194,10 +2201,11 @@ families intact and playable.
 
 ```
 MIDI note_on
-    → query engine: filter → order → pick → sample_id
-        (fallback: try each select spec in order)
-    → transform_manager.get_pitched()  → pitch variant (repitch assignments)
-    → transform_manager.get_at_bpm()   → time-stretch variant (stretch_quantize assignments)
+    → _resolve_sample_id: indexed pick from the pre-computed candidate cache
+        (rebuilt when the library changes, not per-trigger; variant-state
+         selects — quantized_beats / beat_match — fall back to a live query)
+    → transform_manager.get_variant(sample_id, spec)  → processed variant
+        (memory cache → disk cache → enqueue + fall back to a previous/base variant)
     → transform_manager.get_base()     → base variant (all samples)
     → _render()                        → on-the-fly fallback (first trigger only)
     → _render_float(): apply gain · velocity² · anti-clip ceiling

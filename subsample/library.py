@@ -231,6 +231,28 @@ class InstrumentLibrary:
 		# main thread.
 		evicted: list[int] = []
 		with self._lock:
+
+			# De-dup by name first.  A same-name re-add is a normal flow (the
+			# recorder overwrites a filename, the watcher re-derives the stem),
+			# and each carries a fresh sample_id.  Drop the prior record so it
+			# doesn't linger in _order/_index as a stale duplicate (which would
+			# also let a later FIFO eviction delete the name key this record now
+			# owns).  Report it as evicted so callers cascade-clean its
+			# similarity / transform entries, keyed by the old id.
+			prior_id = self._name_index.get(record.name)
+
+			if prior_id is not None and prior_id != record.sample_id:
+				prior = self._index.pop(prior_id, None)
+
+				if prior is not None:
+					self._total_bytes -= prior.audio.nbytes if prior.audio is not None else 0
+					evicted.append(prior_id)
+
+				try:
+					self._order.remove(prior_id)
+				except ValueError:
+					pass
+
 			while self._order and self._total_bytes + sample_bytes > self._max_bytes:
 				oldest_id = self._order.popleft()
 				old_record = self._index.pop(oldest_id, None)
@@ -238,7 +260,12 @@ class InstrumentLibrary:
 				if old_record is not None:
 					old_bytes = old_record.audio.nbytes if old_record.audio is not None else 0
 					self._total_bytes -= old_bytes
-					self._name_index.pop(old_record.name, None)
+
+					# Only drop the name key if it still points at the evicted
+					# id — a same-name re-add may have repointed it.
+					if self._name_index.get(old_record.name) == oldest_id:
+						del self._name_index[old_record.name]
+
 					evicted.append(oldest_id)
 
 			self._index[record.sample_id] = record
@@ -280,7 +307,11 @@ class InstrumentLibrary:
 
 		"""Current total audio memory in bytes."""
 
-		return self._total_bytes
+		# Locked for consistency with the rest of the class — format_memory()
+		# is called from the watcher-thread callback while add() mutates
+		# _total_bytes on another thread.
+		with self._lock:
+			return self._total_bytes
 
 	@property
 	def memory_limit (self) -> int:
@@ -293,12 +324,15 @@ class InstrumentLibrary:
 
 		"""Return a human-readable memory usage string for logging.
 
-		Example: '45.3 / 100.0 MB, 55% free'
+		Example: '45.3 / 100.0 MB, 54% free'
 		"""
 
-		used_mb  = self._total_bytes / (1024 * 1024)
-		limit_mb = self._max_bytes   / (1024 * 1024)
-		pct_free = int(100 * (1.0 - self._total_bytes / self._max_bytes)) if self._max_bytes > 0 else 100
+		with self._lock:
+			total = self._total_bytes
+
+		used_mb  = total / (1024 * 1024)
+		limit_mb = self._max_bytes / (1024 * 1024)
+		pct_free = int(100 * (1.0 - total / self._max_bytes)) if self._max_bytes > 0 else 100
 		return f"{used_mb:.1f} / {limit_mb:.1f} MB, {pct_free}% free"
 
 	def __len__ (self) -> int:
@@ -399,8 +433,11 @@ class _LoadedSample:
 	"""Intermediate result from _load_one_sample(); holds all data needed to
 	build a SampleRecord once the parallel phase is complete.
 
-	sample_id and filepath are filled in during the sequential phase so that
-	allocate_id() is called in sorted order, preserving FIFO semantics.
+	The fields below (including ``audio`` and ``audio_path``) are produced in
+	the parallel worker phase.  ``SampleRecord.sample_id`` and ``filepath`` are
+	assigned later, in the sequential Phase 2, where allocate_id() is called in
+	sorted order to preserve FIFO semantics — this dataclass itself carries
+	neither.
 	"""
 
 	spectral:    subsample.analysis.AnalysisResult

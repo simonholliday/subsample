@@ -33,7 +33,9 @@ import xml.sax.saxutils
 
 import librosa
 import numpy
-from PIL import Image, ImageDraw, ImageFont
+import PIL.Image
+import PIL.ImageDraw
+import PIL.ImageFont
 
 import subsample.analysis
 
@@ -88,6 +90,12 @@ _MIN_BINS_PER_BAND: int = 4
 the n_fft floor in _compute_band_envelopes() so even short samples
 resolve every band instead of rendering empty strata.  Lives next to
 _BAND_HZ so the two stay co-located."""
+
+
+_MIN_BAND_ENVELOPE_FRAMES: int = 32
+"""Below this many mono frames, _compute_band_envelopes returns all-zero
+strata: there is not enough signal for a meaningful per-band STFT, and the
+short-time analysis would be dominated by edge effects."""
 
 
 _MIN_STRATUM_PX: int = 16
@@ -178,6 +186,9 @@ class PreviewData:
 	tempo_bpm:   float
 	duration:    float
 	peak:        float
+	"""Absolute peak amplitude.  Serialised for out-of-repo consumers (e.g. the
+	Supervisor dashboard); the in-repo PNG/SVG renderers draw from ``rms``, not
+	this — kept intentionally, not dead."""
 	rms:         float
 	accent_rgb:  tuple[int, int, int]
 
@@ -344,7 +355,7 @@ def _compute_band_envelopes (
 		numpy.zeros(_ENVELOPE_BINS, dtype=numpy.int8) for _ in range(_N_BANDS)
 	)
 
-	if mono.size < 32:
+	if mono.size < _MIN_BAND_ENVELOPE_FRAMES:
 		return zero_band
 
 	hop_length = max(1, mono.size // _ENVELOPE_BINS)
@@ -457,10 +468,16 @@ def _format_pitch_label (pitch: subsample.analysis.PitchResult) -> typing.Option
 	if not (0 <= pitch.dominant_pitch_class < 12):
 		return None
 
-	midi   = 69.0 + 12.0 * math.log2(pitch.dominant_pitch_hz / 440.0)
-	octave = int(midi) // 12 - 1
+	# Derive BOTH the note name and the octave from the same Hz→MIDI value, so
+	# they can't disagree near a semitone boundary (the chroma argmax and the
+	# pyin Hz could previously render e.g. "A4" for an A#4 sample).  round()
+	# snaps to the nearest semitone; floor division (// on the rounded int)
+	# gives the correct octave even below MIDI 0.
+	midi       = int(round(69.0 + 12.0 * math.log2(pitch.dominant_pitch_hz / 440.0)))
+	note_class = midi % 12
+	octave     = midi // 12 - 1
 
-	return f"{_PITCH_CLASSES[pitch.dominant_pitch_class]}{octave}"
+	return f"{_PITCH_CLASSES[note_class]}{octave}"
 
 
 # ---------------------------------------------------------------------------
@@ -482,8 +499,8 @@ def render_png (data: PreviewData, path: pathlib.Path) -> None:
 	valid for the current audio.
 	"""
 
-	img  = Image.new("RGB", (PNG_WIDTH, PNG_HEIGHT), _BG_COLOR)
-	draw = ImageDraw.Draw(img)
+	img  = PIL.Image.new("RGB", (PNG_WIDTH, PNG_HEIGHT), _BG_COLOR)
+	draw = PIL.ImageDraw.Draw(img)
 
 	_png_draw_band_skyline(draw, data)
 	_png_draw_waveform(draw, data)
@@ -519,7 +536,7 @@ def render_png (data: PreviewData, path: pathlib.Path) -> None:
 		raise
 
 
-def _png_draw_band_skyline (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
+def _png_draw_band_skyline (draw: PIL.ImageDraw.ImageDraw, data: PreviewData) -> None:
 
 	"""Bottom-up strata, each filled with one band's energy envelope.
 
@@ -555,7 +572,7 @@ def _png_draw_band_skyline (draw: ImageDraw.ImageDraw, data: PreviewData) -> Non
 		stratum_bottom = stratum_top
 
 
-def _png_draw_waveform (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
+def _png_draw_waveform (draw: PIL.ImageDraw.ImageDraw, data: PreviewData) -> None:
 
 	"""Mirrored filled envelope, centre line at PNG_HEIGHT/2."""
 
@@ -583,7 +600,7 @@ def _png_draw_waveform (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
 	draw.polygon(pts_top + pts_bottom, fill=data.accent_rgb)
 
 
-def _png_draw_reference_lines (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
+def _png_draw_reference_lines (draw: PIL.ImageDraw.ImageDraw, data: PreviewData) -> None:
 
 	"""Faint horizontals at ±RMS.  Peak is the waveform's own boundary."""
 
@@ -604,7 +621,7 @@ def _png_draw_reference_lines (draw: ImageDraw.ImageDraw, data: PreviewData) -> 
 	)
 
 
-def _png_draw_onset_ticks (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
+def _png_draw_onset_ticks (draw: PIL.ImageDraw.ImageDraw, data: PreviewData) -> None:
 
 	"""Short vertical ticks along the top edge at every onset time."""
 
@@ -620,7 +637,7 @@ def _png_draw_onset_ticks (draw: ImageDraw.ImageDraw, data: PreviewData) -> None
 		draw.line([(x, 0), (x, tick_h)], fill=_ONSET_COLOR, width=1)
 
 
-def _png_draw_beat_grid (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
+def _png_draw_beat_grid (draw: PIL.ImageDraw.ImageDraw, data: PreviewData) -> None:
 
 	"""Dashed full-height verticals at beat times."""
 
@@ -640,7 +657,7 @@ def _png_draw_beat_grid (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
 			y += 12
 
 
-def _png_draw_badge (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
+def _png_draw_badge (draw: PIL.ImageDraw.ImageDraw, data: PreviewData) -> None:
 
 	"""Bottom-right chip: pitch, BPM, duration."""
 
@@ -648,7 +665,7 @@ def _png_draw_badge (draw: ImageDraw.ImageDraw, data: PreviewData) -> None:
 	if not text:
 		return
 
-	font   = ImageFont.load_default()
+	font   = PIL.ImageFont.load_default()
 	bbox   = draw.textbbox((0, 0), text, font=font)
 	text_w = bbox[2] - bbox[0]
 	text_h = bbox[3] - bbox[1]
@@ -891,9 +908,9 @@ def serialize_for_sidecar (data: PreviewData) -> dict[str, typing.Any]:
 	"""Return the JSON-serialisable dict that lives under ``preview`` in
 	.analysis.json.
 
-	Envelopes are int8 packed into base64 strings — ~1.1 KB per 400-value
-	array vs ~2 KB as a plain JSON int list, which adds up across a large
-	library.
+	Envelopes are int8 packed into base64 strings — ~0.5 KB per 400-value
+	array (400 bytes → ~536 base64 chars) vs ~1.6 KB as a plain JSON int list,
+	which adds up across a large library.
 	"""
 
 	return {

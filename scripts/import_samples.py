@@ -217,6 +217,10 @@ def _import_file (
 			duration    = duration,
 			level       = level,
 			band_energy = band_energy,
+			# Record the actual on-disk format, not save_cache's 16/1 defaults
+			# (subtype is PCM_16/24/32; faded is shape (n_frames, channels)).
+			bit_depth   = int(subtype.rsplit("_", 1)[1]),
+			channels    = faded.shape[1],
 		)
 	except OSError as exc:
 		_log.warning("Could not save analysis cache for %s: %s", target_path.name, exc)

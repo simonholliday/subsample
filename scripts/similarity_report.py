@@ -90,6 +90,7 @@ def main () -> None:
 	instrument_library = subsample.library.load_instrument_library(
 		pathlib.Path(cfg.instrument.directory),
 		max_instrument_bytes,
+		with_preview=False,   # mandatory keyword-only; this report renders no previews
 	)
 
 	if len(instrument_library) == 0:

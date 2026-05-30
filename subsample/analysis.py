@@ -30,6 +30,9 @@ Rhythm metrics (RhythmResult) — raw values, NOT normalised:
   pulse_curve        — frame-by-frame rhythmic salience from PLP
   pulse_peak_times   — local maxima of pulse curve in seconds
   onset_times        — transient onset positions in seconds from onset_detect
+  attack_times       — sample-accurate attack positions in seconds (refined
+                       from onsets via amplitude-envelope analysis; used by the
+                       time-stretch grid alignment)
   onset_count        — number of detected onsets
 
 Pitch metrics (PitchResult) — raw structured data, NOT normalised:
@@ -318,6 +321,14 @@ class AnalysisResult:
 	1.0 = bright / treble-dominated (hi-hat, cymbal shimmer).
 	Computed as the linear regression slope of the log-magnitude spectrum
 	against log-frequency, then normalised from the empirical range."""
+
+
+# Minimum frames an entry point will analyse.  Below this the STFT window
+# clamps to n_fft <= 1, which drives librosa's rfftfreq into a 1/(n*d)
+# division-by-zero ("Parameter Nx=0") — a 1-sample (heavily trimmed) capture
+# would crash the analysis instead of degrading.  Such a buffer carries no
+# spectral information anyway, so the entry points return the empty result.
+_MIN_ANALYSIS_FRAMES: int = 2
 
 
 # Zero-valued result for empty or degenerate input. Used by analyze() and
@@ -614,7 +625,7 @@ def analyze (
 		AnalysisResult with all computed metrics in [0.0, 1.0].
 	"""
 
-	if audio.shape[0] == 0:
+	if audio.shape[0] < _MIN_ANALYSIS_FRAMES:
 		return _EMPTY_ANALYSIS_RESULT
 
 	mono = to_mono_float(audio, bit_depth)
@@ -652,7 +663,7 @@ def analyze_mono (
 		AnalysisResult with all computed metrics in [0.0, 1.0].
 	"""
 
-	if mono.shape[0] == 0:
+	if mono.shape[0] < _MIN_ANALYSIS_FRAMES:
 		return _EMPTY_ANALYSIS_RESULT
 
 	# Clamp n_fft to the signal length for short recordings. librosa zero-pads
@@ -1250,7 +1261,7 @@ def analyze_band_energy (
 		All-zero values are returned for empty or silent signals.
 	"""
 
-	if mono.shape[0] == 0:
+	if mono.shape[0] < _MIN_ANALYSIS_FRAMES:
 		return BandEnergyResult(
 			energy_fractions=(0.0,) * _N_BANDS,
 			decay_rates=(0.0,) * _N_BANDS,
@@ -1567,10 +1578,13 @@ def analyze_all (
 	effective_hop = min(params.hop_length, effective_n_fft)
 	hpss_params = dataclasses.replace(params, n_fft=effective_n_fft, hop_length=effective_hop)
 
-	if mono.shape[0] > 0:
+	if mono.shape[0] >= _MIN_ANALYSIS_FRAMES:
 		D = librosa.stft(mono, n_fft=hpss_params.n_fft, hop_length=hpss_params.hop_length)
 		harmonic_ratio, harmonic_audio, percussive_audio = _compute_hpss(mono, hpss_params, D)
 	else:
+		# Too short for a meaningful STFT (n_fft would clamp to <= 1 and crash
+		# librosa); each downstream analyser has its own short-input guard and
+		# degrades to an empty/neutral result.
 		harmonic_ratio = 0.0
 		harmonic_audio = mono
 		percussive_audio = mono
@@ -1806,6 +1820,13 @@ def _compute_spectral_slope (
 	# Skip bin 0 (DC) to avoid log(0).
 	freqs    = freqs[1:]
 	mean_mag = mean_mag[1:]
+
+	# Guard: a regression needs at least two points.  For a tiny capture the
+	# clamped n_fft yields a single non-DC bin, and numpy.polyfit on one point
+	# leaks a RankWarning and returns a meaningless slope — return the neutral
+	# midpoint instead.
+	if freqs.shape[0] < 2:
+		return 0.5
 
 	# Guard: if all magnitudes are zero (silence), return midpoint.
 	if numpy.max(mean_mag) < 1e-10:

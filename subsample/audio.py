@@ -57,9 +57,11 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 
 	Tries the stdlib wave module first (WAV files).  If that fails, falls
 	back to soundfile (libsndfile) which supports WAV, FLAC, AIFF, OGG,
-	MP3/MPEG, and many other formats.  Audio from soundfile is converted to 16-bit
-	PCM so the returned array is identical in format to what AudioReader
-	produces.
+	MP3/MPEG, and many other formats.  The reported ``bit_depth`` follows the
+	source subtype — 32 for FLOAT/DOUBLE and the 32-bit PCM/ALAC variants, 24
+	for the 24-bit variants, and 16 for 16-bit PCM and lossy formats — so the
+	returned int array matches the source resolution rather than always being
+	truncated to 16-bit.
 
 	Args:
 		path: Path to the audio file.
@@ -123,7 +125,6 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 
 		sf_info = soundfile.info(str(path))
 		subtype = (sf_info.subtype or "").upper()
-		sample_rate = sf_info.samplerate
 
 		if subtype in ("FLOAT", "DOUBLE"):
 			# Read at native float precision.  DOUBLE → float64 preserves the
@@ -691,13 +692,26 @@ def float32_to_pcm_bytes (audio: numpy.ndarray, bit_depth: int) -> bytes:
 
 	if bit_depth == 24:
 		# Scale to signed 24-bit range, store in int32, then extract the 3
-		# least-significant bytes (little-endian order) per sample.
-		# This is the inverse of unpack_audio()'s 24-bit path.
+		# least-significant bytes per sample.  This is the inverse of
+		# unpack_audio()'s 24-bit path, which likewise guards byte order.
 		scaled = (flat * 8388607.0).astype(numpy.int32)
 		raw = scaled.view(numpy.uint8).reshape(-1, 4)
-		return raw[:, :3].tobytes()
+
+		# The 3 LSBs are the first three bytes on a little-endian host and the
+		# last three on a big-endian one; the read side makes the same choice.
+		if sys.byteorder == "little":
+			return raw[:, :3].tobytes()
+
+		return raw[:, 1:4].tobytes()
 
 	if bit_depth == 32:
-		return (flat * 2147483647.0).astype(numpy.int32).tobytes()
+		# Clip in float64 before the int32 cast: in float32 the scale factor
+		# 2147483647 rounds up to 2**31, which wraps to full-scale NEGATIVE on
+		# cast — flipping every peak >= ~0.99999996 to a loud click.  float64
+		# represents the int32 max exactly, so the clip lands on it cleanly.
+		scaled64 = numpy.clip(
+			flat.astype(numpy.float64) * 2147483647.0, -2147483648.0, 2147483647.0,
+		)
+		return scaled64.astype(numpy.int32).tobytes()
 
 	raise ValueError(f"Unsupported bit depth {bit_depth}. Supported: 16, 24, 32")

@@ -978,6 +978,33 @@ class TestMaxPolyphony:
 		assert player._last_xrun_warn == first_warn_time
 		assert player._xrun_count == 2
 
+	def test_release_fade_spans_multiple_small_buffers (self) -> None:
+		"""Code-review regression: a release fade longer than buffer_frames must
+		span multiple callbacks, not collapse into one short buffer (which cut
+		note-offs abruptly at small buffer sizes)."""
+		import numpy
+
+		player = self._make_callback_player()
+		player._release_fade_frames = 200
+
+		audio = numpy.ones((1000, 2), dtype=numpy.float32) * 0.5
+		voice = subsample.player._Voice(audio=audio, note=36, channel=9, releasing=True)
+		player._voices = [voice]
+
+		# One 64-frame callback applies only part of the 200-frame fade.
+		subsample.player.MidiPlayer._audio_callback(player, None, 64, {}, 0)
+		assert voice.fade_pos == 64
+		assert voice in player._voices            # still fading, not retired
+
+		# Further callbacks complete the fade (~200 frames total), then retire.
+		for _ in range(6):
+			if not player._voices:
+				break
+			subsample.player.MidiPlayer._audio_callback(player, None, 64, {}, 0)
+
+		assert player._voices == []               # fully faded and retired
+		assert voice.fade_pos >= player._release_fade_frames
+
 
 # ---------------------------------------------------------------------------
 # Safety limiter
