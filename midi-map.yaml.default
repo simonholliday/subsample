@@ -209,6 +209,12 @@ assignments:
   # hit, so the same pad picks one of your top-three matches with
   # natural variation instead of always playing the best match.
   #
+  # Leave an end open to pick across *all* matches without counting
+  # them: `pick: any` (uniform over everything), `pick: [2, null]`
+  # (rank 2 to the last match), `pick: [null, 5]` (the top 5), or
+  # `pick: { gte: 2 }` (rank 2 onward).  Open ends resolve against the
+  # live library, so a new capture joins the pool with no map edit.
+  #
   # When a range pick is given on a multi-note assignment, every note
   # rolls independently at trigger time — no need to write a separate
   # assignment per note for variety.
@@ -226,6 +232,13 @@ assignments:
   #   select:
   #     where: { reference: BD0025 }
   #     pick: [1, 3]   # different kick on every hit, from your closest 3
+
+  # - name: Any clap
+  #   channel: 10
+  #   notes: drum.hand_clap
+  #   select:
+  #     where: { name: { matches: "*clap*" } }
+  #     pick: any      # a different clap from the whole set on every hit
 
 
   # --- F. Rhythmic loops, beat-matched ---

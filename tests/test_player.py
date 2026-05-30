@@ -102,6 +102,59 @@ def _make_note_map (
 
 
 # ---------------------------------------------------------------------------
+# _ranks_for / _format_pick_suffix — open-ended pick handling
+# ---------------------------------------------------------------------------
+
+class TestRanksForOpenEnded:
+
+	"""_ranks_for expands a PickSpec to the ranks a runtime draw could reach,
+	resolving open (None) bounds against the live match count."""
+
+	def test_closed_range_unchanged (self) -> None:
+		ranks = subsample.player._ranks_for(subsample.query.PickSpec(1, 3), 10)
+		assert list(ranks) == [1, 2, 3]
+
+	def test_open_upper_expands_to_count (self) -> None:
+		ranks = subsample.player._ranks_for(subsample.query.PickSpec(2, None), 5)
+		assert list(ranks) == [2, 3, 4, 5]
+
+	def test_open_lower_starts_at_one (self) -> None:
+		ranks = subsample.player._ranks_for(subsample.query.PickSpec(None, 3), 10)
+		assert list(ranks) == [1, 2, 3]
+
+	def test_any_covers_full_list (self) -> None:
+		ranks = subsample.player._ranks_for(subsample.query.PickSpec(None, None), 4)
+		assert list(ranks) == [1, 2, 3, 4]
+
+	def test_open_upper_lo_past_end_clamps (self) -> None:
+		ranks = subsample.player._ranks_for(subsample.query.PickSpec(3, None), 2)
+		assert list(ranks) == [2]
+
+
+class TestFormatPickSuffix:
+
+	"""_format_pick_suffix renders the startup-log `pick` annotation."""
+
+	def test_default_best_match_is_blank (self) -> None:
+		assert subsample.player._format_pick_suffix(subsample.query.PickSpec(1, 1)) == ""
+
+	def test_scalar_rank (self) -> None:
+		assert subsample.player._format_pick_suffix(subsample.query.PickSpec(3, 3)) == " pick 3"
+
+	def test_closed_range (self) -> None:
+		assert subsample.player._format_pick_suffix(subsample.query.PickSpec(2, 5)) == " pick 2-5"
+
+	def test_any (self) -> None:
+		assert subsample.player._format_pick_suffix(subsample.query.PickSpec(None, None)) == " pick any"
+
+	def test_open_upper (self) -> None:
+		assert subsample.player._format_pick_suffix(subsample.query.PickSpec(2, None)) == " pick 2+"
+
+	def test_open_lower_reads_from_one (self) -> None:
+		assert subsample.player._format_pick_suffix(subsample.query.PickSpec(None, 5)) == " pick 1-5"
+
+
+# ---------------------------------------------------------------------------
 # list_midi_input_devices
 # ---------------------------------------------------------------------------
 

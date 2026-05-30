@@ -705,21 +705,35 @@ class PickSpec:
 	variation across the top matches.  ``pick: {gte: 1, lte: 3}`` is the
 	explicit dict form, identical to the list shorthand.
 
-	Both bounds are 1-indexed and inclusive.  ``resolve_index`` clamps the
-	upper bound to the length of the ranked list so out-of-range picks
-	fall back to the last available match rather than failing.
+	An end is left *open* with ``null`` in the list (``pick: [2, null]`` —
+	"rank 2 to the last match"; ``pick: [null, 5]`` — "the top 5"), with a
+	one-sided dict (``pick: {gte: 2}``), or, for the whole list, the
+	shortcut ``pick: any``.  An open bound is stored as ``None``: ``lo=None``
+	means "from the best match", ``hi=None`` means "to the last match" — so
+	there is never a magic sentinel number to stand in for "all of them".
+
+	Bounds are 1-indexed and inclusive.  ``resolve_index`` resolves each
+	open bound against the live match count and clamps an over-long upper
+	bound down to it, so a range that runs past the end falls back to the
+	last available match rather than failing.
 	"""
 
-	lo: int
-	hi: int
+	lo: typing.Optional[int]
+	hi: typing.Optional[int]
 
 	def resolve_index (self, ranked_len: int) -> int:
 
-		"""Return a 0-indexed rank, drawn uniformly from [lo, hi] and
-		clamped to ranked_len."""
+		"""Return a 0-indexed rank, drawn uniformly from [lo, hi].
 
-		hi = min(self.hi, ranked_len)
-		lo = min(self.lo, hi)
+		An open ``lo`` resolves to the best match (rank 1); an open ``hi``
+		resolves to the last match (``ranked_len``).  A concrete upper bound
+		past the end is clamped down to ``ranked_len`` so out-of-range picks
+		land on the last available match.
+		"""
+
+		hi = ranked_len if self.hi is None else min(self.hi, ranked_len)
+		lo = 1          if self.lo is None else self.lo
+		lo = min(lo, hi)
 
 		return random.randint(lo, hi) - 1
 
@@ -1627,16 +1641,30 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 	"""Parse the ``pick:`` value from a select spec.
 
 	Accepted forms:
-	  - missing / None      → PickSpec(1, 1)   (best match)
-	  - int n               → PickSpec(n, n)   (exact rank, n >= 1)
-	  - [lo, hi]            → PickSpec(lo, hi) (random rank in range, both >= 1, lo <= hi)
-	  - {gte, lte, gt, lt, eq: ...} → equivalent range (gt: 1 → lo=2, etc.)
+	  - missing / None      → PickSpec(1, 1)      (best match)
+	  - "any"               → PickSpec(None, None) (uniform draw across all matches)
+	  - int n               → PickSpec(n, n)      (exact rank, n >= 1)
+	  - [lo, hi]            → PickSpec(lo, hi)    (random rank in range, both >= 1, lo <= hi)
+	  - [lo, null] / [null, hi] → open-ended range (None = best match / last match)
+	  - {gte, lte, gt, lt, eq: ...} → equivalent range; a lower-bound-only dict
+	    (gte / gt) leaves the upper bound open (hi=None)
 
 	The range form re-rolls on every note-on (see ``PickSpec.resolve_index``).
 	"""
 
 	if raw is None:
 		return PickSpec(1, 1)
+
+	# "any" is the read-aloud shortcut for the fully-open range [None, None] —
+	# a uniform draw across every match, no magic count to write.
+	if isinstance(raw, str):
+		if raw.strip().lower() == "any":
+			return PickSpec(None, None)
+
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'pick' string must be "
+			f"'any' (got {raw!r})"
+		)
 
 	# bool is a subclass of int in Python — reject explicitly so 'pick: true'
 	# doesn't silently become PickSpec(1, 1) and 'pick: false' PickSpec(0, 0).
@@ -1654,21 +1682,28 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 		return PickSpec(raw, raw)
 
 	if isinstance(raw, list):
-		if len(raw) != 2 or not all(isinstance(x, int) and not isinstance(x, bool) for x in raw):
+		# Each entry is an integer rank or null (an open end).  bool is a
+		# subclass of int, so reject it explicitly the same way the scalar
+		# form does.
+		def _is_bound (x: typing.Any) -> bool:
+			return x is None or (isinstance(x, int) and not isinstance(x, bool))
+
+		if len(raw) != 2 or not all(_is_bound(x) for x in raw):
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: 'pick' list must be "
-				f"exactly two integers [lo, hi] (got {raw!r})"
+				f"two entries [lo, hi], each a positive integer or null for an "
+				f"open end (got {raw!r})"
 			)
 
 		lo, hi = raw
 
-		if lo < 1 or hi < 1:
+		if (lo is not None and lo < 1) or (hi is not None and hi < 1):
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: pick bounds must be "
 				f">= 1 (got [{lo}, {hi}])"
 			)
 
-		if lo > hi:
+		if lo is not None and hi is not None and lo > hi:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: pick 'lo' must be "
 				f"<= 'hi' (got [{lo}, {hi}])"
@@ -1687,13 +1722,22 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 			)
 
 		# eq pins both bounds; other operators define lo (gte/gt) and hi (lte/lt).
-		# pick has no natural upper bound at parse time, so require at least
-		# one of lte/lt/eq — a lower-bound-only range is ambiguous.
+		# A lower-bound-only dict (gte / gt) leaves the upper bound open — "rank
+		# N to the last match" — stored as hi=None.
 		eq_val  = raw.get("eq")
 		gte_val = raw.get("gte")
 		gt_val  = raw.get("gt")
 		lte_val = raw.get("lte")
 		lt_val  = raw.get("lt")
+
+		# An operator-less dict has no bounds to act on.  Reject it so a bare
+		# `pick: {}` doesn't silently mean "any" — write `pick: any` for that.
+		if all(v is None for v in (eq_val, gte_val, gt_val, lte_val, lt_val)):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'pick' dict must "
+				f"include at least one of "
+				f"{', '.join(sorted(_VALID_PICK_OPERATORS))}; got {raw!r}"
+			)
 
 		if eq_val is not None:
 			if not isinstance(eq_val, int) or isinstance(eq_val, bool) or eq_val < 1:
@@ -1737,19 +1781,15 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 				)
 			dict_hi = lt_val - 1
 
-		if dict_hi is None:
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: 'pick' operator dict "
-				f"must include an upper bound (lte / lt / eq); got {raw!r}"
-			)
+		# dict_hi left as None means an open upper bound (lower-bound-only dict).
 
-		if dict_lo < 1 or dict_hi < 1:
+		if dict_lo < 1 or (dict_hi is not None and dict_hi < 1):
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: pick bounds must be "
 				f">= 1 (got lo={dict_lo}, hi={dict_hi})"
 			)
 
-		if dict_lo > dict_hi:
+		if dict_hi is not None and dict_lo > dict_hi:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: pick 'lo' must be "
 				f"<= 'hi' (got lo={dict_lo}, hi={dict_hi})"
@@ -1758,8 +1798,9 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 		return PickSpec(dict_lo, dict_hi)
 
 	raise ValueError(
-		f"MIDI map assignment {assignment_name!r}: 'pick' must be an integer, "
-		f"a 2-element list, or an operator mapping (got {type(raw).__name__})"
+		f"MIDI map assignment {assignment_name!r}: 'pick' must be 'any', an "
+		f"integer, a 2-element list, or an operator mapping "
+		f"(got {type(raw).__name__})"
 	)
 
 

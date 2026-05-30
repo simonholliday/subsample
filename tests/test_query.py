@@ -1143,10 +1143,52 @@ class TestParsePick:
 		with pytest.raises(ValueError, match="pick"):
 			subsample.query.parse_select({"pick": [0, 3]}, "test")
 
-	def test_dict_missing_upper_bound_raises (self) -> None:
-		"""A dict with only a lower bound has no natural upper bound."""
-		with pytest.raises(ValueError, match="upper bound"):
-			subsample.query.parse_select({"pick": {"gte": 1}}, "test")
+	def test_dict_lower_bound_only_is_open (self) -> None:
+		"""A lower-bound-only dict leaves the upper bound open (hi=None)."""
+		specs = subsample.query.parse_select({"pick": {"gte": 1}}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(1, None)
+
+		specs = subsample.query.parse_select({"pick": {"gte": 3}}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(3, None)
+
+	def test_dict_gt_open_upper (self) -> None:
+		"""gt shifts the open lower bound up by one: gt: 1 → lo=2, hi open."""
+		specs = subsample.query.parse_select({"pick": {"gt": 1}}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(2, None)
+
+	def test_dict_empty_raises (self) -> None:
+		"""A bare `pick: {}` has no operators and must not mean 'any'."""
+		with pytest.raises(ValueError, match="at least one"):
+			subsample.query.parse_select({"pick": {}}, "test")
+
+	def test_string_any (self) -> None:
+		"""`pick: any` is the fully-open range across every match."""
+		specs = subsample.query.parse_select({"pick": "any"}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(None, None)
+
+	def test_string_any_case_insensitive (self) -> None:
+		specs = subsample.query.parse_select({"pick": "ANY"}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(None, None)
+
+	def test_list_open_upper (self) -> None:
+		"""[2, null] → rank 2 to the last match (hi open)."""
+		specs = subsample.query.parse_select({"pick": [2, None]}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(2, None)
+
+	def test_list_open_lower (self) -> None:
+		"""[null, 5] → the top 5 (lo open)."""
+		specs = subsample.query.parse_select({"pick": [None, 5]}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(None, 5)
+
+	def test_list_both_open (self) -> None:
+		"""[null, null] is the list spelling of `any`."""
+		specs = subsample.query.parse_select({"pick": [None, None]}, "test")
+		assert specs[0].pick == subsample.query.PickSpec(None, None)
+
+	def test_list_open_end_zero_bound_raises (self) -> None:
+		"""An open end doesn't exempt the concrete end from the >= 1 rule."""
+		with pytest.raises(ValueError, match="pick"):
+			subsample.query.parse_select({"pick": [0, None]}, "test")
 
 	def test_dict_unknown_operator_raises_in_strict_mode (self) -> None:
 		"""Strict mode (default) rejects unknown pick operators."""
@@ -1216,6 +1258,50 @@ class TestPickSpecResolve:
 		calls.clear()
 		subsample.query.PickSpec(1, 5).resolve_index(3)   # hi clamped to 3
 		assert calls == [(1, 3)]
+
+	def test_open_upper_resolves_to_count (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""An open hi (None) resolves to the live match count."""
+		calls: list[tuple[int, int]] = []
+
+		def fake_randint (lo: int, hi: int) -> int:
+			calls.append((lo, hi))
+			return lo
+
+		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+
+		subsample.query.PickSpec(2, None).resolve_index(5)
+		assert calls == [(2, 5)]
+
+	def test_open_lower_resolves_to_one (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""An open lo (None) resolves to rank 1."""
+		calls: list[tuple[int, int]] = []
+
+		def fake_randint (lo: int, hi: int) -> int:
+			calls.append((lo, hi))
+			return lo
+
+		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+
+		subsample.query.PickSpec(None, 3).resolve_index(10)
+		assert calls == [(1, 3)]
+
+	def test_any_spans_full_list (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""PickSpec(None, None) draws across the whole match list."""
+		calls: list[tuple[int, int]] = []
+
+		def fake_randint (lo: int, hi: int) -> int:
+			calls.append((lo, hi))
+			return lo
+
+		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+
+		subsample.query.PickSpec(None, None).resolve_index(7)
+		assert calls == [(1, 7)]
+
+	def test_open_upper_lo_past_end_clamps_to_last (self) -> None:
+		"""An open-upper range whose lo runs past the end lands on the last rank."""
+		spec = subsample.query.PickSpec(3, None)
+		assert spec.resolve_index(2) == 1   # idx 1 = rank 2 = last
 
 
 class TestExtractSpec:

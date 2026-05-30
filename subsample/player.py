@@ -185,13 +185,42 @@ def _ranks_for (pick_spec: subsample.query.PickSpec, ranked_len: int) -> range:
 	Used by update_assignments() to pre-compute variants for every reachable
 	rank: scalar PickSpec(n, n) yields a single rank; range PickSpec(lo, hi)
 	yields lo..hi inclusive, clamped to ranked_len so requests past the end
-	collapse onto the last rank (mirrors resolve_index's clamping).
+	collapse onto the last rank (mirrors resolve_index's clamping).  An open
+	bound (None — from ``pick: any`` / ``[2, null]`` / ``{gte: 2}``) resolves
+	the same way resolve_index does: open lo → 1, open hi → ranked_len.
 	"""
 
-	hi = min(pick_spec.hi, ranked_len)
-	lo = min(pick_spec.lo, hi)
+	hi = ranked_len if pick_spec.hi is None else min(pick_spec.hi, ranked_len)
+	lo = 1          if pick_spec.lo is None else pick_spec.lo
+	lo = min(lo, hi)
 
 	return range(lo, hi + 1)
+
+
+def _format_pick_suffix (pick_spec: subsample.query.PickSpec) -> str:
+
+	"""Human-readable ``pick`` annotation for the startup-log line.
+
+	Returns an empty string for the default best-match pick so unannotated
+	notes stay terse; otherwise a leading-space suffix: `` pick 3`` (scalar),
+	`` pick 2-5`` (closed range), `` pick 2+`` (open upper), or `` pick any``
+	(both ends open).  An open lower bound reads as rank 1.
+	"""
+
+	lo, hi = pick_spec.lo, pick_spec.hi
+
+	if lo is None and hi is None:
+		return " pick any"
+
+	if hi is None:
+		return f" pick {lo}+"
+
+	lo_eff = 1 if lo is None else lo
+
+	if lo_eff == hi:
+		return "" if lo_eff == 1 else f" pick {lo_eff}"
+
+	return f" pick {lo_eff}-{hi}"
 
 
 def _quantize_params (
@@ -2168,12 +2197,7 @@ class MidiPlayer:
 						line += f" rescale [{r_lo},{r_hi}]"
 
 			if len(pick_specs) == 1:
-				ps = next(iter(pick_specs))
-				if ps.lo == ps.hi:
-					if ps.lo != 1:
-						line += f" pick {ps.lo}"
-				else:
-					line += f" pick {ps.lo}-{ps.hi}"
+				line += _format_pick_suffix(next(iter(pick_specs)))
 			else:
 				line += " pick distributed"
 

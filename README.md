@@ -546,7 +546,7 @@ where:
 ```
 
 - The **list** form matches if the sample's stem is in the list. Pair with
-  `pick: [1, N]` (or `[1, 999]`) for uniform random selection across the set.
+  `pick: any` for uniform random selection across the whole set.
 - The **glob** form (`matches:`) uses `*`, `?`, and `[abc]` character classes;
   `.` is a literal dot. Full-string match — `kick` matches only `kick`,
   `*kick*` matches any stem containing `kick`. Case-insensitive.
@@ -605,7 +605,7 @@ common case concise, but it helps to know which ones are on:
 | `order` | `[{ by: similarity, dir: desc }]` | `where.reference` **is** set |
 | `pick` | `1` (best match) for the first note; incremented per note thereafter | Multi-note assignment without `repitch`, and no explicit `pick` |
 | `pick` | `1` for every note | Multi-note assignment with `repitch` in `process` |
-| `pick` | Same `pick` for every note (no per-note distribution) | Any explicit `pick` — scalar or range |
+| `pick` | Same `pick` for every note (no per-note distribution) | Any explicit `pick` — scalar, range, open-ended, or `any` |
 | `where` | Empty (all samples match) | `where` block omitted |
 | `process` | Empty (unprocessed playback) | `process` block omitted |
 | `grid` | `16` (sixteenth-note) | `stretch_quantize` / `pad_quantize` without explicit grid |
@@ -640,6 +640,25 @@ matches, the draw clamps to the last rank — matching the scalar fallback
 behaviour. Any explicit `pick` (scalar or range) suppresses per-note
 distribution, so a range on `notes: [60, 61, 62]` rolls independently for
 each key instead of fixing different ranks to different notes.
+
+**Pick any match — open-ended ranges.** To draw uniformly across *every*
+match without counting your library, leave an end open. Write `null` in the
+list, drop the upper bound from the dict, or use the `any` shortcut:
+
+```yaml
+pick: any                 # uniform draw across all matches
+pick: [null, null]        # same thing, list spelling
+pick: [2, null]           # rank 2 to the last match (skip the top hit)
+pick: [null, 5]           # the top 5 (same as [1, 5])
+pick: { gte: 2 }          # rank 2 onward, open upper bound
+```
+
+An open lower bound means "from the best match"; an open upper bound means
+"to the last match", resolved against the live library on every hit — so a
+new capture is automatically in the running with no map edit. When the whole
+list is in play (`pick: any`), the `order:` clause makes no difference: every
+match is equally likely. (`pick: {}` with no operators is rejected — write
+`pick: any` if that's what you mean.)
 
 #### Beat-pattern matching
 
