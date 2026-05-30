@@ -1,0 +1,4 @@
+# Captured audio is local-only
+*
+!.gitignore
+!.gitkeep
