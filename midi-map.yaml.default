@@ -127,6 +127,28 @@
 #       where: { name_glob: "*lead*" }
 #     one_shot: false
 #
+#   # 6. Templates - define shared fields once, inherit per assignment.
+#   #    `templates:` is a TOP-LEVEL section (a sibling of `assignments:`).
+#   #    Each assignment pulls one in with `template:`; its own fields win,
+#   #    and a `process:`/`select:` it sets replaces the template's wholesale
+#   #    (not merged).  Stack several with `template: [a, b]` (left-to-right).
+#   templates:
+#     percussion:
+#       channel: 10
+#       extract: omni
+#       process:
+#         - gate: true
+#         - transient: true
+#   assignments:
+#     - name: Kick
+#       template: percussion        # inherits channel, extract, process
+#       notes: drum.kick
+#       select: { pick: any, where: { directory: Kick } }
+#     - name: Snare
+#       template: percussion
+#       notes: drum.snare
+#       select: { pick: any, where: { directory: Snare } }
+#
 # The rest of this file is:
 #   EXAMPLES        commented-out assignments, ordered simple to
 #                   advanced - uncomment any to try

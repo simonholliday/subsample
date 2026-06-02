@@ -457,6 +457,49 @@ when you want to try something the tutorial didn't show.
 | `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
 | `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
+| `template` | no | Inherit fields from one or more named templates (see Templates below). The assignment's own fields override the template's; lists (`process`) and nested blocks (`select`) are replaced wholesale, not merged |
+
+### Templates - share fields across assignments
+
+Drum kits repeat themselves: the same `channel`, the same process chain, the
+same `select` shape on every pad. Define those shared fields once in a
+top-level `templates:` section and pull them into each assignment with a
+`template:` reference.
+
+```yaml
+templates:
+  percussion:                    # any subset of assignment fields
+    channel: 10
+    extract: omni
+    process:
+      - gate: true
+      - transient: true
+
+assignments:
+  - name: Kick
+    template: percussion         # inherits channel, extract, process
+    notes: drum.kick
+    select: { pick: any, where: { directory: Kick } }
+
+  - name: Snare
+    template: percussion
+    notes: drum.snare
+    select: { pick: any, where: { directory: Snare } }
+```
+
+**How a template merges.** The assignment starts from the template's fields,
+then its own fields win: a field it *sets* replaces the template's, a field it
+*omits* is inherited. The merge is top-level only — if the assignment sets its
+own `process` (or `select`), that **replaces** the template's wholesale rather
+than appending to or merging into it.
+
+**Stacking templates.** `template: [percussion, loud]` applies several
+left-to-right: a later template overrides an earlier one, and the assignment's
+own fields override them all.
+
+Templates are flat — a template cannot itself carry a `template:` (inheritance
+is one level deep). A `template:` that names an undefined template is a load
+error listing the templates you defined.
 
 ### Note syntax
 

@@ -1171,12 +1171,183 @@ class TestLimiter:
 # load_midi_map
 # ---------------------------------------------------------------------------
 
+class TestResolveAssignmentInheritance:
+
+	"""_resolve_assignment_inheritance — the template: pre-pass merge."""
+
+	_TEMPLATES = {
+		"percussion": {"channel": 10, "extract": "omni", "process": [{"gate": True}]},
+		"loud":       {"gain": 3, "process": [{"saturate": {"drive": 6}}]},
+	}
+
+	def _resolve (self, assignments: list, templates: typing.Any = "_default") -> list:
+		return subsample.player._resolve_assignment_inheritance(
+			assignments, self._TEMPLATES if templates == "_default" else templates,
+		)
+
+	def test_single_template_inherits_all (self) -> None:
+		"""An assignment naming one template inherits every field it omits."""
+		out = self._resolve([{"name": "Kick", "template": "percussion", "notes": "drum.kick"}])
+		assert out[0]["channel"] == 10
+		assert out[0]["extract"] == "omni"
+		assert out[0]["process"] == [{"gate": True}]
+		assert out[0]["notes"] == "drum.kick"
+
+	def test_child_overrides_template_field (self) -> None:
+		"""A field set on the assignment replaces the template's value."""
+		out = self._resolve([{"name": "K", "template": "loud", "gain": 0}])
+		assert out[0]["gain"] == 0
+
+	def test_inherit_when_field_omitted (self) -> None:
+		"""A field absent from the assignment is inherited from the template."""
+		out = self._resolve([{"name": "K", "template": "loud"}])
+		assert out[0]["gain"] == 3
+
+	def test_list_field_replaced_wholesale (self) -> None:
+		"""A child process replaces the template's process — no deep merge."""
+		out = self._resolve([{"name": "S", "template": "percussion", "process": [{"reverse": True}]}])
+		assert out[0]["process"] == [{"reverse": True}]
+
+	def test_nested_dict_replaced_wholesale (self) -> None:
+		"""A child select replaces the template's select wholesale."""
+		templates = {"base": {"select": {"where": {"reference": "A"}}}}
+		out = self._resolve(
+			[{"name": "X", "template": "base", "select": {"where": {"name": "B"}}}], templates,
+		)
+		assert out[0]["select"] == {"where": {"name": "B"}}
+
+	def test_multiple_templates_left_to_right (self) -> None:
+		"""template: [a, b] applies left-to-right; the later template wins ties."""
+		out = self._resolve([{"name": "T", "template": ["percussion", "loud"]}])
+		assert out[0]["channel"] == 10                              # from percussion
+		assert out[0]["gain"] == 3                                  # from loud
+		assert out[0]["process"] == [{"saturate": {"drive": 6}}]    # loud overrides percussion
+
+	def test_assignment_overrides_all_templates (self) -> None:
+		"""The assignment's own keys win over every named template."""
+		out = self._resolve([{"name": "T", "template": ["percussion", "loud"], "gain": -9}])
+		assert out[0]["gain"] == -9
+
+	def test_template_key_stripped (self) -> None:
+		"""The consumed 'template' key does not survive into the result."""
+		out = self._resolve([{"name": "K", "template": "percussion", "notes": 36}])
+		assert "template" not in out[0]
+
+	def test_no_template_unchanged (self) -> None:
+		"""An assignment without 'template' passes through unchanged."""
+		a = {"name": "Plain", "channel": 1, "notes": 60}
+		out = self._resolve([a])
+		assert out[0] == a
+
+	def test_no_templates_section_passthrough (self) -> None:
+		"""No templates section: assignments without 'template' pass through."""
+		a = {"name": "Plain", "notes": 60}
+		out = subsample.player._resolve_assignment_inheritance([a], None)
+		assert out[0] == a
+
+	def test_unknown_template_raises (self) -> None:
+		"""Naming a template that isn't defined raises, listing valid names."""
+		with pytest.raises(ValueError, match="unknown template 'nope'"):
+			self._resolve([{"name": "K", "template": "nope"}])
+
+	def test_template_wrong_type_raises (self) -> None:
+		"""A non-string, non-list 'template' value is rejected."""
+		with pytest.raises(ValueError, match="must be a template name"):
+			self._resolve([{"name": "K", "template": 42}])
+
+	def test_template_list_with_non_string_raises (self) -> None:
+		"""A list 'template' with a non-string entry is rejected."""
+		with pytest.raises(ValueError, match="must be a template name"):
+			self._resolve([{"name": "K", "template": ["percussion", 5]}])
+
+	def test_templates_section_not_mapping_raises (self) -> None:
+		"""A non-mapping templates section is rejected."""
+		with pytest.raises(ValueError, match="'templates' must be a mapping"):
+			subsample.player._resolve_assignment_inheritance([], ["x"])
+
+	def test_template_body_not_mapping_raises (self) -> None:
+		"""A template whose body isn't a mapping is rejected."""
+		with pytest.raises(ValueError, match="template 'soft'"):
+			subsample.player._resolve_assignment_inheritance([], {"soft": "x"})
+
+	def test_template_body_with_template_key_raises (self) -> None:
+		"""Templates may not themselves use 'template' (flat, one level)."""
+		with pytest.raises(ValueError, match="one level deep"):
+			subsample.player._resolve_assignment_inheritance([], {"a": {"template": "b"}})
+
+	def test_assignments_not_list_raises (self) -> None:
+		"""A non-list assignments value is rejected."""
+		with pytest.raises(ValueError, match="'assignments' must be a list"):
+			subsample.player._resolve_assignment_inheritance({"not": "a list"}, None)
+
+
 class TestLoadMidiMap:
 
 	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
 		p = tmp_path / "test-map.yaml"
 		p.write_text(content, encoding="utf-8")
 		return p
+
+	def test_template_inherited_in_notemap (self, tmp_path: pathlib.Path) -> None:
+		"""An assignment using a template inherits its fields into the NoteMap."""
+		path = self._write_map(tmp_path, """
+templates:
+  perc:
+    channel: 10
+    one_shot: false
+    select:
+      where:
+        reference: BD0025
+assignments:
+  - name: Kick
+    template: perc
+    notes: 36
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		assert (9, 36) in note_map
+		asgn, _pick = note_map[(9, 36)][0]
+		assert asgn.one_shot is False
+		assert asgn.select[0].where.reference == "BD0025"
+
+	def test_zone_tuned_assignment_uses_template (self, tmp_path: pathlib.Path) -> None:
+		"""Template resolution runs before zone detection: a templated
+		zone-tuned assignment lands in zone_templates, not the NoteMap."""
+		path = self._write_map(tmp_path, """
+templates:
+  pitched:
+    channel: 1
+    process:
+      - repitch: true
+assignments:
+  - name: Lead
+    template: pitched
+    notes: zone-tuned
+    select:
+      where:
+        pitched: true
+""")
+		result = subsample.player.load_midi_map(path, [])
+
+		assert len(result.zone_templates) == 1
+		assert result.zone_templates[0].channel == 0   # mido 0-indexed
+		assert not result.note_map
+
+	def test_unknown_template_in_map_raises (self, tmp_path: pathlib.Path) -> None:
+		"""load_midi_map surfaces an unknown template reference as ValueError."""
+		path = self._write_map(tmp_path, """
+templates:
+  perc: { channel: 10 }
+assignments:
+  - name: Kick
+    template: drums
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+""")
+		with pytest.raises(ValueError, match="unknown template 'drums'"):
+			subsample.player.load_midi_map(path, ["BD0025"])
 
 	def test_single_note_reference (self, tmp_path: pathlib.Path) -> None:
 		"""Single-note reference assignment."""

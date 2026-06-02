@@ -1439,6 +1439,124 @@ def _validate_assignment_extracts (
 				)
 
 
+def _parse_templates (templates_raw: typing.Any) -> dict[str, dict[str, typing.Any]]:
+
+	"""Validate and return the optional ``templates:`` section.
+
+	Each entry is a named bundle of assignment fields that assignments can
+	inherit via a ``template:`` reference (see
+	``_resolve_assignment_inheritance``).  Returns an empty dict when the
+	section is absent, so callers treat "no templates" and "empty templates"
+	identically.
+
+	Templates are flat: a template body may not itself carry a ``template:``
+	key — inheritance is one level deep, which keeps resolution predictable.
+	"""
+
+	if templates_raw is None:
+		return {}
+
+	if not isinstance(templates_raw, dict):
+		raise ValueError(
+			f"MIDI map 'templates' must be a mapping of name → assignment "
+			f"fields, got {type(templates_raw).__name__}"
+		)
+
+	for name, body in templates_raw.items():
+
+		if not isinstance(body, dict):
+			raise ValueError(
+				f"MIDI map template {name!r}: value must be a mapping of "
+				f"assignment fields, got {type(body).__name__}"
+			)
+
+		if "template" in body:
+			raise ValueError(
+				f"MIDI map template {name!r}: templates may not use 'template' "
+				f"themselves — inheritance is one level deep"
+			)
+
+	return templates_raw
+
+
+def _resolve_assignment_inheritance (
+	assignments_raw: typing.Any,
+	templates_raw:   typing.Any,
+) -> list[dict[str, typing.Any]]:
+
+	"""Merge each assignment over the template(s) it names via ``template:``.
+
+	A pre-pass run before the per-assignment parsing loop: an assignment with
+	``template: percussion`` (or ``template: [a, b]``) inherits the fields of
+	those named templates, then its own keys override them.  The merge is
+	shallow and top-level — a child ``process`` / ``select`` replaces the
+	template's wholesale rather than deep-merging, mirroring YAML ``<<``
+	merge-key behaviour.  Multiple templates apply left-to-right (a later one
+	overrides an earlier one); the assignment's own keys win over all of them.
+	The consumed ``template`` key is stripped from the result.
+
+	Returns a new list of resolved assignment dicts; assignments without a
+	``template:`` reference pass through unchanged.
+	"""
+
+	if not isinstance(assignments_raw, list):
+		raise ValueError(
+			f"MIDI map 'assignments' must be a list, got "
+			f"{type(assignments_raw).__name__}"
+		)
+
+	templates = _parse_templates(templates_raw)
+
+	resolved: list[dict[str, typing.Any]] = []
+
+	for index, assignment_raw in enumerate(assignments_raw, start=1):
+
+		if not isinstance(assignment_raw, dict):
+			raise ValueError(
+				f"MIDI map assignment #{index}: expected a mapping, got "
+				f"{type(assignment_raw).__name__}"
+			)
+
+		template_ref = assignment_raw.get("template")
+
+		if template_ref is None:
+			resolved.append(assignment_raw)
+			continue
+
+		name = assignment_raw.get("name", "<unnamed>")
+
+		# Normalise the scalar-or-list shortcut to an ordered name list.
+		if isinstance(template_ref, str):
+			names = [template_ref]
+		elif isinstance(template_ref, list) and all(isinstance(n, str) for n in template_ref):
+			names = template_ref
+		else:
+			raise ValueError(
+				f"MIDI map assignment {name!r}: 'template' must be a template "
+				f"name or a list of names, got {template_ref!r}"
+			)
+
+		# Build the inherited base, then let the assignment's own keys win.
+		merged: dict[str, typing.Any] = {}
+
+		for tname in names:
+
+			if tname not in templates:
+				raise ValueError(
+					f"MIDI map assignment {name!r}: unknown template {tname!r} "
+					f"(defined templates: {sorted(templates)})"
+				)
+
+			merged.update(templates[tname])
+
+		merged.update(assignment_raw)
+		merged.pop("template", None)
+
+		resolved.append(merged)
+
+	return resolved
+
+
 def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
@@ -1531,6 +1649,13 @@ def load_midi_map (
 			bank_channel=bank_channel,
 			default_bank=default_bank,
 		)
+
+	# Resolve template inheritance before parsing: each assignment that names a
+	# template via ``template:`` is merged over it, so the loop below sees fully
+	# materialised assignment dicts and needs no inheritance awareness.
+	raw["assignments"] = _resolve_assignment_inheritance(
+		raw["assignments"], raw.get("templates"),
+	)
 
 	reference_set = {name.upper() for name in reference_names}
 	note_map: NoteMap = {}
