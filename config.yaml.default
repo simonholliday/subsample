@@ -484,7 +484,7 @@ analysis:
 #   # subsample regenerates missing `.analysis.json` and `.preview.png`
 #   # sidecars at startup, and automatically deletes any sidecar/PNG whose
 #   # audio counterpart has gone away.
-#   # Overridden when banks: is declared in the MIDI map (see README).
+#   # Overridden when programs: is declared in the MIDI map (see README).
 #   # Default: samples/captures (same as output.directory).
 #
 #   watch: false

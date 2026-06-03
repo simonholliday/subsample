@@ -25,10 +25,13 @@ BankManager
 Usage flow
 ----------
 
-1. ``load_midi_map()`` extracts the optional ``banks:``, ``bank_channel:``,
-   and ``default_bank:`` keys from the MIDI map YAML and returns them in a
-   ``MidiMapResult``.  ``default_bank`` selects which bank is active at startup
-   (``cli.py`` passes it as ``default_program`` to ``BankManager``).
+1. ``load_midi_map()`` extracts the optional ``programs:``, ``program_channel:``,
+   and ``default_program:`` keys from the MIDI map YAML and returns them in a
+   ``MidiMapResult``.  ``default_program`` selects which program is active at
+   startup (``cli.py`` passes it as ``default_program`` to ``BankManager``).
+   (Internally these are still modelled as "banks" — a switchable sample
+   library — but the YAML surface uses the MIDI-correct "program" vocabulary
+   since each is selected by a Program Change, not by MIDI Bank Select.)
 
 2. ``cli.py`` calls ``load_bank()`` for each ``BankDefinition``, then
    constructs a ``BankManager`` and passes it to ``MidiPlayer``.
@@ -77,13 +80,13 @@ class BankDefinition:
 
 def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 
-	"""Parse the ``banks:`` key from MIDI map YAML into BankDefinition objects.
+	"""Parse the ``programs:`` key from MIDI map YAML into BankDefinition objects.
 
 	Each entry must have ``name`` (str) and ``directory`` (str).
 	``program`` is optional and defaults to the list index.
 
 	Args:
-		raw: The value of the ``banks:`` key from the parsed YAML dict.
+		raw: The value of the ``programs:`` key from the parsed YAML dict.
 		     Expected to be a list of dicts.
 
 	Returns:
@@ -97,7 +100,7 @@ def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 		return []
 
 	if not isinstance(raw, list):
-		raise ValueError("MIDI map 'banks' must be a list")
+		raise ValueError("MIDI map 'programs' must be a list")
 
 	definitions: list[BankDefinition] = []
 	seen_programs: dict[int, str] = {}
@@ -105,26 +108,26 @@ def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 	for idx, entry in enumerate(raw):
 
 		if not isinstance(entry, dict):
-			raise ValueError(f"MIDI map banks[{idx}]: expected a mapping, got {type(entry).__name__}")
+			raise ValueError(f"MIDI map programs[{idx}]: expected a mapping, got {type(entry).__name__}")
 
 		name = entry.get("name")
 		if name is None:
-			raise ValueError(f"MIDI map banks[{idx}]: missing required 'name'")
+			raise ValueError(f"MIDI map programs[{idx}]: missing required 'name'")
 
 		directory = entry.get("directory")
 		if directory is None:
-			raise ValueError(f"MIDI map banks[{idx}] ({name!r}): missing required 'directory'")
+			raise ValueError(f"MIDI map programs[{idx}] ({name!r}): missing required 'directory'")
 
 		program = int(entry.get("program", idx))
 
 		if not 0 <= program <= 127:
 			raise ValueError(
-				f"MIDI map banks[{idx}] ({name!r}): program {program} is outside [0, 127]"
+				f"MIDI map programs[{idx}] ({name!r}): program {program} is outside [0, 127]"
 			)
 
 		if program in seen_programs:
 			raise ValueError(
-				f"MIDI map banks[{idx}] ({name!r}): duplicate program number {program} "
+				f"MIDI map programs[{idx}] ({name!r}): duplicate program number {program} "
 				f"(already used by {seen_programs[program]!r})"
 			)
 

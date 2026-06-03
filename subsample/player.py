@@ -1557,6 +1557,17 @@ def _resolve_assignment_inheritance (
 	return resolved
 
 
+# Valid top-level keys in a MIDI map.  Unknown keys raise (typo guard,
+# mirroring the velocity/notes inner-key validation) so a misspelt or
+# obsolete key fails loudly rather than being silently ignored — e.g. the
+# former `banks:`/`bank_channel:`/`default_bank:` keys, renamed to the
+# MIDI-correct `programs:`/`program_channel:`/`default_program:` (each entry
+# is selected by a Program Change, not by MIDI Bank Select).
+_VALID_MAP_KEYS: typing.Final[frozenset[str]] = frozenset({
+	"programs", "program_channel", "default_program", "assignments", "templates",
+})
+
+
 def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
@@ -1635,10 +1646,23 @@ def load_midi_map (
 			bank_channel=subsample.bank.DEFAULT_BANK_CHANNEL,
 		)
 
-	# Parse optional bank definitions.
-	bank_definitions = subsample.bank.parse_banks(raw.get("banks"))
-	bank_channel = int(raw.get("bank_channel", subsample.bank.DEFAULT_BANK_CHANNEL))
-	raw_default_bank = raw.get("default_bank")
+	if not isinstance(raw, dict):
+		raise ValueError(
+			f"MIDI map {path}: top-level YAML must be a mapping, got {type(raw).__name__}"
+		)
+
+	unknown_keys = set(raw) - _VALID_MAP_KEYS
+	if unknown_keys:
+		raise ValueError(
+			f"MIDI map {path}: unknown top-level key(s) {sorted(unknown_keys)!r} "
+			f"(valid: {sorted(_VALID_MAP_KEYS)!r})"
+		)
+
+	# Parse optional program definitions — switchable sample libraries, each
+	# selected live by a MIDI Program Change on `program_channel`.
+	bank_definitions = subsample.bank.parse_banks(raw.get("programs"))
+	bank_channel = int(raw.get("program_channel", subsample.bank.DEFAULT_BANK_CHANNEL))
+	raw_default_bank = raw.get("default_program")
 	default_bank: typing.Optional[int] = int(raw_default_bank) if raw_default_bank is not None else None
 
 	if "assignments" not in raw:

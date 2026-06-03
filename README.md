@@ -146,7 +146,7 @@ you focus on playing.
 | **Time stretch** | Beat-quantized with onset-aligned timemaps, partial-quantize amount, pad-quantize alternative for speech |
 | **Segment playback** | Per-hit round-robin, random, or indexed - for sliced loops |
 | **MIDI input** | Hardware port, named virtual port, or both |
-| **MIDI control** | Note on/off, Program Change for banks, CC binding for any numeric parameter |
+| **MIDI control** | Note on/off, Program Change for programs, CC binding for any numeric parameter |
 | **OSC** | Sender + receiver (optional dependency) |
 | **Audio formats in** | WAV, BWF, FLAC, AIFF, OGG, MP3/MPEG (libsndfile) |
 | **Channels** | Mono through 7.1, ITU-R BS.775 downmix, conservative upmix, per-instrument output routing |
@@ -154,7 +154,7 @@ you focus on playing.
 | **Latency** | Pre-rendered variants - playback is a memory copy into the mix buffer |
 | **Library mgmt** | Memory-bounded with FIFO eviction, persistent disk cache for variants, hot-loading from watched directories |
 | **Live-coding** | Edit the MIDI map YAML and assignments reload on save |
-| **Bank switching** | Multiple instrument directories swappable via MIDI Program Change |
+| **Program switching** | Multiple instrument directories swappable via MIDI Program Change |
 | **GM drums** | Ready-to-play map of 47 GM percussion instruments with researched mix chain |
 | **Configuration** | YAML, version-controllable, headless, no GUI |
 | **Platform** | Linux, macOS, Windows (via WSL), Raspberry Pi - anywhere CPython 3.12 runs |
@@ -266,7 +266,7 @@ parameter.
 There is real complexity here - the price of a surface this expressive. The
 rest of this section leads you in gently. A five-step tutorial first, each
 step adding one concept on top of the last. Then the complete reference, then
-the advanced features (banks, ambisonic capture, MIDI CC mapping).
+the advanced features (programs, ambisonic capture, MIDI CC mapping).
 
 MIDI routing is defined in a YAML file - by default `midi-map.yaml` in the
 project directory, referenced from `config.yaml`:
@@ -406,7 +406,7 @@ amount - fully snapped at 1.0, unchanged at 0.0.
 
 That's the ladder. The rest of this section is the full reference - every
 field, every predicate, every processor, every option - then the advanced
-features (banks, ambisonic capture, MIDI CC mapping).
+features (programs, ambisonic capture, MIDI CC mapping).
 
 ### The GM drums map - instant professional drum kit
 
@@ -583,7 +583,7 @@ is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
 | `name` | string / list / dict | Filename stem match. Four forms — see below. Legacy: a path-like scalar value (containing `/` or starting with `.`) is still auto-detected as a `path:` |
 | `path` | path | Match a specific WAV file at this path (relative paths resolved against the MIDI map's directory). Preferred over `name:` for file references |
-| `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Banks vs directory predicate](#banks-vs-directory-predicate)) |
+| `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Programs vs directory predicate](#programs-vs-directory-predicate)) |
 
 The `name:` predicate accepts four forms:
 
@@ -1175,7 +1175,7 @@ as their keyboard ranges don't overlap.
 #### Live re-derivation
 
 Whenever the active library changes — a new sample captured, a watcher
-import, a library eviction, a bank switch, or a MIDI map reload —
+import, a library eviction, a program switch, or a MIDI map reload —
 Subsample re-derives the zones. There's no manual refresh step.
 
 #### Validation
@@ -1257,7 +1257,7 @@ N is 1-indexed and rejected if it exceeds the input's channel count.
 ---
 
 **Going further.** The sections that follow cover the optional advanced
-features: multichannel/ambisonic capture, bank switching for live kit swaps
+features: multichannel/ambisonic capture, program switching for live kit swaps
 via MIDI Program Change, and MIDI CC control for any numeric processor
 parameter. None of this is needed for a basic setup - skip ahead if you're
 just building a drum kit or pitched keyboard.
@@ -1312,14 +1312,14 @@ directionally biased mix. Pad-quantize and beat-quantize work on
 ambisonic samples using Rubber Band's phase-coherent multichannel engine
 - inter-channel relationships survive time-stretching within tolerance.
 
-### Banks - switching instrument sets via MIDI
+### Programs - switching instrument sets via MIDI
 
-The MIDI map can optionally declare multiple instrument directories ("banks")
+The MIDI map can optionally declare multiple instrument directories ("programs")
 that are all loaded at startup. Switch between them at runtime using MIDI
 Program Change messages - no restart, no disk I/O, instant switching:
 
 ```yaml
-banks:
+programs:
   - name: "Acoustic Kit"
     directory: samples/acoustic
     program: 0
@@ -1327,27 +1327,35 @@ banks:
     directory: samples/electronic
     program: 1
 
-bank_channel: 10    # MIDI channel for PC messages (1-16, or 0 = any)
-default_bank: 0     # program number to activate at startup (default: first in list)
+program_channel: 10    # MIDI channel for Program Change messages (1-16, or 0 = any)
+default_program: 0     # program number to activate at startup (default: first in list)
 ```
 
-When `banks:` is absent, the single `instrument.directory` from config.yaml is
-used as before. When present, it overrides `instrument.directory`. Each bank
-gets its own sample library, similarity index, and transform cache.
+Each entry is selected by its `program` number (0-127), addressed by a MIDI
+**Program Change** message. This is deliberately *not* the MIDI **Bank Select**
+mechanism (CC 0 / CC 32), which subsample does not implement - so you address up
+to 128 programs by Program Change number alone. The terminology mirrors that:
+what a synth calls a "program" (one Program Change slot) is one entry here; the
+MIDI term "bank" (a group of 128 programs reached via Bank Select) has no role.
 
-Assignments are bank-agnostic - they query whichever bank is active. Named
-samples (`where: { name: X }`) that only exist in one bank silently produce no
-match in other banks; rule-based selects (`reference:`, `pitched:`, etc.) work
+When `programs:` is absent, the single `instrument.directory` from config.yaml is
+used as before - you do not need a `programs:` block for a single instrument set.
+When present, it overrides `instrument.directory`. Each program gets its own
+sample library, similarity index, and transform cache.
+
+Assignments are program-agnostic - they query whichever program is active. Named
+samples (`where: { name: X }`) that only exist in one program silently produce no
+match in others; rule-based selects (`reference:`, `pitched:`, etc.) work
 naturally against whatever samples are present.
 
-#### Banks vs directory predicate
+#### Programs vs directory predicate
 
-Banks and `where: { directory: ... }` both load samples from a directory, but
-they solve different problems:
+`programs:` and `where: { directory: ... }` both load samples from a directory,
+but they solve different problems:
 
-- **Banks** swap the entire sample pool at once. Only one bank is active at a
-  time - a MIDI Program Change switches all assignments to a new set of samples.
-  Use banks when you want the same MIDI map rules to evaluate against completely
+- **Programs** swap the entire sample pool at once. Only one program is active at
+  a time - a MIDI Program Change switches all assignments to a new set of samples.
+  Use programs when you want the same MIDI map rules to evaluate against completely
   different sample collections (e.g. "Acoustic Kit" vs "Electronic Kit").
 
 - **`where: { directory: ... }`** filters within the active pool. It is
@@ -1356,11 +1364,11 @@ they solve different problems:
   samples from different directories at the same time (e.g. kicks from one
   folder, hi-hats from another).
 
-| | Banks | `where: { directory }` |
+| | Programs | `where: { directory }` |
 |---|---|---|
-| Scope | All assignments share one active bank | Per-assignment filter |
+| Scope | All assignments share one active program | Per-assignment filter |
 | Switching | MIDI Program Change swaps the whole pool | Always active |
-| Simultaneous directories | No (one bank at a time) | Yes (each assignment can use a different directory) |
+| Simultaneous directories | No (one program at a time) | Yes (each assignment can use a different directory) |
 | Use case | Swap entire kits | Mix sources within one kit |
 
 ### CC mapping - real-time parameter control
@@ -1676,8 +1684,8 @@ weights - is optional and rarely needs changing.
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `instrument.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
-| `instrument.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Overridden by `banks:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
-| `instrument.watch` | `false` | Monitor `instrument.directory` (or each bank directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio (see Watching for new samples) |
+| `instrument.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Overridden by `programs:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
+| `instrument.watch` | `false` | Monitor `instrument.directory` (or each program directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio (see Watching for new samples) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
@@ -2194,7 +2202,7 @@ Reference: GM36_BassDrum1
 
 ### Monitoring
 
-- **Web dashboard** - a lightweight local web UI showing active bank, loaded
+- **Web dashboard** - a lightweight local web UI showing active program, loaded
   samples, CC state, voice activity, and transform queue progress. Read-only
   visibility into what the engine is doing, without requiring a terminal.
 

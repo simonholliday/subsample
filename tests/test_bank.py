@@ -1,7 +1,7 @@
 """Tests for subsample.bank — MIDI bank switching.
 
 Covers BankDefinition parsing, BankManager lifecycle, and integration with
-the MIDI map parser (load_midi_map with banks: key).
+the MIDI map parser (load_midi_map with programs: key).
 """
 
 import pathlib
@@ -226,7 +226,7 @@ class TestLoadMidiMapBanks:
 		return p
 
 	def test_no_banks_key (self, tmp_path: pathlib.Path) -> None:
-		"""MIDI map with no banks: key returns empty definitions."""
+		"""MIDI map with no programs: key returns empty definitions."""
 		path = self._write_map(tmp_path, """
 assignments:
   - name: Kick
@@ -244,7 +244,7 @@ assignments:
 	def test_banks_parsed (self, tmp_path: pathlib.Path) -> None:
 		"""Banks are extracted from the MIDI map."""
 		path = self._write_map(tmp_path, """
-banks:
+programs:
   - name: Acoustic
     directory: ./samples/acoustic
     program: 0
@@ -252,7 +252,7 @@ banks:
     directory: ./samples/electronic
     program: 1
 
-bank_channel: 10
+program_channel: 10
 
 assignments:
   - name: Kick
@@ -269,13 +269,13 @@ assignments:
 		assert result.bank_channel == 10
 
 	def test_bank_channel_custom (self, tmp_path: pathlib.Path) -> None:
-		"""Custom bank_channel is parsed."""
+		"""Custom program_channel is parsed."""
 		path = self._write_map(tmp_path, """
-banks:
+programs:
   - name: Kit
     directory: ./kit
 
-bank_channel: 1
+program_channel: 1
 
 assignments: []
 """)
@@ -285,7 +285,7 @@ assignments: []
 	def test_banks_with_duplicate_program_raises (self, tmp_path: pathlib.Path) -> None:
 		"""Duplicate program numbers in banks raise ValueError."""
 		path = self._write_map(tmp_path, """
-banks:
+programs:
   - name: A
     directory: ./a
     program: 5
@@ -304,3 +304,23 @@ assignments: []
 		result = subsample.player.load_midi_map(path, [])
 		assert result.note_map == {}
 		assert result.bank_definitions == []
+
+	def test_obsolete_banks_key_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""The renamed-away banks: key fails loudly as an unknown top-level key."""
+		path = self._write_map(tmp_path, """
+banks:
+  - name: Kit
+    directory: ./kit
+
+assignments: []
+""")
+		with pytest.raises(ValueError, match="unknown top-level key"):
+			subsample.player.load_midi_map(path, [])
+
+	def test_unknown_top_level_key_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""A misspelt top-level key is rejected rather than silently ignored."""
+		path = self._write_map(tmp_path, """
+assignmnets: []
+""")
+		with pytest.raises(ValueError, match="unknown top-level key"):
+			subsample.player.load_midi_map(path, [])
