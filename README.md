@@ -1034,6 +1034,14 @@ Set `player.audio.channels` in config to match your device (e.g. 8 for a
 Focusrite Scarlett 18i20). When `output` is omitted, instruments route to the
 first N outputs as before - stereo users see no change.
 
+`player.audio.channels` defaults to stereo (2), **not** the device maximum -
+opening every physical output for a stereo set would compute a needlessly wide
+mix on every audio callback, and the count would vary by whatever device is
+attached. At startup the player logs the device's detected maximum (`Output
+device 'X' supports up to N channel(s); using M`); if you set `channels` higher
+than the device offers, startup fails with a clear error naming the device's
+real maximum rather than a cryptic PortAudio one.
+
 ### Velocity layering - multiple sounds per MIDI note
 
 A single `(channel, note)` can host multiple assignments, each declaring a

@@ -457,6 +457,45 @@ class TestGetDeviceChannels:
 			subsample.audio.get_device_channels(pa, 0)
 
 
+# ---------------------------------------------------------------------------
+# get_output_device_channels
+# ---------------------------------------------------------------------------
+
+class TestGetOutputDeviceChannels:
+
+	def _make_pa (self, max_output_channels: int) -> unittest.mock.MagicMock:
+		"""Return a mock PyAudio instance reporting the given output channel count."""
+		pa = unittest.mock.MagicMock()
+		pa.get_device_info_by_index.return_value = {
+			"name": "Mock Output Device",
+			"maxOutputChannels": max_output_channels,
+		}
+		return pa
+
+	def test_returns_channel_count (self) -> None:
+		"""Returns the device's maxOutputChannels value as an int."""
+		pa = self._make_pa(16)
+
+		result = subsample.audio.get_output_device_channels(pa, 0)
+
+		assert result == 16
+
+	def test_stereo_device (self) -> None:
+		"""Returns 2 for a stereo device."""
+		pa = self._make_pa(2)
+
+		result = subsample.audio.get_output_device_channels(pa, 0)
+
+		assert result == 2
+
+	def test_zero_channels_raises (self) -> None:
+		"""Raises ValueError when the device reports no output channels (input-only)."""
+		pa = self._make_pa(0)
+
+		with pytest.raises(ValueError, match="no output channels"):
+			subsample.audio.get_output_device_channels(pa, 0)
+
+
 class TestSelectInputChannels:
 
 	"""Tests for select_input_channels() interactive prompt."""

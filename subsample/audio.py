@@ -432,6 +432,32 @@ def get_device_channels (pa: pyaudio.PyAudio, device_index: int) -> int:
 	return ch
 
 
+def get_output_device_channels (pa: pyaudio.PyAudio, device_index: int) -> int:
+
+	"""Return the maximum number of output channels reported by the device.
+
+	The player logs this and validates `player.audio.channels` against it, so
+	an over-large request fails with a clear, actionable message instead of a
+	cryptic PortAudio ``Invalid number of channels`` error at stream-open time.
+	The value comes from PortAudio's `maxOutputChannels` field (the mirror of
+	`maxInputChannels` used by get_device_channels for the recorder).
+
+	Raises:
+		ValueError: If the device reports zero output channels (input-only device).
+	"""
+
+	info = pa.get_device_info_by_index(device_index)
+	ch = int(info["maxOutputChannels"])
+
+	if ch <= 0:
+		raise ValueError(
+			f"Device {info['name']!r} reports no output channels — "
+			"it may be an input-only device."
+		)
+
+	return ch
+
+
 def select_input_channels (device_name: str, max_channels: int) -> tuple[int, ...]:
 
 	"""Prompt the user to choose which input channels to record from.

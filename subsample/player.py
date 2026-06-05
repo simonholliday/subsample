@@ -2483,6 +2483,27 @@ class MidiPlayer:
 			else:
 				output_device_index = subsample.audio.select_output_device(output_devices)
 
+			# Detect the device's real output-channel capability and check the
+			# configured count against it.  `player.audio.channels` defaults to
+			# stereo when unset (resolved in __init__); the device max is NOT a
+			# default — opening every physical output for a stereo set would
+			# waste a wider mix per callback and isn't reproducible across rigs.
+			# We use the detected max only to log the capability and to turn an
+			# over-large request into a clear startup error rather than the
+			# cryptic PortAudio "Invalid number of channels" failure.
+			device_max_out = subsample.audio.get_output_device_channels(pa, output_device_index)
+			device_name    = str(pa.get_device_info_by_index(output_device_index)["name"])
+			_log.info(
+				"Output device %r supports up to %d channel(s); using %d",
+				device_name, device_max_out, self._output_channels,
+			)
+			if self._output_channels > device_max_out:
+				raise ValueError(
+					f"player.audio.channels = {self._output_channels} exceeds the output "
+					f"device {device_name!r} capability ({device_max_out} channel(s)) — "
+					f"lower player.audio.channels, or route within {device_max_out} channels."
+				)
+
 			# Validate output routing indices against the resolved device
 			# channel count.  The device count is only known here (after device
 			# selection), so this fix-up runs at startup.  It must be applied to

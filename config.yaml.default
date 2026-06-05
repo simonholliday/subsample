@@ -301,10 +301,15 @@ player:
     # recorder's bit depth.  Use 16 if the device only supports 16-bit output.
 
     # channels: null
-    # Number of output channels.  null = stereo (2).  Set to match your audio
-    # interface when using per-instrument output routing (e.g. 8 for a Focusrite
-    # Scarlett 18i20, 4 for a 4-output interface).  Each instrument's "output"
-    # field in the MIDI map routes its mix to specific physical outputs.
+    # Number of output channels.  null = stereo (2) — NOT the device maximum
+    # (opening every physical output for a stereo set would waste a wider mix
+    # per audio callback).  Set this to match your audio interface when using
+    # per-instrument output routing (e.g. 8 for a Focusrite Scarlett 18i20, 4
+    # for a 4-output interface).  Each instrument's "output" field in the MIDI
+    # map routes its mix to specific physical outputs.  At startup the player
+    # logs the device's detected maximum ("Output device 'X' supports up to N
+    # channel(s); using M"); if this value exceeds the device's N, startup
+    # fails with a clear error rather than a cryptic PortAudio one.
 
     # buffer_frames: null
     # PortAudio output buffer size in frames.  null (default) lets the OS pick
