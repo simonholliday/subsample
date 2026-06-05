@@ -474,31 +474,71 @@ def _load_bank (
 	reference_library: subsample.library.ReferenceLibrary,
 	cfg: subsample.config.Config,
 	output_sample_rate: int,
+	parent_map_dir: pathlib.Path,
 ) -> subsample.bank.Bank:
 
-	"""Load a single instrument bank: library, similarity matrix, and transform pipeline.
+	"""Load a single program: library, similarity matrix, and transform pipeline.
+
+	Two forms (mutually exclusive on the BankDefinition):
+
+	  - ``directory:`` shorthand — load the directory as the sample pool;
+	    the program reuses the player's top-level assignments.  The returned
+	    Bank carries ``note_map=None`` (use the global rules).
+	  - ``map:`` preset — load a whole mapper file (its own assignments +
+	    samples).  The library is populated from the preset's own path /
+	    ``directory:`` predicates (resolved relative to the preset folder),
+	    and the returned Bank carries the preset's note_map / zone_templates /
+	    mapped_ccs so a Program Change swaps the rules too.
 
 	Args:
-		defn:               Parsed bank definition from the MIDI map.
+		defn:               Parsed program definition from the MIDI map.
 		reference_library:  Shared reference library for similarity scoring.
 		cfg:                Full application config (memory limits, transform settings).
 		output_sample_rate: Effective player output sample rate for variant resampling.
+		parent_map_dir:     Directory of the top-level MIDI map, used to
+		                    resolve a relative ``map:`` preset path.
 
 	Returns:
 		Fully loaded Bank ready for playback.
+
+	Raises:
+		ValueError: If a ``map:`` preset path is missing or itself declares
+		a nested ``programs:`` block.
 	"""
 
 	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
-	directory = pathlib.Path(defn.directory)
 
-	# Load samples.
-	instrument_library = subsample.library.load_instrument_library(
-		directory,
-		max_instrument_bytes,
-		load_audio=True,
-		with_preview=cfg.recorder.previews,
-		target_sample_rate=output_sample_rate,
-	)
+	preset_result: typing.Optional[subsample.player.MidiMapResult] = None
+
+	if defn.map_path is not None:
+		# `map:` preset — load the mapper file; the library starts empty and
+		# is filled by the preset's own path / directory references below.
+		preset_path = parent_map_dir / defn.map_path
+		if not preset_path.exists():
+			raise ValueError(
+				f"Program {defn.name!r}: preset map {defn.map_path!r} not found "
+				f"(resolved to {preset_path})"
+			)
+		preset_result = subsample.player.load_midi_map(
+			preset_path, reference_library.names(), strict=cfg.player.strict_midi_map,
+		)
+		if preset_result.bank_definitions:
+			raise ValueError(
+				f"Program {defn.name!r}: preset {defn.map_path!r} declares its own "
+				f"'programs:' — nested presets are not allowed"
+			)
+		directory = preset_path.parent
+		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
+	else:
+		# `directory:` shorthand — the directory IS the pool.
+		directory = pathlib.Path(typing.cast(str, defn.directory))
+		instrument_library = subsample.library.load_instrument_library(
+			directory,
+			max_instrument_bytes,
+			load_audio=True,
+			with_preview=cfg.recorder.previews,
+			target_sample_rate=output_sample_rate,
+		)
 
 	# Similarity matrix (per-bank — rankings are relative to each bank's samples).
 	similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
@@ -546,16 +586,44 @@ def _load_bank (
 		disk_cache=variant_disk_cache,
 	)
 
-	# Auto-enqueue variants for pre-loaded samples.
+	# For a `map:` preset, populate the (empty) library + similarity matrix
+	# from the preset's own path / directory references — these resolve
+	# relative to the preset folder (load_midi_map stamped the preset's
+	# midi_map_dir into each directory predicate), so a self-contained kit
+	# folder loads with no extra coupling.  Then validate its extracts.
+	if preset_result is not None:
+		subsample.player._resolve_path_references(
+			preset_result.note_map, [similarity_matrix], instrument_library,
+			target_sample_rate=output_sample_rate,
+			with_preview=cfg.recorder.previews,
+		)
+		subsample.player._validate_assignment_extracts(preset_result.note_map, instrument_library)
+		if len(preset_result.note_map) == 0:
+			_log.warning("Program %r preset %s has no assignments", defn.name, defn.map_path)
+		elif len(instrument_library) == 0:
+			_log.warning(
+				"Program %r preset %s loaded no samples — check its 'directory:' predicates",
+				defn.name, defn.map_path,
+			)
+
+	# Auto-enqueue variants for loaded samples.
 	if len(instrument_library) > 0:
 		for record in instrument_library.samples():
 			transform_manager.on_sample_added(record)
 
 	_log.info(
-		"Bank %r loaded: %d sample(s) from %s  [%s]",
-		defn.name, len(instrument_library), defn.directory,
+		"Program %r loaded: %d sample(s) from %s  [%s]",
+		defn.name, len(instrument_library), directory,
 		instrument_library.format_memory(),
 	)
+
+	preset_zone_templates: typing.Optional[tuple[typing.Any, ...]] = None
+	preset_mapped_ccs:     typing.Optional[set[int]]               = None
+	if preset_result is not None:
+		preset_zone_templates = preset_result.zone_templates
+		preset_mapped_ccs     = subsample.player._collect_mapped_ccs(
+			preset_result.note_map, preset_result.zone_templates,
+		)
 
 	return subsample.bank.Bank(
 		name=defn.name,
@@ -564,7 +632,34 @@ def _load_bank (
 		instrument_library=instrument_library,
 		similarity_matrix=similarity_matrix,
 		transform_manager=transform_manager,
+		note_map=preset_result.note_map if preset_result is not None else None,
+		zone_templates=preset_zone_templates,
+		mapped_ccs=preset_mapped_ccs,
 	)
+
+
+def _apply_active_preset_rules (
+	player: subsample.player.MidiPlayer,
+	bank_manager: typing.Optional[subsample.bank.BankManager],
+) -> None:
+
+	"""Install the active program's preset rules at startup, if it carries any.
+
+	The player is constructed with the top-level note_map / zone_templates,
+	but the BankManager's active program (e.g. a ``map:`` default_program) may
+	carry its own.  Swap them in before playback so the default program's
+	rules are live from the first note rather than only after the first
+	Program Change.
+	"""
+
+	if bank_manager is None:
+		return
+
+	active = bank_manager.active_bank
+	if active.note_map is None:
+		return
+
+	player._apply_rule_set(active.note_map, active.zone_templates or (), active.mapped_ccs or set())
 
 
 def _start_player (
@@ -700,6 +795,7 @@ def _start_player (
 		if sv_cell is not None and sv_cell[0] is not None:
 			player.events.on("cc", sv_cell[0]._on_cc)
 
+		_apply_active_preset_rules(player, bank_manager)
 		player.update_pitched_assignments()
 		try:
 			player.run()
@@ -759,6 +855,7 @@ def _start_player (
 	if sv_cell is not None and sv_cell[0] is not None:
 		player.events.on("cc", sv_cell[0]._on_cc)
 
+	_apply_active_preset_rules(player, bank_manager)
 	player.update_pitched_assignments()
 	try:
 		player.run()
@@ -890,31 +987,56 @@ def _main_impl () -> None:
 	# cfg.instrument.directory is ignored (banks take precedence).
 	if bank_definitions:
 		_log.info(
-			"MIDI map declares %d bank(s) — ignoring instrument.directory (%s)",
+			"MIDI map declares %d program(s) — ignoring instrument.directory (%s)",
 			len(bank_definitions), cfg.instrument.directory,
 		)
 
+		parent_map_dir = pathlib.Path(typing.cast(str, cfg.player.midi_map)).parent
+
 		banks: list[subsample.bank.Bank] = []
 		for defn in bank_definitions:
-			bank = _load_bank(defn, reference_library, cfg, output_sample_rate)
+			bank = _load_bank(defn, reference_library, cfg, output_sample_rate, parent_map_dir)
 			banks.append(bank)
+			source = defn.map_path if defn.map_path is not None else defn.directory
 			print(
-				f"  Bank {defn.program:<3d}     : {defn.name!r} — "
-				f"{len(bank.instrument_library)} sample(s) from {defn.directory}"
+				f"  Program {defn.program:<3d}  : {defn.name!r} — "
+				f"{len(bank.instrument_library)} sample(s) from {source}"
 			)
 
 		bank_manager = subsample.bank.BankManager(banks, bank_channel, default_program=default_bank)
 
+		# Eager-load memory guard (WARN only — never blocks startup).  A
+		# program whose audio cannot stay fully resident within
+		# instrument.max_memory_mb is evicting at load, so the first triggers
+		# after a switch to it will reload from disk (lag).  And because each
+		# program's library is capped independently, N programs can use up to
+		# N× the configured budget in aggregate.
+		for bank in banks:
+			if bank.instrument_library.memory_used >= bank.instrument_library.memory_limit:
+				_log.warning(
+					"Program %r exceeds instrument.max_memory_mb (%.0f MB) — samples "
+					"will reload on switch (lag); raise the limit to keep it resident",
+					bank.name, cfg.instrument.max_memory_mb,
+				)
+		total_used = sum(b.instrument_library.memory_used for b in banks)
+		if total_used > max_instrument_bytes:
+			_log.warning(
+				"Programs use %.0f MB of audio in total — more than the "
+				"instrument.max_memory_mb budget (%.0f MB); eager-loading every "
+				"program multiplies the budget by the program count",
+				total_used / (1024 * 1024), cfg.instrument.max_memory_mb,
+			)
+
 		# The primary instrument_library/similarity/transform used by the
-		# recorder on_complete callback come from the first bank. Captures
-		# directed at a bank directory are also picked up by that bank's
+		# recorder on_complete callback come from the first program. Captures
+		# directed at its directory are also picked up by that program's
 		# watcher (see below).
 		instrument_library  = banks[0].instrument_library
 		similarity_matrix   = banks[0].similarity_matrix
 		transform_manager   = banks[0].transform_manager
 
 		print(
-			f"  Banks        : {len(banks)} loaded — "
+			f"  Programs     : {len(banks)} loaded — "
 			f"switch via Program Change on ch {bank_channel}"
 		)
 
@@ -1172,10 +1294,12 @@ def _main_impl () -> None:
 
 			"""Reload the MIDI map and deliver it to the active player.
 
-			Bank-related edits (the `banks:` block, `bank_channel:`, and
-			`default_bank:`) are not hot-reloadable in this version — the
-			callback warns and keeps the current bank state.  Assignments
-			under existing banks reload as normal.
+			Program-set edits (the `programs:` block, `program_channel:`, and
+			`default_program:`) are not hot-reloadable in this version — the
+			callback warns and keeps the current program state.  Editing a
+			`map:` preset's OWN file is also not watched (only the top-level
+			map is) and needs a restart.  Top-level assignment edits reload
+			as normal.
 			"""
 
 			player = _player_cell[0]
@@ -1197,18 +1321,21 @@ def _main_impl () -> None:
 				)
 				return
 
-			# Detect bank-related changes the live reload can't apply, so the
-			# user isn't left wondering why an edit to banks:/bank_channel:/
-			# default_bank: has no audible effect.
+			# Detect program-set changes the live reload can't apply, so the
+			# user isn't left wondering why an edit to programs:/program_channel:/
+			# default_program: has no audible effect.  The BankDefinition diff
+			# also catches a changed map: path or a program retyped between
+			# map: and directory: (map_path is part of the frozen equality).
 			if (
 				result.bank_definitions != _startup_bank_definitions
 				or result.bank_channel != _startup_bank_channel
 				or result.default_bank != _startup_default_bank
 			):
 				_log.warning(
-					"MIDI map reload: bank definitions, bank_channel, or "
-					"default_bank changed — these only take effect on restart. "
-					"Assignment-only changes will still apply.",
+					"MIDI map reload: programs, program_channel, or "
+					"default_program changed — these only take effect on restart. "
+					"Editing a map: preset's own file also needs a restart. "
+					"Top-level assignment changes will still apply.",
 				)
 
 			# reload_midi_map runs update_assignments() against the new map

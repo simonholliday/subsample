@@ -90,7 +90,7 @@
 #   #    contiguous slice of MIDI keys centred on its own pitch.  Zone
 #   #    boundaries meet at midpoints; the lowest sample extends down to
 #   #    the keyboard floor and the highest extends up to the ceiling.
-#   #    re-derived live whenever a new sample arrives, a bank switches,
+#   #    re-derived live whenever a new sample arrives, a program switches,
 #   #    or the MIDI map reloads.  See README "Zone-tuned" for details.
 #   #
 #   #    a) Full keyboard:
@@ -148,6 +148,29 @@
 #       template: percussion
 #       notes: drum.snare
 #       select: { pick: any, where: { directory: Snare } }
+#
+#   # 7. Programs - switch instrument sets live via MIDI Program Change.
+#   #    `programs:` is a TOP-LEVEL section.  Each entry has a name, an
+#   #    optional `program` number (0-127, defaults to its position), and
+#   #    EXACTLY ONE of:
+#   #      directory:  swap the sample pool only; reuse the top-level
+#   #                  `assignments:` (so an `assignments:` block is required).
+#   #      map:        a full preset - a whole mapper file with its own
+#   #                  assignments AND samples (its relative `directory:`
+#   #                  predicates resolve next to the preset file).  Switching
+#   #                  to it swaps the rules and the pool together.
+#   #    Send a Program Change on `program_channel` to switch.  Editing a
+#   #    preset file, or the programs:/program_channel:/default_program:
+#   #    settings, needs a restart.
+#   programs:
+#     - name: "Acoustic Kit"
+#       program: 0
+#       directory: samples/acoustic     # shorthand: reuse top-level assignments
+#     - name: "Electronic Kit"
+#       program: 1
+#       map: kits/electronic/midi-map.yaml   # preset: own assignments + samples
+#   program_channel: 10
+#   default_program: 0
 #
 # The rest of this file is:
 #   EXAMPLES        commented-out assignments, ordered simple to

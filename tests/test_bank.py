@@ -25,9 +25,13 @@ def _make_bank (
 	name: str = "Test Bank",
 	program: int = 0,
 	directory: str = "/tmp/bank",
+	note_map: typing.Optional[typing.Any] = None,
 ) -> subsample.bank.Bank:
 
-	"""Create a minimal Bank for unit testing (empty library, no similarity)."""
+	"""Create a minimal Bank for unit testing (empty library, no similarity).
+
+	Pass ``note_map`` to model a ``map:`` preset that carries its own rules.
+	"""
 
 	library = subsample.library.InstrumentLibrary(max_memory_bytes=1024 * 1024)
 
@@ -40,6 +44,9 @@ def _make_bank (
 		instrument_library=library,
 		similarity_matrix=typing.cast(subsample.similarity.SimilarityMatrix, None),
 		transform_manager=None,
+		note_map=note_map,
+		zone_templates=() if note_map is not None else None,
+		mapped_ccs=set() if note_map is not None else None,
 	)
 
 
@@ -94,10 +101,33 @@ class TestParseBanks:
 		with pytest.raises(ValueError, match="missing required 'name'"):
 			subsample.bank.parse_banks(raw)
 
-	def test_missing_directory_raises (self) -> None:
+	def test_missing_source_raises (self) -> None:
 		raw = [{"name": "Kit A"}]
-		with pytest.raises(ValueError, match="missing required 'directory'"):
+		with pytest.raises(ValueError, match="needs exactly one of 'map' or 'directory'"):
 			subsample.bank.parse_banks(raw)
+
+	def test_map_and_directory_mutually_exclusive_raises (self) -> None:
+		raw = [{"name": "Kit A", "directory": "./a", "map": "kit/midi-map.yaml"}]
+		with pytest.raises(ValueError, match="mutually exclusive"):
+			subsample.bank.parse_banks(raw)
+
+	def test_map_only_parses (self) -> None:
+		raw = [{"name": "Acoustic", "map": "kits/acoustic/midi-map.yaml", "program": 3}]
+		defs = subsample.bank.parse_banks(raw)
+		assert len(defs) == 1
+		assert defs[0].map_path == "kits/acoustic/midi-map.yaml"
+		assert defs[0].directory is None
+		assert defs[0].program == 3
+
+	def test_map_program_defaults_to_index (self) -> None:
+		raw = [
+			{"name": "A", "directory": "./a"},
+			{"name": "B", "map": "b/midi-map.yaml"},
+		]
+		defs = subsample.bank.parse_banks(raw)
+		assert defs[0].program == 0
+		assert defs[1].program == 1
+		assert defs[1].map_path == "b/midi-map.yaml"
 
 	def test_program_out_of_range_raises (self) -> None:
 		raw = [{"name": "Kit A", "directory": "./a", "program": 128}]
@@ -138,6 +168,19 @@ class TestBankManager:
 
 		assert bm.switch_to(1) is True
 		assert bm.active_bank is b
+
+	def test_preset_bank_carries_rules_through_switch (self) -> None:
+		"""A `map:` preset's note_map survives switch_to / active_bank."""
+		rules = {(9, 36): []}
+		a = _make_bank(name="Directory", program=0)               # note_map None
+		b = _make_bank(name="Preset", program=1, note_map=rules)  # carries rules
+		bm = subsample.bank.BankManager([a, b])
+
+		assert bm.active_bank.note_map is None
+		assert bm.switch_to(1) is True
+		assert bm.active_bank.note_map is rules
+		assert bm.active_bank.zone_templates == ()
+		assert bm.active_bank.mapped_ccs == set()
 
 	def test_switch_to_already_active (self) -> None:
 		a = _make_bank(name="A", program=0)
@@ -324,3 +367,29 @@ assignmnets: []
 """)
 		with pytest.raises(ValueError, match="unknown top-level key"):
 			subsample.player.load_midi_map(path, [])
+
+	def test_directory_program_requires_top_level_assignments (self, tmp_path: pathlib.Path) -> None:
+		"""A directory: program with no top-level assignments: is rejected."""
+		path = self._write_map(tmp_path, """
+programs:
+  - name: Kit
+    directory: ./kit
+""")
+		with pytest.raises(ValueError, match="'assignments:' is required"):
+			subsample.player.load_midi_map(path, [])
+
+	def test_all_map_programs_allow_missing_top_level_assignments (self, tmp_path: pathlib.Path) -> None:
+		"""When every program is a map: preset, top-level assignments: is optional."""
+		path = self._write_map(tmp_path, """
+programs:
+  - name: Acoustic
+    map: kits/acoustic/midi-map.yaml
+  - name: Electronic
+    map: kits/electronic/midi-map.yaml
+""")
+		# Parses the top-level map only (preset files are loaded later, in cli);
+		# must not raise despite the absent top-level assignments: block.
+		result = subsample.player.load_midi_map(path, [])
+		assert result.note_map == {}
+		assert len(result.bank_definitions) == 2
+		assert result.bank_definitions[0].map_path == "kits/acoustic/midi-map.yaml"

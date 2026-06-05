@@ -1665,8 +1665,24 @@ def load_midi_map (
 	raw_default_bank = raw.get("default_program")
 	default_bank: typing.Optional[int] = int(raw_default_bank) if raw_default_bank is not None else None
 
+	# Top-level `assignments:` is required for the no-programs case and
+	# whenever any program uses the `directory:` shorthand (those programs
+	# reuse the top-level assignments against their swapped pool).  When
+	# every program is a `map:` preset, each supplies its own assignments,
+	# so the top-level block is optional and a missing one is not a warning.
+	directory_programs = [d.name for d in bank_definitions if d.directory is not None]
+	needs_top_assignments = (not bank_definitions) or bool(directory_programs)
+
 	if "assignments" not in raw:
-		_log.warning("MIDI map %s has no assignments — no notes will be mapped", path)
+		if needs_top_assignments and directory_programs:
+			raise ValueError(
+				f"MIDI map {path}: 'assignments:' is required because program(s) "
+				f"{directory_programs!r} use 'directory:' (they reuse the top-level "
+				f"assignments) — add an 'assignments:' block or give those programs "
+				f"their own 'map:'"
+			)
+		if needs_top_assignments:
+			_log.warning("MIDI map %s has no assignments — no notes will be mapped", path)
 		return MidiMapResult(
 			note_map={},
 			bank_definitions=bank_definitions,
@@ -2218,6 +2234,15 @@ class MidiPlayer:
 		# don't exist in midi_map yet.
 		self._mapped_ccs: set[int] = _collect_mapped_ccs(midi_map, self._zone_templates)
 
+		# Immutable snapshot of the top-level (global) rules.  `directory:`
+		# programs reuse these; a `map:` preset switch overwrites the active
+		# _base_note_map, so switching back to a `directory:` program must
+		# restore THESE, not whatever preset was last active.  Never mutated
+		# after construction.
+		self._top_level_note_map:       NoteMap                  = midi_map
+		self._top_level_zone_templates: tuple[ZoneTemplate, ...] = zone_templates
+		self._top_level_mapped_ccs:     set[int]                 = set(self._mapped_ccs)
+
 		# Debounce timer for CC-triggered re-evaluation.
 		self._cc_debounce_timer: typing.Optional[threading.Timer] = None
 		self._cc_debounce_lock: threading.Lock = threading.Lock()
@@ -2461,55 +2486,32 @@ class MidiPlayer:
 			# Validate output routing indices against the resolved device
 			# channel count.  The device count is only known here (after device
 			# selection), so this fix-up runs at startup.  It must be applied to
-			# the BASE map and the zone-tuned templates — the sources every
-			# re-materialisation rebuilds _note_map from — otherwise the next
-			# update_assignments() would revert the strip and a note that worked
-			# at startup would start raising in route_to_device (dropped by
-			# _safe_handle_message) after the first capture / knob / bank switch.
-
-			def _strip_oob_routing (
-				routing: typing.Optional[tuple[int, ...]],
-				label:   str,
-			) -> typing.Optional[tuple[int, ...]]:
-
-				"""Return None (default routing) if any index exceeds the device,
-				logging once; otherwise return the routing unchanged."""
-
-				if routing is None:
-					return None
-
-				for idx in routing:
-					if idx >= self._output_channels:
-						_log.warning(
-							"%s: output index %d exceeds device channel count (%d) — "
-							"using default routing",
-							label, idx + 1, self._output_channels,
-						)
-						return None
-
-				return routing
-
-			fixed_base: NoteMap = {}
-
-			for (ch, note), entries in self._base_note_map.items():
-				fixed_base[(ch, note)] = [
-					(
-						dataclasses.replace(asgn, output_routing=stripped)
-						if (stripped := _strip_oob_routing(asgn.output_routing, f"Assignment {asgn.name!r} (ch {ch}, note {note})")) is not asgn.output_routing
-						else asgn,
-						pick_spec,
-					)
-					for asgn, pick_spec in entries
-				]
-
-			self._base_note_map = fixed_base
-
-			self._zone_templates = tuple(
-				dataclasses.replace(t, output_routing=stripped)
-				if (stripped := _strip_oob_routing(t.output_routing, f"Zone template {t.name!r}")) is not t.output_routing
-				else t
-				for t in self._zone_templates
+			# every rule SOURCE — the top-level map and each `map:` preset —
+			# because those are what re-materialisation and Program Change
+			# rebuild _note_map from; otherwise the next update_assignments()
+			# would revert the strip and a note that worked at startup would
+			# start raising in route_to_device (dropped by _safe_handle_message)
+			# after the first capture / knob / program switch.  Each source is
+			# stripped exactly once (single warning), then the active base is
+			# re-pointed at the stripped source for the currently active program.
+			self._top_level_note_map, self._top_level_zone_templates = self._strip_oob_routing_rules(
+				self._top_level_note_map, self._top_level_zone_templates,
 			)
+
+			if self._bank_manager is not None:
+				for _bank in self._bank_manager.all_banks():
+					if _bank.note_map is not None:
+						_bank.note_map, _bank.zone_templates = self._strip_oob_routing_rules(
+							_bank.note_map, _bank.zone_templates or (),
+						)
+
+			active_bank = self._bank_manager.active_bank if self._bank_manager is not None else None
+			if active_bank is not None and active_bank.note_map is not None:
+				self._base_note_map  = active_bank.note_map
+				self._zone_templates = active_bank.zone_templates or ()
+			else:
+				self._base_note_map  = self._top_level_note_map
+				self._zone_templates = self._top_level_zone_templates
 
 			# Rebuild the working map and selection cache from the fixed sources.
 			self._materialize_zones()
@@ -2861,10 +2863,40 @@ class MidiPlayer:
 					with self._state_lock:
 						self._last_played.clear()
 						self._segment_counters.clear()
-					# Defensive: a malformed bank map raised at query time
-					# (e.g. similarity order without where.reference) must
-					# not kill the player thread mid-set.
-					self._try_update_assignments(f"bank switch to program {msg.program}")
+
+					bank = bm.active_bank
+
+					if bank.note_map is not None:
+						# `map:` preset — swap the RULES too (assignments /
+						# zones / CCs), not just the pool.
+						rule_set = (
+							bank.note_map,
+							bank.zone_templates or (),
+							bank.mapped_ccs or set(),
+						)
+					else:
+						# `directory:` shorthand — reuse the top-level rules.
+						# Restore the immutable snapshot (a prior `map:` preset
+						# may have replaced the active base) and re-query it
+						# against the swapped pool.
+						rule_set = (
+							self._top_level_note_map,
+							self._top_level_zone_templates,
+							self._top_level_mapped_ccs,
+						)
+
+					# _apply_rule_set runs update_assignments() against the
+					# now-active bank's library and rolls back on failure, so a
+					# broken kit (or a query that raises) never kills the player
+					# thread mid-set.
+					try:
+						self._apply_rule_set(*rule_set)
+					except Exception as exc:
+						_log.error(
+							"Program %d (%s) rules failed to apply — keeping "
+							"previous rules: %s",
+							msg.program, bank.name, exc,
+						)
 			return
 
 		# Control Change: update CC state and debounce re-evaluation for
@@ -3696,51 +3728,111 @@ class MidiPlayer:
 				context, exc,
 			)
 
-	def reload_midi_map (self, new_result: MidiMapResult) -> None:
+	def _strip_oob_routing_rules (
+		self,
+		base_note_map:  NoteMap,
+		zone_templates: tuple[ZoneTemplate, ...],
+	) -> tuple[NoteMap, tuple[ZoneTemplate, ...]]:
 
-		"""Replace the active note map (and zone-tuned templates) and re-compute variants.
+		"""Drop output-routing indices that exceed the resolved device channel count.
 
-		Atomic in the sense that matters for live performance: if the new
-		map is structurally valid but semantically broken (e.g. an order
-		clause like ``similarity`` whose required ``where.reference:`` was
-		accidentally commented out, or a zone-tuned template whose query
-		raises), ``update_assignments()`` raises on the first offending
-		assignment.  This method catches that, restores the previous map
-		AND zone templates, and re-raises so the watcher caller can log
-		and stay live under the old configuration — playback never stops
-		mid-performance for a YAML typo.
+		Output routing can only be validated once the output device is
+		selected (in ``run``).  Any assignment or zone template whose
+		``output:`` names a channel the device lacks falls back to default
+		routing, logged once.  Applied to every rule source — the top-level
+		map and each ``map:`` preset — so a later re-materialisation or
+		Program Change never revives a stripped index (the bug the strip
+		guards against).
 
-		Thread-safety: dict rebinds and tuple rebinds are atomic under the
-		GIL, so any in-flight ``_handle_message()`` call sees either the
-		old configuration or the new, never a half-applied state.
+		Returns the (possibly rebuilt) note map and zone-template tuple;
+		entries without out-of-bounds routing are returned unchanged.
+		"""
+
+		def _strip (
+			routing: typing.Optional[tuple[int, ...]],
+			label:   str,
+		) -> typing.Optional[tuple[int, ...]]:
+
+			if routing is None:
+				return None
+
+			for idx in routing:
+				if idx >= self._output_channels:
+					_log.warning(
+						"%s: output index %d exceeds device channel count (%d) — "
+						"using default routing",
+						label, idx + 1, self._output_channels,
+					)
+					return None
+
+			return routing
+
+		fixed_base: NoteMap = {}
+
+		for (ch, note), entries in base_note_map.items():
+			fixed_base[(ch, note)] = [
+				(
+					dataclasses.replace(asgn, output_routing=stripped)
+					if (stripped := _strip(asgn.output_routing, f"Assignment {asgn.name!r} (ch {ch}, note {note})")) is not asgn.output_routing
+					else asgn,
+					pick_spec,
+				)
+				for asgn, pick_spec in entries
+			]
+
+		fixed_zones = tuple(
+			dataclasses.replace(t, output_routing=stripped)
+			if (stripped := _strip(t.output_routing, f"Zone template {t.name!r}")) is not t.output_routing
+			else t
+			for t in zone_templates
+		)
+
+		return fixed_base, fixed_zones
+
+	def _apply_rule_set (
+		self,
+		base_note_map: NoteMap,
+		zone_templates: tuple[ZoneTemplate, ...],
+		mapped_ccs: set[int],
+	) -> None:
+
+		"""Atomically swap the active rule set and re-materialise, with rollback.
+
+		Shared core of both ``reload_midi_map`` (file-watcher hot-reload) and
+		the Program Change handler's preset switch.  Swaps the note map, zone
+		templates and CC set, then runs ``update_assignments()`` to validate
+		and re-materialise against the *currently active* library/pool.  If
+		validation raises, all four fields are restored and the exception is
+		re-raised so the caller can stay live under the previous rules.
+
+		Thread-safety: dict and tuple rebinds are atomic under the GIL, so any
+		in-flight ``_handle_message()`` sees either the old rules or the new,
+		never a half-applied state.  Cache clears follow the lock-ordering
+		rule (``_mix_matrix_lock`` and ``_state_lock`` are never nested).
 
 		Args:
-			new_result: Parsed MidiMapResult from load_midi_map().  Must be
-			            a complete replacement (not a diff).  Both
-			            ``note_map`` (manual entries) and
-			            ``zone_templates`` are swapped in.
+			base_note_map:  Manual note routing to install (NoteMap).
+			zone_templates: Zone-tuned templates to install.
+			mapped_ccs:     CC numbers referenced by the new rule set.
 
 		Raises:
 			Exception: whatever update_assignments() / _materialize_zones()
-			surfaces while validating the new map.  The active
-			configuration is restored before propagating, so the player
-			remains usable.
+			surfaces; the previous rules are restored before propagating.
 		"""
 
 		old_base_note_map  = self._base_note_map
 		old_note_map       = self._note_map
 		old_zone_templates = self._zone_templates
 		old_mapped_ccs     = self._mapped_ccs
-		old_count          = len(self._note_map)
 
 		# Apply the new configuration first so update_assignments()
 		# validates against what the player would actually run with.  This
 		# is the canonical validation path — we don't duplicate query
 		# logic for a separate dry-run.
-		self._base_note_map  = new_result.note_map
-		self._note_map       = dict(new_result.note_map)
-		self._zone_templates = new_result.zone_templates
-		self._mapped_ccs     = _collect_mapped_ccs(new_result.note_map, new_result.zone_templates)
+		self._base_note_map  = base_note_map
+		self._note_map       = dict(base_note_map)
+		self._zone_templates = zone_templates
+		self._mapped_ccs     = mapped_ccs
 
 		try:
 			# update_assignments() calls _materialize_zones() at its top,
@@ -3768,6 +3860,60 @@ class MidiPlayer:
 			self._mix_matrix_cache.clear()
 		with self._state_lock:
 			self._segment_counters.clear()
+
+	def reload_midi_map (self, new_result: MidiMapResult) -> None:
+
+		"""Replace the TOP-LEVEL note map (and zone-tuned templates) and re-compute variants.
+
+		Called by the file-watcher when the top-level MIDI map changes.
+		Refreshes the immutable top-level snapshot (so a later switch to a
+		``directory:`` program picks up the edit), then applies the new rules
+		live — UNLESS a ``map:`` preset is currently active, in which case the
+		top-level assignments are not the live rule set and applying them would
+		clobber the preset; the snapshot refresh still happens so the edit
+		takes effect on the next non-preset switch.
+
+		Atomic in the sense that matters for live performance: if the new
+		map is structurally valid but semantically broken (e.g. an order
+		clause like ``similarity`` whose required ``where.reference:`` was
+		accidentally commented out, or a zone-tuned template whose query
+		raises), ``update_assignments()`` raises on the first offending
+		assignment.  ``_apply_rule_set`` catches that, restores the previous
+		map AND zone templates, and re-raises so the watcher caller can log
+		and stay live under the old configuration — playback never stops
+		mid-performance for a YAML typo.
+
+		Args:
+			new_result: Parsed MidiMapResult from load_midi_map().  Must be
+			            a complete replacement (not a diff).  Both
+			            ``note_map`` (manual entries) and
+			            ``zone_templates`` are swapped in.
+
+		Raises:
+			Exception: whatever update_assignments() / _materialize_zones()
+			surfaces while validating the new map.  The active
+			configuration is restored before propagating, so the player
+			remains usable.
+		"""
+
+		new_ccs = _collect_mapped_ccs(new_result.note_map, new_result.zone_templates)
+
+		# Refresh the top-level snapshot — `directory:` programs reuse it.
+		self._top_level_note_map       = new_result.note_map
+		self._top_level_zone_templates = new_result.zone_templates
+		self._top_level_mapped_ccs     = new_ccs
+
+		# A `map:` preset is live — don't clobber it with the top-level rules.
+		if self._bank_manager is not None and self._bank_manager.active_bank.note_map is not None:
+			_log.info(
+				"MIDI map reloaded (top-level): a map: preset is active, so the "
+				"edit applies to directory programs / on the next non-preset switch",
+			)
+			return
+
+		old_count = len(self._note_map)
+
+		self._apply_rule_set(new_result.note_map, new_result.zone_templates, new_ccs)
 
 		_log.info(
 			"MIDI map reloaded: %d note(s)%s (was %d)",

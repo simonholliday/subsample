@@ -170,3 +170,58 @@ class TestResolvePathReferences:
 
 		# add_reference should be called exactly once despite two assignments
 		assert matrix.add_reference.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# TestPresetSelfContainedLoading — a `map:` preset's own directory predicates
+# resolve relative to the preset folder and populate a fresh library.  This is
+# the core path-resolution that cli._load_bank relies on for a `map:` program.
+# ---------------------------------------------------------------------------
+
+class TestPresetSelfContainedLoading:
+
+	def test_preset_directory_predicate_loads_relative_to_preset (
+		self,
+		tmp_path: pathlib.Path,
+	) -> None:
+
+		"""A self-contained kit folder (preset map + Kick/ samples) loads as a unit."""
+
+		# Build kit/{midi-map.yaml, Kick/k.wav (+ sidecar)}.
+		kit_dir = tmp_path / "kit"
+		kick_dir = kit_dir / "Kick"
+		kick_dir.mkdir(parents=True)
+		tests.helpers._write_wav_and_sidecar(kick_dir, "k")
+
+		preset_path = kit_dir / "midi-map.yaml"
+		preset_path.write_text(
+			"assignments:\n"
+			"  - name: Kick\n"
+			"    channel: 10\n"
+			"    notes: 36\n"
+			"    select:\n"
+			"      where:\n"
+			"        directory: Kick\n",
+			encoding="utf-8",
+		)
+
+		# Parse the preset map; its `directory: Kick` predicate is stamped with
+		# the preset folder as the resolution base (midi_map_dir = preset.parent).
+		result = subsample.player.load_midi_map(preset_path, [])
+		assert (9, 36) in result.note_map
+
+		# A `map:` preset starts with an EMPTY library; _resolve_path_references
+		# fills it from the preset's own directory predicates.
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=4 * 1024 * 1024)
+		matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		subsample.player._resolve_path_references(
+			result.note_map, [matrix], library, with_preview=False,
+		)
+
+		# The kit's sample loaded — proving the directory predicate resolved
+		# against the preset folder, not the CWD or some external root.
+		assert len(library) == 1
+		loaded = list(library.samples())
+		assert loaded[0].filepath is not None
+		assert loaded[0].filepath.resolve() == (kick_dir / "k.wav").resolve()

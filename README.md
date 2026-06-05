@@ -1314,9 +1314,9 @@ ambisonic samples using Rubber Band's phase-coherent multichannel engine
 
 ### Programs - switching instrument sets via MIDI
 
-The MIDI map can optionally declare multiple instrument directories ("programs")
-that are all loaded at startup. Switch between them at runtime using MIDI
-Program Change messages - no restart, no disk I/O, instant switching:
+The MIDI map can optionally declare multiple **programs** (presets) that are all
+loaded at startup. Switch between them at runtime using MIDI Program Change
+messages - no restart, no disk I/O, instant switching:
 
 ```yaml
 programs:
@@ -1331,6 +1331,18 @@ program_channel: 10    # MIDI channel for Program Change messages (1-16, or 0 = 
 default_program: 0     # program number to activate at startup (default: first in list)
 ```
 
+Each program entry has a `name`, an optional `program` number (0-127, defaults to
+its list position), and **exactly one** of two source forms:
+
+- **`directory:`** - swap the sample pool only. The program reuses the map's
+  top-level `assignments:` and just points them at a different folder. Use this
+  when the same routing rules should evaluate against different samples (the
+  `directory:` example above).
+- **`map:`** - a full **preset**: a whole mapper file with its own `assignments:`
+  *and* its own samples. A Program Change to this program swaps the routing rules
+  *and* the sample pool together - the MIDI-true meaning of a program change
+  (like selecting a different drum kit on a GM device).
+
 Each entry is selected by its `program` number (0-127), addressed by a MIDI
 **Program Change** message. This is deliberately *not* the MIDI **Bank Select**
 mechanism (CC 0 / CC 32), which subsample does not implement - so you address up
@@ -1343,10 +1355,50 @@ used as before - you do not need a `programs:` block for a single instrument set
 When present, it overrides `instrument.directory`. Each program gets its own
 sample library, similarity index, and transform cache.
 
-Assignments are program-agnostic - they query whichever program is active. Named
-samples (`where: { name: X }`) that only exist in one program silently produce no
-match in others; rule-based selects (`reference:`, `pitched:`, etc.) work
-naturally against whatever samples are present.
+With the `directory:` form, assignments are program-agnostic - the same top-level
+rules query whichever program is active. Named samples (`where: { name: X }`) that
+only exist in one program silently produce no match in others; rule-based selects
+(`reference:`, `pitched:`, etc.) work naturally against whatever samples are present.
+
+#### Programs as presets - the `map:` form
+
+A `map:` program is a complete, self-contained preset:
+
+```yaml
+programs:
+  - name: "Acoustic Kit"
+    program: 0
+    map: kits/acoustic/midi-map.yaml      # full preset - own assignments + own samples
+  - name: "Electronic Kit"
+    program: 1
+    map: kits/electronic/midi-map.yaml
+
+program_channel: 10
+default_program: 0
+# no top-level `assignments:` needed when every program is a `map:` preset
+```
+
+- The `map:` path is resolved **relative to the parent map's directory**.
+- The preset is an ordinary mapper file with its own `assignments:`. Its samples
+  come from its own `where: { directory: ... }` predicates and path references,
+  which resolve **relative to the preset's own folder** - so a self-contained kit
+  directory (`kits/acoustic/{midi-map.yaml, Kick/*.wav, Snare/*.wav, ...}`) works
+  as a drop-in unit.
+- A Program Change swaps **both** the rules and the pool atomically. A broken
+  preset is rolled back and logged rather than stopping playback.
+- Presets are **flat**: a preset may not declare its own `programs:` block.
+- The top-level `assignments:` block is **optional** when every program is a
+  `map:` preset, but **required** if any program uses the `directory:` form (those
+  reuse the top-level assignments).
+- You can **mix** `map:` and `directory:` programs in one map.
+
+`map:` and `directory:` programs are eager-loaded at startup so switching stays
+instant. If a program's samples don't fit within `instrument.max_memory_mb`, a
+startup warning notes that switching to it may lag (samples reload from disk).
+
+> **Editing a preset:** the file watcher follows only the top-level map. Editing a
+> `map:` preset's own file - or changing the `programs:` / `program_channel:` /
+> `default_program:` settings - requires a **restart** to take effect.
 
 #### Programs vs directory predicate
 

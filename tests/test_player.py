@@ -3850,6 +3850,164 @@ class TestReloadMidiMap:
 
 
 # ---------------------------------------------------------------------------
+# MidiPlayer — combined program (preset) switch
+# ---------------------------------------------------------------------------
+
+class TestProgramPresetSwitch:
+
+	"""A Program Change swaps the sample POOL and, for a map: preset, the RULES.
+
+	A `directory:` program (note_map None) reuses the top-level rules; a `map:`
+	preset (note_map set) brings its own.  Switching back to a directory
+	program must restore the top-level snapshot, not whatever preset was last
+	active.
+	"""
+
+	def _make_player (
+		self,
+		shutdown_event: threading.Event,
+	) -> tuple[
+		subsample.player.MidiPlayer,
+		typing.Any,
+		typing.Any,
+		subsample.player.NoteMap,
+		subsample.player.NoteMap,
+	]:
+
+		"""Build a player with two programs: directory (program 0) + map preset (1)."""
+
+		import pathlib
+
+		# Top-level rules (reused by the directory program): note 36.
+		top_map = _make_note_map(
+			_make_assignment(name="Top", reference="BD0025"), channel=9, notes=[36],
+		)
+		# Preset rules (carried by the map program): note 50.
+		preset_map = _make_note_map(
+			_make_assignment(name="Preset", reference="BD0025"), channel=9, notes=[50],
+		)
+
+		lib_dir    = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		lib_preset = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		sim_dir    = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		sim_preset = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		directory_bank = subsample.bank.Bank(
+			name="Directory", directory=pathlib.Path("/tmp/dir"), program=0,
+			instrument_library=lib_dir, similarity_matrix=sim_dir, transform_manager=None,
+		)
+		preset_bank = subsample.bank.Bank(
+			name="Preset", directory=pathlib.Path("/tmp/preset"), program=1,
+			instrument_library=lib_preset, similarity_matrix=sim_preset, transform_manager=None,
+			note_map=preset_map, zone_templates=(), mapped_ccs=set(),
+		)
+		bm = subsample.bank.BankManager(
+			[directory_bank, preset_bank], bank_channel=10, default_program=0,
+		)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			shutdown_event,
+			instrument_library=lib_dir,
+			similarity_matrix=sim_dir,
+			midi_map=top_map,
+			sample_rate=44100,
+			bit_depth=16,
+			bank_manager=bm,
+		)
+		return player, lib_dir, lib_preset, top_map, preset_map
+
+	def test_switch_swaps_both_pool_and_rules (self) -> None:
+
+		"""PC to a map preset swaps pool + rules; PC back restores top-level."""
+
+		import mido
+
+		player, lib_dir, lib_preset, top_map, preset_map = self._make_player(threading.Event())
+
+		# Default program 0 = directory: pool is lib_dir, rules are top-level.
+		assert player._effective_instrument_library is lib_dir
+		assert player._note_map == top_map
+
+		# Patch update_assignments so _apply_rule_set isolates the rule swap
+		# (no candidate-cache rebuild against mock libraries).
+		with unittest.mock.patch.object(player, "update_assignments"):
+			# Switch to the map preset (program 1) on the bank channel (mido 9).
+			player._handle_message(mido.Message("program_change", channel=9, program=1))
+			assert player._effective_instrument_library is lib_preset   # pool swapped
+			assert player._note_map == preset_map                       # rules swapped
+			assert (9, 50) in player._note_map
+			assert (9, 36) not in player._note_map
+
+			# Switch back to the directory program (0): rules revert to top-level.
+			player._handle_message(mido.Message("program_change", channel=9, program=0))
+			assert player._effective_instrument_library is lib_dir
+			assert player._note_map == top_map
+			assert (9, 36) in player._note_map
+			assert (9, 50) not in player._note_map
+
+	def test_bad_preset_keeps_previous_rules (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A preset whose update_assignments raises rolls back, player stays live."""
+
+		import logging
+		import mido
+
+		player, lib_dir, lib_preset, top_map, preset_map = self._make_player(threading.Event())
+
+		with unittest.mock.patch.object(
+			player, "update_assignments",
+			side_effect=ValueError("simulated preset query failure"),
+		):
+			with caplog.at_level(logging.ERROR, logger="subsample.player"):
+				player._handle_message(mido.Message("program_change", channel=9, program=1))
+
+		# switch_to succeeded so the pool swapped, but the bad rules rolled
+		# back to the previous (top-level) set — degraded but live.
+		assert player._effective_instrument_library is lib_preset
+		assert player._note_map == top_map
+		assert any("failed to apply" in r.message for r in caplog.records)
+
+	def test_apply_rule_set_success_swaps_fields (self) -> None:
+
+		"""_apply_rule_set installs the new base/zones/CCs on success."""
+
+		player, _lib_dir, _lib_preset, _top_map, preset_map = self._make_player(threading.Event())
+
+		with unittest.mock.patch.object(player, "update_assignments"):
+			player._apply_rule_set(preset_map, (), {7})
+
+		assert player._base_note_map == preset_map
+		assert player._note_map == preset_map
+		assert player._mapped_ccs == {7}
+		assert player._zone_templates == ()
+
+	def test_apply_rule_set_restores_on_failure (self) -> None:
+
+		"""_apply_rule_set restores all four fields when update_assignments raises."""
+
+		player, _lib_dir, _lib_preset, top_map, preset_map = self._make_player(threading.Event())
+
+		base_before  = player._base_note_map
+		ccs_before   = player._mapped_ccs
+		zones_before = player._zone_templates
+
+		with unittest.mock.patch.object(
+			player, "update_assignments", side_effect=ValueError("boom"),
+		):
+			with pytest.raises(ValueError, match="boom"):
+				player._apply_rule_set(preset_map, (), {7})
+
+		assert player._base_note_map is base_before
+		assert player._note_map == top_map
+		assert player._mapped_ccs == ccs_before
+		assert player._zone_templates == zones_before
+
+
+# ---------------------------------------------------------------------------
 # MidiPlayer._render_float — gain_db
 # ---------------------------------------------------------------------------
 

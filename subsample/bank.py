@@ -65,25 +65,37 @@ _log = logging.getLogger(__name__)
 @dataclasses.dataclass(frozen=True)
 class BankDefinition:
 
-	"""A bank declaration parsed from the MIDI map ``banks:`` list.
+	"""A program declaration parsed from the MIDI map ``programs:`` list.
+
+	Each entry carries exactly one of ``directory`` (the shorthand form —
+	swap the sample pool, reuse the top-level ``assignments:``) or
+	``map_path`` (the preset form — a whole mapper file that brings its own
+	assignments and, via its own relative ``directory:`` predicates, its own
+	samples).  ``parse_banks`` enforces the XOR.
 
 	Fields:
 		name:      Human-readable label shown in logs and the startup banner.
-		directory: Path to the sample directory (WAV + .analysis.json pairs).
-		program:   MIDI Program Change number (0-127) that activates this bank.
+		directory: Path to the sample directory (WAV + .analysis.json pairs),
+		           or None when this entry is a ``map:`` preset.
+		map_path:  Path to a preset mapper file (resolved relative to the
+		           parent map's directory), or None for the ``directory:`` form.
+		program:   MIDI Program Change number (0-127) that activates this program.
 	"""
 
 	name:      str
-	directory: str
-	program:   int
+	directory: typing.Optional[str] = None
+	map_path:  typing.Optional[str] = None
+	program:   int                  = 0
 
 
 def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 
 	"""Parse the ``programs:`` key from MIDI map YAML into BankDefinition objects.
 
-	Each entry must have ``name`` (str) and ``directory`` (str).
-	``program`` is optional and defaults to the list index.
+	Each entry must have ``name`` (str) and exactly one of ``directory`` (str —
+	swap the pool, reuse top-level assignments) or ``map`` (str — a preset
+	mapper file with its own assignments + samples).  ``program`` is optional
+	and defaults to the list index.
 
 	Args:
 		raw: The value of the ``programs:`` key from the parsed YAML dict.
@@ -115,8 +127,18 @@ def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 			raise ValueError(f"MIDI map programs[{idx}]: missing required 'name'")
 
 		directory = entry.get("directory")
-		if directory is None:
-			raise ValueError(f"MIDI map programs[{idx}] ({name!r}): missing required 'directory'")
+		map_path  = entry.get("map")
+
+		if directory is None and map_path is None:
+			raise ValueError(
+				f"MIDI map programs[{idx}] ({name!r}): needs exactly one of "
+				f"'map' or 'directory'"
+			)
+		if directory is not None and map_path is not None:
+			raise ValueError(
+				f"MIDI map programs[{idx}] ({name!r}): 'map' and 'directory' "
+				f"are mutually exclusive"
+			)
 
 		program = int(entry.get("program", idx))
 
@@ -132,7 +154,12 @@ def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 			)
 
 		seen_programs[program] = name
-		definitions.append(BankDefinition(name=name, directory=str(directory), program=program))
+		definitions.append(BankDefinition(
+			name=name,
+			directory=str(directory) if directory is not None else None,
+			map_path=str(map_path) if map_path is not None else None,
+			program=program,
+		))
 
 	return definitions
 
@@ -150,14 +177,25 @@ class Bank:
 	similarity index, and transform manager.  Each bank is independent —
 	switching banks swaps all three atomically.
 
+	A ``map:`` preset additionally carries its own assignment rules
+	(``note_map`` / ``zone_templates`` / ``mapped_ccs``).  When these are
+	None (the ``directory:`` shorthand form), the player keeps its
+	top-level/global rules and only the sample pool swaps.  When they are
+	set, a Program Change swaps both the pool AND the rules.
+
 	Fields:
 		name:                Human-readable label.
-		directory:           Path to the bank's sample directory.
+		directory:           Path to the bank's sample directory (or the
+		                     preset folder for a ``map:`` program).
 		program:             MIDI Program Change number.
 		instrument_library:  Loaded samples for this bank.
 		similarity_matrix:   Similarity index for this bank's samples.
 		transform_manager:   Transform pipeline for this bank (may be None
 		                     when transforms are disabled).
+		note_map:            This preset's manual note routing (NoteMap), or
+		                     None to use the player's top-level rules.
+		zone_templates:      This preset's zone-tuned templates, or None.
+		mapped_ccs:          This preset's referenced CC numbers, or None.
 	"""
 
 	name:                str
@@ -165,7 +203,10 @@ class Bank:
 	program:             int
 	instrument_library:  subsample.library.InstrumentLibrary
 	similarity_matrix:   subsample.similarity.SimilarityMatrix
-	transform_manager:   typing.Any = None  # subsample.transform.TransformManager (avoid circular import)
+	transform_manager:   typing.Any              = None  # subsample.transform.TransformManager (avoid circular import)
+	note_map:            typing.Optional[typing.Any]        = None  # player.NoteMap (avoid circular import)
+	zone_templates:      typing.Optional[tuple[typing.Any, ...]] = None  # tuple[player.ZoneTemplate, ...]
+	mapped_ccs:          typing.Optional[set[int]]          = None
 
 
 # ---------------------------------------------------------------------------
