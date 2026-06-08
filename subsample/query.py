@@ -923,7 +923,8 @@ class Assignment:
 	Combines selection criteria, processing pipeline, and playback/output
 	settings.  Stored in the note map keyed by (mido_channel, midi_note);
 	multiple Assignments may share a (channel, note) when each declares a
-	distinct ``velocity_trigger`` range (velocity layering).
+	distinct ``velocity_trigger`` range (velocity layering), or when they
+	opt into ``stack`` to sound together (stacking).
 	"""
 
 	name:      str
@@ -956,6 +957,14 @@ class Assignment:
 	this range before it reaches the gain calculation — so a layer that
 	only sees velocities 0-63 can still play through a full 0-127 dynamic
 	envelope.  Both bounds inclusive, 0-127."""
+
+	stack: bool = False
+	"""Opt in to stacking this sample with others on the same trigger.
+	Default False — an assignment whose velocity range overlaps another on
+	the same (channel, note) is rejected at load as a copy-paste mistake.
+	Set True on *every* overlapping member to instead sound them together:
+	at note-on the player fires all stacked layers that cover the incoming
+	velocity, so e.g. a kick and a sub-sine play as one composite hit."""
 
 
 # ---------------------------------------------------------------------------

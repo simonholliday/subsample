@@ -457,6 +457,7 @@ when you want to try something the tutorial didn't show.
 | `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
 | `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
+| `stack` | no | `true` lets this sound play together with other `stack: true` assignments on the same note and velocity, instead of being rejected as an overlap (see Stacking below). Default `false` |
 | `template` | no | Inherit fields from one or more named templates (see Templates below). The assignment's own fields override the template's; lists (`process`) and nested blocks (`select`) are replaced wholesale, not merged |
 
 ### Templates - share fields across assignments
@@ -1107,7 +1108,7 @@ it covers, so rescaling would inflate the loudness inappropriately.
 | Condition | Behaviour |
 |---|---|
 | Velocity field omitted | Default — single layer covering all velocities (no change from pre-layering) |
-| Overlapping ranges on the same note | `ValueError` at load — overlap is almost always a typo |
+| Overlapping ranges on the same note | `ValueError` at load — overlap is almost always a typo, unless every overlapping assignment sets `stack: true` (see Stacking below) |
 | Coverage gap (some velocities mapped to no layer) | `WARNING` listing the gap — velocities in the gap silently play nothing |
 | `trigger`/`rescale` lo > hi, or out of `[0, 127]` | `ValueError` at load |
 | Unknown inner key (e.g. `trggier` typo) | `ValueError` at load |
@@ -1115,6 +1116,55 @@ it covers, so rescaling would inflate the loudness inappropriately.
 Layers maintain independent `round_robin` segment counters and independent
 variant-transition fallback caches, so two layers on the same note never
 interfere with each other's state.
+
+### Stacking - multiple samples per trigger
+
+Velocity layering puts different samples on *different* slices of one note's
+velocity range. Stacking is the opposite: it plays several samples on the
+*same* note and the *same* velocity, all sounding together as one composite
+hit. Reach for it to fatten a sound that no single sample delivers - a kick
+layered with a sub-sine for low-end weight, a snare doubled with a noise
+burst for crack, or a clap stacked with its own reversed tail.
+
+By default two assignments whose velocity ranges overlap are rejected at load,
+because that is almost always a copy-paste slip. To stack them on purpose, set
+`stack: true` on **every** assignment that shares the note - the flag is your
+explicit "yes, I meant these to overlap":
+
+```yaml
+- name: Kick body
+  channel: 10
+  notes: 36
+  stack: true
+  select:
+    where: { reference: KICK_BODY }
+
+- name: Sub sine
+  channel: 10
+  notes: 36
+  stack: true
+  output: [4]                    # send the sub to its own output if you like
+  select:
+    where: { reference: SUB_SINE }
+```
+
+Each stacked sample keeps its own settings - gain, pan, output routing,
+processing, and `one_shot` - so you can shape and route the layers
+independently, then a single note-off releases them together.
+
+Stacking composes with velocity layering: stack two samples across the soft
+half of a note's velocity and a different one across the loud half, and each
+velocity still triggers exactly the samples you assigned to it.
+
+A few things to keep in mind:
+
+- **Mutual opt-in.** If only some of the overlapping assignments set
+  `stack: true`, the map still fails to load - so a genuine mistake next to a
+  deliberate stack is never silently swallowed.
+- **Voices add up.** A four-deep stack plays four samples per note-on; stack
+  with restraint if you are near your polyphony or CPU ceiling.
+- **Zone-tuned can't stack.** A zone-tuned assignment already maps one sample
+  per note, so `stack: true` there is rejected at load.
 
 ### Zone-tuned - auto-distribute pitched samples across a keyboard
 

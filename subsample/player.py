@@ -131,8 +131,7 @@ class ZoneTemplate:
 		select:              User's select block — filters which samples
 		                     are candidates for zone derivation.
 		process:             User's process block — MUST contain repitch.
-		one_shot ... velocity_rescale_to:  Inherited verbatim by each
-		                     derived Assignment.
+		one_shot ... stack:  Inherited verbatim by each derived Assignment.
 	"""
 
 	name:                str
@@ -148,6 +147,7 @@ class ZoneTemplate:
 	segment_mode:        typing.Union[str, int]
 	velocity_trigger:    tuple[int, int]
 	velocity_rescale_to: typing.Optional[tuple[int, int]]
+	stack:               bool                                = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -652,6 +652,9 @@ def _validate_velocity_layers (note_map: NoteMap) -> None:
 	  - Overlapping ``velocity_trigger`` ranges raise ValueError naming
 	    both assignments — overlap is almost always a copy-paste mistake,
 	    and silently picking one would surprise the user mid-performance.
+	    The exception is stacking: when *both* overlapping members set
+	    ``stack: true`` the overlap is intentional (they sound together),
+	    so it is permitted.
 	  - Gaps in [0, 127] coverage log WARNING listing the uncovered span.
 	    Notes whose velocity falls into a gap play nothing, matching the
 	    existing "no mapping for this note" semantics.
@@ -668,20 +671,24 @@ def _validate_velocity_layers (note_map: NoteMap) -> None:
 		# ties preserve YAML order for deterministic error messages.
 		sorted_layers = sorted(entries, key=lambda e: e[0].velocity_trigger)
 
-		# Overlap check: adjacent layers may not share any velocity value.
+		# Overlap check: adjacent layers may not share any velocity value
+		# unless both opt into stacking.  Adjacency is sufficient — if a
+		# non-stacking layer overlaps any layer it also overlaps its sorted
+		# neighbour, so every offending overlap surfaces on an adjacent pair.
 		for i in range(len(sorted_layers) - 1):
 			asgn_a, _ = sorted_layers[i]
 			asgn_b, _ = sorted_layers[i + 1]
 			lo_a, hi_a = asgn_a.velocity_trigger
 			lo_b, hi_b = asgn_b.velocity_trigger
 
-			if hi_a >= lo_b:
+			if hi_a >= lo_b and not (asgn_a.stack and asgn_b.stack):
 				raise ValueError(
 					f"MIDI map ch{ch + 1} note {note}: velocity ranges of "
 					f"assignments {asgn_a.name!r} [{lo_a}, {hi_a}] and "
 					f"{asgn_b.name!r} [{lo_b}, {hi_b}] overlap — overlapping "
 					f"layers create an ambiguous trigger.  Adjust ranges so "
-					f"each velocity maps to exactly one layer."
+					f"each velocity maps to exactly one layer, or set "
+					f"``stack: true`` on both to sound them together."
 				)
 
 		# Gap check (warning only).  Walk [0, 127] flagging any velocity
@@ -693,7 +700,9 @@ def _validate_velocity_layers (note_map: NoteMap) -> None:
 			lo, hi = asgn.velocity_trigger
 			if lo > cursor:
 				gaps.append((cursor, lo - 1))
-			cursor = hi + 1
+			# max(): stacked layers may overlap, so a later layer's hi can be
+			# below the running cursor — never let coverage regress.
+			cursor = max(cursor, hi + 1)
 
 		if cursor <= 127:
 			gaps.append((cursor, 127))
@@ -1780,6 +1789,8 @@ def load_midi_map (
 			assignment_raw.get("velocity"), name,
 		)
 
+		stack = bool(assignment_raw.get("stack", False))
+
 		# Extract segment playback mode from quantize step parameters.
 		segment_mode: typing.Union[str, int] = ""
 
@@ -1811,6 +1822,17 @@ def load_midi_map (
 					f"repitch step to the process block."
 				)
 
+			# Zone-tuned owns its channel exclusively and derives exactly one
+			# sample per note, so stacking can never take effect here — reject
+			# rather than silently ignore the flag.
+			if stack:
+				raise ValueError(
+					f"MIDI map assignment {name!r}: ``stack`` is not supported "
+					f"on zone-tuned assignments — a zone-tuned channel maps one "
+					f"sample per note, so there is nothing to stack with.  Remove "
+					f"``stack`` or use manual ``notes:`` assignments to stack."
+				)
+
 			zone_templates.append(ZoneTemplate(
 				name=name,
 				channel=mido_channel,
@@ -1825,6 +1847,7 @@ def load_midi_map (
 				segment_mode=segment_mode,
 				velocity_trigger=velocity_trigger,
 				velocity_rescale_to=velocity_rescale_to,
+				stack=stack,
 			))
 			continue
 
@@ -1844,6 +1867,7 @@ def load_midi_map (
 			segment_mode=segment_mode,
 			velocity_trigger=velocity_trigger,
 			velocity_rescale_to=velocity_rescale_to,
+			stack=stack,
 		)
 
 		# Per-note pick distribution:
@@ -2197,11 +2221,11 @@ class MidiPlayer:
 		# during MIDI map transitions: when a new variant is still processing,
 		# the old one plays instead of the unprocessed base — giving smooth
 		# transitions for gradual BPM or amount changes.
-		# Keyed by (channel, note, velocity_lo, velocity_hi) so two velocity
-		# layers on the same MIDI note keep independent variant-transition
-		# fallback.  Default-velocity layers (no layering) hash to
-		# (ch, note, 0, 127) — uniform key shape, no special-case branch.
-		self._last_played: dict[tuple[int, int, int, int], subsample.transform.TransformResult] = {}
+		# Keyed by (channel, note, id(Assignment)) so each layer on the same
+		# MIDI note keeps independent variant-transition fallback — including
+		# stacked members that share a velocity range, which a velocity-based
+		# key could not tell apart.
+		self._last_played: dict[tuple[int, int, int], subsample.transform.TransformResult] = {}
 
 		# Pre-computed sample selection.  An ordinary select (filters + an
 		# order such as age / similarity / duration) resolves to the same
@@ -2285,10 +2309,10 @@ class MidiPlayer:
 
 		# Per-note segment counter for round-robin segment playback.
 		# Cleared on MIDI map reload and bank switch.
-		# Keyed by (channel, note, velocity_lo, velocity_hi) so two velocity
-		# layers on the same MIDI note advance independent round_robin
-		# counters.  Default-velocity layers hash to (ch, note, 0, 127).
-		self._segment_counters: dict[tuple[int, int, int, int], int] = {}
+		# Keyed by (channel, note, id(Assignment)) so each layer on the same
+		# MIDI note advances its own round_robin counter — including stacked
+		# members that share a velocity range.
+		self._segment_counters: dict[tuple[int, int, int], int] = {}
 
 		# Single lock for the small mutable dicts touched by both
 		# _handle_message (rtmidi callback thread) and the threads that run
@@ -2375,6 +2399,12 @@ class MidiPlayer:
 						line += " rescale"
 					else:
 						line += f" rescale [{r_lo},{r_hi}]"
+
+			# Confirm to the user that an intentional overlap loaded as a stack
+			# rather than being rejected — the same note will list once per
+			# stacked sample.
+			if asgn.stack:
+				line += " (stacked)"
 
 			if len(pick_specs) == 1:
 				line += _format_pick_suffix(next(iter(pick_specs)))
@@ -2803,18 +2833,23 @@ class MidiPlayer:
 				"MIDI handler failed for %r: %s", msg, exc, exc_info=True,
 			)
 
-	def _select_velocity_layer (
+	def _select_velocity_layers (
 		self,
 		entries:  list[tuple[subsample.query.Assignment, subsample.query.PickSpec]],
 		velocity: int,
-	) -> typing.Optional[tuple[subsample.query.Assignment, subsample.query.PickSpec, int]]:
+	) -> list[tuple[subsample.query.Assignment, subsample.query.PickSpec, int]]:
 
-		"""Find the velocity layer covering ``velocity`` and compute its effective velocity.
+		"""Find every velocity layer covering ``velocity`` with its effective velocity.
 
 		Linear scan over ``entries`` (≤ ~16 in practice; cost dwarfed by the
-		query-engine and variant-lookup work in the same handler).  Returns
-		``None`` when no layer covers the velocity — caller logs DEBUG and
+		query-engine and variant-lookup work in the same handler).  Returns an
+		empty list when no layer covers the velocity — caller logs DEBUG and
 		returns, matching the existing "no mapping for this note" semantics.
+
+		Usually returns at most one layer: non-stacked layers on a note may not
+		overlap (enforced at load), so a velocity hits exactly one.  Stacked
+		members deliberately overlap, so several layers can cover the same
+		velocity — they all fire and sound together.
 
 		The effective velocity equals the input when the layer declares no
 		``velocity_rescale_to``; otherwise it is the linear remap from the
@@ -2824,6 +2859,8 @@ class MidiPlayer:
 		visible when they differ.
 		"""
 
+		covering: list[tuple[subsample.query.Assignment, subsample.query.PickSpec, int]] = []
+
 		for asgn, pick in entries:
 			lo, hi = asgn.velocity_trigger
 
@@ -2831,7 +2868,8 @@ class MidiPlayer:
 				continue
 
 			if asgn.velocity_rescale_to is None:
-				return (asgn, pick, velocity)
+				covering.append((asgn, pick, velocity))
+				continue
 
 			out_lo, out_hi = asgn.velocity_rescale_to
 
@@ -2840,9 +2878,9 @@ class MidiPlayer:
 			scaled = out_lo + (velocity - lo) / (hi - lo) * (out_hi - out_lo)
 			effective = max(0, min(127, int(round(scaled))))
 
-			return (asgn, pick, effective)
+			covering.append((asgn, pick, effective))
 
-		return None
+		return covering
 
 	def _handle_message (self, msg: mido.Message) -> None:
 
@@ -2983,28 +3021,55 @@ class MidiPlayer:
 			_log.debug("MIDI ch%d note %d: no mapping", msg.channel + 1, msg.note)
 			return
 
-		# Pick the velocity layer whose trigger range covers msg.velocity.
-		# Returns None when the velocity falls into a coverage gap — log at
-		# DEBUG (the gap was already WARNINGed at load time) and stop.
-		selected = self._select_velocity_layer(entries, msg.velocity)
+		# Find every velocity layer covering msg.velocity.  Usually one; more
+		# than one only when stacked members deliberately overlap.  Empty means
+		# the velocity fell into a coverage gap (already WARNINGed at load) —
+		# log DEBUG and stop.
+		layers = self._select_velocity_layers(entries, msg.velocity)
 
-		if selected is None:
+		if not layers:
 			_log.debug(
 				"MIDI ch%d note %d vel %d: no velocity layer covers this velocity",
 				msg.channel + 1, msg.note, msg.velocity,
 			)
 			return
 
-		assignment, pick_spec, effective_velocity = selected
+		# Fire every covering layer.  A normal (non-stacked) note loops exactly
+		# once; stacked members sound together as one composite hit.  Each call
+		# is independent, so one layer finding no sample never silences another.
+		for assignment, pick_spec, effective_velocity in layers:
+			self._trigger_one(msg, assignment, pick_spec, effective_velocity)
+
+	def _trigger_one (
+		self,
+		msg:                mido.Message,
+		assignment:         subsample.query.Assignment,
+		pick_spec:          subsample.query.PickSpec,
+		effective_velocity: int,
+	) -> None:
+
+		"""Render one assignment for a note-on and enqueue its voice.
+
+		Called once per covering velocity layer by ``_handle_message`` — once
+		for a normal note, several times for a stacked note.  Every early return
+		ends only this layer's processing, never the whole handler, so one layer
+		finding no sample doesn't silence its stack-mates.
+
+		Resolves the sample, then walks the variant → previous-variant → base →
+		int-PCM fallback chain, appending a ``_Voice`` on the first that yields
+		audio.  All per-assignment settings (gain, pan, output routing, one_shot,
+		process) come off ``assignment``, so stacked members keep independent
+		voices.
+		"""
+
 		pan_weights      = assignment.pan_weights
 		output_routing   = assignment.output_routing
 		one_shot         = assignment.one_shot
-		velocity_trigger = assignment.velocity_trigger
 
-		# State-dict key includes the velocity trigger range so two layers
-		# on the same (channel, note) maintain independent _last_played
-		# fallback and round_robin counters.
-		state_key = (msg.channel, msg.note, velocity_trigger[0], velocity_trigger[1])
+		# State-dict key is keyed by the assignment's identity so every layer —
+		# including stacked members that share a velocity range — keeps its own
+		# _last_played fallback and round_robin counters.
+		state_key = (msg.channel, msg.note, id(assignment))
 
 		# ── Sample selection ──────────────────────────────────────────────
 		# eff_transform is captured here (not just where the variant lookup
@@ -3094,7 +3159,7 @@ class MidiPlayer:
 						seg_audio, seg_level = self._select_segment(
 							variant.audio, variant.level, variant.segment_bounds,
 							assignment.segment_mode, msg.channel, msg.note,
-							velocity_trigger,
+							id(assignment),
 						)
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
@@ -3111,7 +3176,7 @@ class MidiPlayer:
 
 					# New variant not ready — try the previously played variant
 					# for this layer (smooth transition during gradual param changes).
-					# state_key includes the velocity trigger so each layer
+					# state_key is keyed by the assignment's identity so each layer
 					# falls back to its own previous variant, not another layer's.
 					with self._state_lock:
 						prev = self._last_played.get(state_key)
@@ -3120,7 +3185,7 @@ class MidiPlayer:
 						seg_audio, seg_level = self._select_segment(
 							prev.audio, prev.level, prev.segment_bounds,
 							assignment.segment_mode, msg.channel, msg.note,
-							velocity_trigger,
+							id(assignment),
 						)
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
@@ -3139,7 +3204,7 @@ class MidiPlayer:
 				seg_audio, seg_level = self._select_segment(
 					base.audio, base.level, base.segment_bounds,
 					assignment.segment_mode, msg.channel, msg.note,
-					velocity_trigger,
+					id(assignment),
 				)
 				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 				rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
@@ -3395,6 +3460,7 @@ class MidiPlayer:
 					segment_mode        = template.segment_mode,
 					velocity_trigger    = template.velocity_trigger,
 					velocity_rescale_to = template.velocity_rescale_to,
+					stack               = template.stack,
 				)
 				pick = subsample.query.PickSpec(1, 1)
 
@@ -3951,7 +4017,7 @@ class MidiPlayer:
 		segment_mode: typing.Union[str, int],
 		channel: int,
 		note: int,
-		velocity_trigger: tuple[int, int],
+		assignment_id: int,
 	) -> tuple[numpy.ndarray, subsample.analysis.LevelResult]:
 
 		"""Select a segment from quantized audio, or return the full audio.
@@ -3960,9 +4026,10 @@ class MidiPlayer:
 		to a single segment and recomputes the level.  Otherwise returns the
 		original audio and level unchanged.
 
-		``velocity_trigger`` is the (lo, hi) range of the matched velocity
-		layer; it extends the round_robin counter key so two layers on the
-		same (channel, note) advance independent counters.
+		``assignment_id`` is ``id()`` of the layer's Assignment; it extends the
+		round_robin counter key so each layer on the same (channel, note) —
+		including stacked members sharing a velocity range — advances its own
+		independent counter.
 		"""
 
 		if not segment_mode or segment_bounds is None or not segment_bounds:
@@ -3971,8 +4038,7 @@ class MidiPlayer:
 		if isinstance(segment_mode, int):
 			idx = max(0, min(segment_mode - 1, len(segment_bounds) - 1))
 		elif segment_mode == "round_robin":
-			vel_lo, vel_hi = velocity_trigger
-			key = (channel, note, vel_lo, vel_hi)
+			key = (channel, note, assignment_id)
 			# RMW under _state_lock so a concurrent clear (from
 			# reload_midi_map or bank switch) doesn't drop an increment
 			# and two parallel triggers can't lose a step.

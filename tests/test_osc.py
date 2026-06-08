@@ -1,7 +1,6 @@
 """Tests for subsample.osc — OSC sender and receiver."""
 
 import pathlib
-import threading
 import time
 import unittest.mock
 
@@ -209,12 +208,10 @@ class TestOscReceiver:
 		"""Receiver starts and stops cleanly."""
 
 		callback = unittest.mock.MagicMock()
-		shutdown = threading.Event()
 
 		receiver = subsample.osc.OscReceiver(
 			port=19200,
 			on_import=callback,
-			shutdown_event=shutdown,
 		)
 
 		receiver.start()
@@ -230,12 +227,10 @@ class TestOscReceiver:
 		import pythonosc.udp_client
 
 		callback = unittest.mock.MagicMock()
-		shutdown = threading.Event()
 
 		receiver = subsample.osc.OscReceiver(
 			port=19201,
 			on_import=callback,
-			shutdown_event=shutdown,
 		)
 		receiver.start()
 
@@ -260,12 +255,10 @@ class TestOscReceiver:
 		import pythonosc.udp_client
 
 		callback = unittest.mock.MagicMock()
-		shutdown = threading.Event()
 
 		receiver = subsample.osc.OscReceiver(
 			port=19202,
 			on_import=callback,
-			shutdown_event=shutdown,
 		)
 		receiver.start()
 
@@ -288,12 +281,10 @@ class TestOscReceiver:
 		import pythonosc.udp_client
 
 		callback = unittest.mock.MagicMock(side_effect=RuntimeError("boom"))
-		shutdown = threading.Event()
 
 		receiver = subsample.osc.OscReceiver(
 			port=19203,
 			on_import=callback,
-			shutdown_event=shutdown,
 		)
 		receiver.start()
 

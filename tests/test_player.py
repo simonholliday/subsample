@@ -300,7 +300,7 @@ class TestMidiPlayer:
 		port.__exit__ = unittest.mock.Mock(return_value=False)
 		return port
 
-	def _patch_open_input (self, port: unittest.mock.MagicMock) -> unittest.mock._patch[typing.Any]:
+	def _patch_open_input (self, port: unittest.mock.MagicMock) -> unittest.mock._patch:  # type: ignore[type-arg]
 
 		"""Patch ``mido.open_input`` so it returns ``port`` and stashes the
 		registered callback on ``port.callback`` for later dispatch."""
@@ -634,15 +634,14 @@ class TestStateLock:
 
 		player._select_segment(
 			audio, level, bounds, "round_robin",
-			channel=9, note=36, velocity_trigger=(0, 127),
+			channel=9, note=36, assignment_id=777,
 		)
 
 		assert events.count("acquire") >= 1
 		assert events.count("acquire") == events.count("release")
-		# Default velocity layer hashes to (ch, note, 0, 127) — the
-		# uniform 4-tuple key shape that keeps layered and non-layered
-		# notes on the same code path.
-		assert player._segment_counters[(9, 36, 0, 127)] == 1
+		# Counter is keyed by (ch, note, id(Assignment)) — here a stand-in
+		# id — so each layer keeps its own round_robin position.
+		assert player._segment_counters[(9, 36, 777)] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1807,7 +1806,7 @@ class TestParseVelocity:
 class TestVelocityLayering:
 
 	"""End-to-end tests for velocity layering through ``load_midi_map`` and
-	the runtime layer selection in ``_select_velocity_layer``."""
+	the runtime layer selection in ``_select_velocity_layers``."""
 
 	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
 		p = tmp_path / "test-map.yaml"
@@ -1925,10 +1924,161 @@ assignments:
 		assert any("[31, 59]" in r.message for r in caplog.records)
 
 
+class TestStacking:
+
+	"""Stacking: ``stack: true`` lets several samples share a (channel, note)
+	and the same velocity so they sound together, gated so an un-flagged
+	overlap is still rejected as a copy-paste mistake."""
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_both_stacked_allows_overlap (self, tmp_path: pathlib.Path) -> None:
+		"""Two assignments with identical ranges load when both opt into stack."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick body
+    channel: 10
+    notes: 36
+    stack: true
+    select:
+      where:
+        reference: BD0025
+  - name: Sub sine
+    channel: 10
+    notes: 36
+    stack: true
+    select:
+      where:
+        reference: BD0025
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		entries = note_map[(9, 36)]
+		assert len(entries) == 2
+		assert all(e[0].stack for e in entries)
+		assert {e[0].name for e in entries} == {"Kick body", "Sub sine"}
+
+	def test_one_sided_stack_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""Overlap is rejected unless *every* overlapping member opts in —
+		a lone flag must not silence the copy-paste-mistake guard."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick body
+    channel: 10
+    notes: 36
+    stack: true
+    select:
+      where:
+        reference: BD0025
+  - name: Forgotten paste
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+""")
+		with pytest.raises(ValueError, match="overlap"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_stacked_overlap_no_spurious_gap_warning (
+		self,
+		tmp_path: pathlib.Path,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""Overlapping stacked ranges fully cover [0, 127] — the gap walk must
+		not regress its cursor and falsely warn about a gap."""
+
+		import logging
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Full
+    channel: 10
+    notes: 36
+    velocity: [0, 127]
+    stack: true
+    select:
+      where:
+        reference: BD0025
+  - name: Low partial
+    channel: 10
+    notes: 36
+    velocity: [0, 60]
+    stack: true
+    select:
+      where:
+        reference: BD0025
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+		assert not any("gap" in r.message.lower() for r in caplog.records)
+
+	def test_stack_rejected_on_zone_tuned (self, tmp_path: pathlib.Path) -> None:
+		"""Zone-tuned maps one sample per note, so stacking is meaningless
+		there — reject the flag rather than silently ignore it."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Tuned
+    channel: 10
+    notes: zone-tuned
+    stack: true
+    process:
+      - repitch: true
+    select:
+      where:
+        reference: BD0025
+""")
+		with pytest.raises(ValueError, match="stack"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_handle_message_fires_every_stacked_layer (self) -> None:
+		"""A note-on on a stacked note triggers each covering layer once."""
+
+		import mido
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		body = subsample.query.Assignment(
+			name="Kick body", select=(subsample.query.SelectSpec(),), stack=True,
+		)
+		sub = subsample.query.Assignment(
+			name="Sub sine", select=(subsample.query.SelectSpec(),), stack=True,
+		)
+		pick = subsample.query.PickSpec(1, 1)
+		player._note_map = {(9, 36): [(body, pick), (sub, pick)]}
+
+		# Stub the per-layer renderer so we test dispatch fan-out in isolation,
+		# without needing a real library/transform behind it.
+		player._trigger_one = unittest.mock.MagicMock()  # type: ignore[method-assign]
+
+		player._handle_message(mido.Message("note_on", channel=9, note=36, velocity=64))
+
+		fired = {call.args[1].name for call in player._trigger_one.call_args_list}
+		assert player._trigger_one.call_count == 2
+		assert fired == {"Kick body", "Sub sine"}
+
+
 class TestSelectVelocityLayer:
 
-	"""Tests for MidiPlayer._select_velocity_layer — the runtime lookup
-	that picks the matching velocity layer at note-on time."""
+	"""Tests for MidiPlayer._select_velocity_layers — the runtime lookup
+	that picks the matching velocity layer(s) at note-on time."""
 
 	def _make_player (self) -> subsample.player.MidiPlayer:
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
@@ -1966,9 +2116,9 @@ class TestSelectVelocityLayer:
 		entries = self._entries([((0, 127), None)])
 
 		for v in (1, 32, 64, 100, 127):
-			result = player._select_velocity_layer(entries, v)
-			assert result is not None
-			asgn, _, effective = result
+			result = player._select_velocity_layers(entries, v)
+			assert len(result) == 1
+			asgn, _, effective = result[0]
 			assert asgn.name == "layer_0"
 			# No rescale_to → effective velocity == input velocity.
 			assert effective == v
@@ -1979,23 +2129,33 @@ class TestSelectVelocityLayer:
 		player = self._make_player()
 		entries = self._entries([((0, 63), None), ((64, 127), None)])
 
-		soft = player._select_velocity_layer(entries, 30)
-		assert soft is not None
-		assert soft[0].name == "layer_0"
+		soft = player._select_velocity_layers(entries, 30)
+		assert len(soft) == 1
+		assert soft[0][0].name == "layer_0"
 
-		hard = player._select_velocity_layer(entries, 100)
-		assert hard is not None
-		assert hard[0].name == "layer_1"
+		hard = player._select_velocity_layers(entries, 100)
+		assert len(hard) == 1
+		assert hard[0][0].name == "layer_1"
 
-	def test_returns_none_for_uncovered_velocity (self) -> None:
-		"""A velocity in a coverage gap returns None — handler then plays
-		nothing, matching the existing 'no mapping for this note' path."""
+	def test_returns_empty_for_uncovered_velocity (self) -> None:
+		"""A velocity in a coverage gap returns an empty list — handler then
+		plays nothing, matching the existing 'no mapping for this note' path."""
 
 		player = self._make_player()
 		# Gap from 31-59 inclusive.
 		entries = self._entries([((0, 30), None), ((60, 127), None)])
 
-		assert player._select_velocity_layer(entries, 45) is None
+		assert player._select_velocity_layers(entries, 45) == []
+
+	def test_stacked_layers_all_fire (self) -> None:
+		"""Two overlapping layers both cover the velocity → both are returned,
+		so a stacked note sounds them together."""
+
+		player = self._make_player()
+		entries = self._entries([((0, 127), None), ((0, 127), None)])
+
+		result = player._select_velocity_layers(entries, 64)
+		assert {r[0].name for r in result} == {"layer_0", "layer_1"}
 
 	def test_rescale_true_endpoints (self) -> None:
 		"""rescale: true → output spans 0-127 over the trigger range."""
@@ -2003,8 +2163,8 @@ class TestSelectVelocityLayer:
 		player = self._make_player()
 		entries = self._entries([((0, 63), (0, 127))])
 
-		_, _, eff_lo = player._select_velocity_layer(entries, 0) or (None, None, None)
-		_, _, eff_hi = player._select_velocity_layer(entries, 63) or (None, None, None)
+		_, _, eff_lo = player._select_velocity_layers(entries, 0)[0]
+		_, _, eff_hi = player._select_velocity_layers(entries, 63)[0]
 
 		assert eff_lo == 0
 		assert eff_hi == 127
@@ -2015,8 +2175,8 @@ class TestSelectVelocityLayer:
 		player = self._make_player()
 		entries = self._entries([((0, 63), (10, 100))])
 
-		_, _, eff_lo = player._select_velocity_layer(entries, 0) or (None, None, None)
-		_, _, eff_hi = player._select_velocity_layer(entries, 63) or (None, None, None)
+		_, _, eff_lo = player._select_velocity_layers(entries, 0)[0]
+		_, _, eff_hi = player._select_velocity_layers(entries, 63)[0]
 
 		assert eff_lo == 10
 		assert eff_hi == 100
@@ -2028,7 +2188,7 @@ class TestSelectVelocityLayer:
 		# Trigger 0-100, rescale to 0-127 — input 50 → output 63 or 64.
 		entries = self._entries([((0, 100), (0, 127))])
 
-		_, _, eff = player._select_velocity_layer(entries, 50) or (None, None, None)
+		_, _, eff = player._select_velocity_layers(entries, 50)[0]
 		# Linear: 0 + 50/100 * 127 = 63.5 → rounds to 64 (banker's-rounding
 		# matters here, but Python rounds half to even → 64).
 		assert eff in (63, 64)
@@ -2039,7 +2199,7 @@ class TestSelectVelocityLayer:
 		player = self._make_player()
 		entries = self._entries([((10, 100), None)])
 
-		_, _, eff = player._select_velocity_layer(entries, 50) or (None, None, None)
+		_, _, eff = player._select_velocity_layers(entries, 50)[0]
 		assert eff == 50
 
 
@@ -2062,7 +2222,11 @@ class TestPerLayerSegmentCounter:
 		)
 
 	def test_round_robin_counters_independent_per_layer (self) -> None:
-		"""Two layers on the same (channel, note) advance their own counters."""
+		"""Two layers on the same (channel, note) advance their own counters.
+
+		Keyed by id(Assignment), so this also covers stacked members that
+		would share a velocity range — distinct objects, distinct counters.
+		"""
 
 		import subsample.analysis
 
@@ -2071,22 +2235,22 @@ class TestPerLayerSegmentCounter:
 		audio  = numpy.zeros((200, 1), dtype=numpy.float32)
 		level  = subsample.analysis.LevelResult(peak=0.0, rms=0.0)
 
-		# Layer A: trigger (0, 63).  Two triggers advance its counter to 2.
+		# Layer A: two triggers advance its counter to 2.
 		for _ in range(2):
 			player._select_segment(
 				audio, level, bounds, "round_robin",
-				channel=9, note=36, velocity_trigger=(0, 63),
+				channel=9, note=36, assignment_id=111,
 			)
 
-		# Layer B: trigger (64, 127).  One trigger advances its counter to 1.
+		# Layer B: one trigger advances its counter to 1.
 		player._select_segment(
 			audio, level, bounds, "round_robin",
-			channel=9, note=36, velocity_trigger=(64, 127),
+			channel=9, note=36, assignment_id=222,
 		)
 
 		# Verified the keys are distinct and the counts are independent.
-		assert player._segment_counters[(9, 36, 0, 63)]   == 2
-		assert player._segment_counters[(9, 36, 64, 127)] == 1
+		assert player._segment_counters[(9, 36, 111)] == 2
+		assert player._segment_counters[(9, 36, 222)] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -4499,7 +4663,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, result_level = player._select_segment(audio, level, bounds, "", 0, 60, velocity_trigger=(0, 127))
+		result_audio, result_level = player._select_segment(audio, level, bounds, "", 0, 60, assignment_id=42)
 
 		assert result_audio is audio
 		assert result_level is level
@@ -4510,7 +4674,7 @@ class TestSelectSegment:
 		audio = numpy.random.randn(1000, 1).astype(numpy.float32)
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, result_level = player._select_segment(audio, level, None, "round_robin", 0, 60, velocity_trigger=(0, 127))
+		result_audio, result_level = player._select_segment(audio, level, None, "round_robin", 0, 60, assignment_id=42)
 
 		assert result_audio is audio
 		assert result_level is level
@@ -4521,7 +4685,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, _ = player._select_segment(audio, level, bounds, 3, 0, 60, velocity_trigger=(0, 127))
+		result_audio, _ = player._select_segment(audio, level, bounds, 3, 0, 60, assignment_id=42)
 
 		assert result_audio.shape[0] == 1000
 		numpy.testing.assert_array_equal(result_audio, audio[2000:3000])
@@ -4532,7 +4696,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, _ = player._select_segment(audio, level, bounds, 99, 0, 60, velocity_trigger=(0, 127))
+		result_audio, _ = player._select_segment(audio, level, bounds, 99, 0, 60, assignment_id=42)
 
 		numpy.testing.assert_array_equal(result_audio, audio[3000:4000])
 
@@ -4544,13 +4708,13 @@ class TestSelectSegment:
 
 		results = []
 		for _ in range(6):
-			seg, _ = player._select_segment(audio, level, bounds, "round_robin", 0, 60, velocity_trigger=(0, 127))
+			seg, _ = player._select_segment(audio, level, bounds, "round_robin", 0, 60, assignment_id=42)
 			results.append(seg.shape[0])
 
 		# 4 segments, 6 triggers: should cycle 0,1,2,3,0,1
 		assert results == [1000, 1000, 1000, 1000, 1000, 1000]
 		# Default (no velocity layering) hashes to (ch, note, 0, 127).
-		assert player._segment_counters[(0, 60, 0, 127)] == 6
+		assert player._segment_counters[(0, 60, 42)] == 6
 
 	def test_random_stays_in_bounds (self) -> None:
 		"""Random mode always selects a valid segment."""
@@ -4559,7 +4723,7 @@ class TestSelectSegment:
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
 		for _ in range(20):
-			seg, _ = player._select_segment(audio, level, bounds, "random", 0, 60, velocity_trigger=(0, 127))
+			seg, _ = player._select_segment(audio, level, bounds, "random", 0, 60, assignment_id=42)
 			assert seg.shape[0] == 1000
 
 	def test_segment_mode_parsed_from_yaml_string (self) -> None:
