@@ -1185,7 +1185,7 @@ def compute_level (
 	# AnalysisParams are available (live capture and analyze_all paths).
 	noise_floor = 0.0
 
-	if params is not None and mono.shape[0] > 0:
+	if params is not None:
 		frame_rms = librosa.feature.rms(
 			y=mono,
 			frame_length=params.n_fft,
@@ -1679,6 +1679,12 @@ def to_mono_float (
 	Returns:
 		Shape (n_frames,), dtype float32.
 	"""
+
+	if audio.ndim != 2:
+		raise ValueError(
+			f"to_mono_float expects a 2-D (n_frames, channels) array, "
+			f"got {audio.ndim}-D shape {audio.shape}"
+		)
 
 	# int32 is used internally for both 24-bit (left-shifted) and native 32-bit;
 	# the full-scale divisor is the same in both cases.

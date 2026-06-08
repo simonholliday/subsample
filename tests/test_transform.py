@@ -286,29 +286,6 @@ class TestTransformCache:
 
 		assert cache.get(key) is None
 
-	def test_get_pitched_convenience (self) -> None:
-		cache  = self._make_cache()
-		result = _make_result(sample_id=5)
-		cache.put(result)
-
-		hit = cache.get_pitched(5, 60)
-		assert hit is result
-
-	def test_get_pitched_miss (self) -> None:
-		cache = self._make_cache()
-		assert cache.get_pitched(5, 60) is None
-
-	def test_get_stretched_convenience (self) -> None:
-		cache = self._make_cache()
-		spec  = subsample.transform.TransformSpec(
-			steps=(subsample.transform.TimeStretch(target_bpm=120.0),)
-		)
-		result = _make_result(sample_id=7, spec=spec)
-		cache.put(result)
-
-		hit = cache.get_stretched(7, 120.0)
-		assert hit is result
-
 	def test_has_variants_true (self) -> None:
 		cache  = self._make_cache()
 		result = _make_result(sample_id=1)
@@ -362,28 +339,6 @@ class TestTransformCache:
 		cache   = self._make_cache()
 		evicted = cache.remove_parent(999)
 		assert evicted == []
-
-	def test_remove_by_step_type (self) -> None:
-		cache = self._make_cache()
-
-		pitch_spec = subsample.transform.TransformSpec(
-			steps=(subsample.transform.PitchShift(target_midi_note=60),)
-		)
-		stretch_spec = subsample.transform.TransformSpec(
-			steps=(subsample.transform.TimeStretch(target_bpm=120.0),)
-		)
-
-		r_pitch   = _make_result(sample_id=1, spec=pitch_spec)
-		r_stretch = _make_result(sample_id=2, spec=stretch_spec)
-		cache.put(r_pitch)
-		cache.put(r_stretch)
-
-		evicted = cache.remove_by_step_type(subsample.transform.TimeStretch)
-
-		assert len(evicted) == 1
-		assert evicted[0] == r_stretch.key
-		assert cache.get(r_pitch.key) is r_pitch
-		assert cache.get(r_stretch.key) is None
 
 	def test_memory_tracking (self) -> None:
 		cache = self._make_cache()
@@ -602,45 +557,6 @@ class TestTransformProcessor:
 			subsample.transform.TransformProcessor._HANDLERS.clear()
 			subsample.transform.TransformProcessor._HANDLERS.update(original_handlers)
 
-	def test_enqueue_bpm_change_skips_non_rhythmic (self) -> None:
-		"""enqueue_bpm_change only processes records with tempo_bpm > 0."""
-
-		completed: list[subsample.transform.TransformResult] = []
-
-		def _passthrough (
-			audio:       numpy.ndarray,
-			sample_rate: int,
-			record:      subsample.library.SampleRecord,
-			step:        subsample.transform.TimeStretch,
-		) -> numpy.ndarray:
-			return audio
-
-		original_handlers = dict(subsample.transform.TransformProcessor._HANDLERS)
-
-		try:
-			subsample.transform.TransformProcessor._HANDLERS[
-				subsample.transform.TimeStretch
-			] = _passthrough  # type: ignore[assignment]
-
-			processor = subsample.transform.TransformProcessor(
-				sample_rate=44100,
-				bit_depth=16,
-				on_complete=completed.append,
-			)
-
-			rhythmic     = _make_record(sample_id=1, tempo_bpm=120.0)
-			non_rhythmic = _make_record(sample_id=2, tempo_bpm=0.0)
-
-			processor.enqueue_bpm_change([rhythmic, non_rhythmic], target_bpm=130.0)
-			processor.shutdown()
-
-			assert len(completed) == 1
-			assert completed[0].key.sample_id == 1
-
-		finally:
-			subsample.transform.TransformProcessor._HANDLERS.clear()
-			subsample.transform.TransformProcessor._HANDLERS.update(original_handlers)
-
 
 # ---------------------------------------------------------------------------
 # TestTransformManager
@@ -676,22 +592,6 @@ class TestTransformManager:
 		)
 		return manager, cache, lib
 
-	def test_get_pitched_returns_none_when_not_cached (self) -> None:
-		manager, _, _ = self._make_manager()
-		result = manager.get_pitched(sample_id=1, midi_note=60)
-		assert result is None
-		manager.shutdown()
-
-	def test_get_pitched_returns_cached_result (self) -> None:
-		manager, cache, _ = self._make_manager()
-		r = _make_result(sample_id=5)
-		cache.put(r)
-
-		result = manager.get_pitched(sample_id=5, midi_note=60)
-		assert result is r
-
-		manager.shutdown()
-
 	def test_on_parent_evicted_clears_cache (self) -> None:
 		manager, cache, _ = self._make_manager()
 
@@ -722,18 +622,6 @@ class TestTransformManager:
 		assert not cache.has_variants(1)
 		assert cache.has_variants(2)
 		assert not cache.has_variants(3)
-		manager.shutdown()
-
-	def test_has_pitch_variant_true (self) -> None:
-		manager, cache, _ = self._make_manager()
-		cache.put(_make_result(sample_id=7))
-
-		assert manager.has_pitch_variant(7, 60) is True
-		manager.shutdown()
-
-	def test_has_pitch_variant_false (self) -> None:
-		manager, _, _ = self._make_manager()
-		assert manager.has_pitch_variant(99, 60) is False
 		manager.shutdown()
 
 	def test_list_variants_delegates_to_cache (self) -> None:
@@ -1414,74 +1302,6 @@ class TestOnSampleAddedNoAutoStretch:
 		]
 		assert len(time_stretch_specs) == 0
 		assert len(enqueued_specs) == 1  # just the base variant
-
-
-# ---------------------------------------------------------------------------
-# TestGetAtBpm
-# ---------------------------------------------------------------------------
-
-class TestGetAtBpm:
-
-	"""TransformManager.get_at_bpm() returns None when disabled or on miss."""
-
-	def test_returns_none_when_disabled (self) -> None:
-
-		"""target_bpm=0.0 means get_at_bpm always returns None."""
-
-		cfg = subsample.config.TransformConfig(target_bpm=0.0)
-		cache = subsample.transform.TransformCache(max_memory_bytes=10_000_000)
-
-		class _FakeProcessor:
-			def enqueue (self, record: typing.Any, spec: typing.Any) -> None:
-				pass
-
-		manager = subsample.transform.TransformManager(
-			cache=cache,
-			processor=_FakeProcessor(),  # type: ignore[arg-type]
-			instrument_library=subsample.library.InstrumentLibrary(max_memory_bytes=100_000_000),
-			cfg=cfg,
-		)
-
-		assert manager.get_at_bpm(42) is None
-
-	def test_cache_hit_with_matching_resolution (self) -> None:
-
-		"""get_at_bpm() finds a cached variant when resolution matches config."""
-
-		cfg = subsample.config.TransformConfig(
-			target_bpm=120.0, quantize_resolution=8,
-		)
-		cache = subsample.transform.TransformCache(max_memory_bytes=10_000_000)
-
-		# Insert a result keyed with resolution=8.
-		spec = subsample.transform.TransformSpec(
-			steps=(subsample.transform.TimeStretch(target_bpm=120.0, resolution=8),)
-		)
-		result = _make_result(sample_id=7, spec=spec)
-		cache.put(result)
-
-		# The library must contain a qualifying record for this sample_id.
-		library = subsample.library.InstrumentLibrary(max_memory_bytes=100_000_000)
-		record = _make_record(
-			sample_id=7, tempo_bpm=120.0,
-			onset_times=(0.0, 0.2, 0.4, 0.6, 0.8),
-		)
-		library.add(record)
-
-		class _FakeProcessor:
-			def enqueue (self, record: typing.Any, spec: typing.Any) -> None:
-				pass
-
-		manager = subsample.transform.TransformManager(
-			cache=cache,
-			processor=_FakeProcessor(),  # type: ignore[arg-type]
-			instrument_library=library,
-			cfg=cfg,
-		)
-
-		hit = manager.get_at_bpm(7)
-		assert hit is not None
-		assert hit.key.sample_id == 7
 
 
 # ---------------------------------------------------------------------------

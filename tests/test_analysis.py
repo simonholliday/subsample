@@ -974,6 +974,26 @@ class TestAnalyzePitch:
 
 		assert pitch.dominant_pitch_class == 9
 
+	def test_all_unvoiced_pyin_yields_zero_pitch_not_nan (self) -> None:
+		"""When pyin flags every frame unvoiced, the empty-voiced-mask guards
+		must return 0.0 for the pitch fields, not a silent NaN from
+		numpy.median/mean over an empty array (a == 0.0 assert fails on NaN)."""
+
+		n = 24
+		f0_hz        = numpy.full(n, numpy.nan, dtype=numpy.float32)
+		voiced_flag  = numpy.zeros(n, dtype=bool)
+		voiced_probs = numpy.zeros(n, dtype=numpy.float32)
+
+		pitch, _ = subsample.analysis.analyze_pitch(
+			self._float_sine(), self._params(),
+			_pyin_result=(f0_hz, voiced_flag, voiced_probs),
+		)
+
+		assert pitch.dominant_pitch_hz   == 0.0
+		assert pitch.pitch_confidence    == 0.0
+		assert pitch.pitch_stability     == 0.0
+		assert pitch.voiced_frame_count  == 0
+
 	def test_chroma_profile_has_12_elements (self) -> None:
 		"""chroma_profile must always have exactly 12 elements (one per pitch class)."""
 		pitch, _ = subsample.analysis.analyze_pitch(self._float_sine(), self._params())

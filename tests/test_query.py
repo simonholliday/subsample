@@ -232,6 +232,18 @@ class TestWherePredicate:
 		assert     pred.matches(_make_record(name="KICK_1"))
 		assert     pred.matches(_make_record(name="Kick_22"))
 
+	def test_name_forms_are_mutually_exclusive (self) -> None:
+		"""matches() would silently AND two name forms, so constructing a
+		predicate with more than one is rejected at construction."""
+
+		with pytest.raises(ValueError, match="mutually exclusive"):
+			subsample.query.WherePredicate(name="kick", name_glob="*kick*")
+
+		with pytest.raises(ValueError, match="mutually exclusive"):
+			subsample.query.WherePredicate(
+				name_list=("a", "b"), name_regex=r"x\d",
+			)
+
 	def test_name_regex_dot_matches_any (self) -> None:
 		"""Unlike glob, `.` in a regex matches any single character."""
 		pred = subsample.query.WherePredicate(name_regex=r"kick.\d")
@@ -717,6 +729,15 @@ class TestParseProcess:
 		spec = subsample.query.parse_process([{"stretch_quantize": {"grid": 8}}], "test")
 		assert spec.has_stretch_quantize()
 		assert not spec.has_repitch()
+
+	def test_stretch_and_pad_quantize_together_rejected (self) -> None:
+		"""stretch_quantize and pad_quantize are two ways to beat-align the same
+		sample; combining them is ambiguous and rejected at parse time."""
+
+		raw = [{"stretch_quantize": {"grid": 16}}, {"pad_quantize": {"grid": 16}}]
+
+		with pytest.raises(ValueError, match="cannot be combined"):
+			subsample.query.parse_process(raw, "test")
 
 	def test_unknown_processor_strict_raises (self) -> None:
 		"""Strict mode (default): unknown processor name raises ValueError."""

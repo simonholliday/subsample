@@ -178,6 +178,10 @@ class OscReceiver:
 		if self._thread is not None:
 			self._thread.join(timeout=5.0)
 
+		# shutdown() only stops the serve loop; server_close() releases the
+		# bound UDP socket so a later start on the same port can rebind.
+		self._server.server_close()
+
 		_log.debug("OSC receiver stopped")
 
 	def _handle_import (self, address: str, *args: typing.Any) -> None:

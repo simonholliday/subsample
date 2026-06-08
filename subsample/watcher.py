@@ -80,12 +80,18 @@ class InstrumentWatcher:
 		on_sample_loaded: typing.Callable[[subsample.library.SampleRecord], None],
 		target_sample_rate: typing.Optional[int] = None,
 		known_audio: typing.Optional[set[pathlib.Path]] = None,
+		with_preview: bool = False,
 	) -> None:
 
 		self._directory = directory
 		self._known_sidecars: frozenset[pathlib.Path] = frozenset(known_sidecars)
 		self._on_sample_loaded = on_sample_loaded
 		self._target_sample_rate = target_sample_rate
+
+		# Whether a runtime-discovered audio file should also (re)generate its
+		# .preview.png — kept in step with the startup load so a sample dropped
+		# in later isn't missing the preview a startup-loaded one would have.
+		self._with_preview = with_preview
 
 		# Known audio paths — audio files already loaded at startup.
 		# Derived from known_sidecars by stripping the sidecar suffix when
@@ -105,6 +111,11 @@ class InstrumentWatcher:
 		# not overlap.
 		self._timers: dict[pathlib.Path, threading.Timer] = {}
 		self._lock = threading.Lock()
+
+		# Set by stop().  Guards the reschedule sites below: a debounce/retry/
+		# stability callback already running on a timer thread when stop() fires
+		# must not register a fresh timer that would outlive the watcher.
+		self._stopped = False
 
 		handler = _InstrumentFileHandler(
 			sidecar_callback=self._on_sidecar_event,
@@ -132,6 +143,7 @@ class InstrumentWatcher:
 		self._observer.join()
 
 		with self._lock:
+			self._stopped = True
 			for timer in self._timers.values():
 				timer.cancel()
 			self._timers.clear()
@@ -157,6 +169,9 @@ class InstrumentWatcher:
 			return
 
 		with self._lock:
+			if self._stopped:
+				return
+
 			# Cancel any existing timer for this path — file may still be writing.
 			existing = self._timers.pop(path, None)
 			if existing is not None:
@@ -260,6 +275,8 @@ class InstrumentWatcher:
 		)
 
 		with self._lock:
+			if self._stopped:
+				return
 			self._timers[sidecar_path] = timer
 			timer.start()
 
@@ -282,6 +299,8 @@ class InstrumentWatcher:
 			return
 
 		with self._lock:
+			if self._stopped:
+				return
 
 			existing = self._timers.pop(path, None)
 			if existing is not None:
@@ -336,6 +355,8 @@ class InstrumentWatcher:
 		)
 
 		with self._lock:
+			if self._stopped:
+				return
 			self._timers[audio_path] = timer
 			timer.start()
 
@@ -398,6 +419,8 @@ class InstrumentWatcher:
 			)
 
 			with self._lock:
+				if self._stopped:
+					return
 				self._timers[audio_path] = timer
 				timer.start()
 
@@ -413,7 +436,7 @@ class InstrumentWatcher:
 			audio_path.name,
 		)
 
-		result = subsample.cache.load_or_analyze(audio_path)
+		result = subsample.cache.ensure_sample_assets(audio_path, with_preview=self._with_preview)
 
 		if result is None:
 			_log.warning(
@@ -528,6 +551,7 @@ class MidiMapWatcher:
 
 		self._timer: typing.Optional[threading.Timer] = None
 		self._lock = threading.Lock()
+		self._stopped = False
 
 		handler = _MidiMapFileHandler(self._path.name, self._on_file_event)
 		self._observer: typing.Any = watchdog.observers.Observer()
@@ -548,6 +572,7 @@ class MidiMapWatcher:
 		self._observer.join()
 
 		with self._lock:
+			self._stopped = True
 			if self._timer is not None:
 				self._timer.cancel()
 				self._timer = None
@@ -564,6 +589,9 @@ class MidiMapWatcher:
 		"""
 
 		with self._lock:
+			if self._stopped:
+				return
+
 			if self._timer is not None:
 				self._timer.cancel()
 
@@ -579,6 +607,10 @@ class MidiMapWatcher:
 
 		with self._lock:
 			self._timer = None
+
+			# Don't fire a reload into a torn-down player if stop() already ran.
+			if self._stopped:
+				return
 
 		self._on_changed(self._path)
 

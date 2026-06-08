@@ -370,7 +370,11 @@ def _compute_band_envelopes (
 	narrowest_hz     = min(hi - lo for lo, hi in _BAND_HZ)
 	min_bin_width_hz = narrowest_hz / _MIN_BINS_PER_BAND
 	min_n_fft        = 1 << int(math.ceil(math.log2(max(256.0, sample_rate / min_bin_width_hz))))
-	n_fft            = max(min_n_fft, 1 << int(math.ceil(math.log2(max(hop_length * 2, min_n_fft)))))
+
+	# Round hop_length*2 up to a power of two, floored at min_n_fft.  Since
+	# min_n_fft is itself a power of two inside the max(), the result is always
+	# >= min_n_fft — no outer max() needed.
+	n_fft            = 1 << int(math.ceil(math.log2(max(hop_length * 2, min_n_fft))))
 
 	spec = numpy.abs(librosa.stft(
 		y          = mono,

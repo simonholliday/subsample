@@ -139,7 +139,10 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 			# actual limits avoids both wrap and silently-altered peak values.
 			int32_min = float(numpy.iinfo(numpy.int32).min)
 			int32_max = float(numpy.iinfo(numpy.int32).max)
-			scaled = numpy.clip(float_data.astype(numpy.float64) * float(2**31), int32_min, int32_max)
+			# copy=False avoids a redundant copy when float_data is already
+			# float64 (DOUBLE); the FLOAT path still upcasts so the multiply
+			# happens in float64 regardless of numpy's scalar-promotion rules.
+			scaled = numpy.clip(float_data.astype(numpy.float64, copy=False) * float(2**31), int32_min, int32_max)
 			audio = numpy.ascontiguousarray(scaled.astype(numpy.int32))
 			bit_depth = 32
 
@@ -282,7 +285,7 @@ class AudioReader:
 		reader.stop()           # stops and closes the stream
 	"""
 
-	_QUEUE_MAX: int = 64  # ~0.74s of headroom at 44100 Hz / 512 frames per chunk
+	_QUEUE_MAX: int = 64  # chunks of headroom (≈0.74s at 44100 Hz with the default 512-frame chunk; scales with chunk_size)
 
 	def __init__ (
 		self,

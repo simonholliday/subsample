@@ -33,7 +33,7 @@ Usage flow
    library — but the YAML surface uses the MIDI-correct "program" vocabulary
    since each is selected by a Program Change, not by MIDI Bank Select.)
 
-2. ``cli.py`` calls ``load_bank()`` for each ``BankDefinition``, then
+2. ``cli.py`` calls ``_load_bank()`` for each ``BankDefinition``, then
    constructs a ``BankManager`` and passes it to ``MidiPlayer``.
 
 3. On receiving a MIDI Program Change, the player calls

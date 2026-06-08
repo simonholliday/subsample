@@ -3,6 +3,7 @@
 import numpy
 import pytest
 
+import subsample.buffer
 import subsample.config
 import subsample.detector
 
@@ -300,3 +301,49 @@ class TestBufferOverflow:
 			assert result is None
 
 		assert detector.state == subsample.detector.DetectorState.RECORDING
+
+	def test_recording_at_max_frames_is_fully_retrievable (self) -> None:
+		"""End-to-end: a recording force-ended at the buffer capacity must still
+		be fully readable.
+
+		The whole point of max_recording_frames is to force-end before the
+		circular buffer overwrites the recording's own start.  Driving the
+		detector and buffer together in cli._process_chunk's write-then-process
+		order proves the returned (start, end) span is still entirely in the
+		buffer — a short read would mean the start frame was lost.
+		"""
+
+		max_frames = 500
+		buf = subsample.buffer.CircularBuffer(max_frames=max_frames, channels=1)
+		detector = subsample.detector.LevelDetector(
+			_make_detection_config(),
+			sample_rate=1000,
+			chunk_size=100,
+			max_recording_frames=max_frames,
+		)
+
+		# Seed ambient, then trigger the recording.
+		buf.write(_silent_chunk())
+		detector.process_chunk(_silent_chunk(), buf.frames_written)
+
+		loud = _loud_chunk()
+		buf.write(loud)
+		result = detector.process_chunk(loud, buf.frames_written)
+		assert detector.state == subsample.detector.DetectorState.RECORDING
+
+		# Hold the recording until the force-end fires.
+		for _ in range(20):
+			loud = _loud_chunk()
+			buf.write(loud)
+			result = detector.process_chunk(loud, buf.frames_written)
+			if result is not None:
+				break
+
+		assert result is not None
+		start_frame, end_frame = result
+
+		# read_range clamps to the oldest retained frame, so a full-length read
+		# proves the start survived; the span never exceeds the buffer capacity.
+		segment = buf.read_range(start_frame, end_frame)
+		assert end_frame - start_frame <= max_frames
+		assert segment.shape[0] == end_frame - start_frame

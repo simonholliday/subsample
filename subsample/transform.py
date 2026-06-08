@@ -38,10 +38,8 @@ TransformManager
     Single coordination point for the player and cli.py.  Handles:
       - on_sample_added()   : auto-enqueue configured transforms for new samples
       - on_parent_evicted() : propagate instrument-library eviction to the cache
-      - on_bpm_change()     : invalidate and re-enqueue all time-stretch variants
-      - get_pitched()       : player look-up; enqueues on miss, returns None
-      - get_at_bpm()        : player look-up for time-stretch variants
       - get_variant()       : generic look-up by arbitrary TransformSpec
+      - get_base()          : look up the no-DSP float32 base variant
 
 Data flow
 ---------
@@ -66,11 +64,8 @@ Data flow
       → TransformManager.on_parent_evicted([sample_id])
           → TransformCache.remove_parent(sample_id)
 
-  Target BPM changes
-      → TransformManager.on_bpm_change(new_bpm)
-          → TransformCache.remove_by_step_type(TimeStretch)
-          → filter by tempo_bpm > 0
-          → TransformProcessor.enqueue_bpm_change(qualifying_records, new_bpm)
+  (Target BPM is baked per-trigger into each spec by spec_from_process, so
+  there is no separate BPM-change invalidation path.)
 
 How to add a new transform type
 --------------------------------
@@ -247,8 +242,11 @@ class Saturate:
 	"""Soft-clip saturation via tanh with level compensation.
 
 	amount_db:  Drive level in dB.  0 = no effect.  6 = moderate warmth.
-	            12+ = heavy distortion.  The output is level-compensated so
-	            peak amplitude is preserved.
+	            12+ = heavy distortion.  The output is divided by tanh(drive)
+	            so a full-scale input returns to full scale; below full scale
+	            the compensation lifts the level (tanh's compression is
+	            strongest near the peak), so quieter material gets louder, not
+	            merely undistorted.
 	"""
 
 	amount_db: float
@@ -785,40 +783,6 @@ class TransformCache:
 
 		return self.get(key)
 
-	def get_pitched (
-		self,
-		sample_id: int,
-		midi_note: int,
-	) -> typing.Optional[TransformResult]:
-
-		"""Convenience: look up a pitch-only variant by sample ID and MIDI note."""
-
-		key = TransformKey(
-			sample_id=sample_id,
-			spec=TransformSpec(steps=(PitchShift(target_midi_note=midi_note),)),
-		)
-
-		return self.get(key)
-
-	def get_stretched (
-		self,
-		sample_id:  int,
-		target_bpm: float,
-		resolution: int = 16,
-	) -> typing.Optional[TransformResult]:
-
-		"""Convenience: look up a time-stretch-only variant by sample ID and BPM."""
-
-		key = TransformKey(
-			sample_id=sample_id,
-			spec=TransformSpec(steps=(TimeStretch(
-				target_bpm=target_bpm,
-				resolution=resolution,
-			),)),
-		)
-
-		return self.get(key)
-
 	def has_variants (self, sample_id: int) -> bool:
 
 		"""Return True if any derivatives are currently cached for this parent."""
@@ -843,28 +807,6 @@ class TransformCache:
 
 		with self._lock:
 			return self._evict_parent_locked(sample_id)
-
-	def remove_by_step_type (self, step_type: type) -> list[TransformKey]:
-
-		"""Remove all cached variants that include a given transform step type.
-
-		Used to invalidate a class of transforms when their parameters change.
-		Example: remove_by_step_type(TimeStretch) when the target BPM changes.
-
-		Returns the list of TransformKeys removed.
-		"""
-
-		to_remove: list[TransformKey] = []
-
-		with self._lock:
-			for key in list(self._index):
-				if any(isinstance(step, step_type) for step in key.spec.steps):
-					to_remove.append(key)
-
-			for key in to_remove:
-				self._evict_key_locked(key)
-
-		return to_remove
 
 	@property
 	def memory_used (self) -> int:
@@ -1400,28 +1342,6 @@ class TransformProcessor:
 
 			self.enqueue(record, spec)
 
-	def enqueue_bpm_change (
-		self,
-		records:    list["subsample.library.SampleRecord"],
-		target_bpm: float,
-		resolution: int = 16,
-	) -> None:
-
-		"""Submit time-stretch jobs for all rhythmic samples.
-
-		Only enqueues for records that have a detected tempo
-		(rhythm.tempo_bpm > 0).  Samples with no beat grid are skipped.
-		"""
-
-		spec = TransformSpec(steps=(TimeStretch(
-			target_bpm=target_bpm,
-			resolution=resolution,
-		),))
-
-		for record in records:
-			if record.rhythm.tempo_bpm > 0.0:
-				self.enqueue(record, spec)
-
 	def shutdown (self) -> None:
 
 		"""Wait for all in-flight transforms and stop the worker pool."""
@@ -1608,13 +1528,9 @@ class TransformManager:
 	    Called when InstrumentLibrary.add() returns evicted IDs.  Cascade-evicts
 	    all derivatives of the evicted parents from the cache.
 
-	on_bpm_change(new_bpm)
-	    Called when the target playback BPM changes.  Invalidates all cached
-	    TimeStretch variants and re-enqueues new ones for rhythmic samples.
-
 	Player look-up pattern
 	-----------------------
-	    result = manager.get_pitched(sample_id, midi_note)
+	    result = manager.get_variant(sample_id, spec)   # or get_base(sample_id)
 	    if result is not None:
 	        audio = _render_float(result.audio, result.level, velocity)
 	        voices.append(Voice(audio=audio))
@@ -1636,83 +1552,6 @@ class TransformManager:
 		self._instrument_library = instrument_library
 		self._cfg                = cfg
 		self._disk_cache         = disk_cache
-
-	def get_pitched (
-		self,
-		sample_id: int,
-		midi_note: int,
-	) -> typing.Optional[TransformResult]:
-
-		"""Return a cached pitch variant, or None.
-
-		On a cache miss, enqueues the transform for background production and
-		returns None.  The caller should fall back to the original sample; the
-		variant will be ready on the next trigger.
-		"""
-
-		result = self._cache.get_pitched(sample_id, midi_note)
-
-		if result is None:
-			record = self._instrument_library.get(sample_id)
-
-			# Only enqueue for samples with a stable, confident pitch.
-			# Matches the gate in on_sample_added() — percussive samples have
-			# dominant_pitch_hz == 0, which causes log2(0) in librosa.hz_to_midi.
-			if record is not None and subsample.analysis.has_stable_pitch(
-				record.spectral, record.pitch, record.duration,
-			):
-				spec = TransformSpec(steps=(PitchShift(target_midi_note=midi_note),))
-				self._processor.enqueue(record, spec)
-
-		return result
-
-	def get_at_bpm (
-		self,
-		sample_id:  int,
-		target_bpm: typing.Optional[float] = None,
-		resolution: typing.Optional[int]   = None,
-	) -> typing.Optional[TransformResult]:
-
-		"""Return a cached time-stretch variant, or None.
-
-		By default reads target_bpm and quantize_resolution from the stored
-		config.  Per-assignment overrides can be passed explicitly — this
-		supports stretch_quantize processors that declare their own BPM/grid.
-
-		On a cache miss, enqueues the transform and returns None so the
-		variant is ready on the next trigger.
-
-		Returns None immediately when:
-		  - effective target_bpm is 0.0 (disabled)
-		  - the sample has no detected rhythm (tempo_bpm <= 0)
-		"""
-
-		bpm = target_bpm if target_bpm is not None else self._cfg.target_bpm
-		res = resolution if resolution is not None else self._cfg.quantize_resolution
-
-		if bpm <= 0.0:
-			return None
-
-		record = self._instrument_library.get(sample_id)
-
-		if record is None:
-			return None
-
-		if record.rhythm.tempo_bpm <= 0.0:
-			return None
-
-		spec = TransformSpec(steps=(TimeStretch(
-			target_bpm=bpm,
-			resolution=res,
-		),))
-
-		key    = TransformKey(sample_id=sample_id, spec=spec)
-		result = self._cache.get(key)
-
-		if result is None:
-			self._processor.enqueue(record, spec)
-
-		return result
 
 	def get_variant (
 		self,
@@ -1839,45 +1678,6 @@ class TransformManager:
 					"Cascade-evicted %d transform variant(s) for evicted parent %d",
 					len(evicted), sid,
 				)
-
-	def on_bpm_change (self, new_bpm: float) -> None:
-
-		"""React to a target BPM change.
-
-		Invalidates all cached TimeStretch and PadQuantize variants, then
-		re-enqueues new jobs for every rhythmic sample in the instrument
-		library. Deduplication in TransformProcessor prevents flooding the
-		queue if this is called repeatedly in quick succession (e.g. a BPM
-		knob being turned).
-		"""
-
-		invalidated = self._cache.remove_by_step_type(TimeStretch)
-		invalidated += self._cache.remove_by_step_type(PadQuantize)
-
-		_log.info(
-			"Target BPM changed to %.1f — invalidated %d time-aligned variant(s)",
-			new_bpm, len(invalidated),
-		)
-
-		qualifying = [
-			r for r in self._instrument_library.samples()
-			if r.rhythm.tempo_bpm > 0.0
-		]
-
-		self._processor.enqueue_bpm_change(
-			qualifying, new_bpm, resolution=self._cfg.quantize_resolution,
-		)
-
-	def has_pitch_variant (self, sample_id: int, midi_note: int) -> bool:
-
-		"""Return True if a pitch variant for the given note is currently cached."""
-
-		key = TransformKey(
-			sample_id=sample_id,
-			spec=TransformSpec(steps=(PitchShift(target_midi_note=midi_note),)),
-		)
-
-		return self._cache.get(key) is not None
 
 	def list_variants (self, sample_id: int) -> list[TransformKey]:
 

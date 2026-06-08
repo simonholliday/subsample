@@ -279,6 +279,17 @@ class SimilarityMatrix:
 		sid = record.sample_id
 
 		with self._lock:
+			# Re-adding an id would bisect.insort a second RankedMatch into every
+			# ranking while overwriting the single _scores row, so remove() (which
+			# scans by id) would later leave one stale match orphaned — the same
+			# desync bulk_add() guards against.  allocate_id is monotonic so this
+			# never happens in practice; reject loudly if it ever does.
+			if sid in self._scores:
+				raise ValueError(
+					f"add() called with sample_id {sid} already present — "
+					f"sample ids must be unique (allocate_id is monotonic)."
+				)
+
 			score_row: dict[str, float] = {}
 
 			for ref_name, ref_vec in self._ref_vectors.items():

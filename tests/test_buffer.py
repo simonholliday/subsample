@@ -128,6 +128,26 @@ class TestCircularBufferWrapAround:
 		assert result.shape == (10, 1)
 		assert numpy.all(result == 2)
 
+	def test_full_capacity_read_at_wrap_boundary (self) -> None:
+		"""Read the whole buffer when start_pos == end_pos and n == max_frames.
+
+		This is the one wrap case where the modulo positions coincide and the
+		contiguous (start_pos < end_pos) branch is False — the concat path must
+		still return all max_frames frames, not an empty slice.
+		"""
+
+		buf = subsample.buffer.CircularBuffer(max_frames=10, channels=1)
+
+		buf.write(_make_chunk(1, 10))   # frames 0–9, write_head wraps to 0
+		buf.write(_make_chunk(2, 10))   # frames 10–19, write_head wraps to 0 again
+
+		# start=10, end=20: start_pos = 10 % 10 = 0 == end_pos = 20 % 10 = 0,
+		# and n = 10 = max_frames.
+		result = buf.read_range(10, 20)
+
+		assert result.shape == (10, 1)
+		assert numpy.all(result == 2)
+
 
 class TestCircularBufferStereo:
 

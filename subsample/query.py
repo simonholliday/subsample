@@ -99,6 +99,36 @@ def _resolved_sample_path (path: pathlib.Path) -> pathlib.Path:
 	return resolved
 
 
+# WherePredicate.name_regex stores its pattern as a raw string (so the frozen
+# dataclass stays hashable), but matches() runs on the trigger path — so the
+# compiled re.Pattern is memoised module-side here rather than recompiling, or
+# re-hashing through re's own small wholesale-evicted internal cache, on every
+# record.  Same GIL-atomic, cap-and-clear discipline as _RESOLVED_PATH_CACHE.
+_COMPILED_REGEX_CACHE_MAX: typing.Final[int] = 256
+_COMPILED_REGEX_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _compiled_name_regex (pattern: str) -> "re.Pattern[str]":
+
+	"""Return the case-insensitive compiled form of ``pattern``, memoised.
+
+	The pattern's syntax was already validated at parse time, so compilation
+	here cannot raise for a parser-built predicate.
+	"""
+
+	compiled = _COMPILED_REGEX_CACHE.get(pattern)
+
+	if compiled is None:
+		compiled = re.compile(pattern, flags=re.IGNORECASE)
+
+		if len(_COMPILED_REGEX_CACHE) >= _COMPILED_REGEX_CACHE_MAX:
+			_COMPILED_REGEX_CACHE.clear()
+
+		_COMPILED_REGEX_CACHE[pattern] = compiled
+
+	return compiled
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -328,12 +358,33 @@ class WherePredicate:
 	"""re-module pattern matched against record.name via re.fullmatch with
 	re.IGNORECASE.  Populated by `where: { name: { regex: ... } }`.  The
 	raw string is stored (not a compiled Pattern) so the dataclass stays
-	hashable; the re module caches compiled patterns internally."""
+	hashable; matches() resolves it to a memoised compiled Pattern via
+	_compiled_name_regex so the trigger path doesn't recompile per record."""
 	name_path: typing.Optional[str]  = None
 	"""Internal field — set by parse_select for path-based name references;
 	used by _resolve_path_references to load samples; never evaluated in
 	matches() and never exposed in YAML."""
 	directory: typing.Optional[str]  = None
+
+	def __post_init__ (self) -> None:
+
+		"""Enforce the name-form mutual exclusion the parser guarantees.
+
+		matches() ANDs whichever name forms are populated, so a directly
+		constructed predicate setting two of them would silently intersect
+		rather than be rejected — guard it at construction instead.
+		"""
+
+		name_forms = sum(
+			field is not None
+			for field in (self.name, self.name_list, self.name_glob, self.name_regex)
+		)
+
+		if name_forms > 1:
+			raise ValueError(
+				"WherePredicate accepts at most one of name / name_list / "
+				"name_glob / name_regex (they are mutually exclusive)"
+			)
 
 	def matches (
 		self,
@@ -384,7 +435,7 @@ class WherePredicate:
 				return False
 
 		if self.name_regex is not None:
-			if re.fullmatch(self.name_regex, record.name, flags=re.IGNORECASE) is None:
+			if _compiled_name_regex(self.name_regex).fullmatch(record.name) is None:
 				return False
 
 		if self.directory is not None:
@@ -2054,5 +2105,17 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 				f"MIDI map assignment {assignment_name!r}: process entry must be "
 				f"a string or a dict (got {type(entry).__name__})"
 			)
+
+	# stretch_quantize and pad_quantize are two ways to beat-align the same
+	# sample; combining them is ambiguous (their bpm/grid hints would fight at
+	# trigger time) and almost certainly a mistake — reject it at load.
+	step_names = {step.name for step in steps}
+
+	if "stretch_quantize" in step_names and "pad_quantize" in step_names:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'stretch_quantize' and "
+			f"'pad_quantize' cannot be combined in one process chain — they are "
+			f"two ways to beat-align the same sample.  Use one or the other."
+		)
 
 	return ProcessSpec(steps=tuple(steps))

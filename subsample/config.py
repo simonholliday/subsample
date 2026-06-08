@@ -839,9 +839,9 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		)
 
 	player_limiter_ceiling_db = float(player_raw.get("limiter_ceiling_db", -0.1))
-	if player_limiter_ceiling_db > 0.0:
+	if player_limiter_ceiling_db > 0.0 or player_limiter_ceiling_db < -12.0:
 		raise ValueError(
-			f"player.limiter_ceiling_db ({player_limiter_ceiling_db}) must be ≤ 0.0."
+			f"player.limiter_ceiling_db ({player_limiter_ceiling_db}) must be in [-12.0, 0.0]."
 		)
 	if player_limiter_ceiling_db <= player_limiter_threshold_db:
 		raise ValueError(

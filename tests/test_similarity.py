@@ -169,7 +169,7 @@ class TestBuildFeatureVector:
 			log_attack_time=0.1, spectral_flux=0.9,
 		))
 		v = subsample.similarity._build_feature_vector(record, _SPECTRAL_ONLY_CFG)
-		# The 11-element spectral group contains the L2-normalised vector;
+		# The 14-element spectral group contains the L2-normalised vector;
 		# just verify the values are not all the same (i.e. the two new fields are in)
 		assert not numpy.all(v == v[0])
 
@@ -385,6 +385,17 @@ class TestSimilarityMatrix:
 		inst = _make_record("I1", _make_spectral())
 		matrix.add(inst)
 		assert matrix.get_match("BD", 0) == inst.sample_id
+
+	def test_readding_same_id_is_rejected (self) -> None:
+		"""Re-adding an id would orphan a stale RankedMatch in every ranking
+		(remove() scans by id), so add() rejects a duplicate id."""
+
+		matrix = self._matrix("BD")
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+
+		with pytest.raises(ValueError, match="already present"):
+			matrix.add(inst)
 
 	def test_get_match_case_insensitive (self) -> None:
 		matrix = self._matrix("BD")

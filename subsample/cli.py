@@ -1237,6 +1237,7 @@ def _main_impl () -> None:
 					on_sample_loaded=_make_bank_callback(_bank),
 					target_sample_rate=output_sample_rate,
 					known_audio=known_au,
+					with_preview=cfg.recorder.previews,
 				)
 				watcher.start()
 				instrument_watchers.append(watcher)
@@ -1267,6 +1268,7 @@ def _main_impl () -> None:
 				on_sample_loaded=_on_watched_sample,
 				target_sample_rate=output_sample_rate,
 				known_audio=known_audio_paths,
+				with_preview=cfg.recorder.previews,
 			)
 			watcher.start()
 			instrument_watchers.append(watcher)
@@ -1379,7 +1381,7 @@ def _main_impl () -> None:
 					_log.warning("OSC /sample/import: file not found: %s", file_path)
 					return
 
-				result = subsample.cache.load_or_analyze(file_path)
+				result = subsample.cache.ensure_sample_assets(file_path, with_preview=cfg.recorder.previews)
 
 				if result is None:
 					_log.warning("OSC /sample/import: analysis failed: %s", file_path)

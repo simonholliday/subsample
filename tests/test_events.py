@@ -78,3 +78,25 @@ class TestEventEmitter:
 
 		handler_a.assert_called_once_with(v=1)
 		handler_b.assert_not_called()
+
+	def test_subscribe_during_dispatch_does_not_disturb_iteration (self) -> None:
+		"""A handler that subscribes a new handler mid-dispatch must not corrupt
+		the in-flight iteration (the emitter snapshots the handler list under the
+		lock).  The newly-added handler only runs on the next emit."""
+
+		emitter = subsample.events.EventEmitter()
+		late = unittest.mock.MagicMock()
+
+		def subscriber () -> None:
+			emitter.on("test", late)
+
+		emitter.on("test", subscriber)
+
+		# First emit: must not raise (no "list changed during iteration"), and
+		# the handler added mid-dispatch does not run this round.
+		emitter.emit("test")
+		late.assert_not_called()
+
+		# Second emit: the late handler is now live.
+		emitter.emit("test")
+		late.assert_called_once_with()

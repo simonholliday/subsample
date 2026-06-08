@@ -2,14 +2,24 @@
 
 import pathlib
 import sys
+import typing
+import unittest.mock
 
 import numpy
 import pytest
 
+import subsample.analysis
 import subsample.buffer
 import subsample.cli
 import subsample.config
 import subsample.detector
+import subsample.events
+import subsample.library
+import subsample.player
+import subsample.similarity
+import subsample.transform
+
+import tests.helpers
 
 
 def _make_detection_cfg (
@@ -192,3 +202,99 @@ class TestFormatMmss:
 	def test_negative_clamped_to_zero (self) -> None:
 		"""Negative inputs should clamp to 00:00 rather than render '-1:-1'."""
 		assert subsample.cli._format_mmss(-5.0) == "00:00"
+
+
+def _make_record (
+	name: str,
+	audio: typing.Optional[numpy.ndarray] = None,
+) -> subsample.library.SampleRecord:
+
+	"""Build a SampleRecord with default analysis fields and optional audio."""
+
+	return subsample.library.SampleRecord(
+		sample_id   = subsample.library.allocate_id(),
+		name        = name,
+		spectral    = tests.helpers._make_spectral(),
+		rhythm      = tests.helpers._make_rhythm(),
+		pitch       = tests.helpers._make_pitch(),
+		timbre      = tests.helpers._make_timbre(),
+		level       = tests.helpers._make_level(),
+		band_energy = tests.helpers._make_band_energy(),
+		params      = tests.helpers._make_params(),
+		duration    = 1.0,
+		audio       = audio,
+	)
+
+
+class TestIntegrateSample:
+
+	"""_integrate_sample is the shared hub that fans a new sample out to the
+	library, similarity matrix, transform pipeline, active player, and event
+	bus.  It is reached from three callers (capture, watcher, OSC import)."""
+
+	def test_fans_out_to_every_subsystem (self) -> None:
+		"""A new sample lands in the library, similarity, transforms, the active
+		player's re-evaluation, and the sample_loaded event."""
+
+		library   = subsample.library.InstrumentLibrary(max_memory_bytes=0)
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		similarity.get_scores.return_value = {}
+		transform = unittest.mock.MagicMock(spec=subsample.transform.TransformManager)
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player_cell: list[typing.Optional[subsample.player.MidiPlayer]] = [player]
+
+		events = subsample.events.EventEmitter()
+		loaded: list[subsample.library.SampleRecord] = []
+		events.on("sample_loaded", lambda record: loaded.append(record))
+
+		record = _make_record("kick")
+		subsample.cli._integrate_sample(
+			record, library, similarity, transform, player_cell, events,
+		)
+
+		assert library.get(record.sample_id) is record
+		similarity.add.assert_called_once_with(record)
+		transform.on_sample_added.assert_called_once_with(record)
+		player._try_update_assignments.assert_called_once()
+		assert loaded == [record]
+
+	def test_eviction_propagates_to_similarity_and_transforms (self) -> None:
+		"""When the library add evicts an old sample, the evicted id is removed
+		from the similarity matrix and cascade-evicted from the transform cache."""
+
+		# Budget holds one ~4 KB record; the second add evicts the first.
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=5000)
+		audio   = numpy.zeros((2000, 1), dtype=numpy.int16)   # 4000 bytes
+
+		first = _make_record("first", audio=audio.copy())
+		library.add(first)
+
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		similarity.get_scores.return_value = {}
+		transform = unittest.mock.MagicMock(spec=subsample.transform.TransformManager)
+
+		second = _make_record("second", audio=audio.copy())
+		subsample.cli._integrate_sample(
+			second, library, similarity, transform, player_cell=None,
+		)
+
+		similarity.remove.assert_called_once_with([first.sample_id])
+		transform.on_parent_evicted.assert_called_once_with([first.sample_id])
+
+	def test_tolerates_all_optional_subsystems_none (self) -> None:
+		"""With no similarity/transform/player/events wired, the sample is still
+		added to the library without error."""
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=0)
+		record  = _make_record("lonely")
+
+		subsample.cli._integrate_sample(
+			record, library,
+			similarity_matrix=None,
+			transform_manager=None,
+			player_cell=None,
+			app_events=None,
+		)
+
+		assert library.get(record.sample_id) is record

@@ -132,7 +132,10 @@ class LevelDetector:
 		if self._state == DetectorState.RECORDING:
 			return self._handle_recording(chunk_rms, current_frame)
 
-		return None  # unreachable, satisfies mypy
+		# Exhaustive over DetectorState today; raise (rather than silently
+		# returning None = "no recording") if a new state is ever added without
+		# a handler here.
+		raise AssertionError(f"unhandled detector state {self._state!r}")
 
 	# --- State handlers ---
 

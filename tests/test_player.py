@@ -2075,6 +2075,86 @@ assignments:
 		assert fired == {"Kick body", "Sub sine"}
 
 
+class TestStripOobRouting:
+
+	"""_strip_oob_routing_rules drops output-routing indices the device lacks,
+	leaving in-bounds and unrouted entries untouched by identity."""
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def _asgn (
+		self,
+		name:    str,
+		routing: typing.Optional[tuple[int, ...]],
+	) -> subsample.query.Assignment:
+		return subsample.query.Assignment(
+			name=name,
+			select=(subsample.query.SelectSpec(),),
+			output_routing=routing,
+		)
+
+	def test_strips_oob_keeps_valid_and_unrouted (self) -> None:
+		"""Valid and unrouted assignments pass through by identity; an OOB one is
+		rebuilt with default (None) routing."""
+
+		player = self._make_player()
+		player._output_channels = 2   # valid 0-indexed device channels: 0, 1
+
+		valid    = self._asgn("valid", (0, 1))
+		oob      = self._asgn("oob", (0, 2))     # index 2 exceeds the 2-channel device
+		unrouted = self._asgn("unrouted", None)
+
+		pick = subsample.query.PickSpec(1, 1)
+		note_map: subsample.player.NoteMap = {
+			(9, 36): [(valid, pick)],
+			(9, 37): [(oob, pick)],
+			(9, 38): [(unrouted, pick)],
+		}
+
+		fixed, _ = player._strip_oob_routing_rules(note_map, ())
+
+		# Untouched entries are returned by identity, not rebuilt.
+		assert fixed[(9, 36)][0][0] is valid
+		assert fixed[(9, 38)][0][0] is unrouted
+
+		# The out-of-bounds entry is replaced with default routing.
+		fixed_oob = fixed[(9, 37)][0][0]
+		assert fixed_oob is not oob
+		assert fixed_oob.output_routing is None
+		assert fixed_oob.name == "oob"
+
+	def test_strips_oob_zone_template (self) -> None:
+		"""Zone templates get the same out-of-bounds strip as manual entries."""
+
+		player = self._make_player()
+		player._output_channels = 2
+
+		tmpl = subsample.player.ZoneTemplate(
+			name="zone", channel=9, keyboard_range=(36, 48),
+			select=(subsample.query.SelectSpec(),),
+			process=subsample.query.ProcessSpec(),
+			one_shot=True, gain_db=0.0, pan_weights=None,
+			output_routing=(5,), extract=None, segment_mode="",
+			velocity_trigger=(0, 127), velocity_rescale_to=None,
+		)
+
+		_, fixed_zones = player._strip_oob_routing_rules({}, (tmpl,))
+
+		assert fixed_zones[0] is not tmpl
+		assert fixed_zones[0].output_routing is None
+
+
 class TestSelectVelocityLayer:
 
 	"""Tests for MidiPlayer._select_velocity_layers — the runtime lookup
@@ -4713,7 +4793,7 @@ class TestSelectSegment:
 
 		# 4 segments, 6 triggers: should cycle 0,1,2,3,0,1
 		assert results == [1000, 1000, 1000, 1000, 1000, 1000]
-		# Default (no velocity layering) hashes to (ch, note, 0, 127).
+		# Counter is keyed by (ch, note, id(Assignment)) — here a stand-in id.
 		assert player._segment_counters[(0, 60, 42)] == 6
 
 	def test_random_stays_in_bounds (self) -> None:
