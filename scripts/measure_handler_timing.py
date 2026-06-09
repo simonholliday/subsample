@@ -43,15 +43,13 @@ import threading
 import time
 import typing
 
-import subsample.analysis
-import subsample.bank
+import mido
+
 import subsample.config
 import subsample.library
 import subsample.player
 import subsample.similarity
 import subsample.transform
-
-import mido
 
 
 class _PathCapture (logging.Handler):
@@ -163,7 +161,7 @@ def _fire (
 def main () -> int:
 
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("--assignment", default="Kick", help="Assignment name to fire (default: Kick).")
+	parser.add_argument("--assignment", default="Kicks", help="Assignment name to fire (default: Kicks, as in midi-map.yaml.default).")
 	parser.add_argument("--hits", type=int, default=500, help="Warm-phase hit count (default: 500).")
 	parser.add_argument("--gap-ms", type=float, default=5.0, help="Spacing between warm hits, ms (default: 5).")
 	parser.add_argument("--drain-s", type=float, default=6.0, help="Seconds to wait for transform workers to bake variants (default: 6).")
@@ -194,7 +192,7 @@ def main () -> int:
 	)
 
 	if midi_map_result.bank_definitions:
-		print("This harness covers single-directory maps only; this map declares banks.", file=sys.stderr)
+		print("This harness covers single-directory maps only; this map declares programs.", file=sys.stderr)
 		return 1
 
 	print(f"Loading instrument library from {cfg.instrument.directory} …")

@@ -319,6 +319,12 @@ def _reanalyze_and_save (
 			_log.info("Re-analyzing %s (audio changed or sidecar stale)…", audio_path.name)
 
 	try:
+		# Hash BEFORE decoding so the digest covers the same bytes (or older
+		# ones) than the analysis: if the file changes mid-scan, the stored
+		# MD5 then mismatches the new bytes and the next startup re-analyzes.
+		# Hashing after the decode would pair old-bytes analysis with
+		# new-bytes MD5 — a permanently wrong sidecar that never self-heals.
+		audio_md5 = compute_audio_md5(audio_path)
 		file_info = subsample.audio.read_audio_file(audio_path)
 	except (OSError, ValueError) as exc:
 		_log.warning("Could not read %s for re-analysis: %s", audio_path.name, exc)
@@ -328,31 +334,40 @@ def _reanalyze_and_save (
 	# Non-ambisonic samples keep the historical channel-average behaviour.
 	channel_index = 0 if channel_format.startswith("b_format_") else None
 
-	mono = subsample.analysis.to_mono_float(
-		file_info.audio, file_info.bit_depth, channel_index=channel_index,
-	)
-	params = subsample.analysis.compute_params(file_info.sample_rate)
-	duration = len(mono) / file_info.sample_rate
+	# Guarded broadly: librosa raises assorted exceptions (IndexError,
+	# ParameterError, …) on degenerate input such as a few-millisecond file.
+	# One junk file in the sample tree must skip, not abort the whole load.
+	try:
+		mono = subsample.analysis.to_mono_float(
+			file_info.audio, file_info.bit_depth, channel_index=channel_index,
+		)
+		params = subsample.analysis.compute_params(file_info.sample_rate)
+		duration = len(mono) / file_info.sample_rate
 
-	spectral, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
-		mono, params, subsample.config.AnalysisConfig(),
-	)
-
-	# Compute the preview data once and embed it in the sidecar so the
-	# `preview` block stays coherent with the freshly-computed analysis.
-	# Without this, an MD5-mismatch regen would silently drop any prior
-	# preview block — and a later PNG render would either fail or, worse,
-	# use stale envelope data captured from a now-different audio file.
-	preview_data: typing.Optional[subsample.preview.PreviewData] = None
-	if with_preview:
-		preview_data = subsample.preview.compute_preview_data(
-			mono, file_info.sample_rate,
-			rhythm, pitch, spectral, level, band_energy,
-			duration=duration,
+		spectral, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
+			mono, params, subsample.config.AnalysisConfig(),
 		)
 
+		# Compute the preview data once and embed it in the sidecar so the
+		# `preview` block stays coherent with the freshly-computed analysis.
+		# Without this, an MD5-mismatch regen would silently drop any prior
+		# preview block — and a later PNG render would either fail or, worse,
+		# use stale envelope data captured from a now-different audio file.
+		preview_data: typing.Optional[subsample.preview.PreviewData] = None
+		if with_preview:
+			preview_data = subsample.preview.compute_preview_data(
+				mono, file_info.sample_rate,
+				rhythm, pitch, spectral, level, band_energy,
+				duration=duration,
+			)
+	except Exception as exc:
+		_log.warning(
+			"Could not analyze %s — skipping (%s: %s)",
+			audio_path.name, type(exc).__name__, exc,
+		)
+		return None
+
 	try:
-		audio_md5 = compute_audio_md5(audio_path)
 		save_cache(
 			audio_path, audio_md5, params, spectral, rhythm, pitch, timbre,
 			duration, level, band_energy,
@@ -367,8 +382,20 @@ def _reanalyze_and_save (
 		png_path = audio_path.with_name(audio_path.name + PREVIEW_PNG_SUFFIX)
 		try:
 			subsample.preview.render_png(preview_data, png_path)
-		except OSError as exc:
+		except Exception as exc:
+			# Not just OSError: a Pillow/numpy failure must not lose the
+			# sample either — the sidecar is already saved; only the PNG
+			# is missing and will regenerate on a later pass.
 			_log.warning("Failed to render preview PNG %s: %s", png_path.name, exc)
+	else:
+		# Previews are off (or weren't computed) and the audio just changed:
+		# an existing PNG now depicts DIFFERENT audio.  Remove it rather than
+		# leave a misleading image — it regenerates when previews come back on.
+		stale_png = audio_path.with_name(audio_path.name + PREVIEW_PNG_SUFFIX)
+		try:
+			stale_png.unlink(missing_ok=True)
+		except OSError:
+			pass
 
 	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format)
 
@@ -419,13 +446,17 @@ def ensure_sample_assets (
 	1. Full re-analysis when any of: sidecar missing, sidecar payload
 	   unreadable, analysis_version mismatch, audio MD5 mismatch, or (with
 	   ``with_preview=True``) the sidecar lacks an embedded ``preview``
-	   block.  The single audio read drives analysis + preview computation
-	   in one pass, the sidecar is rewritten with the preview block when
-	   wanted, and the PNG is rendered.
+	   block.  One MD5 pass over the raw bytes (hashed BEFORE decoding so a
+	   mid-scan file change self-heals on the next startup) plus one decode
+	   drive analysis + preview computation; the sidecar is rewritten with
+	   the preview block when wanted, and the PNG is rendered.
 
 	2. Otherwise, if the sidecar is fresh but the PNG is missing and
 	   ``with_preview=True``: render the PNG from the embedded preview
-	   block without re-analysing.  The sidecar is not touched.
+	   block without re-analysing.  The sidecar is not touched — unless the
+	   embedded block turns out unreadable, in which case the file falls
+	   back to branch 1 so the corrupt block heals instead of re-warning
+	   on every startup.
 
 	3. Otherwise: deserialize the existing sidecar and return.
 
@@ -506,14 +537,29 @@ def ensure_sample_assets (
 	if with_preview and not png_path.exists():
 		preview_data = load_preview_data(audio_path)
 
-		if preview_data is not None:
-			try:
-				subsample.preview.render_png(preview_data, png_path)
-			except OSError as exc:
-				_log.warning(
-					"Failed to render preview PNG %s: %s",
-					png_path.name, exc,
-				)
+		if preview_data is None:
+			# The block is present but corrupt/stale (deserialize failed) —
+			# a warn-only path would re-warn on every startup and never heal.
+			# Full re-analysis rewrites a coherent sidecar + PNG.
+			_log.info(
+				"Preview block in %s is unreadable — re-analyzing to heal it",
+				sidecar.name,
+			)
+			return _reanalyze_and_save(
+				audio_path, cached_version=None, silent=True,
+				channel_format=prior_channel_format,
+				with_preview=with_preview,
+			)
+
+		try:
+			subsample.preview.render_png(preview_data, png_path)
+		except Exception as exc:
+			# Broader than OSError: a Pillow/numpy failure must not abort
+			# the load — the analysis payload below is unaffected.
+			_log.warning(
+				"Failed to render preview PNG %s: %s",
+				png_path.name, exc,
+			)
 
 	return _deserialize_payload(payload, sidecar.name)
 

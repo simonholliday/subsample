@@ -514,49 +514,6 @@ class TestTransformProcessor:
 			subsample.transform.TransformProcessor._HANDLERS.clear()
 			subsample.transform.TransformProcessor._HANDLERS.update(original_handlers)
 
-	def test_enqueue_pitch_range (self) -> None:
-		"""enqueue_pitch_range submits one job per MIDI note."""
-
-		completed: list[subsample.transform.TransformResult] = []
-
-		def _passthrough (
-			audio:       numpy.ndarray,
-			sample_rate: int,
-			record:      subsample.library.SampleRecord,
-			step:        subsample.transform.PitchShift,
-		) -> numpy.ndarray:
-			return audio
-
-		original_handlers = dict(subsample.transform.TransformProcessor._HANDLERS)
-
-		try:
-			subsample.transform.TransformProcessor._HANDLERS[
-				subsample.transform.PitchShift
-			] = _passthrough  # type: ignore[assignment]
-
-			processor = subsample.transform.TransformProcessor(
-				sample_rate=44100,
-				bit_depth=16,
-				on_complete=completed.append,
-			)
-
-			record = _make_record(sample_id=2)
-			notes  = list(range(60, 65))  # 5 notes
-
-			processor.enqueue_pitch_range(record, notes)
-			processor.shutdown()
-
-			assert len(completed) == 5
-			result_notes = {
-				r.key.spec.steps[0].target_midi_note  # type: ignore[union-attr]
-				for r in completed
-			}
-			assert result_notes == set(notes)
-
-		finally:
-			subsample.transform.TransformProcessor._HANDLERS.clear()
-			subsample.transform.TransformProcessor._HANDLERS.update(original_handlers)
-
 
 # ---------------------------------------------------------------------------
 # TestTransformManager
@@ -670,8 +627,9 @@ class TestTransformManager:
 		assert len(cache.list_variants(2)) == 1
 		assert cache.get_base(2) is not None
 
-	def test_enqueue_pitch_range_respects_auto_pitch_false (self) -> None:
-		"""auto_pitch=False causes enqueue_pitch_range() to be a no-op."""
+	def test_auto_pitch_enabled_reflects_config (self) -> None:
+		"""auto_pitch_enabled is the read-only switch the player consults
+		before fanning a repitch assignment out across its note range."""
 		lib   = subsample.library.InstrumentLibrary(max_memory_bytes=100 * 1024 * 1024)
 		cache = subsample.transform.TransformCache(max_memory_bytes=50 * 1024 * 1024)
 		processor = subsample.transform.TransformProcessor(
@@ -683,19 +641,8 @@ class TestTransformManager:
 			instrument_library=lib, cfg=cfg,
 		)
 
-		record = _make_record(sample_id=3)
-		lib.add(record)
-		manager.on_sample_added(record)
-
-		# Even when enqueue_pitch_range is called explicitly, auto_pitch=False blocks it.
-		manager.enqueue_pitch_range(record, list(range(60, 73)))
-
+		assert manager.auto_pitch_enabled is False
 		manager.shutdown()
-
-		# Base variant only — enqueue_pitch_range was a no-op.
-		assert cache.has_variants(3)
-		assert len(cache.list_variants(3)) == 1
-		assert cache.get_base(3) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -838,7 +785,9 @@ class TestApplyPitch:
 		assert result.dtype == numpy.float32
 
 	def test_upward_shift_produces_different_audio (self) -> None:
-		"""Shifting a sine wave up by an octave produces distinct output."""
+		"""Shifting a 440 Hz sine up an octave lands at ~880 Hz — direction
+		AND magnitude are pinned, so a sign-flipped shift (which also merely
+		"differs from the input") fails."""
 		t     = numpy.linspace(0, 0.1, 4410, endpoint=False, dtype=numpy.float32)
 		sine  = numpy.sin(2 * numpy.pi * 440.0 * t)
 		audio = sine[:, numpy.newaxis]  # (4410, 1)
@@ -850,8 +799,20 @@ class TestApplyPitch:
 		result = subsample.transform._apply_pitch(audio, 44100, record, step)
 
 		assert result.shape == audio.shape
-		# The octave-shifted output should differ from the original
-		assert not numpy.allclose(result, audio, atol=0.01)
+
+		def _dominant_hz (x: "numpy.ndarray") -> float:
+			# Hann-windowed middle half: Rubber Band leaves strong onset/edge
+			# transients whose energy dominates an unwindowed full-buffer FFT.
+			seg      = x[x.shape[0] // 4 : 3 * x.shape[0] // 4, 0]
+			windowed = seg * numpy.hanning(len(seg))
+			spectrum = numpy.abs(numpy.fft.rfft(windowed))
+			freqs    = numpy.fft.rfftfreq(len(seg), d=1.0 / 44100.0)
+			return float(freqs[int(numpy.argmax(spectrum))])
+
+		assert abs(_dominant_hz(audio) - 440.0) < 30.0   # sanity on the input
+		# ±60 Hz cleanly separates 880 (correct) from 440 (no-op) and
+		# 220 (sign-flipped shift).
+		assert abs(_dominant_hz(result) - 880.0) < 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -2509,7 +2470,8 @@ class TestDistort:
 		assert numpy.all(numpy.abs(result) <= 1.01)
 
 	def test_fold_wraps (self) -> None:
-		"""Fold mode produces values within ±1 even with high drive."""
+		"""Fold mode wraps overdriven peaks back DOWN — visible as extra
+		zero-crossings a clip (or identity) can never create."""
 		record = _make_record(sample_id=1)
 		audio = _make_audio(n_frames=4410, channels=1)
 		audio[:, 0] = numpy.sin(numpy.linspace(0, 20, 4410)).astype(numpy.float32) * 0.5
@@ -2517,8 +2479,20 @@ class TestDistort:
 		step = subsample.transform.Distort(mode="fold", drive_db=20.0, tone=1.0, mix=1.0)
 		result = subsample.transform._apply_distort(audio, 44100, record, step)
 
-		# Fold should keep everything in [-1, 1] before level compensation.
 		assert result.dtype == numpy.float32
+
+		# Level compensation restores the input peak; the folded waveform
+		# never exceeds it.
+		in_peak = float(numpy.max(numpy.abs(audio)))
+		assert float(numpy.max(numpy.abs(result))) <= in_peak * 1.01
+
+		# At 20 dB drive (×10) each half-cycle folds repeatedly — the output
+		# must cross zero far more often than the input.  Identity or
+		# hard-clip implementations preserve the input's crossing count.
+		def crossings (x: "numpy.ndarray") -> int:
+			return int(numpy.count_nonzero(numpy.diff(numpy.sign(x[:, 0])) != 0))
+
+		assert crossings(result) > crossings(audio) * 2
 
 	def test_bit_crush_quantizes (self) -> None:
 		"""Bit-crush mode reduces the number of distinct amplitude levels."""
@@ -2542,8 +2516,12 @@ class TestDistort:
 		step = subsample.transform.Distort(mode="downsample", drive_db=0.0, downsample_factor=4, tone=1.0, mix=1.0)
 		result = subsample.transform._apply_distort(audio, 44100, record, step)
 
-		# Adjacent samples within each group of 4 should be identical.
 		assert result.shape[0] == audio.shape[0]
+
+		# Adjacent samples within each group of 4 ARE identical (the sine
+		# input is strictly varying, so an identity implementation fails).
+		groups = result[: 4400 - (4400 % 4), 0].reshape(-1, 4)
+		assert numpy.all(groups == groups[:, :1])
 
 	def test_mix_blend (self) -> None:
 		"""mix=0.5 blends dry and wet signals."""
@@ -2639,6 +2617,47 @@ class TestReshape:
 		# Middle portion should be at roughly half the original level.
 		mid = result[10000:20000, 0]
 		assert numpy.mean(numpy.abs(mid)) < 0.35
+
+	def test_release_fades_from_sustain_level_not_full (self) -> None:
+		"""The release must start from the sustain level — not jump back to
+		full gain for the tail (the gain[release_start] off-by-one)."""
+
+		record = _make_record(sample_id=1, onset_times=(0.0,), attack_times=(0.0,))
+		audio = _make_audio(n_frames=44100, channels=1)
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.Reshape(sustain=0.5, release_ms=100.0)
+		result = subsample.transform._apply_reshape(audio, 44100, record, step)
+
+		# Constant input, so the output IS the gain envelope (×0.5).  After
+		# the initial peak the envelope must never rise again — a positive
+		# step means the release re-opened to full level.
+		envelope = result[:, 0] / 0.5
+		assert numpy.max(numpy.diff(envelope)) < 1e-6
+
+		# At the start of the release window the level is sustain (0.5), not
+		# 1.0: 0.5 input × 0.5 sustain = 0.25.
+		release_start = 44100 - int(0.100 * 44100)
+		assert abs(result[release_start, 0] - 0.25) < 0.01
+
+	def test_lowered_sustain_has_no_instant_step (self) -> None:
+		"""Neither the 1.0 → sustain transition (implicit decay) nor the
+		release boundary may move in a single-sample jump — both land as
+		audible clicks."""
+
+		record = _make_record(sample_id=1, onset_times=(0.0,), attack_times=(0.0,))
+		audio = _make_audio(n_frames=44100, channels=1)
+		audio[:, 0] = 0.5
+
+		step = subsample.transform.Reshape(attack_ms=10.0, sustain=0.5, release_ms=100.0)
+		result = subsample.transform._apply_reshape(audio, 44100, record, step)
+
+		# Steepest legitimate slope here is the 10 ms attack (~0.0023/sample);
+		# any single-sample step near the sustain drop (0.5) or the release
+		# jump-back (0.5) is two orders of magnitude larger.
+		envelope_diff = numpy.diff(result[:, 0] / 0.5)
+		assert numpy.max(envelope_diff) < 0.01
+		assert numpy.min(envelope_diff) > -0.01
 
 	def test_attack_reshapes_onset (self) -> None:
 		"""attack_ms creates a ramp from silence at the onset."""
@@ -2987,6 +3006,15 @@ class TestTransient:
 		assert result.dtype == numpy.float32
 		assert result.shape == audio.shape
 
+		# Boosting the percussive component raises the peak-to-RMS ratio —
+		# the clicks stand prouder of the tone.  An identity implementation
+		# leaves the crest factor unchanged and fails this.  (Measured:
+		# ~2.4 in → ~4.7 enhanced, so the 1.3× bound has wide margin.)
+		def _crest (x: "numpy.ndarray") -> float:
+			return float(numpy.max(numpy.abs(x)) / numpy.sqrt(numpy.mean(x.astype(numpy.float64) ** 2)))
+
+		assert _crest(result) > _crest(audio) * 1.3
+
 	def test_tame_reduces_percussive_energy (self) -> None:
 		"""Negative amount should reduce percussive component."""
 		record = _make_record(sample_id=1)
@@ -3004,6 +3032,13 @@ class TestTransient:
 
 		assert result.dtype == numpy.float32
 		assert result.shape == audio.shape
+
+		# Taming lowers the peak-to-RMS ratio — clicks recede into the tone.
+		# (Measured: ~2.4 in → ~1.45 tamed; 0.8× leaves wide margin.)
+		def _crest (x: "numpy.ndarray") -> float:
+			return float(numpy.max(numpy.abs(x)) / numpy.sqrt(numpy.mean(x.astype(numpy.float64) ** 2)))
+
+		assert _crest(result) < _crest(audio) * 0.8
 
 	def test_level_compensation (self) -> None:
 		"""Output peak should approximately match input peak."""
@@ -3714,6 +3749,22 @@ class TestReviewRegressions:
 
 		step = subsample.transform.Limit(threshold_db=-6.0)   # default lookahead_ms=5.0
 		result = subsample.transform._apply_limit(audio, 44100, record, step)
+
+		assert result.shape == audio.shape
+		assert float(numpy.max(numpy.abs(result))) > 0.0   # not silent
+
+	def test_gate_short_sample_not_silenced_by_lookahead (self) -> None:
+
+		"""The gate's look-ahead must be capped like the compressor's: an
+		explicit window meeting or exceeding the sample length used to shift
+		the entire signal out of the buffer, leaving total silence."""
+
+		record = _make_record(sample_id=1)
+		# ~30 ms of loud signal, with a 50 ms explicit look-ahead.
+		audio = numpy.full((1323, 1), 0.9, dtype=numpy.float32)
+
+		step = subsample.transform.Gate(threshold_db=-40.0, lookahead_ms=50.0)
+		result = subsample.transform._apply_gate(audio, 44100, record, step)
 
 		assert result.shape == audio.shape
 		assert float(numpy.max(numpy.abs(result))) > 0.0   # not silent

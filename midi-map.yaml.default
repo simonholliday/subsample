@@ -69,20 +69,20 @@
 #   #    form, custom rescale ranges, and validation rules.
 #   - name: Soft hat
 #     channel: 10
-#     notes: drum.closed_hi_hat
+#     notes: drum.hi_hat_closed
 #     velocity:
 #       trigger: [0, 63]
 #       rescale: true
 #     select:
-#       where: { name_glob: "*soft_hat*" }
+#       where: { name: { matches: "*soft_hat*" } }
 #   - name: Hard hat
 #     channel: 10
-#     notes: drum.closed_hi_hat
+#     notes: drum.hi_hat_closed
 #     velocity:
 #       trigger: [64, 127]
 #       rescale: true
 #     select:
-#       where: { name_glob: "*hard_hat*" }
+#       where: { name: { matches: "*hard_hat*" } }
 #
 #   # 5. Zone-tuned - auto-distribute pitched samples across a keyboard.
 #   #    Subsample filters the library to pitched samples (has_stable_pitch),
@@ -114,7 +114,7 @@
 #     process:
 #       - repitch: true
 #     select:
-#       where: { name_glob: "*bass*" }
+#       where: { name: { matches: "*bass*" } }
 #     one_shot: false
 #   - name: Lead zone
 #     channel: 1
@@ -124,7 +124,7 @@
 #     process:
 #       - repitch: true
 #     select:
-#       where: { name_glob: "*lead*" }
+#       where: { name: { matches: "*lead*" } }
 #     one_shot: false
 #
 #   # 6. Templates - define shared fields once, inherit per assignment.

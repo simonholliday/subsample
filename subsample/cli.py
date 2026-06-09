@@ -1161,6 +1161,13 @@ def _main_impl () -> None:
 			print(f"  Supervisor   : ws://localhost:{cfg.supervisor.port}")
 		except ImportError:
 			_log.warning("Supervisor enabled but not installed. pip install subsample[supervisor]")
+		except OSError as exc:
+			# A busy WebSocket port (or similar bind failure) must not abort
+			# the whole startup — mirror the OSC receiver's degradation.
+			_log.warning(
+				"Supervisor could not start on port %d: %s — dashboard disabled",
+				cfg.supervisor.port, exc,
+			)
 
 	if cfg.recorder.enabled:
 		threads.append(threading.Thread(
@@ -1212,7 +1219,7 @@ def _main_impl () -> None:
 				_bank = bank  # capture for closure
 
 				known_sc = {
-					(fp.parent / (fp.name + ".analysis.json")).resolve()
+					(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
 					for r in _bank.instrument_library.samples()
 					if (fp := r.filepath) is not None
 				}
@@ -1246,7 +1253,7 @@ def _main_impl () -> None:
 		# Single-directory mode.
 		else:
 			known_sidecars: set[pathlib.Path] = {
-				(fp.parent / (fp.name + ".analysis.json")).resolve()
+				(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
 				for r in instrument_library.samples()
 				if (fp := r.filepath) is not None
 			}
@@ -1338,6 +1345,31 @@ def _main_impl () -> None:
 					"default_program changed — these only take effect on restart. "
 					"Editing a map: preset's own file also needs a restart. "
 					"Top-level assignment changes will still apply.",
+				)
+
+			# Load any NEW path/directory/reference predicates the edit
+			# introduced — startup does this via _resolve_path_references, and
+			# without it here a live-coded `path:`/`directory:` select would
+			# reload "successfully" but silently match nothing until restart.
+			# Targets the primary library/matrix (same as the OSC import
+			# path); per-bank matrices in multi-bank mode still resolve at
+			# startup/program load.  Already-loaded paths are deduped inside.
+			try:
+				reload_sr = (
+					cfg.player.audio.sample_rate
+					if cfg.player.audio.sample_rate is not None
+					else cfg.recorder.audio.sample_rate
+				)
+				reload_matrices = [similarity_matrix] if similarity_matrix is not None else []
+				subsample.player._resolve_path_references(
+					result.note_map, reload_matrices, instrument_library,
+					target_sample_rate=reload_sr,
+					with_preview=cfg.recorder.previews,
+				)
+			except Exception as exc:
+				_log.warning(
+					"MIDI map reload: could not load new path references — "
+					"affected selects may match nothing: %s", exc,
 				)
 
 			# reload_midi_map runs update_assignments() against the new map
@@ -1522,6 +1554,34 @@ def _integrate_sample (
 	inconsistent state (e.g. an evicted sample still present in the
 	similarity matrix). This is acceptable for the current use case.
 	"""
+
+	# Cross-file stem collision: startup load hard-rejects two audio files
+	# sharing a stem (the library is stem-keyed, so a silent replace would
+	# route MIDI lookups to the wrong sample — and BOTH files remaining on
+	# disk would crash the NEXT startup with that very error).  Apply the
+	# same policy to runtime integration, but warn-and-skip instead of
+	# raising: a hot-dropped duplicate must not kill the watcher/OSC thread.
+	# A re-integration of the SAME file (re-analysis after an edit) is the
+	# legitimate replace case and passes through.
+	if record.filepath is not None:
+		existing_id = instrument_library.find_by_name(record.name)
+
+		if existing_id is not None:
+			existing = instrument_library.get(existing_id)
+
+			if (
+				existing is not None
+				and existing.filepath is not None
+				and existing.filepath.resolve() != record.filepath.resolve()
+			):
+				_log.warning(
+					"Skipping %s: a different file with the same stem is "
+					"already loaded (%s) — the library is stem-keyed, so "
+					"loading both would misroute MIDI lookups.  Rename one "
+					"of the files.",
+					record.filepath, existing.filepath,
+				)
+				return
 
 	evicted = instrument_library.add(record)
 	_log.info(

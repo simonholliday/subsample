@@ -588,6 +588,14 @@ class TestParseSelect:
 		assert specs[0].order == ()
 		assert specs[0].pick == subsample.query.PickSpec(1, 1)
 
+	def test_empty_select_list_rejected (self) -> None:
+
+		"""`select: []` can never match a sample — rejected at parse rather
+		than silently mapping nothing (and crashing path resolution)."""
+
+		with pytest.raises(ValueError, match="at least one spec"):
+			subsample.query.parse_select([], "test")
+
 	def test_reference_defaults_to_similarity_order (self) -> None:
 
 		"""When reference is in where but no explicit order_by, default to similarity."""
@@ -730,11 +738,42 @@ class TestParseProcess:
 		assert spec.has_stretch_quantize()
 		assert not spec.has_repitch()
 
+	def test_hpss_without_keep_rejected_at_parse (self) -> None:
+		"""hpss with no (or an invalid) keep: must fail at map load — at
+		trigger time the same error fires on every note-on and aborts the
+		variant pre-compute pass."""
+
+		with pytest.raises(ValueError, match="keep: harmonic or keep: percussive"):
+			subsample.query.parse_process(["hpss"], "test")
+
+		with pytest.raises(ValueError, match="keep: harmonic or keep: percussive"):
+			subsample.query.parse_process([{"hpss": {"keep": "banana"}}], "test")
+
+	def test_hpss_legacy_aliases_still_parse (self) -> None:
+		"""hpss_harmonic / hpss_percussive inject their keep: and pass the
+		parse-time validation."""
+
+		spec = subsample.query.parse_process(["hpss_harmonic", "hpss_percussive"], "test")
+
+		assert [s.get("keep") for s in spec.steps] == ["harmonic", "percussive"]
+
 	def test_stretch_and_pad_quantize_together_rejected (self) -> None:
 		"""stretch_quantize and pad_quantize are two ways to beat-align the same
 		sample; combining them is ambiguous and rejected at parse time."""
 
 		raw = [{"stretch_quantize": {"grid": 16}}, {"pad_quantize": {"grid": 16}}]
+
+		with pytest.raises(ValueError, match="cannot be combined"):
+			subsample.query.parse_process(raw, "test")
+
+	def test_duplicate_quantize_step_rejected (self) -> None:
+		"""Two copies of the SAME quantize step are equally ambiguous — the
+		set-based check used to let them through."""
+
+		raw = [
+			{"stretch_quantize": {"tempo": 120}},
+			{"stretch_quantize": {"tempo": 140}},
+		]
 
 		with pytest.raises(ValueError, match="cannot be combined"):
 			subsample.query.parse_process(raw, "test")
@@ -1801,20 +1840,24 @@ class TestHpssUnification:
 		assert spec.steps[0].name == "hpss"
 		assert spec.steps[0].get("keep") == "harmonic"
 
-	def test_hpss_missing_keep_raises_at_build (self) -> None:
-		"""Forgotten `keep:` raises at spec build time, not parse (`hpss:` on
-		its own is semantically incomplete but grammatically valid)."""
-		import subsample.transform as _transform
-		spec = subsample.query.parse_process([{"hpss": {}}], "test")
-		assert spec.steps[0].name == "hpss"
-		with pytest.raises(ValueError, match="must be 'harmonic' or 'percussive'"):
-			_transform.spec_from_process(spec)
+	def test_hpss_missing_keep_raises_at_parse (self) -> None:
+		"""Forgotten `keep:` raises at PARSE time — deferring it to spec build
+		meant a per-note-on error in the rtmidi handler and an aborted
+		variant pre-compute pass."""
+		with pytest.raises(ValueError, match="keep: harmonic or keep: percussive"):
+			subsample.query.parse_process([{"hpss": {}}], "test")
 
-	def test_hpss_invalid_keep_raises (self) -> None:
+	def test_hpss_invalid_keep_raises_at_parse (self) -> None:
+		with pytest.raises(ValueError, match="keep: harmonic or keep: percussive"):
+			subsample.query.parse_process([{"hpss": {"keep": "both"}}], "test")
+
+	def test_hpss_build_time_check_still_guards_direct_construction (self) -> None:
+		"""spec_from_process keeps its own keep: check as a latent defense for
+		ProcessSpecs built directly, bypassing parse_process."""
 		import subsample.transform as _transform
-		spec = subsample.query.parse_process(
-			[{"hpss": {"keep": "both"}}], "test",
-		)
+		spec = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="hpss"),
+		))
 		with pytest.raises(ValueError, match="must be 'harmonic' or 'percussive'"):
 			_transform.spec_from_process(spec)
 

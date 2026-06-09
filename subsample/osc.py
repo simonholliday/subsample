@@ -173,10 +173,14 @@ class OscReceiver:
 
 		"""Shut down the OSC server and wait for the thread to exit."""
 
-		self._server.shutdown()
+		# Guard against stop() before start(): BaseServer.shutdown() waits on
+		# an event only serve_forever() sets, so it would block forever.
+		if self._thread is None:
+			self._server.server_close()
+			return
 
-		if self._thread is not None:
-			self._thread.join(timeout=5.0)
+		self._server.shutdown()
+		self._thread.join(timeout=5.0)
 
 		# shutdown() only stops the serve loop; server_close() releases the
 		# bound UDP socket so a later start on the same port can rebind.

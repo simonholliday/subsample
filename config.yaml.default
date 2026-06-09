@@ -564,5 +564,8 @@ analysis:
 #
 #   max_disk_mb: 500.0
 #   # Maximum disk space (MB) for cached variant files.  0 = disabled.
-#   # Oldest files (by modification time) are evicted when the budget is
-#   # exceeded.  At 44100 Hz float32 stereo, 500 MB ≈ 1500 seconds.
+#   # When unset, derived automatically as 3x the memory budget (e.g. ~3 GB
+#   # at the default 1024 MB auto budget) — set it explicitly on machines
+#   # with small or slow storage.  Least-recently-used files are evicted
+#   # when the budget is exceeded.  At 44100 Hz float32 stereo, 500 MB ≈
+#   # 1500 seconds.

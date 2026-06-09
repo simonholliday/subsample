@@ -51,7 +51,13 @@ _AUDIO_PATH_TIMEOUT: float = 15.0
 
 
 def _fast_audio_timings () -> dict[str, float | int]:
-	"""Speed up audio-path timing constants for tests. Returns originals."""
+	"""Speed up audio-path timing constants for tests. Returns originals.
+
+	Callers set the constants before watcher.start() and restore in finally.
+	If start() itself raises, the shortened constants leak for the session —
+	tolerated deliberately: a failed start leaves no observer thread, and
+	shortened debounce windows only make later tests faster, never wrong.
+	"""
 
 	originals = {
 		"audio_debounce": subsample.watcher._AUDIO_DEBOUNCE_SECONDS,
@@ -321,6 +327,75 @@ class TestInstrumentWatcherAudioPath:
 
 		png = (tmp_path / "clap.wav").with_name("clap.wav" + subsample.cache.PREVIEW_PNG_SUFFIX)
 		assert png.exists(), "with_preview=True should have rendered the .preview.png"
+
+	def test_rename_into_place_triggers_callback (self, tmp_path: pathlib.Path) -> None:
+
+		"""A file renamed into place (rsync/SFTP .part, atomic-save editors)
+		fires only a move event — the handler must hot-load it from the
+		destination path."""
+
+		import os
+
+		originals = _fast_audio_timings()
+
+		done = threading.Event()
+		watcher = self._make_watcher(tmp_path, lambda record: done.set())
+		watcher.start()
+
+		try:
+			# Write under a non-audio suffix (no events fire), then rename —
+			# the only event for clap.wav is the FileMovedEvent.
+			part = tmp_path / "clap.part"
+			tests.helpers._make_wav(part)
+			time.sleep(0.1)
+			os.rename(part, tmp_path / "clap.wav")
+
+			triggered = done.wait(timeout=_AUDIO_PATH_TIMEOUT)
+		finally:
+			watcher.stop()
+			_restore_audio_timings(originals)
+
+		assert triggered, "Callback not called for renamed-into-place audio file"
+
+	def test_stop_waits_for_in_flight_load (
+		self,
+		tmp_path: pathlib.Path,
+		monkeypatch: "pytest.MonkeyPatch",
+	) -> None:
+
+		"""stop() must not return while a load callback is still running on a
+		timer thread — the caller tears down the systems the callback feeds
+		the moment stop() returns."""
+
+		started = threading.Event()
+		release = threading.Event()
+		delivered: list[typing.Any] = []
+
+		def slow_ensure (path: pathlib.Path, *, with_preview: bool) -> None:
+			started.set()
+			release.wait(timeout=5.0)
+			return None
+
+		monkeypatch.setattr(subsample.cache, "ensure_sample_assets", slow_ensure)
+
+		originals = _fast_audio_timings()
+
+		watcher = self._make_watcher(tmp_path, lambda record: delivered.append(record))
+		watcher.start()
+
+		try:
+			tests.helpers._make_wav(tmp_path / "slow.wav")
+			assert started.wait(timeout=_AUDIO_PATH_TIMEOUT), "load never started"
+
+			# Release the in-flight load shortly after stop() begins waiting.
+			threading.Timer(0.2, release.set).start()
+			watcher.stop()
+
+			# stop() returned ⇒ the in-flight callback had completed.
+			assert release.is_set()
+			assert delivered == []
+		finally:
+			_restore_audio_timings(originals)
 
 	def test_sidecar_arriving_during_grace_skips_audio_path (self, tmp_path: pathlib.Path) -> None:
 

@@ -843,7 +843,9 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		raise ValueError(
 			f"player.limiter_ceiling_db ({player_limiter_ceiling_db}) must be in [-12.0, 0.0]."
 		)
-	if player_limiter_ceiling_db <= player_limiter_threshold_db:
+	# threshold 0.0 = limiter disabled; the ceiling is then unused, so the
+	# ordering constraint (which 0.0 could never satisfy) doesn't apply.
+	if player_limiter_threshold_db < 0.0 and player_limiter_ceiling_db <= player_limiter_threshold_db:
 		raise ValueError(
 			f"player.limiter_ceiling_db ({player_limiter_ceiling_db}) must be greater than "
 			f"player.limiter_threshold_db ({player_limiter_threshold_db})."

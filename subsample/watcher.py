@@ -117,6 +117,14 @@ class InstrumentWatcher:
 		# must not register a fresh timer that would outlive the watcher.
 		self._stopped = False
 
+		# In-flight callback gate.  Timer callbacks deregister themselves from
+		# _timers at entry, so stop() cannot find them to join — instead each
+		# callback increments _in_flight through _enter_callback() and stop()
+		# waits on _idle until the count returns to zero.  The Condition shares
+		# _lock so the wait releases it for the callbacks' own acquisitions.
+		self._in_flight = 0
+		self._idle = threading.Condition(self._lock)
+
 		handler = _InstrumentFileHandler(
 			sidecar_callback=self._on_sidecar_event,
 			audio_callback=self._on_audio_file_event,
@@ -137,18 +145,50 @@ class InstrumentWatcher:
 
 	def stop (self) -> None:
 
-		"""Stop the observer thread and cancel any pending debounce timers."""
+		"""Stop the observer, cancel pending timers, and wait out in-flight ones.
+
+		Cancelled-but-unstarted timers never pass the entry gate, so only
+		callbacks already running count toward _in_flight; the bounded wait
+		means a load that was mid-analysis when stop() began finishes BEFORE
+		stop() returns, so the caller can safely tear down the systems the
+		callback would otherwise feed.  (wait_for releases the lock while
+		waiting, letting those callbacks decrement the gate.)
+		"""
 
 		self._observer.stop()
 		self._observer.join()
 
 		with self._lock:
 			self._stopped = True
+
 			for timer in self._timers.values():
 				timer.cancel()
+
 			self._timers.clear()
 
+			self._idle.wait_for(lambda: self._in_flight == 0, timeout=5.0)
+
 		_log.debug("Instrument watcher stopped")
+
+	def _enter_callback (self) -> bool:
+
+		"""Gate a timer callback in: False (skip the body) once stop() has run."""
+
+		with self._lock:
+			if self._stopped:
+				return False
+
+			self._in_flight += 1
+
+			return True
+
+	def _exit_callback (self) -> None:
+
+		"""Gate a timer callback out, waking a stop() waiting for idle."""
+
+		with self._lock:
+			self._in_flight -= 1
+			self._idle.notify_all()
 
 	# ------------------------------------------------------------------
 	# Sidecar path — existing behaviour, unchanged
@@ -189,6 +229,18 @@ class InstrumentWatcher:
 			timer.start()
 
 	def _attempt_load (self, sidecar_path: pathlib.Path, attempt: int) -> None:
+
+		"""In-flight-gated shim for _attempt_load_inner (see _enter_callback)."""
+
+		if not self._enter_callback():
+			return
+
+		try:
+			self._attempt_load_inner(sidecar_path, attempt)
+		finally:
+			self._exit_callback()
+
+	def _attempt_load_inner (self, sidecar_path: pathlib.Path, attempt: int) -> None:
 
 		"""Try to load a sidecar + WAV pair, retrying if files are not yet ready.
 
@@ -243,6 +295,13 @@ class InstrumentWatcher:
 			filepath       = audio_path,
 			channel_format = channel_format,
 		)
+
+		# A stop() racing this callback joins the timer thread, so delivering
+		# here is safe — but skip when stop already ran to completion (the
+		# downstream systems may be torn down).  Mirrors MidiMapWatcher._fire.
+		with self._lock:
+			if self._stopped:
+				return
 
 		self._on_sample_loaded(record)
 
@@ -316,6 +375,18 @@ class InstrumentWatcher:
 
 	def _check_sidecar_then_load (self, audio_path: pathlib.Path) -> None:
 
+		"""In-flight-gated shim for _check_sidecar_then_load_inner."""
+
+		if not self._enter_callback():
+			return
+
+		try:
+			self._check_sidecar_then_load_inner(audio_path)
+		finally:
+			self._exit_callback()
+
+	def _check_sidecar_then_load_inner (self, audio_path: pathlib.Path) -> None:
+
 		"""After the initial debounce, check whether a sidecar already exists.
 
 		If a sidecar is present, another subsample instance (or the sidecar
@@ -361,6 +432,23 @@ class InstrumentWatcher:
 			timer.start()
 
 	def _attempt_audio_load (
+		self,
+		audio_path: pathlib.Path,
+		prev_size: int,
+		stability_checks: int,
+	) -> None:
+
+		"""In-flight-gated shim for _attempt_audio_load_inner."""
+
+		if not self._enter_callback():
+			return
+
+		try:
+			self._attempt_audio_load_inner(audio_path, prev_size, stability_checks)
+		finally:
+			self._exit_callback()
+
+	def _attempt_audio_load_inner (
 		self,
 		audio_path: pathlib.Path,
 		prev_size: int,
@@ -472,6 +560,13 @@ class InstrumentWatcher:
 			channel_format = channel_format,
 		)
 
+		# Skip delivery when stop() already ran — the sidecar is written, so the
+		# sample loads on the next startup instead of being pushed into systems
+		# that are tearing down.  Mirrors the sidecar path and MidiMapWatcher._fire.
+		with self._lock:
+			if self._stopped:
+				return
+
 		self._on_sample_loaded(record)
 
 
@@ -501,14 +596,36 @@ class _InstrumentFileHandler (watchdog.events.FileSystemEventHandler):
 
 		self._dispatch(event)
 
+	def on_moved (self, event: watchdog.events.FileSystemEvent) -> None:
+
+		"""Forward rename-into-place events using the DESTINATION path.
+
+		rsync, SFTP ``.part`` transfers, and atomic-save editors write a temp
+		file (whose suffix is not an audio extension, so no events fire) and
+		then rename it into place — the only event for the final filename is
+		this move.  Without handling it, externally-synced samples never
+		hot-load.  Mirrors _MidiMapFileHandler.on_moved.
+		"""
+
+		dest = getattr(event, "dest_path", None)
+
+		if not dest:
+			return
+
+		self._dispatch_path(bool(event.is_directory), pathlib.Path(str(dest)))
+
 	def _dispatch (self, event: watchdog.events.FileSystemEvent) -> None:
 
 		"""Route the event to the appropriate callback based on file type."""
 
-		if event.is_directory:
-			return
+		self._dispatch_path(bool(event.is_directory), pathlib.Path(str(event.src_path)))
 
-		path = pathlib.Path(str(event.src_path))
+	def _dispatch_path (self, is_directory: bool, path: pathlib.Path) -> None:
+
+		"""Route a concrete path to the sidecar or audio callback."""
+
+		if is_directory:
+			return
 
 		if path.name.endswith(subsample.cache.SIDECAR_SUFFIX):
 			self._sidecar_callback(path)
@@ -553,6 +670,11 @@ class MidiMapWatcher:
 		self._lock = threading.Lock()
 		self._stopped = False
 
+		# In-flight gate, as in InstrumentWatcher: _fire deregisters itself at
+		# entry, so stop() waits on this rather than joining the timer.
+		self._in_flight = 0
+		self._idle = threading.Condition(self._lock)
+
 		handler = _MidiMapFileHandler(self._path.name, self._on_file_event)
 		self._observer: typing.Any = watchdog.observers.Observer()
 		self._observer.schedule(handler, str(self._path.parent), recursive=False)
@@ -573,9 +695,15 @@ class MidiMapWatcher:
 
 		with self._lock:
 			self._stopped = True
+
 			if self._timer is not None:
 				self._timer.cancel()
 				self._timer = None
+
+			# Bounded wait for a _fire already past its entry gate — the
+			# reload callback it runs must finish before the caller tears
+			# down the player it feeds.
+			self._idle.wait_for(lambda: self._in_flight == 0, timeout=5.0)
 
 		_log.debug("MIDI map watcher stopped")
 
@@ -612,7 +740,14 @@ class MidiMapWatcher:
 			if self._stopped:
 				return
 
-		self._on_changed(self._path)
+			self._in_flight += 1
+
+		try:
+			self._on_changed(self._path)
+		finally:
+			with self._lock:
+				self._in_flight -= 1
+				self._idle.notify_all()
 
 
 class _MidiMapFileHandler (watchdog.events.FileSystemEventHandler):

@@ -1213,7 +1213,7 @@ zone-tuned is for.
     - repitch: true
   select:
     where:
-      name_glob: "*bass*"
+      name: { matches: "*bass*" }
 
 - name: Lead zone
   channel: 1
@@ -1224,7 +1224,7 @@ zone-tuned is for.
     - repitch: true
   select:
     where:
-      name_glob: "*lead*"
+      name: { matches: "*lead*" }
 ```
 
 Multiple `zone-tuned` assignments on the same channel are allowed as long
@@ -1437,6 +1437,9 @@ default_program: 0
 ```
 
 - The `map:` path is resolved **relative to the parent map's directory**.
+  A `directory:` program, by contrast, resolves **relative to the working
+  directory you launch subsample from** (like `instrument.directory`) - if a
+  kit works from the project root but not elsewhere, this asymmetry is why.
 - The preset is an ordinary mapper file with its own `assignments:`. Its samples
   come from its own `where: { directory: ... }` predicates and path references,
   which resolve **relative to the preset's own folder** - so a self-contained kit
@@ -1770,9 +1773,9 @@ weights - is optional and rarely needs changing.
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
 | `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit |
-| `player.max_polyphony` | `8` | Max simultaneous voices; per-voice gain = 1/max\_polyphony. Raise if clipping; lower for louder individual voices |
-| `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched |
-| `player.limiter_ceiling_db` | `-0.1` | Maximum output level (dBFS) the limiter allows; must exceed threshold |
+| `player.max_polyphony` | `8` | Headroom divisor, not a voice cap: per-voice gain = 1/max\_polyphony, so this many voices at full velocity sum to full scale. Voices are never cut off. Raise if clipping; lower for louder individual voices |
+| `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched. `0.0` disables the limiter |
+| `player.limiter_ceiling_db` | `-0.1` | Maximum output level (dBFS) the limiter allows; must exceed threshold (ignored when the limiter is disabled) |
 | `player.midi_device` | `none` | MIDI input device name (substring match); if unset, auto-select or prompt |
 | `player.audio.device` | `none` | Audio output device name for playback |
 | `player.audio.sample_rate` | auto | Output sample rate; defaults to recorder rate. Do not set higher than source. |

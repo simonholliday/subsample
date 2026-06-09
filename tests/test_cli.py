@@ -282,6 +282,52 @@ class TestIntegrateSample:
 		similarity.remove.assert_called_once_with([first.sample_id])
 		transform.on_parent_evicted.assert_called_once_with([first.sample_id])
 
+	def test_cross_file_stem_collision_skipped (self, tmp_path: pathlib.Path) -> None:
+		"""A hot-dropped file whose stem matches a DIFFERENT already-loaded
+		file is skipped with a warning — the silent replace would misroute
+		MIDI lookups now and crash the next startup (which hard-rejects the
+		duplicate pair)."""
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=0)
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		similarity.get_scores.return_value = {}
+
+		first = _make_record("kick")
+		object.__setattr__(first, "filepath", tmp_path / "a" / "kick.wav")
+		library.add(first)
+
+		clash = _make_record("kick")
+		object.__setattr__(clash, "filepath", tmp_path / "b" / "kick.wav")
+
+		subsample.cli._integrate_sample(
+			clash, library, similarity, transform_manager=None, player_cell=None,
+		)
+
+		# The original record survives; the clashing one was never integrated.
+		assert library.get(first.sample_id) is first
+		assert library.get(clash.sample_id) is None
+		similarity.add.assert_not_called()
+
+	def test_same_file_reintegration_replaces (self, tmp_path: pathlib.Path) -> None:
+		"""Re-integrating the SAME file (re-analysis after an edit) is the
+		legitimate replace case and passes through."""
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=0)
+
+		path = tmp_path / "kick.wav"
+		first = _make_record("kick")
+		object.__setattr__(first, "filepath", path)
+		library.add(first)
+
+		again = _make_record("kick")
+		object.__setattr__(again, "filepath", path)
+
+		subsample.cli._integrate_sample(
+			again, library, similarity_matrix=None, transform_manager=None, player_cell=None,
+		)
+
+		assert library.get(again.sample_id) is again
+
 	def test_tolerates_all_optional_subsystems_none (self) -> None:
 		"""With no similarity/transform/player/events wired, the sample is still
 		added to the library without error."""

@@ -1962,6 +1962,14 @@ def parse_select (
 		return (_parse_select_spec(raw, assignment_name, midi_map_dir),)
 
 	if isinstance(raw, list):
+		# An empty fallback chain can never match a sample; reject it loudly
+		# rather than letting the assignment silently map nothing.
+		if not raw:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'select' list must "
+				f"contain at least one spec"
+			)
+
 		return tuple(_parse_select_spec(entry, assignment_name, midi_map_dir) for entry in raw)
 
 	raise ValueError(
@@ -2106,16 +2114,32 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 				f"a string or a dict (got {type(entry).__name__})"
 			)
 
-	# stretch_quantize and pad_quantize are two ways to beat-align the same
-	# sample; combining them is ambiguous (their bpm/grid hints would fight at
-	# trigger time) and almost certainly a mistake — reject it at load.
-	step_names = {step.name for step in steps}
+	# hpss needs a valid `keep:` to build a transform step.  Validate here —
+	# at trigger time the same check raises inside the rtmidi handler on
+	# EVERY note-on, and aborts the whole variant pre-compute pass; every
+	# other config error in the map already surfaces at parse time.
+	for step in steps:
+		if step.name == "hpss":
+			keep = step.get("keep", "")
 
-	if "stretch_quantize" in step_names and "pad_quantize" in step_names:
+			if keep not in ("harmonic", "percussive"):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: hpss requires "
+					f"keep: harmonic or keep: percussive (got {keep!r})"
+				)
+
+	# A process chain may carry at most ONE beat-aligning step.  Combining
+	# stretch_quantize with pad_quantize — or repeating either — is ambiguous
+	# (their tempo/grid parameters would fight at trigger time) and almost
+	# certainly a mistake; reject it at load.
+	quantize_names = [s.name for s in steps if s.name in ("stretch_quantize", "pad_quantize")]
+
+	if len(quantize_names) > 1:
 		raise ValueError(
-			f"MIDI map assignment {assignment_name!r}: 'stretch_quantize' and "
-			f"'pad_quantize' cannot be combined in one process chain — they are "
-			f"two ways to beat-align the same sample.  Use one or the other."
+			f"MIDI map assignment {assignment_name!r}: "
+			f"{' and '.join(repr(n) for n in quantize_names[:2])} cannot be "
+			f"combined in one process chain — a chain may beat-align a sample "
+			f"only once.  Keep a single quantize step."
 		)
 
 	return ProcessSpec(steps=tuple(steps))

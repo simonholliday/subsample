@@ -671,25 +671,32 @@ def _validate_velocity_layers (note_map: NoteMap) -> None:
 		# ties preserve YAML order for deterministic error messages.
 		sorted_layers = sorted(entries, key=lambda e: e[0].velocity_trigger)
 
-		# Overlap check: adjacent layers may not share any velocity value
-		# unless both opt into stacking.  Adjacency is sufficient — if a
-		# non-stacking layer overlaps any layer it also overlaps its sorted
-		# neighbour, so every offending overlap surfaces on an adjacent pair.
-		for i in range(len(sorted_layers) - 1):
-			asgn_a, _ = sorted_layers[i]
-			asgn_b, _ = sorted_layers[i + 1]
-			lo_a, hi_a = asgn_a.velocity_trigger
-			lo_b, hi_b = asgn_b.velocity_trigger
+		# Overlap check: no two layers may share a velocity value unless both
+		# opt into stacking.  This must compare EVERY pair, not just sorted
+		# neighbours: once stacked pairs are allowed to pass, a wide stacked
+		# layer can "bridge" past a later non-stacked layer that never
+		# overlaps its own immediate neighbour (e.g. [0,100] stacked,
+		# [5,6] stacked, [50,60] non-stacked — the only adjacent overlap is
+		# the consensual one, yet [0,100] and [50,60] collide).  Layer counts
+		# are tiny (≤ ~16 per note), so the O(n²) scan is free at load time.
+		for i in range(len(sorted_layers)):
+			for j in range(i + 1, len(sorted_layers)):
+				asgn_a, _ = sorted_layers[i]
+				asgn_b, _ = sorted_layers[j]
+				lo_a, hi_a = asgn_a.velocity_trigger
+				lo_b, hi_b = asgn_b.velocity_trigger
 
-			if hi_a >= lo_b and not (asgn_a.stack and asgn_b.stack):
-				raise ValueError(
-					f"MIDI map ch{ch + 1} note {note}: velocity ranges of "
-					f"assignments {asgn_a.name!r} [{lo_a}, {hi_a}] and "
-					f"{asgn_b.name!r} [{lo_b}, {hi_b}] overlap — overlapping "
-					f"layers create an ambiguous trigger.  Adjust ranges so "
-					f"each velocity maps to exactly one layer, or set "
-					f"``stack: true`` on both to sound them together."
-				)
+				# Sorted by lo, so for i < j the pair overlaps iff a's high
+				# end reaches b's low end.
+				if hi_a >= lo_b and not (asgn_a.stack and asgn_b.stack):
+					raise ValueError(
+						f"MIDI map ch{ch + 1} note {note}: velocity ranges of "
+						f"assignments {asgn_a.name!r} [{lo_a}, {hi_a}] and "
+						f"{asgn_b.name!r} [{lo_b}, {hi_b}] overlap — overlapping "
+						f"layers create an ambiguous trigger.  Adjust ranges so "
+						f"each velocity maps to exactly one layer, or set "
+						f"``stack: true`` on both to sound them together."
+					)
 
 		# Gap check (warning only).  Walk [0, 127] flagging any velocity
 		# value uncovered by the union of trigger ranges.
@@ -968,14 +975,17 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 	# generic "not a valid note name" from the inner _parse_single_note() call.
 	if isinstance(notes_raw, str) and ".." in notes_raw:
 
-		if "." in notes_raw.split("..")[0]:
+		lo_str, hi_str = notes_raw.split("..", 1)
+
+		# Either end being symbolic makes the range meaningless — drum names
+		# are not a musical sequence ("36..drum.kick_1" is as invalid as
+		# "drum.kick_1..drum.snare_1").
+		if "." in lo_str or "." in hi_str:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: "
 				f"range syntax (a..b) is not supported for symbolic notes — "
 				f"use a list instead, e.g. [drum.kick_1, drum.snare_1]"
 			)
-
-		lo_str, hi_str = notes_raw.split("..", 1)
 		lo = _parse_single_note(lo_str.strip(), assignment_name)
 		hi = _parse_single_note(hi_str.strip(), assignment_name)
 
@@ -991,7 +1001,14 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 	if isinstance(notes_raw, (int, str)):
 		return [_parse_single_note(notes_raw, assignment_name)]
 
-	# List of mixed values.
+	# List of mixed values.  An empty list would silently map nothing while
+	# still claiming its channel against zone-tuned templates — reject it.
+	if not notes_raw:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'notes' list must "
+			f"contain at least one note"
+		)
+
 	return [_parse_single_note(item, assignment_name) for item in notes_raw]
 
 
@@ -1234,17 +1251,20 @@ def _resolve_path_references (
 				continue
 			seen_assignments.add(assignment_id)
 
+			# All three collections must walk EVERY spec in the assignment's
+			# select chain — a fallback chain's primary spec is just as able
+			# to carry a path/directory predicate as its last.
 			for select_spec in assignment.select:
 				ref = select_spec.where.reference
 				if ref is not None and subsample.query.is_path_like(ref):
 					ref_paths.add(ref)
 
-			name_path = select_spec.where.name_path
-			if name_path is not None:
-				inst_paths.add(name_path)
+				name_path = select_spec.where.name_path
+				if name_path is not None:
+					inst_paths.add(name_path)
 
-			if select_spec.where.directory is not None:
-				dir_paths.add(select_spec.where.directory)
+				if select_spec.where.directory is not None:
+					dir_paths.add(select_spec.where.directory)
 
 	# Load samples from directory predicates into the instrument library.
 	# This must happen before reference loading so that directory samples
@@ -2165,9 +2185,23 @@ class MidiPlayer:
 		# Pre-computed linear values so the callback does no dB conversions.
 		# The knee is the range between threshold and ceiling; the tanh curve
 		# maps [0, ∞) to [0, knee) asymptotically, so output never exceeds ceiling.
+		# threshold_db = 0.0 disables the soft-clip stage entirely (the hard
+		# clip to [-1, 1] in the callback remains): at 0 dB the knee would be
+		# negative (ceiling sits below threshold) and the curve would expand
+		# rather than compress.
+		self._limiter_enabled   = limiter_threshold_db < 0.0
 		self._limiter_threshold = 10.0 ** (limiter_threshold_db / 20.0)
 		self._limiter_ceiling   = 10.0 ** (limiter_ceiling_db / 20.0)
 		self._limiter_knee      = self._limiter_ceiling - self._limiter_threshold
+
+		# Latent guard for direct construction (config validation already
+		# enforces this for the YAML surface): an enabled limiter with a
+		# non-positive knee would divide by zero or EXPAND in the callback.
+		if self._limiter_enabled and self._limiter_knee <= 0.0:
+			raise ValueError(
+				f"limiter_ceiling_db ({limiter_ceiling_db}) must be greater "
+				f"than limiter_threshold_db ({limiter_threshold_db})"
+			)
 
 		# Clipping detection: timestamp of the last warning so we can throttle
 		# to at most one log message every 5 seconds during dense passages.
@@ -2180,6 +2214,10 @@ class MidiPlayer:
 		# tuned too low for the machine to sustain.
 		self._xrun_count:     int   = 0
 		self._last_xrun_warn: float = 0.0
+
+		# Audio-callback failure guard: timestamp of the last ERROR so a
+		# persistent fault logs once per 5 s instead of per buffer.
+		self._last_callback_error_warn: float = 0.0
 
 		# Optional transform pipeline. When provided, _handle_message() checks
 		# for a pre-computed pitched variant before falling back to _render().
@@ -2217,14 +2255,17 @@ class MidiPlayer:
 		self._zone_templates: tuple[ZoneTemplate, ...]      = zone_templates
 		self._note_map:       NoteMap                       = dict(midi_map)
 
-		# Most recently played variant per (channel, note).  Used as a fallback
-		# during MIDI map transitions: when a new variant is still processing,
-		# the old one plays instead of the unprocessed base — giving smooth
-		# transitions for gradual BPM or amount changes.
-		# Keyed by (channel, note, id(Assignment)) so each layer on the same
-		# MIDI note keeps independent variant-transition fallback — including
-		# stacked members that share a velocity range, which a velocity-based
-		# key could not tell apart.
+		# Most recently played variant per layer.  Used as a fallback while a
+		# new variant is still processing: the old one plays instead of the
+		# unprocessed base — giving smooth transitions for gradual CC/BPM
+		# parameter changes, where the Assignment objects (and so the keys)
+		# survive the re-evaluation.  Keyed by (channel, note, id(Assignment))
+		# so each layer on the same MIDI note keeps independent fallback —
+		# including stacked members that share a velocity range, which a
+		# velocity-based key could not tell apart.  Identity keys mean a rule
+		# swap or zone re-materialisation retires entries rather than carrying
+		# them across; _prune_stale_layer_state() sweeps those on every
+		# update_assignments so they can't pin evicted variant audio.
 		self._last_played: dict[tuple[int, int, int], subsample.transform.TransformResult] = {}
 
 		# Pre-computed sample selection.  An ordinary select (filters + an
@@ -2281,10 +2322,11 @@ class MidiPlayer:
 		self._ambisonic_config = ambisonic_config
 
 		# Mix matrix cache: (in_channels, pan_weights_tuple, output_routing,
-		# channel_format) → matrix.  channel_format is included so ambisonic
-		# decode matrices do not collide with raw-PCM routing for the same
-		# 4-channel input shape.  Lazily populated by _get_mix_matrix();
-		# cleared on MIDI map reload.
+		# channel_format, extract) → matrix.  channel_format is included so
+		# ambisonic decode matrices do not collide with raw-PCM routing for
+		# the same 4-channel input shape; extract so per-(kind, channel_index)
+		# variants get distinct entries.  Lazily populated by
+		# _get_mix_matrix(); cleared on MIDI map reload.
 		#
 		# _mix_matrix_lock serialises the dict across threads:
 		#   - the MIDI dispatch thread reads and writes entries in
@@ -2362,7 +2404,11 @@ class MidiPlayer:
 
 		# Sort by (channel, note, velocity_trigger) so layers of the same
 		# note print together in ascending velocity order.
-		flat_entries.sort(key=lambda e: (e[0], e[1], e[2].velocity_trigger))
+		# Sort velocity range BEFORE note so each layer's consecutive-note run
+		# stays adjacent — sorting by note first interleaves the layers of
+		# every note and the range-grouping below can never extend a run
+		# (a 50-note velocity-split keyboard would print 100 lines).
+		flat_entries.sort(key=lambda e: (e[0], e[2].velocity_trigger, e[1]))
 
 		for ch, note, asgn, pick_spec in flat_entries:
 			if (
@@ -2599,6 +2645,13 @@ class MidiPlayer:
 						self._buffer_frames, exc,
 					)
 					open_kwargs.pop("frames_per_buffer")
+
+					# Clear the stored value too: the stream now runs at the
+					# device default, and the xrun warning reports this field —
+					# keeping the rejected number would send the user tuning a
+					# knob that isn't in effect.
+					self._buffer_frames = None
+
 					stream = pa.open(**open_kwargs)
 				else:
 					raise
@@ -2648,10 +2701,6 @@ class MidiPlayer:
 			self._shutdown_event.wait()
 
 		finally:
-			with self._cc_debounce_lock:
-				if self._cc_debounce_timer is not None:
-					self._cc_debounce_timer.cancel()
-
 			# Tear down whichever resources were successfully opened.  None
 			# checks guard the partial-open paths: a mido failure leaves
 			# ``port is None`` but ``stream`` may already be open; an early
@@ -2661,6 +2710,14 @@ class MidiPlayer:
 			# then closes the port.
 			if port is not None:
 				port.close()
+
+			# Cancel the CC debounce AFTER the port is closed: a CC arriving
+			# between a cancel and the close would re-arm a fresh timer that
+			# outlives shutdown (and runs update_assignments against a player
+			# that is tearing down).
+			with self._cc_debounce_lock:
+				if self._cc_debounce_timer is not None:
+					self._cc_debounce_timer.cancel()
 
 			if stream is not None:
 				stream.stop_stream()
@@ -2672,6 +2729,40 @@ class MidiPlayer:
 				_log.info("MIDI player closed port: %s", port_label)
 
 	def _audio_callback (
+		self,
+		in_data: typing.Optional[bytes],
+		frame_count: int,
+		time_info: typing.Any,
+		status_flags: int,
+	) -> tuple[bytes, int]:
+
+		"""Exception-guarded wrapper around the real mix callback.
+
+		An exception escaping a PortAudio callback aborts the stream
+		permanently: PortAudio prints to stderr and stops calling back, so
+		the player would sit MIDI-alive but audio-dead with nothing in our
+		own log.  Mirror of ``_safe_handle_message`` on the MIDI side —
+		log the failure (throttled; we are on the audio thread) and return
+		one buffer of silence so the stream survives.
+		"""
+
+		try:
+			return self._audio_callback_impl(in_data, frame_count, time_info, status_flags)
+		except Exception:
+			now = time.monotonic()
+
+			if now - self._last_callback_error_warn >= 5.0:
+				self._last_callback_error_warn = now
+				_log.error(
+					"Audio callback failed — emitting silence for this buffer",
+					exc_info=True,
+				)
+
+			silence = b"\x00" * (frame_count * self._output_channels * (self._output_bit_depth // 8))
+
+			return (silence, pyaudio.paContinue)
+
+	def _audio_callback_impl (
 		self,
 		in_data: typing.Optional[bytes],
 		frame_count: int,
@@ -2731,6 +2822,9 @@ class MidiPlayer:
 
 					if n > 0:
 						idx  = numpy.arange(voice.fade_pos, voice.fade_pos + n, dtype=numpy.float32)
+						# The ramp's final value is cos(π(N-1)/N), not exactly 0
+						# — a residual of ~1.3e-5 at 441 frames, far below
+						# audibility.  Intentional; not an off-by-one.
 						ramp = ((1.0 + numpy.cos(numpy.pi * idx / fade_total)) / 2.0).astype(numpy.float32)
 						output[:n] += voice.audio[voice.position : voice.position + n] * ramp[:, numpy.newaxis]
 						voice.position += n
@@ -2757,24 +2851,28 @@ class MidiPlayer:
 		# Below threshold: zero cost (mask is False, no computation).
 		# Above threshold: smoothly compressed toward ceiling.
 		# The hard clip below remains as a final safety net.
-		abs_output = numpy.abs(output)
-		mask = abs_output > self._limiter_threshold
-		if numpy.any(mask):
-			sign   = numpy.sign(output[mask])
-			excess = abs_output[mask] - self._limiter_threshold
-			output[mask] = sign * (
-				self._limiter_threshold
-				+ self._limiter_knee * numpy.tanh(excess / self._limiter_knee)
-			)
+		# Skipped entirely when disabled (limiter_threshold_db: 0.0).
+		if self._limiter_enabled:
+			abs_output = numpy.abs(output)
+			mask = abs_output > self._limiter_threshold
+			if numpy.any(mask):
+				sign   = numpy.sign(output[mask])
+				excess = abs_output[mask] - self._limiter_threshold
+				output[mask] = sign * (
+					self._limiter_threshold
+					+ self._limiter_knee * numpy.tanh(excess / self._limiter_knee)
+				)
 
 		mixed = numpy.clip(output, -1.0, 1.0)
 
 		# Clipping detection: warn only if the post-limiter output still exceeds
 		# the ceiling (shouldn't happen — the tanh asymptote guarantees this —
 		# but serves as a diagnostic if the limiter is misconfigured or bypassed).
-		# Throttled to at most one warning every 5 seconds.
+		# Throttled to at most one warning every 5 seconds.  With the limiter
+		# disabled the hard clip legitimately reaches full scale, so the
+		# ceiling diagnostic doesn't apply.
 		peak_abs = float(numpy.max(numpy.abs(mixed)))
-		if peak_abs > self._limiter_ceiling:
+		if self._limiter_enabled and peak_abs > self._limiter_ceiling:
 			now = time.monotonic()
 			if now - self._last_clip_warn >= 5.0:
 				self._last_clip_warn = now
@@ -3040,6 +3138,69 @@ class MidiPlayer:
 		for assignment, pick_spec, effective_velocity in layers:
 			self._trigger_one(msg, assignment, pick_spec, effective_velocity)
 
+	def _build_trigger_spec (
+		self,
+		assignment: subsample.query.Assignment,
+		record:     subsample.library.SampleRecord,
+		midi_note:  int,
+	) -> "subsample.transform.TransformSpec":
+
+		"""Build the exact TransformSpec a note-on for this (assignment, record,
+		note) produces.
+
+		Single source of truth shared by the trigger path (``_trigger_one``)
+		and the variant pre-compute (``update_assignments`` /
+		``_enqueue_quantize_variants``).  Any divergence between the two means
+		pre-computed cache keys never match trigger-time keys — every
+		pre-render is wasted work and the first trigger per note recomputes.
+
+		Dynamic parameters (MIDI note, BPM, CC values, reference path) are
+		substituted at the position the user declared them in the
+		``process:`` list.
+		"""
+
+		# Validation: skip repitch for unpitched samples.
+		midi_note_for_spec: typing.Optional[int] = None
+
+		if assignment.process.has_repitch():
+			if subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
+				midi_note_for_spec = midi_note
+
+		# Validation: skip stretch_quantize for samples with no tempo.
+		# pad_quantize does NOT need source tempo — only target BPM.
+		bpm_for_spec: typing.Optional[float] = None
+		grid_for_spec = 16
+
+		if assignment.process.has_stretch_quantize():
+			if record.rhythm.tempo_bpm > 0.0:
+				bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "stretch_quantize", self._target_bpm)
+			else:
+				# DEBUG, not WARNING: on the trigger path this fires on EVERY
+				# note-on for a tempo-less sample.  The once-per-rebuild
+				# WARNING in update_assignments already surfaces it; an
+				# unthrottled per-trigger WARNING would spam the
+				# latency-critical path.
+				_log.debug(
+					"stretch_quantize %s: sample %r has no detected tempo — "
+					"playing without beat-quantizing",
+					assignment.name, record.name,
+				)
+
+		if assignment.process.has_pad_quantize():
+			bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "pad_quantize", self._target_bpm)
+
+		cc_state_snapshot, cc_omni_snapshot = self._snapshot_cc_state()
+
+		return subsample.transform.spec_from_process(
+			assignment.process,
+			midi_note=midi_note_for_spec,
+			target_bpm=bpm_for_spec,
+			resolution=grid_for_spec,
+			reference_path=_reference_wav_path(assignment),
+			cc_state=cc_state_snapshot,
+			cc_omni=cc_omni_snapshot,
+		)
+
 	def _trigger_one (
 		self,
 		msg:                mido.Message,
@@ -3110,47 +3271,7 @@ class MidiPlayer:
 			# position the user declared them in the process: list.
 			if assignment.process.steps:
 
-				# Validation: skip repitch for unpitched samples.
-				midi_note_for_spec: typing.Optional[int] = None
-
-				if assignment.process.has_repitch():
-					if subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
-						midi_note_for_spec = msg.note
-
-				# Validation: skip stretch_quantize for samples with no tempo.
-				# pad_quantize does NOT need source tempo — only target BPM.
-				bpm_for_spec: typing.Optional[float] = None
-				grid_for_spec = 16
-
-				if assignment.process.has_stretch_quantize():
-					if record.rhythm.tempo_bpm > 0.0:
-						bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "stretch_quantize", self._target_bpm)
-					else:
-						# DEBUG, not WARNING: this is the rtmidi callback thread and
-						# fires on EVERY note-on for a tempo-less sample.  The
-						# once-per-rebuild WARNING in update_assignments already
-						# surfaces this; an unthrottled per-trigger WARNING would
-						# spam the latency-critical path.
-						_log.debug(
-							"stretch_quantize %s: sample %r has no detected tempo — "
-							"playing without beat-quantizing",
-							assignment.name, record.name,
-						)
-
-				if assignment.process.has_pad_quantize():
-					bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "pad_quantize", self._target_bpm)
-
-				cc_state_snapshot, cc_omni_snapshot = self._snapshot_cc_state()
-
-				spec = subsample.transform.spec_from_process(
-					assignment.process,
-					midi_note=midi_note_for_spec,
-					target_bpm=bpm_for_spec,
-					resolution=grid_for_spec,
-					reference_path=_reference_wav_path(assignment),
-					cc_state=cc_state_snapshot,
-					cc_omni=cc_omni_snapshot,
-				)
+				spec = self._build_trigger_spec(assignment, record, msg.note)
 
 				if spec.steps:
 					variant = eff_transform.get_variant(sample_id, spec)
@@ -3275,19 +3396,13 @@ class MidiPlayer:
 		Variants are deduplicated by ``sample_id`` because multiple ranks
 		can resolve to the same sample and only one variant is needed per
 		(sample, spec) key — the transform processor itself dedups across
-		calls, but doing it here avoids per-rank ``spec_from_process``
-		work.
+		calls, but doing it here avoids per-rank spec-building work.  Specs
+		come from ``_build_trigger_spec`` (which snapshots CC state per call)
+		so pre-computed keys match trigger-time keys exactly.
 		"""
 
-		bpm, grid = _quantize_params(asgn.process, step_name, self._target_bpm)
 		enqueued = 0
 		seen_ids: set[int] = set()
-
-		# Snapshot CC state once for the whole batch — all variants in this
-		# enqueue share the same parameter values.  Required here because
-		# this runs on whichever thread invoked update_assignments (watcher,
-		# CC debounce, on-complete), not on the rtmidi callback thread.
-		cc_state_snapshot, cc_omni_snapshot = self._snapshot_cc_state()
 
 		for _note, pick_spec in note_picks:
 			for rank in _ranks_for(pick_spec, len(ranked)):
@@ -3310,16 +3425,15 @@ class MidiPlayer:
 					)
 					continue
 
-				spec = subsample.transform.spec_from_process(
-					asgn.process,
-					target_bpm=bpm,
-					resolution=grid,
-					reference_path=_reference_wav_path(asgn),
-					cc_state=cc_state_snapshot,
-					cc_omni=cc_omni_snapshot,
-				)
-				eff_transform.get_variant(sid, spec)
-				enqueued += 1
+				# Same helper as the trigger path so the pre-computed key is
+				# byte-identical to the one the note-on will look up.  (The
+				# spec is note-independent without repitch — the dedup by
+				# sample_id above stays valid.)
+				spec = self._build_trigger_spec(asgn, record, _note)
+
+				if spec.steps:
+					eff_transform.get_variant(sid, spec)
+					enqueued += 1
 
 		return enqueued
 
@@ -3439,6 +3553,18 @@ class MidiPlayer:
 				else:
 					next_centre = pitched[i + 1][0]
 					zone_hi = (centre_midi + next_centre) // 2
+
+				# Three or more samples sharing the SAME detected pitch leave
+				# the middle one(s) with an empty zone (lo > hi) — surface it
+				# rather than dropping the sample without a trace.
+				if zone_lo > zone_hi:
+					_log.warning(
+						"Zone-tuned %s: sample %r shares its detected pitch "
+						"(MIDI %d) with its neighbours and received no keys — "
+						"it will not be playable on this channel",
+						template.name, record.name, centre_midi,
+					)
+					continue
 
 				# Build the derived Assignment for this sample.  The
 				# select is replaced with an exact stem-name predicate so
@@ -3608,6 +3734,32 @@ class MidiPlayer:
 
 		return ranked_by_assignment
 
+	def _prune_stale_layer_state (self) -> None:
+
+		"""Drop _last_played / _segment_counters entries for retired assignments.
+
+		Both dicts are keyed by (channel, note, id(Assignment)).  Manual
+		assignments keep their identity across re-evaluations, so their
+		round-robin position and variant-transition fallback survive; zone-
+		derived assignments are re-minted by every _materialize_zones run, and
+		rule swaps (reload / preset switch) replace the whole map — keys
+		referencing retired objects can never match again, and each orphaned
+		_last_played entry pins a full float32 variant in memory.
+		"""
+
+		live_ids = {
+			id(assignment)
+			for entries in self._note_map.values()
+			for assignment, _pick_spec in entries
+		}
+
+		with self._state_lock:
+			for key in [k for k in self._last_played if k[2] not in live_ids]:
+				del self._last_played[key]
+
+			for key in [k for k in self._segment_counters if k[2] not in live_ids]:
+				del self._segment_counters[key]
+
 	def update_assignments (self) -> None:
 
 		"""Pre-compute transform variants for all assignments that declare processors.
@@ -3645,6 +3797,12 @@ class MidiPlayer:
 		# runs even without a transform manager, so selection works when only
 		# the player (and no transforms) is configured.
 		candidate_records = self._rebuild_candidate_cache()
+
+		# Drop per-layer state keyed by retired Assignment identities — rule
+		# swaps and zone re-materialisation mint fresh objects, and stale
+		# _last_played entries would otherwise pin full variant audio for the
+		# rest of the session.
+		self._prune_stale_layer_state()
 
 		eff_transform = self._effective_transform_manager
 
@@ -3692,8 +3850,17 @@ class MidiPlayer:
 			notes = [n for n, _p in note_picks]
 
 			# Repitch: all notes share pick=1 (same sample, pitched per note).
-			# The full process chain is passed so variants include filters, etc.
+			# Each note's spec is built by the SAME helper the trigger path
+			# uses, so the pre-computed keys are identical to trigger-time
+			# keys even for chains that add a vocoder, CC-bound params, or a
+			# quantize step alongside the repitch.  get_variant enqueues on
+			# miss and dedups against in-flight work.
 			if asgn.process.has_repitch():
+				# transform.auto_pitch=false disables the note-range fan-out;
+				# variants then render lazily on first trigger instead.
+				if not eff_transform.auto_pitch_enabled:
+					continue
+
 				record = eff_library.get(ranked[0].sample_id)
 
 				if record is None:
@@ -3706,7 +3873,12 @@ class MidiPlayer:
 					)
 
 				else:
-					eff_transform.enqueue_pitch_range(record, notes, process=asgn.process)
+					for note in notes:
+						spec = self._build_trigger_spec(asgn, record, note)
+
+						if spec.steps:
+							eff_transform.get_variant(record.sample_id, spec)
+
 					_total_assignments += 1
 					_total_variants += len(notes)
 
@@ -3789,7 +3961,10 @@ class MidiPlayer:
 				_total_assignments, _total_variants,
 			)
 
-	# Backward-compatible alias — cli.py and tests call this name.
+	# Backward-compatible alias — LOAD-BEARING, do not remove in a dead-code
+	# sweep: cli.py, scripts/measure_handler_timing.py, and several tests
+	# call this name.  Kept until those callers migrate to
+	# update_assignments.
 	update_pitched_assignments = update_assignments
 
 	def _try_update_assignments (self, context: str) -> None:
@@ -3821,14 +3996,16 @@ class MidiPlayer:
 		zone_templates: tuple[ZoneTemplate, ...],
 	) -> tuple[NoteMap, tuple[ZoneTemplate, ...]]:
 
-		"""Drop output-routing indices that exceed the resolved device channel count.
+		"""Drop output-routing indices that exceed the configured channel count.
 
-		Output routing can only be validated once the output device is
-		selected (in ``run``).  Any assignment or zone template whose
-		``output:`` names a channel the device lacks falls back to default
-		routing, logged once.  Applied to every rule source — the top-level
-		map and each ``map:`` preset — so a later re-materialisation or
-		Program Change never revives a stripped index (the bug the strip
+		Validates against ``self._output_channels`` (fixed at construction
+		from ``player.audio.channels``, default stereo), so it can run both
+		at startup in ``run()`` — applied to every rule source, the top-level
+		map and each ``map:`` preset — and again in ``reload_midi_map`` for
+		hot-edited rules.  Any assignment or zone template whose ``output:``
+		names a channel beyond that count falls back to default routing,
+		logged once; stripping every source means a later re-materialisation
+		or Program Change never revives a stripped index (the bug the strip
 		guards against).
 
 		Returns the (possibly rebuilt) note map and zone-template tuple;
@@ -3932,7 +4109,10 @@ class MidiPlayer:
 			# previously-good configuration.  Any variants
 			# update_assignments() may have enqueued before raising are
 			# harmless — they sit in the transform manager's cache for
-			# future calls.
+			# future calls.  The candidate cache is deliberately NOT
+			# restored: a stale id misses and falls through to the live
+			# query, so the cost is performance-only and self-corrects on
+			# the next update_assignments.
 			self._base_note_map  = old_base_note_map
 			self._note_map       = old_note_map
 			self._zone_templates = old_zone_templates
@@ -3985,9 +4165,18 @@ class MidiPlayer:
 
 		new_ccs = _collect_mapped_ccs(new_result.note_map, new_result.zone_templates)
 
+		# Strip out-of-bounds output routing exactly as run() does at startup.
+		# Without this, a hot-edited `output:` beyond the device channel count
+		# would survive into the live rules and raise in route_to_device on
+		# EVERY note-on (silent note + per-trigger ERROR) instead of degrading
+		# gracefully to default routing with one warning here.
+		stripped_map, stripped_zones = self._strip_oob_routing_rules(
+			new_result.note_map, new_result.zone_templates,
+		)
+
 		# Refresh the top-level snapshot — `directory:` programs reuse it.
-		self._top_level_note_map       = new_result.note_map
-		self._top_level_zone_templates = new_result.zone_templates
+		self._top_level_note_map       = stripped_map
+		self._top_level_zone_templates = stripped_zones
 		self._top_level_mapped_ccs     = new_ccs
 
 		# A `map:` preset is live — don't clobber it with the top-level rules.
@@ -4000,7 +4189,7 @@ class MidiPlayer:
 
 		old_count = len(self._note_map)
 
-		self._apply_rule_set(new_result.note_map, new_result.zone_templates, new_ccs)
+		self._apply_rule_set(stripped_map, stripped_zones, new_ccs)
 
 		_log.info(
 			"MIDI map reloaded: %d note(s)%s (was %d)",
@@ -4156,10 +4345,11 @@ class MidiPlayer:
 					)
 					if output_routing is not None:
 						mat = subsample.channel.route_to_device(decoder, self._output_channels, output_routing)
-					elif logical_out_ch == self._output_channels:
-						mat = decoder
 					else:
-						mat = subsample.channel.route_to_device(decoder, self._output_channels, None)
+						# Without explicit routing, logical_out_ch IS
+						# self._output_channels (see its assignment above),
+						# so the decoder already matches the device width.
+						mat = decoder
 				else:
 					# Unsupported combination (non-standard output channel count
 					# or wrong input channel count): fall back to plain routing.

@@ -36,7 +36,7 @@ TransformProcessor
 
 TransformManager
     Single coordination point for the player and cli.py.  Handles:
-      - on_sample_added()   : auto-enqueue configured transforms for new samples
+      - on_sample_added()   : enqueue the base variant for new samples
       - on_parent_evicted() : propagate instrument-library eviction to the cache
       - get_variant()       : generic look-up by arbitrary TransformSpec
       - get_base()          : look up the no-DSP float32 base variant
@@ -46,7 +46,7 @@ Data flow
 
   SampleRecord added to InstrumentLibrary
       → TransformManager.on_sample_added()
-          → TransformProcessor.enqueue(record, spec)   [auto-pitch / auto-BPM]
+          → TransformProcessor.enqueue(record, spec)   [base variant]
               → worker: _pcm_to_float32 → handler chain → compute_level
                   → TransformCache.put(result)
                       → on_complete callback
@@ -127,6 +127,7 @@ import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 import pymididefs.notes
 
 import subsample.analysis
+import subsample.config
 import subsample.library
 import subsample.query
 
@@ -890,7 +891,8 @@ class TransformCache:
 #     RMS          (4 bytes, float32, little-endian)
 #     Reserved     (10 bytes, zero)
 #   Body: n_frames * channels * 4 bytes of float32, little-endian
-#   Footer (optional, SSV2 only — present when segment_count > 0):
+#   Footer (SSV2 only — the 4-byte segment_count word is always written,
+#   0 when there are no segments, so offsets stay uniform):
 #     Segment count  (4 bytes, uint32 LE)
 #     Bounds         (segment_count * 8 bytes: start uint32 LE + end uint32 LE)
 
@@ -930,7 +932,8 @@ class VariantDiskCache:
 	"""Persistent file-based cache for transform variants.
 
 	Each variant is stored as a single binary file named by its SHA-256 hash
-	(no sidecar).  FIFO eviction by modification time keeps total disk usage
+	(no sidecar).  Least-recently-used eviction (get() touches mtime, so
+	recently played variants survive) keeps total disk usage
 	within the configured budget.
 
 	Thread-safe: writes use atomic temp-file + rename; eviction scans are
@@ -1320,28 +1323,6 @@ class TransformProcessor:
 
 		self._executor.submit(self._execute, record, spec, key)
 
-	def enqueue_pitch_range (
-		self,
-		record:     "subsample.library.SampleRecord",
-		midi_notes: list[int],
-		process:    typing.Optional[subsample.query.ProcessSpec] = None,
-	) -> None:
-
-		"""Submit one pitch-shift job per MIDI note in the list.
-
-		When *process* is provided, builds the full ordered chain via
-		spec_from_process() so pre-computed variants include all processors
-		(filters, saturate, etc.) alongside the pitch shift.
-		"""
-
-		for note in midi_notes:
-			if process is not None:
-				spec = spec_from_process(process, midi_note=note)
-			else:
-				spec = TransformSpec(steps=(PitchShift(target_midi_note=note),))
-
-			self.enqueue(record, spec)
-
 	def shutdown (self) -> None:
 
 		"""Wait for all in-flight transforms and stop the worker pool."""
@@ -1380,7 +1361,7 @@ class TransformProcessor:
 				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
 
 			# Check disk cache before doing expensive DSP.  This covers the
-			# startup pre-computation path (update_assignments → enqueue_pitch_range)
+			# startup pre-computation path (update_assignments → get_variant)
 			# which bypasses TransformManager.get_variant().
 			if self._disk_cache is not None and spec.steps and audio_md5 is not None:
 				disk_hit = self._disk_cache.get(audio_md5, spec, key)
@@ -1455,6 +1436,9 @@ class TransformProcessor:
 			duration = audio.shape[0] / self._output_sample_rate
 
 			# Compute grid energy profile if a quantize step was applied.
+			# First matching step wins — mirrors _quantize_params reading the
+			# first step's tempo/grid.  (Cross-type quantize pairs are rejected
+			# at parse; only duplicate same-name steps could match twice.)
 			energy_profile: typing.Optional[GridEnergyProfile] = None
 
 			for step in spec.steps:
@@ -1470,6 +1454,8 @@ class TransformProcessor:
 						len(energy_profile.energy),
 						"[" + ", ".join(f"{e:.2f}" for e in energy_profile.energy) + "]",
 					)
+
+					break
 
 			result = TransformResult(
 				key=key, audio=audio, duration=duration, level=level,
@@ -1522,7 +1508,8 @@ class TransformManager:
 	---------------
 	on_sample_added(record)
 	    Called from the on_complete callback after a new SampleRecord is added
-	    to InstrumentLibrary.  Phase 2 will auto-enqueue pitch variants here.
+	    to InstrumentLibrary.  Enqueues the base variant only; pitch/quantize
+    variants are driven by the player's update_assignments().
 
 	on_parent_evicted(sample_ids)
 	    Called when InstrumentLibrary.add() returns evicted IDs.  Cascade-evicts
@@ -1621,29 +1608,18 @@ class TransformManager:
 
 		return result
 
-	def enqueue_pitch_range (
-		self,
-		record:     "subsample.library.SampleRecord",
-		midi_notes: list[int],
-		process:    typing.Optional[subsample.query.ProcessSpec] = None,
-	) -> None:
+	@property
+	def auto_pitch_enabled (self) -> bool:
 
-		"""Enqueue pitch-shift variants for a set of MIDI notes.
+		"""Whether the pitch-range pre-compute fan-out is enabled.
 
-		Delegates to the underlying TransformProcessor, which deduplicates
-		in-flight and already-cached keys — safe to call repeatedly.
-
-		When *process* is provided, each variant is built via
-		spec_from_process() so it includes the full ordered chain (filters,
-		saturate, etc.) alongside the pitch shift.
-
-		No-ops when auto_pitch is disabled.
+		Read by the player's ``update_assignments`` before it pre-renders a
+		repitch assignment's variants across its note range — when False, the
+		fan-out is skipped and each note's variant is produced on first
+		trigger instead.
 		"""
 
-		if not self._cfg.auto_pitch:
-			return
-
-		self._processor.enqueue_pitch_range(record, midi_notes, process=process)
+		return self._cfg.auto_pitch
 
 	def on_sample_added (self, record: "subsample.library.SampleRecord") -> None:
 
@@ -2201,7 +2177,10 @@ def _apply_filter (
 	else:
 		clamped = max(1.0, min(freq, nyquist - 1.0))
 
-		# Degenerate case: freq <= 1 Hz after clamping — filter is meaningless.
+		# Degenerate case: the max() above floors clamped at 1.0, so this
+		# fires only for requests of <= 1 Hz.  Pass-through is right for a
+		# high-pass (nothing to remove); for a low-pass it ignores an
+		# unreasonable request rather than silencing the sample.
 		if clamped <= 1.0:
 			return audio
 
@@ -2703,6 +2682,12 @@ def _apply_gate (
 	# Lookahead: delay the audio relative to the gain envelope.
 	lookahead_samples = int(lookahead_ms * sample_rate / 1000.0)
 
+	# Cap the look-ahead to half the sample, mirroring _compress: the pad-
+	# then-slice below discards the last `lookahead_samples`, so a window
+	# meeting or exceeding the sample length would silence it entirely
+	# (e.g. an explicit 50 ms look-ahead on a 30 ms tick).
+	lookahead_samples = min(lookahead_samples, n_frames // 2)
+
 	if lookahead_samples > 0:
 		audio_f64 = numpy.pad(audio_f64, ((lookahead_samples, 0), (0, 0)), mode="constant")
 		audio_f64 = audio_f64[:n_frames]
@@ -2829,6 +2814,12 @@ def _apply_distort (
 # Envelope Reshaping
 # ---------------------------------------------------------------------------
 
+# Length of the implicit decay ramp used when ``sustain`` is lowered without
+# an explicit ``decay_ms`` — long enough to avoid a click, short enough to be
+# indistinguishable from an instant drop musically.
+_RESHAPE_IMPLICIT_DECAY_MS: typing.Final[float] = 5.0
+
+
 def _apply_reshape (
 	audio:       numpy.ndarray,
 	sample_rate: int,
@@ -2915,9 +2906,17 @@ def _apply_reshape (
 		hold_samples = int(step.hold_ms * sample_rate / 1000.0)
 		cursor = min(cursor + hold_samples, n_frames)
 
-	# Decay phase: ramp from 1.0 to sustain level.
+	# Decay phase: ramp from 1.0 to sustain level.  A lowered sustain with no
+	# explicit decay gets a short implicit ramp instead of an instantaneous
+	# 1.0 → sustain step, which lands as an audible click.
 	if step.decay_ms is not None:
 		decay_samples = max(1, int(step.decay_ms * sample_rate / 1000.0))
+	elif step.sustain < 1.0:
+		decay_samples = max(1, int(_RESHAPE_IMPLICIT_DECAY_MS * sample_rate / 1000.0))
+	else:
+		decay_samples = 0
+
+	if decay_samples > 0:
 		end = min(cursor + decay_samples, n_frames)
 		ramp_len = end - cursor
 
@@ -2930,12 +2929,18 @@ def _apply_reshape (
 	release_samples = max(1, int(release_ms * sample_rate / 1000.0))
 	release_start = max(cursor, n_frames - release_samples)
 
-	if step.sustain < 1.0 or step.decay_ms is not None:
+	sustain_active = step.sustain < 1.0 or step.decay_ms is not None
+
+	if sustain_active:
 		gain[cursor:release_start] = step.sustain
 
-	# Release phase: fade from current level to 0.
+	# Release phase: fade to 0 from the level actually in effect when the
+	# release begins.  The sustain write above is exclusive of release_start,
+	# so reading gain[release_start] would pick up the untouched initial 1.0 —
+	# the release would jump back to full level in one sample (a click) and
+	# the whole tail would play at the wrong volume.
 	if release_start < n_frames:
-		start_level = gain[release_start]
+		start_level = step.sustain if sustain_active else float(gain[release_start])
 		gain[release_start:] = numpy.linspace(
 			start_level, 0.0, n_frames - release_start,
 		)
@@ -3228,6 +3233,11 @@ def _load_carrier (path: str, target_sr: int) -> numpy.ndarray:
 
 	cache_key = f"{path}@{target_sr}"
 
+	# Double-checked load: the unlocked-looking first read IS under the lock;
+	# the disk read + resample below deliberately run outside it, and the
+	# insert re-checks under the lock.  Two workers racing the same carrier
+	# may duplicate the disk read, but never double-count bytes or duplicate
+	# eviction-queue entries — don't "fix" the lock scope.
 	with _carrier_cache_lock:
 		cached = _carrier_cache.get(cache_key)
 
@@ -3408,29 +3418,37 @@ def _apply_vocoder (
 
 	result = numpy.zeros_like(audio)
 
+	# Prepare the carrier once: loop or truncate to the modulator length, then
+	# band-split.  The carrier is mono and identical for every channel, so
+	# filtering it inside the channel loop would double the work for stereo.
+	carrier = carrier_mono
+
+	if len(carrier) < n_frames:
+		# Loop the carrier to fill the modulator length.
+		repeats = (n_frames // len(carrier)) + 1
+		carrier = numpy.tile(carrier, repeats)[:n_frames]
+	else:
+		carrier = carrier[:n_frames]
+
+	carrier_f64 = carrier.astype(numpy.float64)
+	car_bands = [
+		scipy.signal.sosfiltfilt(car_filters[b], carrier_f64).astype(numpy.float32)
+		for b in range(n_bands)
+	]
+
 	for ch in range(n_channels):
 		mod_signal = audio[:, ch]
-
-		# Prepare carrier for this channel: loop or truncate to match length.
-		carrier = carrier_mono
-
-		if len(carrier) < n_frames:
-			# Loop the carrier to fill the modulator length.
-			repeats = (n_frames // len(carrier)) + 1
-			carrier = numpy.tile(carrier, repeats)[:n_frames]
-		else:
-			carrier = carrier[:n_frames]
 
 		vocoded = numpy.zeros(n_frames, dtype=numpy.float32)
 
 		for b in range(n_bands):
-			# Filter modulator and carrier through corresponding bands.
+			# Filter the modulator through its band; the matching carrier
+			# band was pre-computed above.
 			mod_band = scipy.signal.sosfiltfilt(mod_filters[b], mod_signal.astype(numpy.float64)).astype(numpy.float32)
-			car_band = scipy.signal.sosfiltfilt(car_filters[b], carrier.astype(numpy.float64)).astype(numpy.float32)
 
 			# Extract modulator envelope and apply to carrier band.
 			env = _extract_envelope(mod_band, sample_rate)
-			vocoded += car_band * env
+			vocoded += car_bands[b] * env
 
 		result[:, ch] = vocoded
 
@@ -3724,7 +3742,10 @@ def spec_from_process (
 					if reference_path is not None:
 						carrier_str = reference_path
 					else:
-						_log.warning("vocoder carrier: reference but no reference path available — skipped")
+						_warn_once(
+						"vocoder-no-reference-path",
+						"vocoder carrier: reference but no reference path available — skipped",
+					)
 						continue
 				else:
 					# Explicit file path — resolve relative to cwd.
@@ -3737,7 +3758,10 @@ def spec_from_process (
 					formant_shift=int(_resolve_cc(proc.get("formant_shift"), cc_state, 0, cc_omni=cc_omni)),
 				))
 			else:
-				_log.warning("vocoder requires a 'carrier' parameter — skipped")
+				_warn_once(
+				"vocoder-no-carrier",
+				"vocoder requires a 'carrier' parameter — skipped",
+			)
 
 		else:
 			_log.warning("Unknown processor %r — skipped", proc.name)

@@ -15,6 +15,7 @@ Usage:
 	python scripts/import_samples.py --force --to samples/radio /mnt/sdr/audio/*.wav
 """
 
+import argparse
 import glob
 import logging
 import math
@@ -239,7 +240,6 @@ def main () -> None:
 
 	"""Import pre-trimmed audio files into the Subsample capture library."""
 
-	import argparse
 
 	parser = argparse.ArgumentParser(
 		prog="import_samples",

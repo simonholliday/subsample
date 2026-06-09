@@ -8,6 +8,7 @@ import pytest
 
 import subsample.analysis
 import subsample.cache
+import subsample.library
 
 import tests.helpers
 
@@ -509,6 +510,36 @@ class TestEnsureSampleAssets:
 		payload = json.loads(sidecar.read_text())
 		assert "preview" in payload
 		assert self._png_path(wav_path).exists()
+
+	def test_degenerate_audio_skipped_not_raised (self, tmp_path: pathlib.Path) -> None:
+		"""A readable-but-degenerate file (a few ms of audio) must warn and
+		return None — not let a librosa exception escape and abort the whole
+		startup load over one junk file."""
+
+		wav_path = tmp_path / "click.wav"
+		tests.helpers._make_wav(wav_path, n_frames=100)
+
+		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		assert result is None
+
+	def test_one_degenerate_file_does_not_abort_library_load (
+		self,
+		tmp_path: pathlib.Path,
+	) -> None:
+		"""End-to-end: a directory with one good and one degenerate file loads
+		the good one instead of crashing the recursive load."""
+
+		tests.helpers._make_wav(tmp_path / "good.wav")
+		tests.helpers._make_wav(tmp_path / "junk.wav", n_frames=100)
+
+		library = subsample.library.load_instrument_library(
+			tmp_path, max_memory_bytes=4 * 1024 * 1024, with_preview=False,
+		)
+
+		assert library is not None
+		names = {r.name for r in library.samples()}
+		assert names == {"good"}
 
 	def test_cold_no_sidecar_no_png_with_preview_off (
 		self,

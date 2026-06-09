@@ -68,16 +68,6 @@ def main () -> None:
 
 	cfg = subsample.config.load_config(args.config)
 
-	if cfg.instrument.directory is None:
-		print(
-			"Error: no instrument directory configured.\n"
-			"Add an instrument section to config.yaml:\n"
-			"  instrument:\n"
-			"    directory: ./samples",
-			file=sys.stderr,
-		)
-		sys.exit(1)
-
 	# --- Load libraries ---
 
 	reference_library = subsample.library.load_reference_library(args.reference_dir)

@@ -323,8 +323,9 @@ class TestMidiPlayer:
 				player = self._make_player(shutdown_event)
 				player.run()
 
-		# run() should have returned without hanging
-		assert not threading.current_thread().daemon
+		# Reaching here means run() returned without hanging.  (The
+		# threaded variant, test_run_on_thread_exits_cleanly, adds a join
+		# timeout for the genuinely-asynchronous case.)
 
 	def test_logs_port_open (self, caplog: pytest.LogCaptureFixture) -> None:
 		import logging
@@ -724,12 +725,13 @@ class TestNoteOff:
 		player._release_fade_frames = 441  # 10 ms at 44100 Hz
 		player._last_clip_warn      = 0.0
 		player._max_polyphony       = 8
+		player._limiter_enabled     = True
 		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
 		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
 		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
 
 		# Call the real _audio_callback
-		subsample.player.MidiPlayer._audio_callback(
+		subsample.player.MidiPlayer._audio_callback_impl(
 			player, None, 512, {}, 0
 		)
 
@@ -751,11 +753,12 @@ class TestNoteOff:
 		player._output_bit_depth    = 16
 		player._last_clip_warn      = 0.0
 		player._max_polyphony       = 8
+		player._limiter_enabled     = True
 		player._limiter_threshold   = 10.0 ** (-1.5 / 20.0)
 		player._limiter_ceiling     = 10.0 ** (-0.1 / 20.0)
 		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
 
-		subsample.player.MidiPlayer._audio_callback(
+		subsample.player.MidiPlayer._audio_callback_impl(
 			player, None, 512, {}, 0
 		)
 
@@ -879,10 +882,39 @@ class TestMaxPolyphony:
 		player._last_xrun_warn      = 0.0
 		player._buffer_frames       = 256
 		player._max_polyphony       = 8
+		player._limiter_enabled     = limiter_threshold_db < 0.0
 		player._limiter_threshold   = 10.0 ** (limiter_threshold_db / 20.0)
 		player._limiter_ceiling     = 10.0 ** (limiter_ceiling_db / 20.0)
 		player._limiter_knee        = player._limiter_ceiling - player._limiter_threshold
 		return player
+
+	def test_limiter_disabled_at_zero_threshold (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""limiter_threshold_db: 0.0 disables the soft-clip stage: a loud mix
+		hard-clips to full scale, and the ceiling diagnostic stays quiet."""
+		import logging
+		import numpy
+
+		n_frames = 512
+		audio_loud = numpy.ones((n_frames, 2), dtype=numpy.float32) * 0.8
+		player = self._make_callback_player(limiter_threshold_db=0.0)
+		player._voices = [
+			subsample.player._Voice(audio=audio_loud.copy(), note=36, channel=9),
+			subsample.player._Voice(audio=audio_loud.copy(), note=38, channel=9),
+		]
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			raw, _ = subsample.player.MidiPlayer._audio_callback_impl(
+				player, None, n_frames, {}, 0,
+			)
+
+		# 0.8 + 0.8 hard-clips to full scale — no tanh compression below it.
+		samples = numpy.frombuffer(raw, dtype=numpy.int16)
+		assert int(numpy.max(samples)) == 32767
+
+		assert not any("Audio clipping" in r.message for r in caplog.records)
 
 	def test_limiter_prevents_clipping_warning (
 		self,
@@ -903,7 +935,7 @@ class TestMaxPolyphony:
 		]
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+			subsample.player.MidiPlayer._audio_callback_impl(player, None, n_frames, {}, 0)
 
 		assert not any("clipping" in r.message.lower() for r in caplog.records)
 
@@ -934,7 +966,7 @@ class TestMaxPolyphony:
 		player._voices = [subsample.player._Voice(audio=audio.copy(), note=36, channel=9)]
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+			subsample.player.MidiPlayer._audio_callback_impl(player, None, n_frames, {}, 0)
 
 		assert any("clipping" in r.message.lower() for r in caplog.records)
 
@@ -951,13 +983,13 @@ class TestMaxPolyphony:
 
 		# First call — fires the warning and records the timestamp.
 		player._voices = [subsample.player._Voice(audio=audio.copy(), note=36, channel=9)]
-		subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+		subsample.player.MidiPlayer._audio_callback_impl(player, None, n_frames, {}, 0)
 		first_warn_time: float = player._last_clip_warn
 
 		# Second call immediately after — should be throttled.
 		player._voices = [subsample.player._Voice(audio=audio.copy(), note=36, channel=9)]
 		with unittest.mock.patch.object(subsample.player._log, "warning") as mock_warn:
-			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+			subsample.player.MidiPlayer._audio_callback_impl(player, None, n_frames, {}, 0)
 
 		mock_warn.assert_not_called()
 		assert player._last_clip_warn == first_warn_time
@@ -976,7 +1008,7 @@ class TestMaxPolyphony:
 		player._voices = [subsample.player._Voice(audio=audio_quiet.copy(), note=36, channel=9)]
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			subsample.player.MidiPlayer._audio_callback(player, None, n_frames, {}, 0)
+			subsample.player.MidiPlayer._audio_callback_impl(player, None, n_frames, {}, 0)
 
 		assert not any("clipping" in r.message.lower() for r in caplog.records)
 
@@ -992,7 +1024,7 @@ class TestMaxPolyphony:
 		player = self._make_callback_player()
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			subsample.player.MidiPlayer._audio_callback(
+			subsample.player.MidiPlayer._audio_callback_impl(
 				player, None, 256, {}, pyaudio.paOutputUnderflow,
 			)
 
@@ -1009,7 +1041,7 @@ class TestMaxPolyphony:
 		player = self._make_callback_player()
 
 		with caplog.at_level(logging.WARNING, logger="subsample.player"):
-			subsample.player.MidiPlayer._audio_callback(player, None, 256, {}, 0)
+			subsample.player.MidiPlayer._audio_callback_impl(player, None, 256, {}, 0)
 
 		assert player._xrun_count == 0
 		assert not any("xrun" in r.message.lower() for r in caplog.records)
@@ -1020,11 +1052,11 @@ class TestMaxPolyphony:
 
 		player = self._make_callback_player()
 
-		subsample.player.MidiPlayer._audio_callback(player, None, 256, {}, pyaudio.paOutputUnderflow)
+		subsample.player.MidiPlayer._audio_callback_impl(player, None, 256, {}, pyaudio.paOutputUnderflow)
 		first_warn_time: float = player._last_xrun_warn
 
 		with unittest.mock.patch.object(subsample.player._log, "warning") as mock_warn:
-			subsample.player.MidiPlayer._audio_callback(player, None, 256, {}, pyaudio.paOutputUnderflow)
+			subsample.player.MidiPlayer._audio_callback_impl(player, None, 256, {}, pyaudio.paOutputUnderflow)
 
 		mock_warn.assert_not_called()
 		assert player._last_xrun_warn == first_warn_time
@@ -1044,7 +1076,7 @@ class TestMaxPolyphony:
 		player._voices = [voice]
 
 		# One 64-frame callback applies only part of the 200-frame fade.
-		subsample.player.MidiPlayer._audio_callback(player, None, 64, {}, 0)
+		subsample.player.MidiPlayer._audio_callback_impl(player, None, 64, {}, 0)
 		assert voice.fade_pos == 64
 		assert voice in player._voices            # still fading, not retired
 
@@ -1052,7 +1084,7 @@ class TestMaxPolyphony:
 		for _ in range(6):
 			if not player._voices:
 				break
-			subsample.player.MidiPlayer._audio_callback(player, None, 64, {}, 0)
+			subsample.player.MidiPlayer._audio_callback_impl(player, None, 64, {}, 0)
 
 		assert player._voices == []               # fully faded and retired
 		assert voice.fade_pos >= player._release_fade_frames
@@ -1094,7 +1126,7 @@ class TestLimiter:
 		n_frames = len(audio)
 		voice = subsample.player._Voice(audio=audio.copy(), note=36, channel=9)
 		player._voices = [voice]
-		raw, _ = subsample.player.MidiPlayer._audio_callback(
+		raw, _ = subsample.player.MidiPlayer._audio_callback_impl(
 			player, None, n_frames, {}, 0
 		)
 		# Unpack the int16 bytes back to float for assertion
@@ -1962,6 +1994,74 @@ assignments:
 		assert all(e[0].stack for e in entries)
 		assert {e[0].name for e in entries} == {"Kick body", "Sub sine"}
 
+	def test_bridged_nonconsensual_overlap_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""A wide stacked layer must not let a non-stacked layer slip past
+		validation just because the non-stacked layer doesn't overlap its
+		immediate sorted neighbour (the adjacency-bypass regression)."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Wide stacked
+    channel: 10
+    notes: 36
+    velocity: [0, 100]
+    stack: true
+    select:
+      where:
+        reference: BD0025
+  - name: Narrow stacked
+    channel: 10
+    notes: 36
+    velocity: [5, 6]
+    stack: true
+    select:
+      where:
+        reference: BD0025
+  - name: Solo nonstack
+    channel: 10
+    notes: 36
+    velocity: [50, 60]
+    select:
+      where:
+        reference: BD0025
+""")
+		with pytest.raises(ValueError, match="overlap"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_nonoverlapping_nonstack_beside_stack_allowed (self, tmp_path: pathlib.Path) -> None:
+		"""A non-stacked layer that genuinely overlaps nothing coexists with a
+		stacked pair on the same note."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Wide stacked
+    channel: 10
+    notes: 36
+    velocity: [0, 40]
+    stack: true
+    select:
+      where:
+        reference: BD0025
+  - name: Narrow stacked
+    channel: 10
+    notes: 36
+    velocity: [5, 6]
+    stack: true
+    select:
+      where:
+        reference: BD0025
+  - name: Solo nonstack
+    channel: 10
+    notes: 36
+    velocity: [50, 60]
+    select:
+      where:
+        reference: BD0025
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		assert len(note_map[(9, 36)]) == 3
+
 	def test_one_sided_stack_rejected (self, tmp_path: pathlib.Path) -> None:
 		"""Overlap is rejected unless *every* overlapping member opts in —
 		a lone flag must not silence the copy-paste-mistake guard."""
@@ -2153,6 +2253,98 @@ class TestStripOobRouting:
 
 		assert fixed_zones[0] is not tmpl
 		assert fixed_zones[0].output_routing is None
+
+
+class TestRuntimeSafetyGuards:
+
+	"""The audio-callback exception guard, the stale layer-state prune, and
+	the hot-reload OOB-routing strip — runtime-robustness fixes from the
+	2026-06 review."""
+
+	def _make_player (self) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	def test_audio_callback_failure_returns_silence_not_raise (self) -> None:
+		"""A raise inside the mix must not escape the PortAudio callback — it
+		would abort the stream permanently.  The guard returns one buffer of
+		silence and paContinue."""
+
+		import pyaudio
+
+		player = self._make_player()
+
+		# A voice whose channel count can't broadcast into the stereo output
+		# makes the unguarded mix raise.
+		bad = subsample.player._Voice(
+			audio=numpy.zeros((128, 7), dtype=numpy.float32), note=36, channel=9,
+		)
+		player._voices.append(bad)
+
+		data, flag = player._audio_callback(None, 64, None, 0)
+
+		assert flag == pyaudio.paContinue
+		assert data == b"\x00" * (64 * 2 * 2)   # frames × stereo × int16
+
+	def test_prune_drops_only_retired_assignment_state (self) -> None:
+		"""Per-layer state keyed by a retired Assignment id is swept; state for
+		assignments still in the note map survives."""
+
+		player = self._make_player()
+
+		live = subsample.query.Assignment(name="live", select=(subsample.query.SelectSpec(),))
+		dead = subsample.query.Assignment(name="dead", select=(subsample.query.SelectSpec(),))
+		pick = subsample.query.PickSpec(1, 1)
+		player._note_map = {(9, 36): [(live, pick)]}
+
+		fake_variant = unittest.mock.MagicMock()
+		player._last_played[(9, 36, id(live))] = fake_variant
+		player._last_played[(9, 36, id(dead))] = fake_variant
+		player._segment_counters[(9, 36, id(live))] = 3
+		player._segment_counters[(9, 36, id(dead))] = 5
+
+		player._prune_stale_layer_state()
+
+		assert (9, 36, id(live)) in player._last_played
+		assert (9, 36, id(dead)) not in player._last_played
+		assert player._segment_counters == {(9, 36, id(live)): 3}
+
+	def test_reload_strips_oob_routing (self) -> None:
+		"""A hot-reloaded map gets the same out-of-bounds output strip as the
+		startup sources — an OOB `output:` must not survive into live rules."""
+
+		player = self._make_player()
+		player._output_channels = 2
+
+		oob = subsample.query.Assignment(
+			name="oob", select=(subsample.query.SelectSpec(),), output_routing=(0, 5),
+		)
+		pick = subsample.query.PickSpec(1, 1)
+		result = subsample.player.MidiMapResult(
+			note_map={(9, 36): [(oob, pick)]},
+			bank_definitions=[],
+			bank_channel=0,
+		)
+
+		applied: list[subsample.player.NoteMap] = []
+		player._apply_rule_set = lambda nm, zt, ccs: applied.append(nm)  # type: ignore[method-assign]
+
+		player.reload_midi_map(result)
+
+		# Both the applied rules and the refreshed top-level snapshot carry
+		# the stripped (default-routed) assignment.
+		stripped = applied[0][(9, 36)][0][0]
+		assert stripped.output_routing is None
+		assert player._top_level_note_map[(9, 36)][0][0].output_routing is None
 
 
 class TestSelectVelocityLayer:
@@ -2888,8 +3080,9 @@ class TestMaterializeZones:
 
 class TestZoneTunedRuntime:
 
-	"""End-to-end note_on dispatch through a zone-tuned MidiPlayer —
-	confirms the materialised entries route correctly."""
+	"""Materialisation of zone-tuned templates into the working note map —
+	verifies entry construction, not note-on dispatch (the dispatch happy
+	path is covered by TestFallbackResolution's stocked-library test)."""
 
 	def _make_player_with_zone (
 		self,
@@ -3192,10 +3385,10 @@ class TestUpdatePitchedAssignments:
 
 		player.update_pitched_assignments()
 
-		transform_manager.enqueue_pitch_range.assert_not_called()
+		transform_manager.get_variant.assert_not_called()
 
 	def test_enqueues_for_pitched_reference (self) -> None:
-		"""enqueue_pitch_range is called with the matched record and notes."""
+		"""One variant per note is pre-rendered for the matched record."""
 
 		notes = [48, 50, 52]
 		player = self._make_player_with_pitch_map(notes=notes)
@@ -3221,10 +3414,16 @@ class TestUpdatePitchedAssignments:
 		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=True):
 			player.update_pitched_assignments()
 
-		transform_manager.enqueue_pitch_range.assert_called_once()
-		call_args = transform_manager.enqueue_pitch_range.call_args
-		assert call_args[0][0] is mock_record
-		assert sorted(call_args[0][1]) == sorted(notes)
+		# One pre-rendered variant per note, built by the SAME spec helper the
+		# trigger path uses (so cache keys match at note-on).
+		assert transform_manager.get_variant.call_count == len(notes)
+		queued_ids   = {c.args[0] for c in transform_manager.get_variant.call_args_list}
+		queued_notes = sorted(
+			c.args[1].steps[0].target_midi_note
+			for c in transform_manager.get_variant.call_args_list
+		)
+		assert queued_ids == {42}
+		assert queued_notes == sorted(notes)
 
 	def test_no_match_skips_enqueue (self) -> None:
 		"""No enqueue when similarity matrix returns None (no match yet)."""
@@ -3236,7 +3435,7 @@ class TestUpdatePitchedAssignments:
 
 		player.update_pitched_assignments()
 
-		transform_manager.enqueue_pitch_range.assert_not_called()
+		transform_manager.get_variant.assert_not_called()
 
 	def test_no_stable_pitch_skips_enqueue (self, caplog: pytest.LogCaptureFixture) -> None:
 		"""No enqueue and a warning when the matched sample has no stable pitch."""
@@ -3263,11 +3462,11 @@ class TestUpdatePitchedAssignments:
 			with caplog.at_level(logging.WARNING, logger="subsample.player"):
 				player.update_pitched_assignments()
 
-		transform_manager.enqueue_pitch_range.assert_not_called()
+		transform_manager.get_variant.assert_not_called()
 		assert any("stable pitch" in r.message for r in caplog.records)
 
 	def test_enqueues_for_pitched_filter (self) -> None:
-		"""enqueue_pitch_range is called for an assignment with pitched: true filter."""
+		"""Variants are pre-rendered for an assignment with pitched: true filter."""
 
 		notes = [48, 50, 52]
 		asgn = _make_assignment(name="Pitched newest", pitched_filter=True, order_by="newest", repitch=True, one_shot=False)
@@ -3302,10 +3501,16 @@ class TestUpdatePitchedAssignments:
 		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=True):
 			player.update_pitched_assignments()
 
-		transform_manager.enqueue_pitch_range.assert_called_once()
-		call_args = transform_manager.enqueue_pitch_range.call_args
-		assert call_args[0][0] is mock_record
-		assert sorted(call_args[0][1]) == sorted(notes)
+		# One pre-rendered variant per note, built by the SAME spec helper the
+		# trigger path uses (so cache keys match at note-on).
+		assert transform_manager.get_variant.call_count == len(notes)
+		queued_ids   = {c.args[0] for c in transform_manager.get_variant.call_args_list}
+		queued_notes = sorted(
+			c.args[1].steps[0].target_midi_note
+			for c in transform_manager.get_variant.call_args_list
+		)
+		assert queued_ids == {42}
+		assert queued_notes == sorted(notes)
 
 	def test_pitched_selector_no_match_skips (self) -> None:
 		"""No enqueue when query returns no results."""
@@ -3334,7 +3539,7 @@ class TestUpdatePitchedAssignments:
 
 		player.update_pitched_assignments()
 
-		transform_manager.enqueue_pitch_range.assert_not_called()
+		transform_manager.get_variant.assert_not_called()
 
 	def test_beat_quantize_pre_computation (self) -> None:
 		"""update_assignments() calls get_variant() for stretch_quantize assignments."""
@@ -3356,6 +3561,7 @@ class TestUpdatePitchedAssignments:
 			midi_map=note_map,
 			sample_rate=44100,
 			bit_depth=16,
+			target_bpm=120.0,
 		)
 
 		mock_record = unittest.mock.MagicMock()
@@ -3371,10 +3577,17 @@ class TestUpdatePitchedAssignments:
 
 		player.update_assignments()
 
-		# get_variant should have been called to pre-compute the time-stretch variant.
+		# Exactly one pre-rendered variant, whose spec actually contains the
+		# TimeStretch step.  (With no target BPM the step is silently dropped
+		# and the empty spec is skipped, not enqueued — the old assertion
+		# passed on that no-op call.)
 		transform_manager.get_variant.assert_called_once()
 		call_args = transform_manager.get_variant.call_args
 		assert call_args[0][0] == 7  # sample_id
+		assert any(
+			isinstance(step, subsample.transform.TimeStretch)
+			for step in call_args[0][1].steps
+		)
 
 	def test_range_pick_precomputes_all_ranks (self) -> None:
 		"""A range pick pre-computes variants for every reachable rank, so
@@ -3929,6 +4142,65 @@ class TestFallbackResolution:
 
 		with player._voices_lock:
 			assert len(player._voices) == 0
+
+	def test_stocked_library_note_on_produces_voice (self) -> None:
+		"""End-to-end happy path: a note-on against a real, stocked library
+		renders one voice with real audio (the int-PCM fallback path — no
+		transform manager configured)."""
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=0)
+
+		audio = numpy.full((4410, 1), 8000, dtype=numpy.int16)
+		record = subsample.library.SampleRecord(
+			sample_id   = subsample.library.allocate_id(),
+			name        = "kick",
+			spectral    = tests.helpers._make_spectral(),
+			rhythm      = tests.helpers._make_rhythm(),
+			pitch       = tests.helpers._make_pitch(),
+			timbre      = tests.helpers._make_timbre(),
+			level       = tests.helpers._make_level(),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = tests.helpers._make_params(),
+			duration    = 0.1,
+			audio       = audio,
+		)
+		library.add(record)
+
+		asgn = subsample.query.Assignment(
+			name="Kick",
+			select=(subsample.query.SelectSpec(
+				where=subsample.query.WherePredicate(name="kick"),
+			),),
+		)
+		note_map: subsample.player.NoteMap = {(9, 36): [(asgn, subsample.query.PickSpec(1, 1))]}
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=library,
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		msg = unittest.mock.MagicMock()
+		msg.type = "note_on"
+		msg.channel = 9
+		msg.note = 36
+		msg.velocity = 100
+
+		player._handle_message(msg)
+
+		with player._voices_lock:
+			assert len(player._voices) == 1
+			voice = player._voices[0]
+
+		# Rendered to the output channel count, full length, audibly non-zero.
+		assert voice.audio.shape == (4410, 2)
+		assert float(numpy.max(numpy.abs(voice.audio))) > 0.0
+		assert voice.note == 36
+		assert voice.channel == 9
 
 
 # ---------------------------------------------------------------------------
@@ -4781,18 +5053,25 @@ class TestSelectSegment:
 		numpy.testing.assert_array_equal(result_audio, audio[3000:4000])
 
 	def test_round_robin_cycles (self) -> None:
-		"""Round-robin advances through segments and wraps."""
+		"""Round-robin plays segment 1, 2, 3, 4 then wraps — verified by
+		CONTENT, so a regression to "always segment 1" (which still returns
+		equal-length slices and advances the counter) fails."""
 		player = self._make_player()
-		audio, bounds = self._make_audio_and_bounds()
+
+		# Four segments with distinct constant values 1, 2, 3, 4.
+		audio = numpy.zeros((4000, 1), dtype=numpy.float32)
+		for k in range(4):
+			audio[k * 1000 : (k + 1) * 1000] = float(k + 1)
+		bounds = ((0, 1000), (1000, 2000), (2000, 3000), (3000, 4000))
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		results = []
+		played = []
 		for _ in range(6):
 			seg, _ = player._select_segment(audio, level, bounds, "round_robin", 0, 60, assignment_id=42)
-			results.append(seg.shape[0])
+			played.append(int(seg[0, 0]))
 
-		# 4 segments, 6 triggers: should cycle 0,1,2,3,0,1
-		assert results == [1000, 1000, 1000, 1000, 1000, 1000]
+		# 4 segments, 6 triggers: cycle 1,2,3,4 then wrap to 1,2.
+		assert played == [1, 2, 3, 4, 1, 2]
 		# Counter is keyed by (ch, note, id(Assignment)) — here a stand-in id.
 		assert player._segment_counters[(0, 60, 42)] == 6
 

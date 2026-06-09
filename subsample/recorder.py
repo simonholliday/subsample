@@ -353,6 +353,21 @@ class SampleProcessor:
 				b_format_float = subsample.ambisonic.process_capture(
 					audio_float, ambisonic_format, sample_rate=effective_sample_rate,
 				)
+
+				# The format conversion can push past full scale even when the
+				# raw capture had headroom (FuMa→AmbiX scales W by √2; the
+				# A-format HF shelf adds gain), and _pcm_float_to_int hard-clips
+				# without a trace — warn here, where the cause is attributable
+				# to conversion gain rather than input gain.
+				b_peak = float(numpy.max(numpy.abs(b_format_float))) if b_format_float.size else 0.0
+
+				if b_peak > 1.0:
+					_log.warning(
+						"ambisonic conversion clipped (peak %+.1f dBFS after %s "
+						"processing) — reduce input gain to leave conversion headroom",
+						20.0 * math.log10(b_peak), ambisonic_format,
+					)
+
 				req = dataclasses.replace(
 					req, audio=_pcm_float_to_int(b_format_float, effective_bit_depth),
 				)
@@ -377,7 +392,10 @@ class SampleProcessor:
 
 			# Warn on clipped live recordings so the user knows to reduce gain.
 			# Skipped for file imports (filename_base set) — clipping already occurred.
-			if req.filename_base is None and level.peak >= 1.0:
+			# Threshold sits just below full scale because integer PCM cannot
+			# represent +1.0 exactly (int16 positive rail is 32767/32768 ≈
+			# 0.99997) — a `>= 1.0` test only ever fired on the negative rail.
+			if req.filename_base is None and level.peak >= 0.999:
 				_log.warning(
 					"input clipped (peak %.1f dBFS) — reduce input gain to avoid distortion",
 					20.0 * math.log10(level.peak),
@@ -594,7 +612,10 @@ class SampleProcessor:
 			png_path = filepath.with_name(filepath.name + subsample.cache.PREVIEW_PNG_SUFFIX)
 			try:
 				subsample.preview.render_png(preview_data, png_path)
-			except OSError as exc:
+			except Exception as exc:
+				# Broader than OSError on purpose: a Pillow/numpy failure here
+				# must not bypass on_complete — the captured sample is already
+				# on disk and analysed; only the preview image is lost.
 				_log.warning("Failed to write preview %s: %s", png_path.name, exc)
 
 		return filepath, duration

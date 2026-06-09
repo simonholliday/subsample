@@ -165,6 +165,9 @@ def _write_sidecar (
 
 	payload: dict[str, typing.Any] = {
 		"analysis_version": subsample.analysis.ANALYSIS_VERSION,
+		# A fake digest is fine here: library/watcher loads go through
+		# load_sidecar(), which validates version only — the MD5 is checked
+		# by ensure_sample_assets/load_cache paths that regenerate anyway.
 		"audio_md5":        "deadbeef00000000deadbeef00000000",
 		"sample_rate":      params.sample_rate,
 		"duration":         1.0,

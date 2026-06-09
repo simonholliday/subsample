@@ -147,6 +147,39 @@ class TestResolvePathReferences:
 
 		instrument_lib.add.assert_called_once()
 
+	def test_directory_in_first_spec_of_fallback_chain_loaded (
+		self,
+		tmp_path: pathlib.Path,
+	) -> None:
+
+		"""A directory predicate in the FIRST spec of a fallback chain is
+		collected — the collection walks every spec, not just the last (the
+		loop-indentation regression that silently broke fallback chains)."""
+
+		kick_dir = tmp_path / "Kick"
+		kick_dir.mkdir()
+		tests.helpers._write_wav_and_sidecar(kick_dir, "k")
+
+		primary  = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(directory=str(kick_dir.resolve())),
+		)
+		fallback = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(name="anything"),
+		)
+		assignment = subsample.query.Assignment(name="chained", select=(primary, fallback))
+
+		note_map: subsample.player.NoteMap = {
+			(9, 36): [(assignment, subsample.query.PickSpec(1, 1))],
+		}
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=4 * 1024 * 1024)
+		matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		subsample.player._resolve_path_references(note_map, [matrix], library, with_preview=False)
+
+		# The primary spec's directory loaded even though a fallback follows it.
+		assert len(library) == 1
+
 	def test_duplicate_path_reference_skipped (self, tmp_path: pathlib.Path) -> None:
 		"""When the same path appears in multiple assignments, load only once."""
 		wav_path, _ = tests.helpers._write_wav_and_sidecar(tmp_path, "shared_ref")

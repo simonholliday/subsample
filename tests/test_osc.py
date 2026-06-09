@@ -1,7 +1,9 @@
 """Tests for subsample.osc — OSC sender and receiver."""
 
 import pathlib
+import threading
 import time
+import typing
 import unittest.mock
 
 import numpy
@@ -204,17 +206,26 @@ class TestOscEventSender:
 
 class TestOscReceiver:
 
+	"""Receiver tests bind port 0 (OS-assigned) so parallel test runs and
+	occupied ports can't collide, and wait on events instead of sleeping."""
+
+	def _make_receiver (
+		self,
+		callback: typing.Callable[[str], None],
+	) -> tuple[subsample.osc.OscReceiver, int]:
+
+		"""Return a started receiver and the port the OS actually assigned."""
+
+		receiver = subsample.osc.OscReceiver(port=0, on_import=callback)
+		receiver.start()
+
+		return receiver, receiver._server.server_address[1]
+
 	def test_start_stop_lifecycle (self) -> None:
 		"""Receiver starts and stops cleanly."""
 
-		callback = unittest.mock.MagicMock()
+		receiver, _port = self._make_receiver(unittest.mock.MagicMock())
 
-		receiver = subsample.osc.OscReceiver(
-			port=19200,
-			on_import=callback,
-		)
-
-		receiver.start()
 		assert receiver._thread is not None
 		assert receiver._thread.is_alive()
 
@@ -226,25 +237,21 @@ class TestOscReceiver:
 
 		import pythonosc.udp_client
 
-		callback = unittest.mock.MagicMock()
+		received: list[str] = []
+		delivered = threading.Event()
 
-		receiver = subsample.osc.OscReceiver(
-			port=19201,
-			on_import=callback,
-		)
-		receiver.start()
+		def on_import (path: str) -> None:
+			received.append(path)
+			delivered.set()
+
+		receiver, port = self._make_receiver(on_import)
 
 		try:
-			# Give the server a moment to bind.
-			time.sleep(0.1)
-
-			client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", 19201)
+			client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", port)
 			client.send_message("/sample/import", ["/tmp/some_audio.wav"])
 
-			# Wait for the message to be processed.
-			time.sleep(0.3)
-
-			callback.assert_called_once_with("/tmp/some_audio.wav")
+			assert delivered.wait(timeout=5.0), "callback not invoked"
+			assert received == ["/tmp/some_audio.wav"]
 
 		finally:
 			receiver.stop()
@@ -255,22 +262,22 @@ class TestOscReceiver:
 		import pythonosc.udp_client
 
 		callback = unittest.mock.MagicMock()
+		probe = threading.Event()
 
-		receiver = subsample.osc.OscReceiver(
-			port=19202,
-			on_import=callback,
-		)
-		receiver.start()
+		receiver, port = self._make_receiver(callback)
 
 		try:
-			time.sleep(0.1)
-
-			client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", 19202)
+			client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", port)
 			client.send_message("/sample/import", [])
 
-			time.sleep(0.3)
+			# Negative case has nothing observable to wait on — send a valid
+			# probe AFTER it; UDP from one socket to one socket preserves
+			# order, so once the probe lands the empty message was processed.
+			callback.side_effect = lambda _p: probe.set()
+			client.send_message("/sample/import", ["/tmp/probe.wav"])
 
-			callback.assert_not_called()
+			assert probe.wait(timeout=5.0), "probe never delivered"
+			callback.assert_called_once_with("/tmp/probe.wav")
 
 		finally:
 			receiver.stop()
@@ -280,24 +287,21 @@ class TestOscReceiver:
 
 		import pythonosc.udp_client
 
-		callback = unittest.mock.MagicMock(side_effect=RuntimeError("boom"))
+		delivered = threading.Event()
 
-		receiver = subsample.osc.OscReceiver(
-			port=19203,
-			on_import=callback,
-		)
-		receiver.start()
+		def boom (path: str) -> None:
+			delivered.set()
+			raise RuntimeError("boom")
+
+		receiver, port = self._make_receiver(boom)
 
 		try:
-			time.sleep(0.1)
-
-			client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", 19203)
+			client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", port)
 			client.send_message("/sample/import", ["/tmp/fail.wav"])
 
-			time.sleep(0.3)
+			assert delivered.wait(timeout=5.0), "callback not invoked"
 
-			# Callback was called (and raised), but server is still alive.
-			callback.assert_called_once()
+			# Callback raised, but the server thread survives.
 			assert receiver._thread is not None
 			assert receiver._thread.is_alive()
 
