@@ -2495,7 +2495,7 @@ class TestDistort:
 		assert crossings(result) > crossings(audio) * 2
 
 	def test_bit_crush_quantizes (self) -> None:
-		"""Bit-crush mode reduces the number of distinct amplitude levels."""
+		"""Bit-crush mode snaps to the exact N-bit grid (step 2^(1-N))."""
 		record = _make_record(sample_id=1)
 		audio = _make_audio(n_frames=4410, channels=1)
 		audio[:, 0] = numpy.linspace(-0.5, 0.5, 4410, dtype=numpy.float32)
@@ -2503,9 +2503,11 @@ class TestDistort:
 		step = subsample.transform.Distort(mode="bit_crush", drive_db=0.0, bit_depth=2, tone=1.0, mix=1.0)
 		result = subsample.transform._apply_distort(audio, 44100, record, step)
 
-		# With 2-bit depth (4 levels), there should be very few unique values.
-		unique_count = len(numpy.unique(numpy.round(result, decimals=4)))
-		assert unique_count < 20  # far fewer than the 4410 input samples
+		# 2-bit step is 2^(1-2) = 0.5; a ±0.5 ramp lands on exactly
+		# {-0.5, 0, 0.5}.  An off-by-one quantizer (step 2^-2) would
+		# produce five levels here — one bit finer than requested.
+		levels = numpy.unique(result)
+		assert numpy.allclose(levels, [-0.5, 0.0, 0.5])
 
 	def test_downsample_reduces_detail (self) -> None:
 		"""Downsample mode produces repeated sample groups."""
@@ -2558,6 +2560,175 @@ class TestDistort:
 		step = subsample.transform.Distort(mode="hard_clip", drive_db=6.0, tone=1.0)
 		result = subsample.transform._apply_distort(audio, 44100, record, step)
 		assert result.dtype == numpy.float32
+
+
+# ---------------------------------------------------------------------------
+# Bit-Depth Reduction
+# ---------------------------------------------------------------------------
+
+class TestBitDepth:
+
+	def test_spec_from_process_bare (self) -> None:
+		"""bit_depth: true → BitDepth with the default 12 bits."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="bit_depth"),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		assert len(spec.steps) == 1
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.BitDepth)
+		assert step.bits == 12
+
+	def test_spec_from_process_explicit (self) -> None:
+		"""bit_depth: {bits: 8} → explicit bits."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="bit_depth", params=(("bits", 8),)),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.BitDepth)
+		assert step.bits == 8
+
+	def test_spec_from_process_clamps_cc_range (self) -> None:
+		"""Out-of-range bits (only reachable via a CC binding's min/max —
+		plain values are rejected at parse) are clamped to 1–16 at build."""
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="bit_depth", params=(("bits", 99),)),
+		))
+		spec = subsample.transform.spec_from_process(process)
+		step = spec.steps[0]
+		assert isinstance(step, subsample.transform.BitDepth)
+		assert step.bits == 16
+
+	def test_exact_n_bit_grid (self) -> None:
+		"""A full-scale ramp quantizes to step 2^(1-N) — the exact spacing
+		of an N-bit converter, not one bit finer."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=100000, channels=1)
+		audio[:, 0] = numpy.linspace(-1.0, 1.0, 100000, dtype=numpy.float32)
+
+		step = subsample.transform.BitDepth(bits=12)
+		result = subsample.transform._apply_bit_depth(audio, 44100, record, step)
+
+		levels = numpy.unique(result)
+		# Mid-tread grid over ±1: 2^12 + 1 levels, uniformly 2^-11 apart.
+		assert len(levels) == 2 ** 12 + 1
+		assert numpy.allclose(numpy.diff(levels), 2.0 ** -11)
+
+	def test_no_drive_no_tone_no_level_games (self) -> None:
+		"""Unlike distort's bit_crush, output differs from input by at most
+		half a quantization step — nothing else touches the signal."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=2)
+		audio[:, 0] = numpy.sin(numpy.linspace(0, 50, 4410)).astype(numpy.float32) * 0.9
+		audio[:, 1] = numpy.sin(numpy.linspace(0, 30, 4410)).astype(numpy.float32) * 0.3
+
+		step = subsample.transform.BitDepth(bits=8)
+		result = subsample.transform._apply_bit_depth(audio, 44100, record, step)
+
+		half_step = 2.0 ** -7 / 2.0
+		assert numpy.max(numpy.abs(result - audio)) <= half_step + 1e-7
+
+	def test_16_bits_nearly_transparent (self) -> None:
+		"""At 16 bits the error is bounded by half a 16-bit step."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = numpy.sin(numpy.linspace(0, 50, 4410)).astype(numpy.float32) * 0.9
+
+		step = subsample.transform.BitDepth(bits=16)
+		result = subsample.transform._apply_bit_depth(audio, 44100, record, step)
+
+		assert numpy.max(numpy.abs(result - audio)) <= 2.0 ** -15 / 2.0 + 1e-7
+
+	def test_silence_stays_silent (self) -> None:
+		"""Mid-tread grid: zero is a level, so silence is untouched."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)  # all zeros
+
+		step = subsample.transform.BitDepth(bits=4)
+		result = subsample.transform._apply_bit_depth(audio, 44100, record, step)
+
+		assert numpy.max(numpy.abs(result)) == 0.0
+
+	def test_output_dtype (self) -> None:
+		"""BitDepth output is float32."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)
+		audio[:, 0] = 0.5
+		step = subsample.transform.BitDepth(bits=12)
+		result = subsample.transform._apply_bit_depth(audio, 44100, record, step)
+		assert result.dtype == numpy.float32
+
+	def test_handler_registered (self) -> None:
+		"""BitDepth is dispatchable through the TransformProcessor registry."""
+		assert subsample.transform.BitDepth in subsample.transform.TransformProcessor._HANDLERS
+
+	def test_spec_from_process_dither_forms (self) -> None:
+		"""dither: true → triangular; absent → none; named types pass
+		through case-normalised."""
+		def built_dither (params: tuple) -> str:
+			process = subsample.query.ProcessSpec(steps=(
+				subsample.query.ProcessorStep(name="bit_depth", params=params),
+			))
+			step = subsample.transform.spec_from_process(process).steps[0]
+			assert isinstance(step, subsample.transform.BitDepth)
+			return step.dither
+
+		assert built_dither((("bits", 12),)) == "none"
+		assert built_dither((("bits", 12), ("dither", False))) == "none"
+		assert built_dither((("bits", 12), ("dither", True))) == "triangular"
+		assert built_dither((("dither", "RECTANGULAR"),)) == "rectangular"
+
+	def test_dither_stays_on_grid_and_is_deterministic (self) -> None:
+		"""Dithered output still lands on the N-bit grid, and two renders
+		of the same spec are byte-identical (fixed dither seed — a
+		re-render after cache eviction must match the original)."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=2)
+		audio[:, 0] = numpy.sin(numpy.linspace(0, 50, 4410)).astype(numpy.float32) * 0.7
+		audio[:, 1] = numpy.sin(numpy.linspace(0, 33, 4410)).astype(numpy.float32) * 0.4
+
+		for dither in ("triangular", "rectangular"):
+			step = subsample.transform.BitDepth(bits=8, dither=dither)
+			a = subsample.transform._apply_bit_depth(audio, 44100, record, step)
+			b = subsample.transform._apply_bit_depth(audio, 44100, record, step)
+
+			assert numpy.array_equal(a, b)
+			# Every output value is an integer multiple of the 8-bit step.
+			assert numpy.allclose(a * 2.0 ** 7, numpy.round(a * 2.0 ** 7), atol=1e-5)
+
+	def test_dither_recovers_sub_lsb_signal (self) -> None:
+		"""The reason dither exists: a signal smaller than half an LSB is
+		annihilated by the bare quantizer but survives (inside the noise)
+		when dithered."""
+		record = _make_record(sample_id=1)
+		lsb = 2.0 ** -11   # 12-bit step
+		audio = _make_audio(n_frames=100000, channels=1)
+		audio[:, 0] = (numpy.sin(numpy.linspace(0, 400, 100000)) * 0.4 * lsb).astype(numpy.float32)
+
+		bare = subsample.transform._apply_bit_depth(
+			audio, 44100, record, subsample.transform.BitDepth(bits=12))
+		dithered = subsample.transform._apply_bit_depth(
+			audio, 44100, record, subsample.transform.BitDepth(bits=12, dither="triangular"))
+
+		# Bare: every input is within ±0.4 LSB of zero → rounds to silence.
+		assert numpy.max(numpy.abs(bare)) == 0.0
+
+		# Dithered: output correlates with the input — the signal is in there.
+		corr = float(numpy.corrcoef(audio[:, 0], dithered[:, 0])[0, 1])
+		assert corr > 0.1
+
+	def test_dithered_silence_is_bounded_noise (self) -> None:
+		"""Dithered silence carries a noise floor (documented behaviour),
+		bounded by one quantization step."""
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=4410, channels=1)  # all zeros
+
+		step = subsample.transform.BitDepth(bits=8, dither="triangular")
+		result = subsample.transform._apply_bit_depth(audio, 44100, record, step)
+
+		assert numpy.max(numpy.abs(result)) <= 2.0 ** -7 + 1e-7
+		assert numpy.max(numpy.abs(result)) > 0.0
 
 
 # ---------------------------------------------------------------------------

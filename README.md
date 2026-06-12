@@ -140,7 +140,7 @@ you focus on playing.
 | **Live capture** | Adaptive noise floor, zero-gap back-to-back detection, S-curve fades |
 | **Analysis** | 58 dimensions across 5 feature groups; cached `.analysis.json` sidecars |
 | **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
-| **DSP processors** | 16 (filter, comp, gate, distort, saturate, reshape, transient, HPSS, vocoder, repitch, beat-quantize, pad-quantize, ...) |
+| **DSP processors** | 17 (filter, comp, gate, distort, bit-depth, saturate, reshape, transient, HPSS, vocoder, repitch, beat-quantize, pad-quantize, ...) |
 | **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
 | **Pitch shifting** | Rubber Band offline finer (highest available quality), pre-rendered |
 | **Time stretch** | Beat-quantized with onset-aligned timemaps, partial-quantize amount, pad-quantize alternative for speech |
@@ -876,6 +876,7 @@ Available processors:
 | `hpss: { keep: percussive }` | as above | Keep only percussive/transient content (remove harmonics) |
 | `gate: true` | threshold (auto), attack (auto), release (auto), hold (auto), lookahead (auto) | Noise gate - silences audio below the noise floor. All parameters auto-adapt: threshold from noise floor, attack/release/hold from onset and decay character. |
 | `distort: true` | mode (hard_clip), drive (auto), mix (1.0), tone (auto), bit_depth (8), downsample_factor (4) | Waveshaping distortion with four modes: hard_clip, fold, bit_crush, downsample. Drive adapts to crest factor; tone adapts to spectral rolloff. |
+| `bit_depth: 12` | bits (1-16, default 12), dither (false, true = triangular, or `triangular` / `rectangular`) | Clean bit-depth reduction - requantizes to an N-bit amplitude grid for vintage sampler grit (the MPC60 and SP-1200 store 12-bit samples). Pure quantization: no drive, tone filtering, or level changes. Dither defaults off (vintage units had none); turn it on to trade the gritty low-level distortion for a smooth hiss. |
 | `reshape: true` | attack (preserve), hold (0), decay (preserve), sustain (1.0), release (auto) | ADSR envelope reshaping. Default auto-tightens the tail. Set attack, decay, sustain, release to reshape specific phases. |
 | `transient: true` | gain (auto, dB signed) | Transient enhancement/taming via HPSS rebalancing. Auto-adapts from crest factor: peaky samples are tamed, dull samples enhanced. |
 | `transient: { gain: 6 }` | gain (dB, signed: +/- enhance/tame) | Explicit dB of transient enhancement or taming |
@@ -934,6 +935,9 @@ process:
   - distort: true                            # hard-clip with auto drive
   - distort: { mode: fold, drive: 12 }       # foldback distortion
   - distort: { mode: bit_crush, bit_depth: 4, mix: 0.5 }
+  - bit_depth: 12                            # clean 12-bit converter grit
+  - bit_depth: { bits: 12, dither: true }    # smooth (triangular dither)
+  - bit_depth: { bits: { cc: 70, min: 4, max: 16 } }   # bits on a knob
   - reshape: true                            # auto tail-tightening
   - reshape: { attack: 5, release: 100 }     # fast attack, controlled release
   - reshape: { sustain: 0.5, release: 50 }   # half sustain, tight tail
@@ -943,6 +947,24 @@ process:
   - pad_quantize: { tempo: 120, grid: 8 }   # silence-pad onsets to eighth-note grid
   - vocoder: { carrier: reference }           # cross-synthesise with this note's reference
   - vocoder: { carrier: samples/reference/GM36_BassDrum1.wav, bands: 16, depth: 0.8 }
+```
+
+`bit_depth` and `distort: { mode: bit_crush }` share the same quantizer, but
+serve different ends: `bit_depth` is the converter itself - just the grid, with
+silence staying silent and levels untouched - while bit_crush wraps that grid
+in a distortion chain (drive, tone filter, level compensation, mix). Dither
+decides what happens to material quieter than one quantization step: without
+it (the default, and what vintage hardware did), fades and tails break up into
+gritty, signal-correlated distortion; with `dither: true` (triangular) that
+distortion becomes a smooth, constant hiss - including over silence, which is
+the trade. Use `rectangular` for marginally less hiss at the cost of slight
+noise pumping. For the full vintage-sampler character, pair the converter with
+its low sample rate:
+
+```yaml
+process:
+  - bit_depth: 12                            # the converter grain
+  - distort: { mode: downsample, downsample_factor: 2, drive: 0, tone: 1.0 }
 ```
 
 For the opposite of snappy drums (bring up room ambience and reverb tails), use
@@ -1526,6 +1548,7 @@ Every enum-string value the MIDI map accepts, in one place:
 | `notes` range | `<low>..<high>` (e.g. `C2..C4` or `36..60`) |
 | `pitch` predicate value | Hz float (`440`) or note name (`A4`, `C#3`, `Db5`) |
 | `distort` `mode` | `hard_clip` `fold` `bit_crush` `downsample` |
+| `bit_depth` `dither` | `true` (= `triangular`) `false` `none` `triangular` `rectangular` |
 | Quantize `segment` | `round_robin` `random` or integer (1-indexed) |
 | `vocoder` `carrier` | `reference` (the note's reference sample) or a file path |
 | Legacy `order_by` tokens | `newest` `oldest` `duration_asc` `duration_desc` `pitch_asc` `pitch_desc` `onsets_asc` `onsets_desc` `tempo_asc` `tempo_desc` `loudest` `quietest` `similarity` `quantized_beats_asc` `quantized_beats_desc` |

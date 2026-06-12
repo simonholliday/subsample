@@ -408,6 +408,40 @@ class Distort:
 
 
 @dataclasses.dataclass(frozen=True)
+class BitDepth:
+
+	"""Bit-depth reduction — clean requantization to a coarser amplitude grid.
+
+	Simulates playback through an N-bit converter: the audio is snapped to
+	an amplitude grid with the exact step size of N-bit storage, and the
+	quantization error is left audible as the characteristic grit of
+	vintage hardware (the Akai MPC60 and E-mu SP-1200 store 12-bit
+	samples).  Unlike ``distort: {mode: bit_crush}`` there is no drive,
+	tone filtering, or level compensation — the quantization is the whole
+	effect.  16 bits is essentially transparent; 12 adds gentle converter
+	grain; 8 is overtly lo-fi; 4 and below are heavily degraded special
+	effects.
+
+	bits:    Target bit depth (1–16).
+	dither:  Noise added before quantization, in canonical string form.
+	         "none"        — bare quantization (the vintage behaviour;
+	                         low-level material distorts gritty).
+	         "triangular"  — ±1 LSB TPDF, the industry standard: turns
+	                         quantization distortion into a benign,
+	                         signal-independent hiss.  Silence acquires
+	                         a constant ≤1 LSB noise floor — that is the
+	                         price of dither, not a bug.
+	         "rectangular" — ±0.5 LSB RPDF: marginally quieter, slight
+	                         noise modulation remains.
+	         (YAML ``dither: true`` maps to "triangular" in
+	         spec_from_process; false/absent maps to "none".)
+	"""
+
+	bits:   int = 12
+	dither: str = "none"
+
+
+@dataclasses.dataclass(frozen=True)
 class Reshape:
 
 	"""Envelope reshaping — ADSR-style amplitude control.
@@ -539,6 +573,7 @@ TransformStep = typing.Union[
 	TimeStretch,
 	Gate,
 	Distort,
+	BitDepth,
 	Reshape,
 	Transient,
 	PadQuantize,
@@ -2777,8 +2812,11 @@ def _apply_distort (
 		wet = numpy.abs(numpy.mod(driven - 1.0, 4.0) - 2.0) - 1.0
 
 	elif mode == "bit_crush":
-		levels = float(2 ** max(1, min(16, step.bit_depth)))
-		wet = (numpy.round(driven * levels) / levels).astype(numpy.float32)
+		# Step size 2^(1-N) — the spacing of an N-bit converter (2^N levels
+		# across full scale).  A 2^-N step would sound one bit finer than
+		# the requested depth.
+		scale = float(2 ** (max(1, min(16, step.bit_depth)) - 1))
+		wet = (numpy.round(driven * scale) / scale).astype(numpy.float32)
 
 	elif mode == "downsample":
 		factor = max(2, min(64, step.downsample_factor))
@@ -2808,6 +2846,52 @@ def _apply_distort (
 		wet = dry * numpy.float32(1.0 - step.mix) + wet * numpy.float32(step.mix)
 
 	return wet.astype(numpy.float32)
+
+
+# ---------------------------------------------------------------------------
+# Bit-Depth Reduction
+# ---------------------------------------------------------------------------
+
+# Fixed dither RNG seed: a re-render after cache eviction must be
+# byte-identical to the original, or A/B comparisons (and the disk-cache
+# round-trip tests) would hear two different noise floors for one spec.
+_DITHER_SEED: typing.Final[int] = 0x5D17
+
+def _apply_bit_depth (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        BitDepth,
+) -> numpy.ndarray:
+
+	"""Requantize to step.bits — mid-tread, step size 2^(1-N) (full scale ±1).
+
+	The pure quantizer: no drive, tone filtering, or level compensation —
+	contrast _apply_distort's bit_crush mode, which wraps the same grid in
+	a distortion chain.  The grid is mid-tread (zero is a level, so
+	undithered silence stays silent) with one symmetric level at each
+	full-scale extreme.
+
+	Dither is non-subtractive, added in LSB units before rounding:
+	triangular (TPDF, difference of two uniforms, ±1 LSB) or rectangular
+	(RPDF, one uniform, ±0.5 LSB).  Dithered silence carries a constant
+	≤1 LSB noise floor by design.
+	"""
+
+	scale = numpy.float32(2 ** (max(1, min(16, step.bits)) - 1))
+	driven = audio * scale
+
+	if step.dither == "triangular":
+		rng = numpy.random.default_rng(_DITHER_SEED)
+		driven = driven + (
+			rng.random(audio.shape, dtype=numpy.float32)
+			- rng.random(audio.shape, dtype=numpy.float32)
+		)
+	elif step.dither == "rectangular":
+		rng = numpy.random.default_rng(_DITHER_SEED)
+		driven = driven + (rng.random(audio.shape, dtype=numpy.float32) - numpy.float32(0.5))
+
+	return (numpy.round(driven) / scale).astype(numpy.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -3482,6 +3566,7 @@ TransformProcessor._HANDLERS[HpssHarmonic]    = _apply_hpss_harmonic
 TransformProcessor._HANDLERS[HpssPercussive]  = _apply_hpss_percussive
 TransformProcessor._HANDLERS[Gate]            = _apply_gate
 TransformProcessor._HANDLERS[Distort]         = _apply_distort
+TransformProcessor._HANDLERS[BitDepth]        = _apply_bit_depth
 TransformProcessor._HANDLERS[Reshape]         = _apply_reshape
 TransformProcessor._HANDLERS[Transient]       = _apply_transient
 TransformProcessor._HANDLERS[PadQuantize]     = _apply_pad_quantize
@@ -3697,6 +3782,21 @@ def spec_from_process (
 				tone=float(_tone_raw) if _tone_raw is not None else None,
 				bit_depth=int(_resolve_cc(proc.get("bit_depth"), cc_state, 8, cc_omni=cc_omni)),
 				downsample_factor=int(_resolve_cc(proc.get("downsample_factor"), cc_state, 4, cc_omni=cc_omni)),
+			))
+
+		elif proc.name == "bit_depth":
+			# parse_process validates plain values (1–16) at load; a CC
+			# binding resolves per-trigger, so clamp the resolved value here.
+			_dither_raw = proc.get("dither")
+
+			if isinstance(_dither_raw, bool) or _dither_raw is None:
+				dither = "triangular" if _dither_raw else "none"
+			else:
+				dither = str(_dither_raw).lower()
+
+			steps.append(BitDepth(
+				bits=max(1, min(16, int(_resolve_cc(proc.get("bits"), cc_state, 12, cc_omni=cc_omni)))),
+				dither=dither,
 			))
 
 		elif proc.name == "reshape":

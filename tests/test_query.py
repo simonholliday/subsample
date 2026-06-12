@@ -757,6 +757,72 @@ class TestParseProcess:
 
 		assert [s.get("keep") for s in spec.steps] == ["harmonic", "percussive"]
 
+	def test_bit_depth_scalar_shorthand (self) -> None:
+		"""bit_depth: 12 is shorthand for bit_depth: {bits: 12}."""
+
+		spec = subsample.query.parse_process([{"bit_depth": 12}], "test")
+
+		assert len(spec.steps) == 1
+		assert spec.steps[0].name == "bit_depth"
+		assert spec.steps[0].get("bits") == 12
+
+	def test_bit_depth_dict_and_bare_forms (self) -> None:
+		"""Dict form carries bits; bare form defers to the build default."""
+
+		spec = subsample.query.parse_process([{"bit_depth": {"bits": 8}}, "bit_depth"], "test")
+
+		assert spec.steps[0].get("bits") == 8
+		assert spec.steps[1].params == ()
+
+	def test_bit_depth_out_of_range_rejected_at_parse (self) -> None:
+		"""bits outside 1–16 (or fractional / boolean) must fail at map
+		load, not at trigger time."""
+
+		for bad in (0, 17, 12.5):
+			with pytest.raises(ValueError, match="whole number of bits from 1 to 16"):
+				subsample.query.parse_process([{"bit_depth": bad}], "test")
+
+		# Dict form: same range check, plus booleans (bit_depth: true is
+		# the valid bare form, but bits: true is a mistake).
+		for bad in (17, True):
+			with pytest.raises(ValueError, match="whole number of bits from 1 to 16"):
+				subsample.query.parse_process([{"bit_depth": {"bits": bad}}], "test")
+
+	def test_bit_depth_dither_forms_accepted (self) -> None:
+		"""dither accepts booleans and the named types, any case."""
+
+		for good in (True, False, "none", "triangular", "rectangular", "Triangular"):
+			spec = subsample.query.parse_process(
+				[{"bit_depth": {"bits": 12, "dither": good}}], "test",
+			)
+			assert spec.steps[0].get("dither") == good
+
+	def test_bit_depth_unknown_dither_rejected_at_parse (self) -> None:
+		"""An unknown dither type (or a numeric value) fails at map load."""
+
+		for bad in ("gaussian", 1, 0.5):
+			with pytest.raises(ValueError, match="dither must be"):
+				subsample.query.parse_process(
+					[{"bit_depth": {"bits": 12, "dither": bad}}], "test",
+				)
+
+	def test_bit_depth_cc_binding_accepted (self) -> None:
+		"""A CC binding on bits skips the parse-time range check — it
+		resolves per-trigger and is clamped at build time."""
+
+		spec = subsample.query.parse_process(
+			[{"bit_depth": {"bits": {"cc": 70, "min": 4, "max": 16}}}], "test",
+		)
+
+		assert isinstance(spec.steps[0].get("bits"), subsample.query.CcBinding)
+
+	def test_scalar_shorthand_only_for_registered_processors (self) -> None:
+		"""A bare scalar on a processor without a registered shorthand is
+		still rejected — the shorthand must not leak grammar-wide."""
+
+		with pytest.raises(ValueError, match="unsupported value type"):
+			subsample.query.parse_process([{"gate": 5}], "test")
+
 	def test_stretch_and_pad_quantize_together_rejected (self) -> None:
 		"""stretch_quantize and pad_quantize are two ways to beat-align the same
 		sample; combining them is ambiguous and rejected at parse time."""

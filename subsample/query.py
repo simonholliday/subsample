@@ -244,10 +244,19 @@ _VALID_PROCESSOR_NAMES: frozenset[str] = frozenset({
 	"hpss_percussive",  # legacy; translated to hpss {keep: percussive}
 	"gate",
 	"distort",
+	"bit_depth",
 	"reshape",
 	"transient",
 	"vocoder",
 })
+
+
+# Processors that accept a bare scalar value as shorthand for their single
+# defining parameter: `bit_depth: 12` ≡ `bit_depth: {bits: 12}`.  Maps
+# processor name → parameter name the scalar binds to.
+_SCALAR_PROCESSOR_PARAMS: dict[str, str] = {
+	"bit_depth": "bits",
+}
 
 
 # Per-processor legacy parameter renames.  Shape: (processor_name,
@@ -1993,6 +2002,9 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 	  - A string "name" (e.g. "repitch") — boolean processor, no params
 	  - A dict {name: true} — boolean processor
 	  - A dict {name: {param: value, ...}} — processor with params
+	  - A dict {name: scalar} — shorthand for the processor's single
+	    defining parameter (only for names in _SCALAR_PROCESSOR_PARAMS,
+	    e.g. `bit_depth: 12`)
 	"""
 
 	if raw is None:
@@ -2050,6 +2062,14 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 			if isinstance(proc_value, bool) or proc_value is None:
 				# e.g. "repitch: true" or "repitch:"
 				steps.append(_build_parameterless_step(proc_name_str))
+
+			elif canonical_name in _SCALAR_PROCESSOR_PARAMS and isinstance(proc_value, (int, float)):
+				# e.g. "bit_depth: 12" — scalar shorthand for the single
+				# defining parameter.  (bool is consumed by the branch above.)
+				steps.append(ProcessorStep(
+					name=canonical_name,
+					params=((_SCALAR_PROCESSOR_PARAMS[canonical_name], proc_value),),
+				))
 
 			elif isinstance(proc_value, dict):
 				# e.g. "stretch_quantize: { grid: 16, tempo: 120 }"
@@ -2127,6 +2147,33 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 					f"MIDI map assignment {assignment_name!r}: hpss requires "
 					f"keep: harmonic or keep: percussive (got {keep!r})"
 				)
+
+	# bit_depth needs whole-number bits in 1–16 to build a transform step.
+	# Validate plain values here, at load, like the hpss check above.  A
+	# CcBinding resolves per-trigger and is clamped in spec_from_process;
+	# an absent param falls back to the BitDepth default (12).
+	for step in steps:
+		if step.name == "bit_depth":
+			bits = step.get("bits")
+
+			if bits is not None and not isinstance(bits, CcBinding):
+				if isinstance(bits, bool) or not isinstance(bits, int) or not (1 <= bits <= 16):
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: bit_depth "
+						f"requires a whole number of bits from 1 to 16 "
+						f"(got {bits!r})"
+					)
+
+			# dither: bool shorthand (true → triangular) or a named type.
+			dither = step.get("dither")
+
+			if dither is not None and not isinstance(dither, bool):
+				if not isinstance(dither, str) or dither.lower() not in ("none", "triangular", "rectangular"):
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: bit_depth "
+						f"dither must be true, false, triangular, or "
+						f"rectangular (got {dither!r})"
+					)
 
 	# A process chain may carry at most ONE beat-aligning step.  Combining
 	# stretch_quantize with pad_quantize — or repeating either — is ambiguous
