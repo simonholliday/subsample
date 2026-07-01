@@ -140,7 +140,7 @@ you focus on playing.
 | **Live capture** | Adaptive noise floor, zero-gap back-to-back detection, S-curve fades |
 | **Analysis** | 58 dimensions across 5 feature groups; cached `.analysis.json` sidecars |
 | **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
-| **DSP processors** | 17 (filter, comp, gate, distort, bit-depth, saturate, reshape, transient, HPSS, vocoder, repitch, beat-quantize, pad-quantize, ...) |
+| **DSP processors** | 20 (filter, comp, gate, distort, bit-depth, radio, freqshift, wobble, saturate, reshape, transient, HPSS, vocoder, repitch, beat-quantize, pad-quantize, ...) |
 | **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
 | **Pitch shifting** | Rubber Band offline finer (highest available quality), pre-rendered |
 | **Time stretch** | Beat-quantized with onset-aligned timemaps, partial-quantize amount, pad-quantize alternative for speech |
@@ -877,6 +877,9 @@ Available processors:
 | `gate: true` | threshold (auto), attack (auto), release (auto), hold (auto), lookahead (auto) | Noise gate - silences audio below the noise floor. All parameters auto-adapt: threshold from noise floor, attack/release/hold from onset and decay character. |
 | `distort: true` | mode (hard_clip), drive (auto), mix (1.0), tone (auto), bit_depth (8), downsample_factor (4) | Waveshaping distortion with four modes: hard_clip, fold, bit_crush, downsample. Drive adapts to crest factor; tone adapts to spectral rolloff. |
 | `bit_depth: 12` | bits (1-16, default 12), dither (false, true = triangular, or `triangular` / `rectangular`) | Clean bit-depth reduction - requantizes to an N-bit amplitude grid for vintage sampler grit (the MPC60 and SP-1200 store 12-bit samples). Pure quantization: no drive, tone filtering, or level changes. Dither defaults off (vintage units had none); turn it on to trade the gritty low-level distortion for a smooth hiss. |
+| `radio: { mode: am }` | mode (am, lw, fm, ssb), demod (matched, am, fm, ssb), tune (Hz), signal (0-1), static (0-1), fade (0-1), bandwidth (Hz), stereo (mono, stereo), mix (1.0) | Broadcast-and-received: a full transmit -> channel -> demodulate round-trip. `lw` is AM through a steep longwave channel; `fm` is narrowband NFM; `ssb` with `tune` is the mistuned voice. `demod` different from the mode is the deliberate wrong demodulator (`fm` -> `ssb` is a musical warble; AM<->FM is harsh noise, silence-guarded if it recovers nothing). `signal` weakens the station (hiss, FM clicks, AGC swell-on-fade), `static` adds atmospheric crackle, `fade` adds shortwave swimming. Authentic mono collapse by default; `stereo` for dual-mono. |
+| `freqshift: 1000` | shift_hz (signed Hz), mix (1.0) | Bode/single-sideband frequency shift - adds a constant number of Hz to every partial (harmonic ratios break; NOT a pitch shift). Small shifts detune and phase; large shifts go clangorous and metallic. |
+| `wobble: { depth: 6, rate: 0.3 }` | depth (Hz), rate (Hz), base (Hz), mix (1.0) | Oscillator warble - a slow continuous drift of the tuning (microphonic / BFO wander). `depth` sets the Hz of wander, `rate` the LFO speed, `base` a constant offset to drift around. |
 | `reshape: true` | attack (preserve), hold (0), decay (preserve), sustain (1.0), release (auto) | ADSR envelope reshaping. Default auto-tightens the tail. Set attack, decay, sustain, release to reshape specific phases. |
 | `transient: true` | gain (auto, dB signed) | Transient enhancement/taming via HPSS rebalancing. Auto-adapts from crest factor: peaky samples are tamed, dull samples enhanced. |
 | `transient: { gain: 6 }` | gain (dB, signed: +/- enhance/tame) | Explicit dB of transient enhancement or taming |
@@ -938,6 +941,13 @@ process:
   - bit_depth: 12                            # clean 12-bit converter grit
   - bit_depth: { bits: 12, dither: true }    # smooth (triangular dither)
   - bit_depth: { bits: { cc: 70, min: 4, max: 16 } }   # bits on a knob
+  - radio: { mode: am }                      # cleanest AM round-trip
+  - radio: { mode: lw, signal: 0.4, static: 0.5 }      # weak, crackly longwave
+  - radio: { mode: ssb, tune: 150, signal: 0.3 }       # mistuned voice in static
+  - radio: { mode: fm, demod: ssb }          # transmit FM, receive WRONG -> warble
+  - radio: { mode: am, fade: 0.6, stereo: stereo }     # shortwave swimming fade
+  - freqshift: 1000                          # frequency shift up 1 kHz
+  - wobble: { depth: 6, rate: 0.3 }          # slow tuning warble
   - reshape: true                            # auto tail-tightening
   - reshape: { attack: 5, release: 100 }     # fast attack, controlled release
   - reshape: { sustain: 0.5, release: 50 }   # half sustain, tight tail
@@ -965,6 +975,33 @@ its low sample rate:
 process:
   - bit_depth: 12                            # the converter grain
   - distort: { mode: downsample, downsample_factor: 2, drive: 0, tone: 1.0 }
+```
+
+The `radio` effect is a complete radio link: it modulates the sample onto a
+carrier, sends it through a channel, and demodulates it back - so the sample
+returns sounding broadcast and received. Every stage is real radio physics
+(AM/FM/SSB modulation, a diode envelope detector, an FM discriminator, a
+mistunable SSB product detector), so the character is authentic rather than an
+EQ-and-noise impression. Two things make it more than a lo-fi preset. First,
+the receiver can be told to demodulate with the *wrong* scheme: set `demod`
+different from `mode` and you hear what a real receiver does when tuned to the
+wrong mode - `fm` into `ssb` is a musical pitch-tracking warble, while crossing
+AM and FM is harsh noise (a combination that recovers nothing is muted rather
+than amplified into hiss). Second, the impairments are injected before
+demodulation, so the detector shapes them the way a real radio does: `signal`
+weakens the carrier (FM gains its bright rising hiss and threshold crackle, and
+an automatic gain control makes a fading station swim in rising static rather
+than merely go quiet), `static` adds genuine atmospheric crackle (Poisson
+lightning impulses, not a click loop), and `fade` adds the shortwave swimming
+of selective fading. Stereo files collapse to authentic mono by default (real
+broadcast is mono); `stereo: stereo` runs each channel as its own receiver
+sharing one sky - independent hiss, but the same lightning crackle centred
+across both.
+
+```yaml
+process:
+  - radio: { mode: ssb, tune: 150, signal: 0.3, static: 0.3 }   # a voice on a crowded band
+  - radio: { mode: fm, demod: ssb }                             # the wrong-mode warble
 ```
 
 For the opposite of snappy drums (bring up room ambience and reverb tails), use
@@ -1549,6 +1586,9 @@ Every enum-string value the MIDI map accepts, in one place:
 | `pitch` predicate value | Hz float (`440`) or note name (`A4`, `C#3`, `Db5`) |
 | `distort` `mode` | `hard_clip` `fold` `bit_crush` `downsample` |
 | `bit_depth` `dither` | `true` (= `triangular`) `false` `none` `triangular` `rectangular` |
+| `radio` `mode` | `am` `lw` `fm` `ssb` |
+| `radio` `demod` | `matched` `am` `fm` `ssb` |
+| `radio` `stereo` | `mono` `stereo` |
 | Quantize `segment` | `round_robin` `random` or integer (1-indexed) |
 | `vocoder` `carrier` | `reference` (the note's reference sample) or a file path |
 | Legacy `order_by` tokens | `newest` `oldest` `duration_asc` `duration_desc` `pitch_asc` `pitch_desc` `onsets_asc` `onsets_desc` `tempo_asc` `tempo_desc` `loudest` `quietest` `similarity` `quantized_beats_asc` `quantized_beats_desc` |

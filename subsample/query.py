@@ -245,6 +245,9 @@ _VALID_PROCESSOR_NAMES: frozenset[str] = frozenset({
 	"gate",
 	"distort",
 	"bit_depth",
+	"radio",
+	"freqshift",
+	"wobble",
 	"reshape",
 	"transient",
 	"vocoder",
@@ -256,6 +259,8 @@ _VALID_PROCESSOR_NAMES: frozenset[str] = frozenset({
 # processor name → parameter name the scalar binds to.
 _SCALAR_PROCESSOR_PARAMS: dict[str, str] = {
 	"bit_depth": "bits",
+	"freqshift": "shift_hz",
+	"wobble":    "depth",
 }
 
 
@@ -2174,6 +2179,41 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 						f"dither must be true, false, triangular, or "
 						f"rectangular (got {dither!r})"
 					)
+
+	# radio enum strings (mode/demod/stereo) and 0..1 amounts validated at
+	# load — a bad enum would silently fall through to a default at trigger
+	# time on every note-on.  CcBinding values pass (clamped in spec_from_process).
+	for step in steps:
+		if step.name == "radio":
+			mode = str(step.get("mode", "am")).lower()
+			if mode not in ("am", "lw", "fm", "ssb"):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: radio mode must be "
+					f"am, lw, fm, or ssb (got {step.get('mode')!r})"
+				)
+
+			demod = str(step.get("demod", "matched")).lower()
+			if demod not in ("matched", "am", "fm", "ssb"):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: radio demod must be "
+					f"matched, am, fm, or ssb (got {step.get('demod')!r})"
+				)
+
+			stereo = str(step.get("stereo", "mono")).lower()
+			if stereo not in ("mono", "stereo"):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: radio stereo must be "
+					f"mono or stereo (got {step.get('stereo')!r})"
+				)
+
+			for amount in ("signal", "static", "fade"):
+				val = step.get(amount)
+				if val is not None and not isinstance(val, CcBinding):
+					if isinstance(val, bool) or not isinstance(val, (int, float)) or not (0.0 <= val <= 1.0):
+						raise ValueError(
+							f"MIDI map assignment {assignment_name!r}: radio "
+							f"{amount} must be a number from 0 to 1 (got {val!r})"
+						)
 
 	# A process chain may carry at most ONE beat-aligning step.  Combining
 	# stretch_quantize with pad_quantize — or repeating either — is ambiguous

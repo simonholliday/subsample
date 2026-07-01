@@ -2732,6 +2732,64 @@ class TestBitDepth:
 
 
 # ---------------------------------------------------------------------------
+# Radio / FreqShift / Wobble (spec_from_process build + handler dispatch)
+# ---------------------------------------------------------------------------
+
+class TestRadioBuild:
+
+	def test_spec_from_process_radio (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="radio", params=(
+				("mode", "ssb"), ("demod", "ssb"), ("tune", 150), ("signal", 0.3),
+				("static", 0.4), ("stereo", "stereo"),
+			)),
+		))
+		step = subsample.transform.spec_from_process(process).steps[0]
+		assert isinstance(step, subsample.transform.Radio)
+		assert step.mode == "ssb"
+		assert step.demod == "ssb"
+		assert step.tune == 150.0
+		assert step.signal == 0.3
+		assert step.stereo == "stereo"
+
+	def test_spec_from_process_radio_clamps_amounts (self) -> None:
+		# Amounts outside 0..1 are only reachable via a CC binding; clamp at build.
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="radio", params=(("signal", 9.0),)),
+		))
+		step = subsample.transform.spec_from_process(process).steps[0]
+		assert isinstance(step, subsample.transform.Radio)
+		assert step.signal == 1.0
+
+	def test_spec_from_process_freqshift_wobble (self) -> None:
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="freqshift", params=(("shift_hz", 1000),)),
+			subsample.query.ProcessorStep(name="wobble", params=(("depth", 6), ("rate", 0.3))),
+		))
+		steps = subsample.transform.spec_from_process(process).steps
+		assert isinstance(steps[0], subsample.transform.FreqShift)
+		assert steps[0].shift_hz == 1000.0
+		assert isinstance(steps[1], subsample.transform.Wobble)
+		assert steps[1].depth == 6.0
+
+	def test_handlers_registered_and_dispatch (self) -> None:
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=8820, channels=2)
+		audio[:, 0] = numpy.sin(numpy.linspace(0, 80, 8820)).astype(numpy.float32) * 0.5
+		audio[:, 1] = numpy.sin(numpy.linspace(0, 60, 8820)).astype(numpy.float32) * 0.5
+		for step in (
+			subsample.transform.Radio(mode="am", signal=0.3, static=0.3),
+			subsample.transform.FreqShift(shift_hz=500.0),
+			subsample.transform.Wobble(depth=6.0),
+		):
+			handler = subsample.transform.TransformProcessor._HANDLERS[type(step)]
+			out = handler(audio, 44100, record, step)
+			assert out.shape == audio.shape
+			assert out.dtype == numpy.float32
+			assert numpy.all(numpy.isfinite(out))
+
+
+# ---------------------------------------------------------------------------
 # Reshape (Envelope Shaping)
 # ---------------------------------------------------------------------------
 

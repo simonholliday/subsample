@@ -823,6 +823,41 @@ class TestParseProcess:
 		with pytest.raises(ValueError, match="unsupported value type"):
 			subsample.query.parse_process([{"gate": 5}], "test")
 
+	def test_radio_modes_accepted (self) -> None:
+		for mode in ("am", "lw", "fm", "ssb"):
+			spec = subsample.query.parse_process([{"radio": {"mode": mode}}], "test")
+			assert spec.steps[0].name == "radio"
+			assert spec.steps[0].get("mode") == mode
+
+	def test_radio_bad_enums_rejected_at_parse (self) -> None:
+		with pytest.raises(ValueError, match="radio mode must be"):
+			subsample.query.parse_process([{"radio": {"mode": "wfm"}}], "test")
+		with pytest.raises(ValueError, match="radio demod must be"):
+			subsample.query.parse_process([{"radio": {"demod": "banana"}}], "test")
+		with pytest.raises(ValueError, match="radio stereo must be"):
+			subsample.query.parse_process([{"radio": {"stereo": "surround"}}], "test")
+
+	def test_radio_amount_range_rejected (self) -> None:
+		for amount in ("signal", "static", "fade"):
+			with pytest.raises(ValueError, match=f"radio {amount} must be"):
+				subsample.query.parse_process([{"radio": {amount: 1.5}}], "test")
+
+	def test_radio_amount_cc_binding_accepted (self) -> None:
+		spec = subsample.query.parse_process(
+			[{"radio": {"mode": "am", "signal": {"cc": 70, "min": 0, "max": 1}}}], "test",
+		)
+		assert isinstance(spec.steps[0].get("signal"), subsample.query.CcBinding)
+
+	def test_freqshift_scalar_shorthand (self) -> None:
+		spec = subsample.query.parse_process([{"freqshift": 1000}], "test")
+		assert spec.steps[0].name == "freqshift"
+		assert spec.steps[0].get("shift_hz") == 1000
+
+	def test_wobble_scalar_and_dict (self) -> None:
+		spec = subsample.query.parse_process([{"wobble": 6}, {"wobble": {"rate": 0.5}}], "test")
+		assert spec.steps[0].get("depth") == 6
+		assert spec.steps[1].get("rate") == 0.5
+
 	def test_stretch_and_pad_quantize_together_rejected (self) -> None:
 		"""stretch_quantize and pad_quantize are two ways to beat-align the same
 		sample; combining them is ambiguous and rejected at parse time."""

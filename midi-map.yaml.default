@@ -342,6 +342,24 @@ assignments:
   #   one_shot: false
 
 
+  # --- H2. Radio - broadcast and received ---
+  # `radio:` is a full transmit -> channel -> demodulate round-trip.
+  # `mode` picks the modulation (am / lw / fm / ssb); `signal`/`static`/
+  # `fade` weaken/degrade the reception; setting `demod` different from
+  # `mode` demodulates with the WRONG scheme on purpose.  `freqshift`
+  # (constant-Hz shift, not a pitch change) and `wobble` (slow tuning
+  # warble) are standalone.
+
+  # - name: Shortwave voice
+  #   channel: 8
+  #   notes: C2..C5
+  #   select:
+  #     where: { pitched: true }
+  #   process:
+  #     - radio: { mode: ssb, tune: 150, signal: 0.3, static: 0.4 }
+  #   one_shot: false
+
+
   # --- I. Fallback chain ---
   # `select:` can be a list of specs tried in order - the first one
   # that yields a match wins.  Here: try a specific named sample

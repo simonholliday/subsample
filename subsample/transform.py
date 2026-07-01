@@ -130,6 +130,7 @@ import subsample.analysis
 import subsample.config
 import subsample.library
 import subsample.query
+import subsample.radio
 
 _log = logging.getLogger(__name__)
 
@@ -442,6 +443,76 @@ class BitDepth:
 
 
 @dataclasses.dataclass(frozen=True)
+class Radio:
+
+	"""Radio transmission/reception — sound broadcast and received, optionally
+	demodulated incorrectly.  A complete modulate -> channel -> demodulate
+	round-trip; the DSP lives in subsample.radio (researched + audited for
+	authenticity — real radio physics, idealised only where a musical effect
+	benefits).
+
+	mode:      Transmit modulation: "am", "lw" (AM with a steep ~4.2 kHz
+	           longwave channel), "fm" (narrowband NFM), "ssb".
+	demod:     Receive demodulation: "matched" (the mode's natural detector),
+	           or "am"/"fm"/"ssb" to demodulate WRONG on purpose (the wrong-
+	           demodulator palette — FM->SSB is a musical warble, AM<->FM is
+	           harsh noise; a dead cross-demod is silence-guarded, not hash).
+	tune:      BFO/tuning offset in Hz (the mistuned-SSB "Donald Duck").
+	signal:    0..1 weak-signal amount — hiss + FM triangular noise/clicks +
+	           AGC swell-on-fade.
+	static:    0..1 atmospheric crackle density (Poisson sferics).
+	fade:      0..1 shortwave selective-fading amount.
+	bandwidth: optional Hz override of the per-mode channel filter.
+	stereo:    "mono" (authentic collapse) or "stereo" (dual-mono, each channel
+	           its own receiver sharing one sky: independent hiss, shared crackle).
+	mix:       Dry/wet blend (0.0 dry, 1.0 fully processed).
+	"""
+
+	mode:      str                    = "am"
+	demod:     str                    = "matched"
+	tune:      float                  = 0.0
+	signal:    float                  = 0.0
+	static:    float                  = 0.0
+	fade:      float                  = 0.0
+	bandwidth: typing.Optional[float] = None
+	stereo:    str                    = "mono"
+	mix:       float                  = 1.0
+
+
+@dataclasses.dataclass(frozen=True)
+class FreqShift:
+
+	"""Bode / single-sideband frequency shifter — adds a constant number of Hz
+	to every partial (harmonic ratios break; NOT a pitch shift).  Small shifts
+	detune/phase; large shifts go clangorous inharmonic.
+
+	shift_hz:  Signed frequency shift in Hz.
+	mix:       Dry/wet blend.
+	"""
+
+	shift_hz: float = 0.0
+	mix:      float = 1.0
+
+
+@dataclasses.dataclass(frozen=True)
+class Wobble:
+
+	"""Oscillator warble — a continuous LFO drift of the tuning (microphonic /
+	BFO wander), implemented as a true integrated-phase frequency drift.
+
+	depth:  Peak frequency drift in Hz.
+	rate:   LFO rate in Hz.
+	base:   Constant frequency offset the drift rides on, in Hz.
+	mix:    Dry/wet blend.
+	"""
+
+	depth: float = 5.0
+	rate:  float = 0.3
+	base:  float = 0.0
+	mix:   float = 1.0
+
+
+@dataclasses.dataclass(frozen=True)
 class Reshape:
 
 	"""Envelope reshaping — ADSR-style amplitude control.
@@ -574,6 +645,9 @@ TransformStep = typing.Union[
 	Gate,
 	Distort,
 	BitDepth,
+	Radio,
+	FreqShift,
+	Wobble,
 	Reshape,
 	Transient,
 	PadQuantize,
@@ -2895,6 +2969,53 @@ def _apply_bit_depth (
 
 
 # ---------------------------------------------------------------------------
+# Radio (modulation / demodulation) — thin handlers over subsample.radio
+# ---------------------------------------------------------------------------
+
+def _apply_radio (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Radio,
+) -> numpy.ndarray:
+
+	"""Composite radio effect — delegates to subsample.radio.render_radio."""
+
+	return subsample.radio.render_radio(
+		audio, sample_rate,
+		mode=step.mode, demod=step.demod, tune=step.tune,
+		signal=step.signal, static=step.static, fade=step.fade,
+		bandwidth=step.bandwidth, stereo=step.stereo, mix=step.mix,
+	)
+
+
+def _apply_freqshift (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        FreqShift,
+) -> numpy.ndarray:
+
+	"""Bode/SSB frequency shifter — delegates to subsample.radio."""
+
+	return subsample.radio.render_freqshift(audio, sample_rate, shift_hz=step.shift_hz, mix=step.mix)
+
+
+def _apply_wobble (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        Wobble,
+) -> numpy.ndarray:
+
+	"""Oscillator-warble frequency drift — delegates to subsample.radio."""
+
+	return subsample.radio.render_wobble(
+		audio, sample_rate, depth=step.depth, rate=step.rate, base=step.base, mix=step.mix,
+	)
+
+
+# ---------------------------------------------------------------------------
 # Envelope Reshaping
 # ---------------------------------------------------------------------------
 
@@ -3567,6 +3688,9 @@ TransformProcessor._HANDLERS[HpssPercussive]  = _apply_hpss_percussive
 TransformProcessor._HANDLERS[Gate]            = _apply_gate
 TransformProcessor._HANDLERS[Distort]         = _apply_distort
 TransformProcessor._HANDLERS[BitDepth]        = _apply_bit_depth
+TransformProcessor._HANDLERS[Radio]           = _apply_radio
+TransformProcessor._HANDLERS[FreqShift]       = _apply_freqshift
+TransformProcessor._HANDLERS[Wobble]          = _apply_wobble
 TransformProcessor._HANDLERS[Reshape]         = _apply_reshape
 TransformProcessor._HANDLERS[Transient]       = _apply_transient
 TransformProcessor._HANDLERS[PadQuantize]     = _apply_pad_quantize
@@ -3797,6 +3921,35 @@ def spec_from_process (
 			steps.append(BitDepth(
 				bits=max(1, min(16, int(_resolve_cc(proc.get("bits"), cc_state, 12, cc_omni=cc_omni)))),
 				dither=dither,
+			))
+
+		elif proc.name == "radio":
+			# Enum strings are validated at parse time; numeric params CC-bind.
+			_bw_raw = _resolve_cc(proc.get("bandwidth"), cc_state, cc_omni=cc_omni)
+			steps.append(Radio(
+				mode=str(proc.get("mode", "am")).lower(),
+				demod=str(proc.get("demod", "matched")).lower(),
+				tune=float(_resolve_cc(proc.get("tune"), cc_state, 0.0, cc_omni=cc_omni)),
+				signal=max(0.0, min(1.0, float(_resolve_cc(proc.get("signal"), cc_state, 0.0, cc_omni=cc_omni)))),
+				static=max(0.0, min(1.0, float(_resolve_cc(proc.get("static"), cc_state, 0.0, cc_omni=cc_omni)))),
+				fade=max(0.0, min(1.0, float(_resolve_cc(proc.get("fade"), cc_state, 0.0, cc_omni=cc_omni)))),
+				bandwidth=float(_bw_raw) if _bw_raw is not None else None,
+				stereo=str(proc.get("stereo", "mono")).lower(),
+				mix=max(0.0, min(1.0, float(_resolve_cc(proc.get("mix"), cc_state, 1.0, cc_omni=cc_omni)))),
+			))
+
+		elif proc.name == "freqshift":
+			steps.append(FreqShift(
+				shift_hz=float(_resolve_cc(proc.get("shift_hz"), cc_state, 0.0, cc_omni=cc_omni)),
+				mix=max(0.0, min(1.0, float(_resolve_cc(proc.get("mix"), cc_state, 1.0, cc_omni=cc_omni)))),
+			))
+
+		elif proc.name == "wobble":
+			steps.append(Wobble(
+				depth=float(_resolve_cc(proc.get("depth"), cc_state, 5.0, cc_omni=cc_omni)),
+				rate=float(_resolve_cc(proc.get("rate"), cc_state, 0.3, cc_omni=cc_omni)),
+				base=float(_resolve_cc(proc.get("base"), cc_state, 0.0, cc_omni=cc_omni)),
+				mix=max(0.0, min(1.0, float(_resolve_cc(proc.get("mix"), cc_state, 1.0, cc_omni=cc_omni)))),
 			))
 
 		elif proc.name == "reshape":
