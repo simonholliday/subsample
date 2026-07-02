@@ -361,8 +361,10 @@ class TransformConfig:
 	exceeded.  At 44100 Hz float32 stereo, 500 MB ≈ 1500 seconds."""
 
 	carrier_memory_mb: float = 10.0
-	"""Memory budget (MB) for vocoder carrier file cache.  Derived from the
-	global memory budget (5%) when not overridden."""
+	"""Memory budget (MB) for the vocoder carrier file cache.  Always derived
+	from the global memory budget (5%) at config load — there is no
+	config.yaml key for it, so the dataclass default only matters for
+	directly-constructed configs in tests."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -608,13 +610,54 @@ def _require (section: dict[str, typing.Any], key: str, section_name: str) -> ty
 	return section[key]
 
 
-def _section (container: dict[str, typing.Any], key: str) -> dict[str, typing.Any]:
+class _KeyTracker (dict[str, typing.Any]):
+
+	"""A dict that records every key the config builder consults.
+
+	After _build_config has read everything it understands, any key present
+	in the YAML but never consulted is a typo or a removed option — warned
+	about by name so a misspelt setting doesn't silently fall back to its
+	default.  Tracking what the code actually reads means there is no
+	hand-maintained schema list to drift out of date.
+	"""
+
+	def __init__ (self, raw: dict[str, typing.Any], label: str) -> None:
+
+		super().__init__(raw)
+		self.label = label
+		self.accessed: set[str] = set()
+
+	def get (self, key: typing.Any, default: typing.Any = None) -> typing.Any:
+		self.accessed.add(key)
+		return super().get(key, default)
+
+	def __getitem__ (self, key: typing.Any) -> typing.Any:
+		self.accessed.add(key)
+		return super().__getitem__(key)
+
+	def __contains__ (self, key: typing.Any) -> bool:
+		self.accessed.add(key)
+		return super().__contains__(key)
+
+	def unknown_keys (self) -> list[str]:
+		return sorted(set(self.keys()) - self.accessed)
+
+
+def _section (
+	container: dict[str, typing.Any],
+	key: str,
+	registry: typing.Optional[list["_KeyTracker"]] = None,
+	label: typing.Optional[str] = None,
+) -> dict[str, typing.Any]:
 
 	"""Return the named sub-section as a dict, or {} when absent.
 
 	Raises a clear ValueError naming the key when the section is present but
 	not a mapping (e.g. a scalar from an indentation typo), instead of letting
 	a later ``.get`` fail with an opaque "'str' object has no attribute 'get'".
+
+	When ``registry`` is given, the returned mapping is a _KeyTracker
+	registered for the unknown-key sweep at the end of _build_config.
 	"""
 
 	value = container.get(key, {})
@@ -625,19 +668,31 @@ def _section (container: dict[str, typing.Any], key: str) -> dict[str, typing.An
 			"Check your config.yaml indentation."
 		)
 
-	return value
+	if registry is None:
+		return value
+
+	tracker = _KeyTracker(value, label or key)
+	registry.append(tracker)
+
+	return tracker
 
 
 def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	"""Construct the Config dataclass tree from a raw YAML dict."""
 
-	recorder_raw   = _section(raw, "recorder")
-	audio_raw      = _section(recorder_raw, "audio")
-	buffer_raw     = _section(recorder_raw, "buffer")
-	detection_raw  = _section(raw, "detection")
-	output_raw     = _section(raw, "output")
-	analysis_raw   = _section(raw, "analysis")
+	# Every section is wrapped in a _KeyTracker so keys the builder never
+	# consults can be warned about (typos / removed options) after the build.
+	trackers: list[_KeyTracker] = []
+	raw = _KeyTracker(raw, "top-level")
+	trackers.append(raw)
+
+	recorder_raw   = _section(raw, "recorder", trackers)
+	audio_raw      = _section(recorder_raw, "audio", trackers, "recorder.audio")
+	buffer_raw     = _section(recorder_raw, "buffer", trackers, "recorder.buffer")
+	detection_raw  = _section(raw, "detection", trackers)
+	output_raw     = _section(raw, "output", trackers)
+	analysis_raw   = _section(raw, "analysis", trackers)
 
 	device_raw = audio_raw.get("device")
 	if device_raw is not None and not isinstance(device_raw, str):
@@ -776,8 +831,8 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		previews=bool(recorder_raw.get("previews", True)),
 	)
 
-	player_raw      = _section(raw, "player")
-	player_audio_raw = _section(player_raw, "audio")
+	player_raw      = _section(raw, "player", trackers)
+	player_audio_raw = _section(player_raw, "audio", trackers, "player.audio")
 	player_device = player_audio_raw.get("device")
 	if player_device is not None and not isinstance(player_device, str):
 		raise ValueError(
@@ -938,14 +993,14 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"(got {analysis.tempo_min} >= {analysis.tempo_max})"
 		)
 
-	instrument_raw  = _section(raw, "instrument")
+	instrument_raw  = _section(raw, "instrument", trackers)
 	instrument = InstrumentConfig(
 		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
 		directory=str(instrument_raw.get("directory", "samples/captures")),
 		watch=bool(instrument_raw.get("watch", False)),
 	)
 
-	similarity_raw  = _section(raw, "similarity")
+	similarity_raw  = _section(raw, "similarity", trackers)
 	similarity = SimilarityConfig(
 		weight_spectral=float(similarity_raw.get("weight_spectral", 1.0)),
 		weight_timbre=float(similarity_raw.get("weight_timbre", 1.0)),
@@ -967,7 +1022,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 				"Set to 0.0 to disable a feature group entirely."
 			)
 
-	transform_raw   = _section(raw, "transform")
+	transform_raw   = _section(raw, "transform", trackers)
 	quantize_resolution = int(transform_raw.get("quantize_resolution", 16))
 
 	if quantize_resolution not in {1, 2, 4, 8, 16}:
@@ -1023,7 +1078,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	transform = dataclasses.replace(transform, carrier_memory_mb=effective_budget * 0.05)
 
 	# --- OSC ---
-	osc_raw         = _section(raw, "osc")
+	osc_raw         = _section(raw, "osc", trackers)
 	osc = OscConfig(
 		enabled=bool(osc_raw.get("enabled", False)),
 		send_host=str(osc_raw.get("send_host", "127.0.0.1")),
@@ -1034,14 +1089,14 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	)
 
 	# --- Supervisor ---
-	supervisor_raw  = _section(raw, "supervisor")
+	supervisor_raw  = _section(raw, "supervisor", trackers)
 	supervisor = SupervisorConfig(
 		enabled=bool(supervisor_raw.get("enabled", False)),
 		port=int(supervisor_raw.get("port", 9003)),
 	)
 
 	# --- Ambisonic ---
-	ambisonic_raw   = _section(raw, "ambisonic")
+	ambisonic_raw   = _section(raw, "ambisonic", trackers)
 	import subsample.ambisonic
 	ambi_decoder = str(ambisonic_raw.get("decoder", "basic"))
 
@@ -1066,6 +1121,19 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		roll_degrees  = float(ambisonic_raw.get("roll_degrees",  0.0)),
 		max_order     = ambi_max_order,
 	)
+
+	# Unknown-key sweep: any key present in the YAML but never consulted
+	# above is a typo or a removed option — warn by name (never raise, so an
+	# old config file keeps working) instead of silently using the default.
+	for tracker in trackers:
+		unknown = tracker.unknown_keys()
+
+		if unknown:
+			_log.warning(
+				"config.yaml: unknown key(s) in %s section ignored: %s "
+				"— check spelling against config.yaml.default",
+				tracker.label, ", ".join(unknown),
+			)
 
 	return Config(
 		recorder=recorder,

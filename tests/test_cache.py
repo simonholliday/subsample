@@ -453,36 +453,8 @@ class TestBandEnergyCache:
 
 
 # ---------------------------------------------------------------------------
-# Backward-compat: v11 sidecars missing new analysis fields
+# TestEnsureSampleAssets
 # ---------------------------------------------------------------------------
-
-class TestLoadOrAnalyze:
-
-	def test_generates_sidecar_when_missing (self, tmp_path: pathlib.Path) -> None:
-		"""load_or_analyze() creates a sidecar when none exists and returns valid data."""
-		wav_path = tmp_path / "test.wav"
-		tests.helpers._make_wav(wav_path)
-
-		sidecar = subsample.cache.cache_path(wav_path)
-		assert not sidecar.exists()
-
-		result = subsample.cache.load_or_analyze(wav_path)
-		assert result is not None
-		assert len(result) == 9  # spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format
-		assert sidecar.exists()
-
-	def test_returns_cached_on_second_call (self, tmp_path: pathlib.Path) -> None:
-		"""Second call returns the cached sidecar without re-analyzing."""
-		wav_path = tmp_path / "test.wav"
-		tests.helpers._make_wav(wav_path)
-
-		result1 = subsample.cache.load_or_analyze(wav_path)
-		result2 = subsample.cache.load_or_analyze(wav_path)
-		assert result1 is not None
-		assert result2 is not None
-		# Spectral results should be identical.
-		assert result1[0] == result2[0]
-
 
 class TestEnsureSampleAssets:
 

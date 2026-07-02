@@ -87,9 +87,11 @@ you focus on playing.
   a seven-criterion stability gate and pitch-shifted across the keyboard range
   at the highest available quality (Rubber Band offline finer mode). Drums,
   melodic, and effect samples share one library and one workflow.
-- **16-processor DSP chain with intelligent defaults.** Compression, gating,
-  transient shaping, filters, distortion, saturation, vocoder cross-synthesis,
-  beat-quantize, pitch-shift, time-stretch, reverse, envelope reshape, and
+- **20-processor DSP chain with intelligent defaults.** Compression, gating,
+  transient shaping, filters, distortion, saturation, bit-depth reduction,
+  radio transmission/reception, frequency shift, tuning wobble, vocoder
+  cross-synthesis, beat-quantize, pitch-shift, time-stretch, reverse,
+  envelope reshape, and
   HPSS harmonic/percussive separation. Every parameter auto-adapts to each
   sample's analysis data - write `compress: true` and the right threshold,
   attack, and release are derived from the audio. Variants are pre-rendered
@@ -456,6 +458,7 @@ when you want to try something the tutorial didn't show.
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
+| `extract` | no | Collapse a multi-channel sample to one channel at playback: `omni`, `left`, `right`, `front`, `back`, `side`, `depth`, `height`, or `channel.N` (see Channel extraction below) |
 | `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
 | `stack` | no | `true` lets this sound play together with other `stack: true` assignments on the same note and velocity, instead of being rejected as an overlap (see Stacking below). Default `false` |
 | `template` | no | Inherit fields from one or more named templates (see Templates below). The assignment's own fields override the template's; lists (`process`) and nested blocks (`select`) are replaced wholesale, not merged |
@@ -621,7 +624,9 @@ field in one `where` block raises an error; use one form per field. New
 YAML should prefer the operator-dict form.
 
 `order` is a list of clauses. Each clause has a `by` (scorer name), a `dir`
-(`asc` or `desc`, default `asc`), and optional scorer-specific parameters.
+(`asc` or `desc`; the default is `asc`, except for the match-quality scorers
+`similarity` and `beat_match`, which default to `desc` so the best match comes
+first), and optional scorer-specific parameters.
 Later clauses break ties on earlier ones, so primary sort + secondary
 tie-breaker is natural:
 
@@ -1728,7 +1733,7 @@ analysis version - any change to any of these produces a different key, so stale
 cache hits are impossible. Recently-used files are kept warm (LRU by modification
 time); oldest files are evicted when the disk budget is exceeded. Quantized
 variants also store a grid energy profile - per-grid-slot RMS energy normalized
-to [0, 1] - alongside the audio, enabling future complementary pattern matching.
+to [0, 1] - alongside the audio; the `beat_match` order scorer compares against it.
 
 Samples with detected rhythmic content can be time-stretched to a target tempo
 using the `stretch_quantize` processor in a MIDI map assignment. Detected attacks are
@@ -1861,7 +1866,7 @@ weights - is optional and rarely needs changing.
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `instrument.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
 | `instrument.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Overridden by `programs:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
-| `instrument.watch` | `false` | Monitor `instrument.directory` (or each program directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio (see Watching for new samples) |
+| `instrument.watch` | `false` | Monitor `instrument.directory` (or each program directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio. Watches the top level of each directory only - drop new files there, not into subdirectories (see Watching for new samples) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
@@ -1880,6 +1885,7 @@ weights - is optional and rarely needs changing.
 | `osc.send_port` | `9000` | Destination UDP port for outgoing OSC messages |
 | `osc.receive_enabled` | `false` | Listen for `/sample/import` messages to load audio files into the in-memory library from other apps (reads in place, does not copy) |
 | `osc.receive_port` | `9002` | UDP port the OSC receiver listens on |
+| `osc.receive_host` | `127.0.0.1` | Host/interface the OSC receiver binds to - set `0.0.0.0` to accept import requests from other machines |
 | `recorder.audio.ambisonic_format` | `null` | Enable ambisonic capture. One of `a_nt_sf1`, `a_generic`, `b_fuma`, `b_ambix`; requires `channels: 4`. Converts capture to canonical AmbiX B-format on disk (see [Ambisonic capture](#ambisonic-capture)) |
 | `ambisonic.decoder` | `basic` | Decoder weight mode: `basic` (flat velocity), `max_re` (tighter lobes, best HF), or `inphase` (softest lobes, no back-lobes) |
 | `ambisonic.yaw_degrees` | `0.0` | Yaw rotation (degrees) applied to the B-format signal before decoding |
@@ -2026,6 +2032,9 @@ Set `instrument.watch: true` to monitor the instrument directory for new audio
 files at runtime and load them without restarting. The watcher detects audio
 files from any source - another Subsample instance, a DAW, an SDR recorder, a
 script, or any other application that writes audio to the watched directory.
+The watcher monitors the top level of each watched directory only - drop new
+files directly into the watched directory, not into a subdirectory (existing
+subdirectories are still fully loaded at startup, which walks recursively).
 
 Two detection paths run in parallel:
 
@@ -2378,9 +2387,9 @@ Reference: GM36_BassDrum1
 
 ### Monitoring
 
-- **Web dashboard** - a lightweight local web UI showing active program, loaded
-  samples, CC state, voice activity, and transform queue progress. Read-only
-  visibility into what the engine is doing, without requiring a terminal.
+- **Supervisor dashboard extensions** - the read-only web dashboard shipped
+  (enable with `supervisor.enabled: true`); planned additions include voice
+  activity metering and transform queue progress.
 
 ## Architecture
 
@@ -2514,6 +2523,7 @@ Subsample makes use of these excellent open-source libraries:
 | [librosa ↗](https://librosa.org/) | Audio analysis (spectral, rhythm, pitch) | ISC |
 | [SciPy ↗](https://scipy.org/) | Signal processing (onset detection, filtering) | BSD-3-Clause |
 | [SoundFile ↗](https://python-soundfile.readthedocs.io/) | WAV file reading for library pre-load | BSD-3-Clause |
+| [Pillow ↗](https://python-pillow.org/) | PNG waveform preview rendering | MIT-CMU |
 | [mido ↗](https://github.com/mido/mido) | MIDI message parsing and I/O | MIT |
 | [python-rtmidi ↗](https://github.com/SpotlightKid/python-rtmidi) | MIDI device access (RtMidi bindings) | MIT |
 | [pyrubberband ↗](https://github.com/bmcfee/pyrubberband) | Pitch shifting and time-stretching (Rubber Band wrapper) | ISC |

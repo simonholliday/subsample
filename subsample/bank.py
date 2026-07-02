@@ -8,7 +8,8 @@ Architecture
 ------------
 
 BankDefinition (frozen dataclass)
-    Parsed from the optional ``banks:`` key in the MIDI map YAML file.
+    Parsed from the optional ``programs:`` key in the MIDI map YAML file
+    (the old ``banks:`` spelling is rejected as an unknown top-level key).
     Describes one bank: human-readable name, directory path, and the MIDI
     program number that activates it.
 
@@ -40,9 +41,10 @@ Usage flow
    ``bank_manager.switch_to(program)`` and subsequent note triggers query
    the new active bank.
 
-When no ``banks:`` key is present in the MIDI map, ``cli.py`` wraps the
-single ``cfg.instrument.directory`` library in a one-bank ``BankManager``
-transparently — the player code path is identical in both cases.
+When no ``programs:`` key is present in the MIDI map, ``cli.py`` builds no
+BankManager at all — it loads the single ``cfg.instrument.directory`` library
+directly, and the player branches on ``bank_manager is not None`` wherever the
+active pool matters (the two paths are deliberately separate).
 """
 
 import dataclasses

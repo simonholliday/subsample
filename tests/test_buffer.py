@@ -1,7 +1,6 @@
 """Tests for subsample.buffer.CircularBuffer."""
 
 import numpy
-import pytest
 
 import subsample.buffer
 

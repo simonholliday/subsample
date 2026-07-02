@@ -599,7 +599,7 @@ class TestPreviewEmission:
 		import json
 
 		import subsample.preview
-		from PIL import Image
+		import PIL.Image
 
 		rng   = numpy.random.RandomState(10)
 		audio = (rng.randn(4410, 1) * 5000.0).astype(numpy.int16)
@@ -615,7 +615,7 @@ class TestPreviewEmission:
 			png_path = out_dir / "with_preview.wav.preview.png"
 			assert png_path.exists(), "preview PNG sidecar missing"
 
-			with Image.open(png_path) as img:
+			with PIL.Image.open(png_path) as img:
 				assert img.size == (
 					subsample.preview.PNG_WIDTH, subsample.preview.PNG_HEIGHT,
 				)

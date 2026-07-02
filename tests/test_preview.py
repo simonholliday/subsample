@@ -7,7 +7,7 @@ import pathlib
 import numpy
 import pytest
 
-from PIL import Image
+import PIL.Image
 
 import subsample.preview
 
@@ -226,7 +226,7 @@ class TestRenderPng:
 		subsample.preview.render_png(data, out)
 
 		assert out.exists()
-		with Image.open(out) as img:
+		with PIL.Image.open(out) as img:
 			img.verify()
 
 	def test_output_dimensions_are_1024_by_256 (self, tmp_path: pathlib.Path) -> None:
@@ -236,7 +236,7 @@ class TestRenderPng:
 
 		subsample.preview.render_png(data, out)
 
-		with Image.open(out) as img:
+		with PIL.Image.open(out) as img:
 			assert img.size == (subsample.preview.PNG_WIDTH, subsample.preview.PNG_HEIGHT)
 
 	def test_output_is_opaque_rgb (self, tmp_path: pathlib.Path) -> None:
@@ -249,7 +249,7 @@ class TestRenderPng:
 
 		subsample.preview.render_png(data, out)
 
-		with Image.open(out) as img:
+		with PIL.Image.open(out) as img:
 			assert img.mode == "RGB"
 
 	def test_overwrites_existing_file (self, tmp_path: pathlib.Path) -> None:
@@ -279,7 +279,7 @@ class TestRenderPng:
 		out  = tmp_path / "sample.preview.png"
 		subsample.preview.render_png(data, out)
 
-		with Image.open(out) as img:
+		with PIL.Image.open(out) as img:
 			pixels = numpy.array(img)
 
 		# A non-trivial render has at least a few distinct colours — at minimum
@@ -581,7 +581,6 @@ class TestComputeStratumHeights:
 		stratum (bottom of the image) should hold the bass colour for a
 		bass-heavy sample and the highs colour for a highs-heavy one."""
 
-		from PIL import Image
 
 		bass_data = _make_preview_data(
 			bands        = tuple(
@@ -603,8 +602,8 @@ class TestComputeStratumHeights:
 		subsample.preview.render_png(bass_data,  bass_png)
 		subsample.preview.render_png(highs_data, highs_png)
 
-		bass_pixels  = numpy.array(Image.open(bass_png))
-		highs_pixels = numpy.array(Image.open(highs_png))
+		bass_pixels  = numpy.array(PIL.Image.open(bass_png))
+		highs_pixels = numpy.array(PIL.Image.open(highs_png))
 
 		# Middle row (y=128) crosses the waveform — not useful for this
 		# check.  Use y=240 (very bottom, should be inside bass stratum

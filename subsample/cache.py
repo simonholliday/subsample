@@ -301,7 +301,7 @@ def _reanalyze_and_save (
 		with_preview:   When True, also compute the PreviewData, embed it in
 		                the rewritten sidecar, and render the .preview.png
 		                sidecar.  Default False preserves the legacy behaviour
-		                used by ``load_cache`` / ``load_or_analyze`` callers
+		                used by ``load_cache`` callers
 		                that don't manage PNGs.
 
 	Returns:
@@ -400,33 +400,6 @@ def _reanalyze_and_save (
 	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format)
 
 
-def load_or_analyze (audio_path: pathlib.Path) -> _LoadResult | None:
-
-	"""Load cached analysis for an audio file, generating it if no sidecar exists.
-
-	Like load_cache(), but instead of returning None when the sidecar is absent,
-	runs the full analysis pipeline and writes the sidecar for next time.
-
-	Used for named instrument samples referenced directly in the MIDI map that
-	were not imported through the normal pipeline (no pre-existing sidecar).
-
-	Args:
-		audio_path: Path to the audio file.
-
-	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
-		channel_format) 9-tuple on success, else None.
-	"""
-
-	sidecar = cache_path(audio_path)
-
-	if not sidecar.exists():
-		_log.info("No sidecar for %s — analyzing now…", audio_path.name)
-		return _reanalyze_and_save(audio_path, silent=True)
-
-	return load_cache(audio_path)
-
-
 def ensure_sample_assets (
 	audio_path: pathlib.Path,
 	*,
@@ -446,10 +419,11 @@ def ensure_sample_assets (
 	1. Full re-analysis when any of: sidecar missing, sidecar payload
 	   unreadable, analysis_version mismatch, audio MD5 mismatch, or (with
 	   ``with_preview=True``) the sidecar lacks an embedded ``preview``
-	   block.  One MD5 pass over the raw bytes (hashed BEFORE decoding so a
-	   mid-scan file change self-heals on the next startup) plus one decode
-	   drive analysis + preview computation; the sidecar is rewritten with
-	   the preview block when wanted, and the PNG is rendered.
+	   block.  MD5 over the raw bytes (hashed BEFORE decoding so a mid-scan
+	   file change self-heals on the next startup; the stale-sidecar case
+	   hashes once more inside the regeneration) plus one decode drive
+	   analysis + preview computation; the sidecar is rewritten with the
+	   preview block when wanted, and the PNG is rendered.
 
 	2. Otherwise, if the sidecar is fresh but the PNG is missing and
 	   ``with_preview=True``: render the PNG from the embedded preview

@@ -20,9 +20,13 @@ Concurrency control:
   - _state_lock guards the small mutable dicts (_cc_state, _cc_omni,
     _cc_last_log, _segment_counters, _last_played) that are touched by
     both _handle_message (rtmidi thread) and update_assignments
-    (watcher / CC debounce / on-complete threads).  Lock-ordering rule:
-    _state_lock is outermost; never acquire it while holding any of the
-    others.
+    (watcher / CC debounce / on-complete threads).
+  - _rules_lock (reentrant) serialises rule-set re-evaluation:
+    update_assignments and _apply_rule_set (hot-reload / program-change
+    swap) never interleave, so the swap's install→validate→rollback
+    window cannot be observed by a concurrent re-evaluation.
+    Lock-ordering rule: _rules_lock is outermost, then _state_lock;
+    never acquire either while holding any of the others.
 
 Mixing architecture: a PyAudio callback stream requests N frames at regular
 intervals. Each triggered note adds a _Voice (pre-rendered multichannel float32
@@ -161,7 +165,7 @@ class MidiMapResult:
 		                  templates are NOT materialised here; the player builds
 		                  the working map by merging this with derived entries
 		                  on every (re-)materialisation.
-		bank_definitions: Parsed bank declarations from the optional ``banks:`` key.
+		bank_definitions: Parsed program declarations from the optional ``programs:`` key.
 		                  Empty list when no banks are declared (single-directory mode).
 		bank_channel:     MIDI channel for Program Change bank switching (user-facing 1-16,
 		                  0 = omni).  Only meaningful when bank_definitions is non-empty.
@@ -237,8 +241,10 @@ def _quantize_params (
 	the actual value is resolved later in spec_from_process().
 	"""
 
+	# The parser canonicalises the YAML tempo param (legacy `bpm:` included)
+	# to "tempo" — that is the ONLY key parser-built steps ever carry.
 	step = next(s for s in process.steps if s.name == step_name)
-	bpm_raw = step.get("bpm", 0)
+	bpm_raw = step.get("tempo", 0)
 	grid_raw = step.get("grid", 16)
 
 	# CcBinding means BPM will be resolved at note-on time — treat as "provided".
@@ -385,6 +391,14 @@ def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing
 	if weights_raw is None:
 		return None
 
+	# A scalar (`pan: 50`) must fail the documented ValueError contract, not
+	# leak a TypeError past the startup/hot-reload catch sites.
+	if isinstance(weights_raw, (str, int, float, bool)) or not hasattr(weights_raw, "__iter__"):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan must be a list of "
+			f"numbers (got {weights_raw!r})"
+		)
+
 	weights = list(weights_raw)
 	weight_arr = numpy.array(weights, dtype=numpy.float32)
 
@@ -426,6 +440,14 @@ def _parse_output_routing (
 
 	if raw is None:
 		return None
+
+	# A scalar (`output: 3`) must fail the documented ValueError contract,
+	# not leak a TypeError past the startup/hot-reload catch sites.
+	if isinstance(raw, (str, int, float, bool)) or not hasattr(raw, "__iter__"):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: output must be a list of "
+			f"1-indexed channel numbers (got {raw!r})"
+		)
 
 	channels = list(raw)
 
@@ -1691,6 +1713,14 @@ def load_midi_map (
 	# selected live by a MIDI Program Change on `program_channel`.
 	bank_definitions = subsample.bank.parse_banks(raw.get("programs"))
 	bank_channel = int(raw.get("program_channel", subsample.bank.DEFAULT_BANK_CHANNEL))
+
+	# 0 = respond on any channel; 17+ (or negatives) would silently never
+	# match a Program Change message, so reject at load.
+	if not (0 <= bank_channel <= 16):
+		raise ValueError(
+			f"MIDI map {path}: program_channel must be 1-16, or 0 for any "
+			f"channel (got {bank_channel})"
+		)
 	raw_default_bank = raw.get("default_program")
 	default_bank: typing.Optional[int] = int(raw_default_bank) if raw_default_bank is not None else None
 
@@ -1894,20 +1924,29 @@ def load_midi_map (
 		# When process includes repitch, all notes share pick=1 (same sample,
 		# pitched per note).  Otherwise, each note gets the next pick position
 		# so multi-note assignments distribute across ranked matches.
-		# An explicit pick in the SelectSpec (scalar or range) overrides this
-		# default — range forms re-roll at trigger time rather than being
-		# distributed across notes at load time.
+		# An explicit pick anywhere in the select chain (scalar or range)
+		# overrides this default — the FIRST spec that declares one governs
+		# the whole chain (one pick applies per trigger regardless of which
+		# fallback spec matched, so a pick declared only on a fallback spec
+		# must not be silently ignored).
+		explicit_pick = False
+		chain_pick: typing.Optional[subsample.query.PickSpec] = None
+
 		if isinstance(select_raw, dict):
 			explicit_pick = "pick" in select_raw
+			if explicit_pick:
+				chain_pick = select_specs[0].pick
 		elif isinstance(select_raw, list) and select_raw:
-			explicit_pick = any("pick" in s for s in select_raw if isinstance(s, dict))
-		else:
-			explicit_pick = False
+			for spec_idx, spec_raw in enumerate(select_raw):
+				if isinstance(spec_raw, dict) and "pick" in spec_raw:
+					explicit_pick = True
+					chain_pick = select_specs[spec_idx].pick
+					break
 
 		for note_idx, note in enumerate(notes):
 
 			if explicit_pick or process.has_repitch() or len(notes) == 1:
-				pick_spec = select_specs[0].pick
+				pick_spec = chain_pick if chain_pick is not None else select_specs[0].pick
 			else:
 				rank = note_idx + 1
 				pick_spec = subsample.query.PickSpec(rank, rank)
@@ -2366,9 +2405,20 @@ class MidiPlayer:
 		# other player lock.
 		#
 		# Lock ordering rule (enforced by code review, not the runtime):
-		# _state_lock is outermost.  Never acquire it while holding
-		# _voices_lock, _mix_matrix_lock, or _cc_debounce_lock.
+		# _rules_lock is outermost, then _state_lock.  Never acquire
+		# _state_lock while holding _voices_lock, _mix_matrix_lock, or
+		# _cc_debounce_lock; never acquire _rules_lock while holding any
+		# other player lock.
 		self._state_lock: threading.Lock = threading.Lock()
+
+		# Serialises rule-set re-evaluation: update_assignments() and
+		# _apply_rule_set() run under this lock so a watcher / CC-debounce /
+		# on-complete re-evaluation can never interleave with a hot-reload or
+		# program-change swap's install→validate→rollback window (which could
+		# rebuild _note_map from half-installed rules AFTER the rollback,
+		# leaving the player permanently on rolled-back rules).  RLock:
+		# _apply_rule_set calls update_assignments() on the same thread.
+		self._rules_lock: threading.RLock = threading.RLock()
 
 		# Materialise zone-tuned templates against the active library so
 		# the startup log shows the derived per-sample zones rather than
@@ -3370,7 +3420,12 @@ class MidiPlayer:
 		if record.audio is None:
 			return None
 
-		float_audio = subsample.transform._pcm_to_float32(record.audio, self._bit_depth)
+		# The divisor must match the ARRAY's dtype, not the configured capture
+		# depth: imported files keep their native dtype (int16 for 16-bit,
+		# int32 for 24/32-bit), so a 24-bit import under a 16-bit config would
+		# otherwise render ~65536x too hot on this fallback path.
+		record_depth = 16 if record.audio.dtype == numpy.int16 else 32
+		float_audio = subsample.transform._pcm_to_float32(record.audio, record_depth)
 
 		return self._render_float(float_audio, record.level, velocity, mix_matrix, gain_db)
 
@@ -3786,6 +3841,15 @@ class MidiPlayer:
 		assignments exist.
 		"""
 
+		# Serialised against every other re-evaluation AND the rule-swap
+		# window in _apply_rule_set (see _rules_lock in __init__).
+		with self._rules_lock:
+			self._update_assignments_locked()
+
+	def _update_assignments_locked (self) -> None:
+
+		"""Body of update_assignments — caller must hold _rules_lock."""
+
 		# Re-derive zone-tuned entries against the current library before
 		# the candidate cache and variant pre-computation walk the NoteMap.
 		# Cheap when no templates are declared (early return inside).
@@ -4070,9 +4134,13 @@ class MidiPlayer:
 		re-raised so the caller can stay live under the previous rules.
 
 		Thread-safety: dict and tuple rebinds are atomic under the GIL, so any
-		in-flight ``_handle_message()`` sees either the old rules or the new,
-		never a half-applied state.  Cache clears follow the lock-ordering
-		rule (``_mix_matrix_lock`` and ``_state_lock`` are never nested).
+		in-flight ``_handle_message()`` READER sees either the old rules or
+		the new, never a half-applied state.  WRITERS are serialised by
+		``_rules_lock`` (held for the whole install→validate→rollback window,
+		reentrantly shared with ``update_assignments``), so a concurrent
+		re-evaluation can never rebuild from half-installed rules.  Cache
+		clears follow the lock-ordering rule (``_mix_matrix_lock`` and
+		``_state_lock`` are never nested).
 
 		Args:
 			base_note_map:  Manual note routing to install (NoteMap).
@@ -4083,6 +4151,18 @@ class MidiPlayer:
 			Exception: whatever update_assignments() / _materialize_zones()
 			surfaces; the previous rules are restored before propagating.
 		"""
+
+		with self._rules_lock:
+			self._apply_rule_set_locked(base_note_map, zone_templates, mapped_ccs)
+
+	def _apply_rule_set_locked (
+		self,
+		base_note_map: NoteMap,
+		zone_templates: tuple[ZoneTemplate, ...],
+		mapped_ccs: set[int],
+	) -> None:
+
+		"""Body of _apply_rule_set — caller must hold _rules_lock."""
 
 		old_base_note_map  = self._base_note_map
 		old_note_map       = self._note_map

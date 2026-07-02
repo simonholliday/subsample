@@ -466,7 +466,9 @@ class WherePredicate:
 
 		# reference is handled externally by the query runner (needs SimilarityMatrix).
 		# WherePredicate.matches() is a record-level filter; reference scoring
-		# requires the full ranked list, so it's applied in query().
+		# requires the full ranked list, so it's applied by query()'s
+		# primary-clause similarity fast path (parse auto-injects a similarity
+		# order clause whenever reference is set without an explicit order).
 
 		return True
 
@@ -899,7 +901,7 @@ class ProcessorStep:
 	"""A single processor declaration within a process pipeline.
 
 	name:   Processor name (e.g. "repitch", "stretch_quantize").
-	params: Frozen key-value pairs (e.g. (("grid", 16), ("bpm", 120))).
+	params: Frozen key-value pairs (e.g. (("grid", 16), ("tempo", 120))).
 	        Empty tuple for parameterless processors (e.g. "repitch: true").
 	        Stored as a tuple of pairs so the frozen dataclass is truly hashable.
 	"""
@@ -1143,15 +1145,20 @@ def query (
 
 	filtered = [r for r in samples if where.matches(r, beats_resolver)]
 
-	# Apply each "exclude"-policy scorer as an additional filter before
-	# sorting.  A record failing any exclude-scorer drops from the result.
-	for clause in clauses:
+	# Score every (clause, record) pair exactly once, applying each
+	# "exclude"-policy scorer's filter as its clause is scored.  Without the
+	# memo, exclude scorers ran twice per record (pre-filter + sort key) —
+	# and beat_match resolves variant state on every call, doubling real work.
+	scores: dict[tuple[int, int], typing.Optional[float]] = {}
+
+	for ci, clause in enumerate(clauses):
 		spec = _SCORERS[clause.by]
+
+		for r in filtered:
+			scores[(ci, r.sample_id)] = spec.fn(r, clause.params, state)
+
 		if spec.on_missing == "exclude":
-			filtered = [
-				r for r in filtered
-				if spec.fn(r, clause.params, state) is not None
-			]
+			filtered = [r for r in filtered if scores[(ci, r.sample_id)] is not None]
 
 	# Build sort key: tuple of per-clause (missing_flag, signed_value).
 	# missing_flag is 0 for scored, 1 for None — 1 always sorts after 0
@@ -1162,9 +1169,8 @@ def query (
 		record: "subsample.library.SampleRecord",
 	) -> tuple[tuple[int, float], ...]:
 		parts: list[tuple[int, float]] = []
-		for clause in clauses:
-			spec  = _SCORERS[clause.by]
-			score = spec.fn(record, clause.params, state)
+		for ci, clause in enumerate(clauses):
+			score = scores[(ci, record.sample_id)]
 			if score is None:
 				parts.append((1, 0.0))
 			else:
@@ -1303,7 +1309,13 @@ def _parse_name_operator_dict (
 			f"must be non-empty"
 		)
 
-	if is_path_like(op_value):
+	# Path detection: a slash always means a path.  A leading dot means a
+	# path for GLOBS (hidden-file/relative-path shapes) but NOT for regexes,
+	# where a leading '.' is the wildcard itself — `regex: ".*kick.*"` is the
+	# natural fullmatch-contains spelling and must be accepted.
+	path_like = ("/" in op_value) if op == "regex" else is_path_like(op_value)
+
+	if path_like:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: 'name.{op}' pattern "
 			f"is path-like ({op_value!r}); patterns match the filename "
@@ -1562,8 +1574,10 @@ def _parse_order_clause (
 	Accepts:
 	  - A bare string (legacy token: ``duration_desc``, ``loudest``, …)
 	    translated via _LEGACY_ORDER_TOKENS.
-	  - A mapping with ``by`` (required), ``dir`` (optional, default
-	    "asc"), and any extra keys treated as scorer params.
+	  - A mapping with ``by`` (required), ``dir`` (optional — defaults to
+	    "desc" (best match first) for the match-quality scorers
+	    ``similarity``/``beat_match``, "asc" for everything else), and any
+	    extra keys treated as scorer params.
 	"""
 
 	if isinstance(raw, str):
@@ -1586,8 +1600,13 @@ def _parse_order_clause (
 			f"MIDI map assignment {assignment_name!r}: order entry must have a 'by' key"
 		)
 
-	by      = str(raw["by"])
-	dir_raw = str(raw.get("dir", "asc")).lower()
+	by = str(raw["by"])
+
+	# Match-quality scorers default to best-match-first (desc), mirroring the
+	# similarity clauses built by the legacy-token table and auto-injection —
+	# an omitted dir on `by: beat_match` must not rank WORST matches first.
+	default_dir = "desc" if by in ("beat_match", "similarity") else "asc"
+	dir_raw = str(raw.get("dir", default_dir)).lower()
 
 	if dir_raw not in ("asc", "desc"):
 		raise ValueError(
@@ -1811,6 +1830,27 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 				f"MIDI map assignment {assignment_name!r}: 'pick' dict must "
 				f"include at least one of "
 				f"{', '.join(sorted(_VALID_PICK_OPERATORS))}; got {raw!r}"
+			)
+
+		# Conflicting operator combinations must not be silently resolved by
+		# precedence: eq pins both bounds (nothing can combine with it), and
+		# gte/gt (or lte/lt) express the same bound two ways.
+		if eq_val is not None and any(v is not None for v in (gte_val, gt_val, lte_val, lt_val)):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick 'eq' cannot be "
+				f"combined with other operators (got {sorted(raw.keys())})"
+			)
+
+		if gte_val is not None and gt_val is not None:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick cannot combine "
+				f"'gte' and 'gt' — use one lower bound"
+			)
+
+		if lte_val is not None and lt_val is not None:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick cannot combine "
+				f"'lte' and 'lt' — use one upper bound"
 			)
 
 		if eq_val is not None:
@@ -2105,12 +2145,34 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 					seen_params.add(canonical_param)
 
 					if isinstance(v, dict) and "cc" in v:
+						cc_num = int(v["cc"])
+						cc_channel = int(v["channel"]) if "channel" in v else None
+
+						# Out-of-range cc/channel can never match an incoming
+						# message — the knob would be silently dead forever,
+						# so reject at load like every other config error.
+						if not (0 <= cc_num <= 127):
+							raise ValueError(
+								f"MIDI map assignment {assignment_name!r}: "
+								f"processor {proc_name_str!r} parameter "
+								f"{canonical_param!r} has cc {cc_num} outside "
+								f"the MIDI range 0-127"
+							)
+
+						if cc_channel is not None and not (1 <= cc_channel <= 16):
+							raise ValueError(
+								f"MIDI map assignment {assignment_name!r}: "
+								f"processor {proc_name_str!r} parameter "
+								f"{canonical_param!r} has channel {cc_channel} "
+								f"outside the MIDI range 1-16"
+							)
+
 						resolved_params.append((canonical_param, CcBinding(
-							cc=int(v["cc"]),
+							cc=cc_num,
 							min_val=float(v.get("min", 0.0)),
 							max_val=float(v.get("max", 1.0)),
 							default=float(v["default"]) if "default" in v else None,
-							channel=int(v["channel"]) if "channel" in v else None,
+							channel=cc_channel,
 						)))
 					else:
 						resolved_params.append((canonical_param, v))
@@ -2176,7 +2238,7 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 				if not isinstance(dither, str) or dither.lower() not in ("none", "triangular", "rectangular"):
 					raise ValueError(
 						f"MIDI map assignment {assignment_name!r}: bit_depth "
-						f"dither must be true, false, triangular, or "
+						f"dither must be true, false, none, triangular, or "
 						f"rectangular (got {dither!r})"
 					)
 
@@ -2214,6 +2276,54 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 							f"MIDI map assignment {assignment_name!r}: radio "
 							f"{amount} must be a number from 0 to 1 (got {val!r})"
 						)
+
+			# bandwidth must clear the channel filter's fixed 300 Hz lower
+			# edge for the band-pass modes (fm/ssb) and be positive for the
+			# low-pass modes — otherwise the filter design raises at render
+			# time inside the worker and the variant silently never appears.
+			bw = step.get("bandwidth")
+
+			if bw is not None and not isinstance(bw, CcBinding):
+				bw_floor = 300.0 if mode in ("fm", "ssb") else 0.0
+
+				if isinstance(bw, bool) or not isinstance(bw, (int, float)) or bw <= bw_floor:
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: radio "
+						f"bandwidth must be a frequency in Hz above "
+						f"{bw_floor:.0f} (got {bw!r})"
+					)
+
+	# repitch's fixed `note:` must be a MIDI note number (0-127) or a valid
+	# note name — an invalid value would otherwise raise inside the rtmidi
+	# handler on EVERY note-on (the same rationale as the hpss check above).
+	for step in steps:
+		if step.name == "repitch":
+			note = step.get("note")
+
+			if note is None:
+				continue
+
+			if isinstance(note, bool):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: repitch note "
+					f"must be a MIDI note number (0-127) or a note name "
+					f"like C4 (got {note!r})"
+				)
+
+			if isinstance(note, int):
+				if not (0 <= note <= 127):
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: repitch note "
+						f"{note} is outside the MIDI range 0-127"
+					)
+			else:
+				try:
+					pymididefs.notes.name_to_note(str(note))
+				except (ValueError, KeyError) as exc:
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: repitch note "
+						f"{note!r} is not a valid note name: {exc}"
+					) from exc
 
 	# A process chain may carry at most ONE beat-aligning step.  Combining
 	# stretch_quantize with pad_quantize — or repeating either — is ambiguous

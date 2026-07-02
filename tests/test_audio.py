@@ -11,7 +11,6 @@ import pytest
 
 import subsample.audio
 import subsample.config
-import subsample.recorder
 
 
 class TestUnpackAudio16Bit:
@@ -282,6 +281,24 @@ class TestReadAudioFile:
 		assert info.audio.shape == (len(samples), 1)
 		assert numpy.array_equal(info.audio.flatten(), samples)
 
+	def test_8bit_wav_falls_through_to_soundfile (self) -> None:
+		"""An 8-bit PCM WAV is readable via soundfile — unpack_audio's
+		ValueError from the wave fast path must fall through, not escape as
+		'Unsupported bit depth 8'."""
+
+		samples = numpy.array([128, 200, 60, 255, 0], dtype=numpy.uint8)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			path = pathlib.Path(tmp) / "eight.wav"
+			self._write_wav(path, samples, sample_rate=22050, sample_width=1)
+
+			info = subsample.audio.read_audio_file(path)
+
+		assert info.sample_rate == 22050
+		assert info.channels == 1
+		assert info.audio.shape[0] == len(samples)
+		assert info.audio.dtype in (numpy.int16, numpy.int32)
+
 	def test_stereo_shape (self) -> None:
 		"""Stereo WAV should produce channels=2 and correct array shape."""
 		samples = numpy.zeros(20, dtype=numpy.int16)
@@ -354,10 +371,14 @@ class TestFloat32ToPcmBytes:
 		repacked = subsample.audio.float32_to_pcm_bytes(
 			unpacked.astype(numpy.float32) / 2147483648.0, 32,
 		)
-		# 32-bit round-trip may lose LSBs due to float32 precision; check shape.
 		restored = subsample.audio.unpack_audio(repacked, 32, 2)
 		assert restored.shape == unpacked.shape
 		assert restored.dtype == unpacked.dtype
+
+		# float32's 24-bit mantissa can cost the bottom ~8 bits of a 32-bit
+		# sample — but the VALUES must round-trip within that tolerance, not
+		# merely have the right shape (an all-zeros output previously passed).
+		numpy.testing.assert_allclose(restored, unpacked, atol=256)
 
 	def test_output_length (self) -> None:
 		"""Output byte length matches expected frames * channels * sample_width."""

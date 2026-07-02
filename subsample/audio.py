@@ -96,6 +96,12 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 	except wave.Error:
 		pass  # Not a WAV file — fall through to soundfile.
 
+	except ValueError:
+		# A real WAV, but at a width unpack_audio doesn't handle (e.g. 8-bit
+		# PCM_U8) — soundfile reads those fine, so fall through rather than
+		# rejecting a readable file.
+		pass
+
 	# Fallback: soundfile (libsndfile) handles FLAC, AIFF, OGG, MP3, and also
 	# WAV variants the stdlib wave module rejects — notably WAVE_FORMAT_IEEE_FLOAT
 	# (32-bit float WAVs from DAWs and field recorders).
@@ -511,41 +517,35 @@ def select_input_channels (device_name: str, max_channels: int) -> tuple[int, ..
 	return tuple(selected)
 
 
-def list_input_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:
+def _list_devices (pa: pyaudio.PyAudio, direction: str) -> list[DeviceInfo]:
 
-	"""Return all audio devices that have at least one input channel."""
+	"""Return all devices with at least one channel in *direction* ("input"/"output")."""
 
+	key = "maxInputChannels" if direction == "input" else "maxOutputChannels"
 	devices: list[DeviceInfo] = []
 
 	for i in range(pa.get_device_count()):
 		info: DeviceInfo = pa.get_device_info_by_index(i)
 
-		if int(info["maxInputChannels"]) > 0:
+		if int(info[key]) > 0:
 			devices.append(info)
 
 	return devices
 
 
-def find_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
+def _find_device_by_name (pa: pyaudio.PyAudio, name: str, direction: str) -> int:
 
-	"""Return the index of the first input device whose name contains *name*.
+	"""Return the index of the first *direction* device whose name contains *name*.
 
 	Matching is case-insensitive substring search, so "Samson" matches
 	"Samson Go Mic: USB Audio (hw:1,0)".
 
-	Args:
-		pa:   Active PyAudio instance.
-		name: Substring to match against device names.
-
-	Returns:
-		Device index of the first matching input device.
-
 	Raises:
-		ValueError: If no input device name contains *name*, with a list of
+		ValueError: If no device name contains *name*, with a list of
 		            available device names to help the user correct the config.
 	"""
 
-	devices = list_input_devices(pa)
+	devices = _list_devices(pa, direction)
 	name_lower = name.lower()
 
 	for dev in devices:
@@ -554,28 +554,28 @@ def find_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
 
 	available = "\n".join(f"  {d['name']}" for d in devices) or "  (none)"
 	raise ValueError(
-		f"No input device matching {name!r} found.\nAvailable devices:\n{available}"
+		f"No {direction} device matching {name!r} found.\nAvailable devices:\n{available}"
 	)
 
 
-def select_device (devices: list[DeviceInfo]) -> int:
+def _select_device (devices: list[DeviceInfo], direction: str, empty_hint: str) -> int:
 
 	"""Return the device index to use, prompting the user if there are multiple.
 
-	Auto-selects when only one input device is available.
-	Raises ValueError if no input devices are found.
+	Auto-selects when only one device is available; raises ValueError with
+	*empty_hint* when the list is empty.
 	"""
 
 	if not devices:
-		raise ValueError("No audio input devices found. Check that a microphone is connected.")
+		raise ValueError(empty_hint)
 
 	if len(devices) == 1:
 		name = devices[0]["name"]
-		print(f"Using audio input: {name}")
+		print(f"Using audio {direction}: {name}")
 		return int(devices[0]["index"])
 
 	# Multiple devices — let the user choose
-	print("Available audio input devices:")
+	print(f"Available audio {direction} devices:")
 	for i, device in enumerate(devices):
 		name = device["name"]
 		rate = int(device["defaultSampleRate"])
@@ -596,77 +596,55 @@ def select_device (devices: list[DeviceInfo]) -> int:
 		print(f"  Please enter a number between 0 and {len(devices) - 1}.")
 
 
+def list_input_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:
+
+	"""Return all audio devices that have at least one input channel."""
+
+	return _list_devices(pa, "input")
+
+
+def find_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
+
+	"""Return the index of the first input device whose name contains *name*.
+
+	Matching is case-insensitive substring search (see _find_device_by_name).
+	"""
+
+	return _find_device_by_name(pa, name, "input")
+
+
+def select_device (devices: list[DeviceInfo]) -> int:
+
+	"""Return the input device index to use, prompting the user if there are multiple."""
+
+	return _select_device(
+		devices, "input",
+		"No audio input devices found. Check that a microphone is connected.",
+	)
+
+
 def list_output_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:
 
 	"""Return all audio devices that have at least one output channel."""
 
-	devices: list[DeviceInfo] = []
-
-	for i in range(pa.get_device_count()):
-		info: DeviceInfo = pa.get_device_info_by_index(i)
-
-		if int(info["maxOutputChannels"]) > 0:
-			devices.append(info)
-
-	return devices
+	return _list_devices(pa, "output")
 
 
 def find_output_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
 
 	"""Return the index of the first output device whose name contains *name*.
 
-	Matching is case-insensitive substring search.
-
-	Raises:
-		ValueError: If no output device name contains *name*.
+	Matching is case-insensitive substring search (see _find_device_by_name).
 	"""
 
-	devices = list_output_devices(pa)
-	name_lower = name.lower()
-
-	for device in devices:
-		if name_lower in str(device["name"]).lower():
-			return int(device["index"])
-
-	available = "\n".join(f"  {d['name']}" for d in devices) or "  (none)"
-	raise ValueError(
-		f"No output device matching {name!r} found.\nAvailable devices:\n{available}"
-	)
+	return _find_device_by_name(pa, name, "output")
 
 
 def select_output_device (devices: list[DeviceInfo]) -> int:
 
-	"""Return the output device index to use, prompting the user if there are multiple.
+	"""Return the output device index to use, prompting the user if there are multiple."""
 
-	Auto-selects when only one output device is available.
-	Raises ValueError if no output devices are found.
-	"""
-
-	if not devices:
-		raise ValueError("No audio output devices found.")
-
-	if len(devices) == 1:
-		print(f"Using audio output: {devices[0]['name']}")
-		return int(devices[0]["index"])
-
-	print("Available audio output devices:")
-	for i, device in enumerate(devices):
-		rate = int(device["defaultSampleRate"])
-		print(f"  [{i}] {device['name']}  (default {rate} Hz)")
-
-	while True:
-		raw = input(f"Select device [0–{len(devices) - 1}]: ").strip()
-
-		try:
-			choice = int(raw)
-		except ValueError:
-			print("  Please enter a number.")
-			continue
-
-		if 0 <= choice < len(devices):
-			return int(devices[choice]["index"])
-
-		print(f"  Please enter a number between 0 and {len(devices) - 1}.")
+	return _select_device(devices, "output", "No audio output devices found.")
 
 
 def get_pyaudio_format (bit_depth: int) -> int:
@@ -705,6 +683,10 @@ def float32_to_pcm_bytes (audio: numpy.ndarray, bit_depth: int) -> bytes:
 		audio:     float32 array, values in [-1.0, 1.0]. Any shape — the array
 		           is flattened in C (row-major) order, which produces the
 		           interleaved L/R layout PortAudio expects.
+		           ⓒ Values are NOT clipped here (only the 32-bit path clamps
+		           for arithmetic-overflow reasons): the caller contract is
+		           pre-clipped input, and the audio callback hard-clips the
+		           mix to [-1.0, 1.0] immediately before calling this.
 		bit_depth: 16, 24, or 32.
 
 	Returns:
@@ -727,7 +709,9 @@ def float32_to_pcm_bytes (audio: numpy.ndarray, bit_depth: int) -> bytes:
 		raw = scaled.view(numpy.uint8).reshape(-1, 4)
 
 		# The 3 LSBs are the first three bytes on a little-endian host and the
-		# last three on a big-endian one; the read side makes the same choice.
+		# last three on a big-endian one.  (unpack_audio's 24-bit READ path
+		# refuses big-endian hosts outright, so the big-endian branch below
+		# is defensive symmetry, not a tested round-trip.)
 		if sys.byteorder == "little":
 			return raw[:, :3].tobytes()
 

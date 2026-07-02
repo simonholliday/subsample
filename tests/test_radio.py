@@ -123,6 +123,42 @@ class TestModes:
 		out = _render("fm", demod="am")
 		assert float(numpy.max(numpy.abs(out))) < 1e-5
 
+	def test_sparse_burst_in_long_buffer_not_muted (self) -> None:
+		"""The silence guard must be duty-cycle-robust: a real 30 ms hit with
+		a long silent tail must NOT be muted by its own tail (whole-buffer
+		RMS would mute it; the loudest-window statistic must not)."""
+
+		for mode in ("am", "fm"):
+			n = 8 * SR
+			x = numpy.zeros((n, 2), dtype=numpy.float32)
+			t = numpy.arange(int(0.03 * SR)) / SR
+			burst = (0.9 * numpy.sin(2.0 * numpy.pi * 700.0 * t)).astype(numpy.float32)
+			x[:len(burst), 0] = x[:len(burst), 1] = burst
+
+			with warnings.catch_warnings():
+				warnings.simplefilter("ignore")
+				out = subsample.radio.render_radio(
+					x, SR, mode=mode, demod="matched", tune=0.0, signal=0.0,
+					static=0.0, fade=0.0, bandwidth=None, stereo="mono", mix=1.0)
+
+			assert float(numpy.max(numpy.abs(out))) > 0.1, mode
+
+	def test_dead_cross_demod_muted_even_in_long_buffer (self) -> None:
+		"""The guard still catches a genuinely dead cross-demod at the same
+		buffer length where real content survives."""
+
+		n = 8 * SR
+		t = numpy.arange(n) / SR
+		x = numpy.stack([(0.9 * numpy.sin(2.0 * numpy.pi * 700.0 * t)).astype(numpy.float32)] * 2, axis=1)
+
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore")
+			out = subsample.radio.render_radio(
+				x, SR, mode="fm", demod="am", tune=0.0, signal=0.0,
+				static=0.0, fade=0.0, bandwidth=None, stereo="mono", mix=1.0)
+
+		assert float(numpy.max(numpy.abs(out))) < 1e-5
+
 	def test_wrong_demod_fm_to_ssb_is_a_real_signal (self) -> None:
 		# The musical wrong-demod (FM through an SSB detector) is a real warble.
 		out = _render("fm", demod="ssb")
@@ -159,11 +195,15 @@ class TestCrackle:
 			return float(numpy.median(vals))
 		assert energy(0.6) > energy(0.2)
 
-	def test_zero_intensity_is_silent (self) -> None:
+	def test_sparse_intensity_is_bounded (self) -> None:
+		"""At the sparsest setting the front-end cap bounds every impulse.
+		(Intensity 0.0 still fires ~3 events/s by design — production gates
+		the crackle call on static > 0, so 0.0 is never rendered.)"""
 		rng = numpy.random.default_rng(0)
 		crk = subsample.radio.crackle(SR, SR, 0.0, 1.0, subsample.radio._CARRIER_HZ, rng)
-		# rate at intensity 0 is ~3 ev/s — sparse, but the cap keeps it bounded.
 		assert numpy.all(numpy.isfinite(crk))
+		# The tanh front-end cap: |crackle| can never exceed 12x carrier_ref.
+		assert float(numpy.max(numpy.abs(crk))) <= 12.0
 
 
 # ---------------------------------------------------------------------------

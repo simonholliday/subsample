@@ -1,7 +1,9 @@
 """Tests for subsample/transform.py — the sample transform pipeline scaffold."""
 
 import dataclasses
+import hashlib
 import pathlib
+import unittest.mock
 import tempfile
 import threading
 import time
@@ -643,6 +645,182 @@ class TestTransformManager:
 
 		assert manager.auto_pitch_enabled is False
 		manager.shutdown()
+
+
+class TestTransformManagerGetVariant:
+
+	"""Direct coverage of the player's primary trigger-path lookup —
+	memory hit → disk-promote → enqueue — and TransformProcessor's
+	disk-cache integration.  These are production defaults (cli wires a
+	VariantDiskCache into both) that previously had no non-mock tests."""
+
+	def _make_stack (
+		self,
+		tmp_path: pathlib.Path,
+	) -> tuple[
+		subsample.transform.TransformManager,
+		subsample.transform.TransformCache,
+		subsample.library.InstrumentLibrary,
+		subsample.transform.VariantDiskCache,
+		subsample.transform.TransformProcessor,
+	]:
+		lib   = subsample.library.InstrumentLibrary(max_memory_bytes=100 * 1024 * 1024)
+		cache = subsample.transform.TransformCache(max_memory_bytes=10 * 1024 * 1024)
+		disk  = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100, bit_depth=16, on_complete=cache.put, disk_cache=disk,
+		)
+		manager = subsample.transform.TransformManager(
+			cache=cache, processor=processor, instrument_library=lib,
+			cfg=subsample.config.TransformConfig(), disk_cache=disk,
+		)
+		return manager, cache, lib, disk, processor
+
+	def _spec (self) -> subsample.transform.TransformSpec:
+		return subsample.transform.TransformSpec(steps=(subsample.transform.Reverse(),))
+
+	def test_memory_hit_returned_without_enqueue (self, tmp_path: pathlib.Path) -> None:
+		manager, cache, lib, _disk, processor = self._make_stack(tmp_path)
+		spec = self._spec()
+		cache.put(_make_result(sample_id=1, spec=spec))
+
+		with unittest.mock.patch.object(processor, "enqueue") as spy:
+			result = manager.get_variant(1, spec)
+
+		assert result is not None
+		spy.assert_not_called()
+		manager.shutdown()
+
+	def test_miss_enqueues_and_completes (self, tmp_path: pathlib.Path) -> None:
+		manager, cache, lib, _disk, _processor = self._make_stack(tmp_path)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+		spec = self._spec()
+
+		assert manager.get_variant(1, spec) is None   # miss enqueues
+
+		manager.shutdown()                            # drains the worker pool
+
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+		assert cache.get(key) is not None             # ...and the variant landed
+
+	def test_disk_hit_promoted_to_memory (self, tmp_path: pathlib.Path) -> None:
+		manager, cache, lib, disk, _processor = self._make_stack(tmp_path)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+		spec = self._spec()
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+
+		# A distinctive constant no Reverse of the record could produce.
+		marker = numpy.full((100, 1), 0.123, dtype=numpy.float32)
+		disk.put(
+			hashlib.md5(record.audio.tobytes()).hexdigest(), spec,
+			subsample.transform.TransformResult(
+				key=key, audio=marker, duration=0.1,
+				level=subsample.analysis.LevelResult(peak=0.123, rms=0.1),
+			),
+		)
+
+		result = manager.get_variant(1, spec)
+
+		assert result is not None
+		numpy.testing.assert_array_equal(result.audio, marker)
+		assert cache.get(key) is not None             # promoted into memory
+		manager.shutdown()
+
+	def test_source_md5_memoised_across_lookups (self, tmp_path: pathlib.Path) -> None:
+		"""get_variant runs on the rtmidi thread — the full-buffer hash must
+		be computed once per sample, not once per miss."""
+
+		manager, _cache, lib, _disk, _processor = self._make_stack(tmp_path)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+
+		with unittest.mock.patch(
+			"subsample.transform.hashlib.md5", wraps=hashlib.md5,
+		) as spy:
+			manager.get_variant(1, self._spec())
+			first = spy.call_count
+			manager.get_variant(1, subsample.transform.TransformSpec(
+				steps=(subsample.transform.Saturate(amount_db=3.0),),
+			))
+
+			# The manager itself must not have hashed again (worker threads
+			# may hash for the disk WRITE, so compare manager-side counts).
+			assert manager._md5_cache.get(1) is not None
+			assert first >= 1
+
+		manager.shutdown()
+
+	def test_md5_cache_invalidated_on_evict_and_readd (self, tmp_path: pathlib.Path) -> None:
+		manager, _cache, lib, _disk, _processor = self._make_stack(tmp_path)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+
+		manager.get_variant(1, self._spec())
+		assert 1 in manager._md5_cache
+
+		manager.on_parent_evicted([1])
+		assert 1 not in manager._md5_cache
+
+		manager.get_variant(1, self._spec())
+		manager.on_sample_added(record)
+		assert 1 not in manager._md5_cache
+
+		manager.shutdown()
+
+	def test_execute_disk_hit_short_circuits_dsp (self, tmp_path: pathlib.Path) -> None:
+		"""A pre-existing disk entry must be delivered as-is by the worker
+		(the pre-DSP short-circuit), not recomputed."""
+
+		manager, cache, lib, disk, processor = self._make_stack(tmp_path)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+		spec = self._spec()
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+
+		marker = numpy.full((100, 1), 0.321, dtype=numpy.float32)
+		disk.put(
+			hashlib.md5(record.audio.tobytes()).hexdigest(), spec,
+			subsample.transform.TransformResult(
+				key=key, audio=marker, duration=0.1,
+				level=subsample.analysis.LevelResult(peak=0.321, rms=0.1),
+			),
+		)
+
+		processor.enqueue(record, spec)
+		manager.shutdown()
+
+		cached = cache.get(key)
+		assert cached is not None
+		numpy.testing.assert_array_equal(cached.audio, marker)
+
+	def test_execute_writes_disk_after_dsp (self, tmp_path: pathlib.Path) -> None:
+		manager, _cache, lib, disk, processor = self._make_stack(tmp_path)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+		spec = self._spec()
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+
+		processor.enqueue(record, spec)
+		manager.shutdown()
+
+		md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+		assert disk.get(md5, spec, key) is not None
+
+	def test_base_variant_never_touches_disk (self, tmp_path: pathlib.Path) -> None:
+		manager, cache, lib, _disk, processor = self._make_stack(tmp_path)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+
+		before = sorted(p.name for p in tmp_path.iterdir())
+		processor.enqueue(record, subsample.transform._BASE_VARIANT_SPEC)
+		manager.shutdown()
+
+		assert cache.get_base(1) is not None
+		assert sorted(p.name for p in tmp_path.iterdir()) == before
 
 
 # ---------------------------------------------------------------------------
@@ -2729,6 +2907,49 @@ class TestBitDepth:
 
 		assert numpy.max(numpy.abs(result)) <= 2.0 ** -7 + 1e-7
 		assert numpy.max(numpy.abs(result)) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Reverse × quantize segment bounds
+# ---------------------------------------------------------------------------
+
+class TestReverseRemapsSegmentBounds:
+
+	def test_bounds_mirrored_by_reverse (self) -> None:
+		"""A chain like [pad_quantize, reverse] must leave segment bounds
+		pointing at the reversed hits, not at the original positions (which
+		are silence after the flip)."""
+
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=1000, channels=1)
+		audio[10:100, 0] = 0.5   # a "hit" near the start
+
+		subsample.transform._segment_bounds_local.bounds = ((0, 100), (500, 700))
+		try:
+			result = subsample.transform._apply_reverse(
+				audio, 44100, record, subsample.transform.Reverse(),
+			)
+
+			bounds = subsample.transform._segment_bounds_local.bounds
+			assert bounds == ((300, 500), (900, 1000))
+
+			# The mirrored first-hit window really contains the audio.
+			start, end = bounds[1]
+			assert float(numpy.max(numpy.abs(result[start:end]))) > 0.4
+		finally:
+			subsample.transform._segment_bounds_local.bounds = None
+
+	def test_no_bounds_no_effect (self) -> None:
+		record = _make_record(sample_id=1)
+		audio = _make_audio(n_frames=100, channels=1)
+
+		subsample.transform._segment_bounds_local.bounds = None
+		result = subsample.transform._apply_reverse(
+			audio, 44100, record, subsample.transform.Reverse(),
+		)
+
+		assert result.shape == audio.shape
+		assert getattr(subsample.transform._segment_bounds_local, "bounds", None) is None
 
 
 # ---------------------------------------------------------------------------

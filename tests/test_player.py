@@ -576,21 +576,21 @@ class TestStateLock:
 		real_lock = threading.Lock()
 
 		class _TrackingLock:
-			def __enter__(self_inner) -> bool:
+			def __enter__ (self_inner) -> bool:
 				real_lock.acquire()
 				events.append("acquire")
 				return True
 
-			def __exit__(self_inner, *args: typing.Any) -> None:
+			def __exit__ (self_inner, *args: typing.Any) -> None:
 				events.append("release")
 				real_lock.release()
 
-			def acquire(self_inner, *args: typing.Any, **kwargs: typing.Any) -> bool:
+			def acquire (self_inner, *args: typing.Any, **kwargs: typing.Any) -> bool:
 				result = real_lock.acquire(*args, **kwargs)
 				events.append("acquire")
 				return result
 
-			def release(self_inner) -> None:
+			def release (self_inner) -> None:
 				events.append("release")
 				real_lock.release()
 
@@ -1669,6 +1669,58 @@ assignments:
     pan: [50, -10]
 """)
 		with pytest.raises(ValueError, match="pan"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_pick_on_fallback_spec_governs_chain (self, tmp_path: pathlib.Path) -> None:
+		"""A pick declared only on a FALLBACK spec must reach the note map —
+		it was previously ignored in favour of the first spec's default."""
+
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      - where: { name: my-favourite-kick }
+      - where: { reference: BD0025 }
+        pick: [1, 3]
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+		_asgn, pick = note_map[(9, 36)][0]
+		assert pick == subsample.query.PickSpec(1, 3)
+
+	def test_scalar_pan_and_output_raise_value_error (self, tmp_path: pathlib.Path) -> None:
+		"""A scalar `pan: 50` / `output: 3` must raise ValueError (the
+		documented contract) — a TypeError would escape the startup and
+		hot-reload catch sites as an unhandled traceback."""
+
+		for field, value in (("pan", "50"), ("output", "3")):
+			path = self._write_map(tmp_path, f"""
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+    {field}: {value}
+""")
+			with pytest.raises(ValueError, match=field):
+				subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_program_channel_out_of_range_raises (self, tmp_path: pathlib.Path) -> None:
+		"""program_channel 17+ can never match a Program Change message."""
+		path = self._write_map(tmp_path, """
+program_channel: 17
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+""")
+		with pytest.raises(ValueError, match="program_channel"):
 			subsample.player.load_midi_map(path, ["BD0025"])
 
 	def test_repitch_all_notes_same_pick (self, tmp_path: pathlib.Path) -> None:
@@ -3601,7 +3653,7 @@ class TestUpdatePitchedAssignments:
 				pick=subsample.query.PickSpec(1, 3),
 			),),
 			process=subsample.query.ProcessSpec(steps=(
-				subsample.query.ProcessorStep(name="stretch_quantize", params=(("bpm", 120), ("grid", 16))),
+				subsample.query.ProcessorStep(name="stretch_quantize", params=(("tempo", 120), ("grid", 16))),
 			)),
 			one_shot=False,
 		)
@@ -3655,7 +3707,7 @@ class TestUpdatePitchedAssignments:
 			name="Explicit BPM",
 			select=(subsample.query.SelectSpec(order=(subsample.query.OrderClause(by="age", dir="desc"),)),),
 			process=subsample.query.ProcessSpec(steps=(
-				subsample.query.ProcessorStep(name="stretch_quantize", params=(("bpm", 120), ("grid", 8))),
+				subsample.query.ProcessorStep(name="stretch_quantize", params=(("tempo", 120), ("grid", 8))),
 			)),
 			one_shot=False,
 		)
@@ -4527,6 +4579,155 @@ class TestProgramPresetSwitch:
 # MidiPlayer._render_float — gain_db
 # ---------------------------------------------------------------------------
 
+class TestRulesLockSerialisation:
+
+	"""update_assignments and _apply_rule_set must never interleave — a
+	concurrent re-evaluation inside the swap's install→validate→rollback
+	window could rebuild the note map from half-installed rules."""
+
+	def test_concurrent_update_assignments_serialised (self) -> None:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		inside = 0
+		max_inside = 0
+		gauge = threading.Lock()
+		original = player._materialize_zones
+
+		def slow_materialize () -> None:
+			nonlocal inside, max_inside
+			with gauge:
+				inside += 1
+				max_inside = max(max_inside, inside)
+			try:
+				time.sleep(0.05)
+				original()
+			finally:
+				with gauge:
+					inside -= 1
+
+		def run () -> None:
+			# Swallow downstream errors from the mock-backed player — this
+			# test measures serialisation, not the re-evaluation itself.
+			try:
+				player.update_assignments()
+			except Exception:
+				pass
+
+		with unittest.mock.patch.object(player, "_materialize_zones", side_effect=slow_materialize):
+			threads = [threading.Thread(target=run) for _ in range(4)]
+			for t in threads:
+				t.start()
+			for t in threads:
+				t.join()
+
+		assert max_inside == 1, f"re-evaluations interleaved ({max_inside} concurrent)"
+
+	def test_apply_rule_set_reenters_rules_lock (self) -> None:
+		"""_apply_rule_set calls update_assignments while holding the rules
+		lock — the RLock must allow same-thread reentry (no deadlock)."""
+
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		done = threading.Event()
+
+		def run () -> None:
+			player._apply_rule_set({}, (), set())
+			done.set()
+
+		t = threading.Thread(target=run)
+		t.start()
+		t.join(timeout=5.0)
+
+		assert done.is_set(), "_apply_rule_set deadlocked on the rules lock"
+
+
+class TestRenderBitDepth:
+
+	"""_render must convert record.audio by the ARRAY's dtype, not the
+	configured capture bit depth — imported files keep their native dtype,
+	so a 24/32-bit import under a 16-bit config previously rendered
+	~65536x too hot on the int-PCM fallback path."""
+
+	def test_int32_record_under_16bit_config_not_blasted (self) -> None:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,          # capture config says 16-bit...
+		)
+
+		# ...but the record is a 24-bit import: int32 at half scale.
+		record = unittest.mock.MagicMock(spec=subsample.library.SampleRecord)
+		record.audio = numpy.full((100, 1), 2 ** 30, dtype=numpy.int32)
+		record.level = subsample.analysis.LevelResult(peak=0.5, rms=0.3)
+
+		s = float(numpy.sqrt(0.5))
+		mat = numpy.array([[s], [s]], dtype=numpy.float32)
+
+		out = player._render(record, 127, mat)
+
+		assert out is not None
+		# Correct conversion lands well under full scale; the bug produced
+		# a peak in the tens of thousands.
+		assert float(numpy.max(numpy.abs(out))) < 2.0
+
+	def test_int16_record_still_correct (self) -> None:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=24,          # config says 24 — record is a 16-bit file
+		)
+
+		record = unittest.mock.MagicMock(spec=subsample.library.SampleRecord)
+		record.audio = numpy.full((100, 1), 2 ** 14, dtype=numpy.int16)
+		record.level = subsample.analysis.LevelResult(peak=0.5, rms=0.3)
+
+		s = float(numpy.sqrt(0.5))
+		mat = numpy.array([[s], [s]], dtype=numpy.float32)
+
+		out = player._render(record, 127, mat)
+
+		assert out is not None
+		# int16 divisor: 2^14/32768 = 0.5 pre-gain — NOT the near-silence
+		# (2^14/2^31 ~ 7.6e-6) the config-driven divisor produced.
+		assert float(numpy.max(numpy.abs(out))) > 0.05
+
+
 class TestRenderFloatGainDb:
 
 	def _make_player (self) -> subsample.player.MidiPlayer:
@@ -5122,7 +5323,7 @@ class TestBuildEnergyProfileResolver:
 	def test_returns_none_when_no_transform_manager (self) -> None:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="stretch_quantize", params=(("bpm", 120), ("grid", 16)),
+				name="stretch_quantize", params=(("tempo", 120), ("grid", 16)),
 			),
 		))
 		resolver = subsample.player._build_energy_profile_resolver(
@@ -5144,7 +5345,7 @@ class TestBuildEnergyProfileResolver:
 		"""Resolver's get_variant call uses a TransformSpec with a TimeStretch step."""
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="stretch_quantize", params=(("bpm", 120), ("grid", 8)),
+				name="stretch_quantize", params=(("tempo", 120), ("grid", 8)),
 			),
 		))
 		transform_manager = unittest.mock.MagicMock()
@@ -5164,13 +5365,32 @@ class TestBuildEnergyProfileResolver:
 		assert sample_id == 42
 		assert len(spec.steps) == 1
 		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
-		assert spec.steps[0].target_bpm == 120.0   # per-assignment bpm wins
+		assert spec.steps[0].target_bpm == 120.0   # per-assignment tempo wins
 		assert spec.steps[0].resolution == 8
+
+	def test_parser_built_tempo_reaches_resolver (self) -> None:
+		"""END-TO-END through the real parser: the YAML `tempo:` (and legacy
+		`bpm:`) spellings are canonicalised to a "tempo" param, and
+		_quantize_params must read THAT key — a hand-built ("bpm", ...) step
+		is a shape the parser can never produce, and reading "bpm" made every
+		real map's explicit quantize tempo invisible to the resolvers."""
+
+		for spelling in ("tempo", "bpm"):
+			process = subsample.query.parse_process(
+				[{"stretch_quantize": {spelling: 120, "grid": 8}}], "test",
+			)
+
+			bpm, grid = subsample.player._quantize_params(
+				process, "stretch_quantize", config_bpm=0.0,
+			)
+
+			assert bpm == 120.0, spelling   # explicit tempo wins even with no config bpm
+			assert grid == 8
 
 	def test_pad_quantize_builds_padquantize_spec (self) -> None:
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="pad_quantize", params=(("bpm", 90), ("grid", 16)),
+				name="pad_quantize", params=(("tempo", 90), ("grid", 16)),
 			),
 		))
 		transform_manager = unittest.mock.MagicMock()
@@ -5218,7 +5438,7 @@ class TestBuildEnergyProfileResolver:
 		)
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+				name="stretch_quantize", params=(("tempo", 120), ("grid", 4)),
 			),
 		))
 		resolver = subsample.player._build_energy_profile_resolver(
@@ -5233,7 +5453,7 @@ class TestBuildEnergyProfileResolver:
 		transform_manager.get_variant.return_value = None
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+				name="stretch_quantize", params=(("tempo", 120), ("grid", 4)),
 			),
 		))
 		resolver = subsample.player._build_energy_profile_resolver(
@@ -5251,7 +5471,7 @@ class TestBuildEnergyProfileResolver:
 		)
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+				name="stretch_quantize", params=(("tempo", 120), ("grid", 4)),
 			),
 		))
 		resolver = subsample.player._build_energy_profile_resolver(
@@ -5317,7 +5537,7 @@ class TestBeatMatchEndToEnd:
 		# stretch_quantize step so the resolver fires.
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+				name="stretch_quantize", params=(("tempo", 120), ("grid", 4)),
 			),
 		))
 		select = subsample.query.SelectSpec(
@@ -5381,7 +5601,7 @@ class TestBeatMatchEndToEnd:
 
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
-				name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+				name="stretch_quantize", params=(("tempo", 120), ("grid", 4)),
 			),
 		))
 		select = subsample.query.SelectSpec(
@@ -5459,7 +5679,7 @@ class TestBeatMatchEndToEnd:
 			),),
 			process=subsample.query.ProcessSpec(steps=(
 				subsample.query.ProcessorStep(
-					name="stretch_quantize", params=(("bpm", 120), ("grid", 4)),
+					name="stretch_quantize", params=(("tempo", 120), ("grid", 4)),
 				),
 			)),
 			one_shot=False,

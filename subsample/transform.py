@@ -1114,7 +1114,17 @@ class VariantDiskCache:
 					_log.debug("Variant cache: sample rate mismatch in %s — ignoring", path.name)
 					return None
 
+				# Bound the allocation by the file's actual size BEFORE trusting
+				# the header's frame/channel counts — a corrupt (or hostile)
+				# header could otherwise request a multi-gigabyte read.
 				expected_bytes = n_frames * channels * 4
+				actual_size = path.stat().st_size
+
+				if expected_bytes > actual_size:
+					_log.warning("Variant cache: corrupt size header in %s — deleting", path.name)
+					path.unlink(missing_ok=True)
+					return None
+
 				body = f.read(expected_bytes)
 
 				if len(body) < expected_bytes:
@@ -1168,7 +1178,7 @@ class VariantDiskCache:
 
 			audio = numpy.frombuffer(body, dtype=numpy.float32).reshape(n_frames, channels)
 
-			# Touch mtime so recently-used files survive FIFO eviction.
+			# Touch mtime so recently-used files survive the LRU eviction.
 			os.utime(path, None)
 
 			level    = subsample.analysis.LevelResult(peak=peak, rms=rms)
@@ -1191,7 +1201,7 @@ class VariantDiskCache:
 		result:    "TransformResult",
 	) -> None:
 
-		"""Write a variant to disk.  Runs FIFO eviction if over budget."""
+		"""Write a variant to disk.  Runs LRU (by mtime) eviction if over budget."""
 
 		if not self.enabled:
 			return
@@ -1463,10 +1473,11 @@ class TransformProcessor:
 				return
 
 			# Compute the source audio hash once — used for both the disk cache
-			# read check and the write after DSP.
+			# read check and the write after DSP.  Base variants (empty spec)
+			# never touch the disk cache, so skip the full-buffer hash for them.
 			audio_md5: typing.Optional[str] = None
 
-			if record.audio is not None:
+			if self._disk_cache is not None and spec.steps:
 				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
 
 			# Check disk cache before doing expensive DSP.  This covers the
@@ -1649,6 +1660,14 @@ class TransformManager:
 		self._cfg                = cfg
 		self._disk_cache         = disk_cache
 
+		# Source-PCM MD5 per sample_id, memoised because get_variant runs on
+		# the rtmidi dispatch thread (once per trigger, and once PER CANDIDATE
+		# for variant-state selects) — a full-buffer hash + tobytes() copy
+		# there is a latency hazard.  Invalidated on re-add and eviction.
+		# Plain dict: single-key get/set/pop are GIL-atomic, and the worst
+		# race outcome is one redundant recompute of the same digest.
+		self._md5_cache: dict[int, str] = {}
+
 	def get_variant (
 		self,
 		sample_id: int,
@@ -1677,7 +1696,12 @@ class TransformManager:
 
 		# Check disk cache before enqueuing a (possibly expensive) recompute.
 		if self._disk_cache is not None and record is not None and record.audio is not None:
-			audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+			audio_md5 = self._md5_cache.get(sample_id)
+
+			if audio_md5 is None:
+				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+				self._md5_cache[sample_id] = audio_md5
+
 			disk_hit = self._disk_cache.get(audio_md5, spec, key)
 
 			if disk_hit is not None:
@@ -1744,6 +1768,10 @@ class TransformManager:
 		precise set.
 		"""
 
+		# A re-added sample (same id, new capture) has new PCM — the memoised
+		# source hash must not survive it.
+		self._md5_cache.pop(record.sample_id, None)
+
 		# Base variant: always enqueue regardless of pitch content.
 		self._processor.enqueue(record, _BASE_VARIANT_SPEC)
 
@@ -1756,6 +1784,7 @@ class TransformManager:
 		"""
 
 		for sid in sample_ids:
+			self._md5_cache.pop(sid, None)
 			evicted = self._cache.remove_parent(sid)
 
 			if evicted:
@@ -2225,6 +2254,17 @@ def _apply_reverse (
 	Returns a contiguous copy — the negative-stride view from [::-1] can
 	break downstream C-based DSP (pyrubberband, soundfile, etc.).
 	"""
+
+	# If an earlier quantize step published segment bounds, mirror them so
+	# segment playback still points at the (now reversed) hits — without this
+	# a chain like [pad_quantize, reverse] leaves bounds aimed at silence.
+	bounds = getattr(_segment_bounds_local, "bounds", None)
+
+	if bounds is not None:
+		n = audio.shape[0]
+		_segment_bounds_local.bounds = tuple(
+			sorted((n - end, n - start) for start, end in bounds)
+		)
 
 	return audio[::-1].copy()
 
@@ -3925,9 +3965,18 @@ def spec_from_process (
 
 		elif proc.name == "radio":
 			# Enum strings are validated at parse time; numeric params CC-bind.
+			_radio_mode = str(proc.get("mode", "am")).lower()
 			_bw_raw = _resolve_cc(proc.get("bandwidth"), cc_state, cc_omni=cc_omni)
+
+			# Plain bandwidth values are validated at parse; a CC binding
+			# resolves per-trigger, so clamp above the mode's filter floor
+			# here (mirrors the signal/static/fade clamps below).
+			if _bw_raw is not None:
+				_bw_floor = 301.0 if _radio_mode in ("fm", "ssb") else 1.0
+				_bw_raw = max(_bw_floor, float(_bw_raw))
+
 			steps.append(Radio(
-				mode=str(proc.get("mode", "am")).lower(),
+				mode=_radio_mode,
 				demod=str(proc.get("demod", "matched")).lower(),
 				tune=float(_resolve_cc(proc.get("tune"), cc_state, 0.0, cc_omni=cc_omni)),
 				signal=max(0.0, min(1.0, float(_resolve_cc(proc.get("signal"), cc_state, 0.0, cc_omni=cc_omni)))),
@@ -3996,9 +4045,9 @@ def spec_from_process (
 						carrier_str = reference_path
 					else:
 						_warn_once(
-						"vocoder-no-reference-path",
-						"vocoder carrier: reference but no reference path available — skipped",
-					)
+							"vocoder-no-reference-path",
+							"vocoder carrier: reference but no reference path available — skipped",
+						)
 						continue
 				else:
 					# Explicit file path — resolve relative to cwd.
@@ -4012,9 +4061,9 @@ def spec_from_process (
 				))
 			else:
 				_warn_once(
-				"vocoder-no-carrier",
-				"vocoder requires a 'carrier' parameter — skipped",
-			)
+					"vocoder-no-carrier",
+					"vocoder requires a 'carrier' parameter — skipped",
+				)
 
 		else:
 			_log.warning("Unknown processor %r — skipped", proc.name)

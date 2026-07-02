@@ -125,6 +125,12 @@ class InstrumentWatcher:
 		self._in_flight = 0
 		self._idle = threading.Condition(self._lock)
 
+		# Sidecars the AUDIO path is about to write itself (via
+		# ensure_sample_assets).  Each entry suppresses exactly one sidecar
+		# event so a dropped audio file is not loaded twice — once by the
+		# audio path and again by its own sidecar write.  Protected by _lock.
+		self._self_written_sidecars: set[pathlib.Path] = set()
+
 		handler = _InstrumentFileHandler(
 			sidecar_callback=self._on_sidecar_event,
 			audio_callback=self._on_audio_file_event,
@@ -209,6 +215,14 @@ class InstrumentWatcher:
 			return
 
 		with self._lock:
+			# One-shot suppression: this sidecar was just written by our own
+			# audio path, which is already loading the sample — reacting to
+			# it would integrate the same file twice.  Discard the entry so a
+			# LATER external regeneration of the sidecar still triggers.
+			if path in self._self_written_sidecars:
+				self._self_written_sidecars.discard(path)
+				return
+
 			if self._stopped:
 				return
 
@@ -524,6 +538,14 @@ class InstrumentWatcher:
 			audio_path.name,
 		)
 
+		# ensure_sample_assets writes the sidecar itself; register it for
+		# suppression FIRST so the resulting watchdog event cannot trigger a
+		# second load of the same sample through the sidecar path.
+		expected_sidecar = subsample.cache.cache_path(audio_path).resolve()
+
+		with self._lock:
+			self._self_written_sidecars.add(expected_sidecar)
+
 		result = subsample.cache.ensure_sample_assets(audio_path, with_preview=self._with_preview)
 
 		if result is None:
@@ -531,6 +553,12 @@ class InstrumentWatcher:
 				"Watcher: could not analyze %s — skipping",
 				audio_path.name,
 			)
+
+			# No sidecar was successfully produced — drop the suppression so
+			# a later external sidecar for this file still triggers a load.
+			with self._lock:
+				self._self_written_sidecars.discard(expected_sidecar)
+
 			return
 
 		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result

@@ -4,7 +4,7 @@ Decouples audio capture from analysis and disk I/O by running per-sample
 work on a thread-pool executor. The recorder thread hands off completed
 recordings via enqueue() (submit() is the internal executor call); each
 worker independently runs the full pipeline:
-  convert → analyze → write WAV → save sidecar → invoke on_complete callback
+  convert → analyze → write audio file (WAV or FLAC per audio_format) → save sidecar → invoke on_complete callback
 
 Worker count is auto-scaled from os.cpu_count() at construction time — no
 configuration needed. Two cores are reserved for audio threads (recorder +
@@ -147,7 +147,7 @@ class SampleProcessor:
 	"""Processes audio recordings on a thread-pool executor.
 
 	Each submitted recording runs the full pipeline concurrently:
-	  convert → analyze → write WAV → save sidecar → on_complete callback
+	  convert → analyze → write audio file → save sidecar → on_complete callback
 
 	Worker count is auto-scaled from os.cpu_count() — see _compute_worker_count().
 	Results may complete out of order; InstrumentLibrary and SimilarityMatrix
@@ -160,7 +160,7 @@ class SampleProcessor:
 		processor.shutdown()
 
 	IMPORTANT: shutdown() must be called before the process exits to ensure
-	all in-flight recordings complete and their WAV files are written.
+	all in-flight recordings complete and their audio files are written.
 	"""
 
 	def __init__ (
@@ -320,7 +320,7 @@ class SampleProcessor:
 
 		"""Full processing pipeline for a single recording. Runs on a worker thread.
 
-		Sequence: convert → analyze → write WAV → save sidecar → on_complete callback.
+		Sequence: convert → analyze → write audio file (WAV/FLAC) → save sidecar → on_complete callback.
 		Exceptions are caught and logged so one failed recording never kills the worker.
 		"""
 

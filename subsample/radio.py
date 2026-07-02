@@ -47,9 +47,9 @@ _FM_DEV_HZ:   typing.Final[float] = 2500.0    # NFM peak deviation
 _DEEMPH_TAU:  typing.Final[float] = 750e-6    # NFM de-emphasis time constant
 _CRACKLE_TAU: typing.Final[float] = 0.9e-3    # sferic IF-ring decay
 
-_MODES:  typing.Final[frozenset[str]] = frozenset({"am", "lw", "fm", "ssb"})
-_DEMODS: typing.Final[frozenset[str]] = frozenset({"matched", "am", "fm", "ssb"})
-_STEREO: typing.Final[frozenset[str]] = frozenset({"mono", "stereo"})
+# Valid mode/demod/stereo enum strings are enforced at MIDI-map parse time in
+# query.py's radio validation block; by the time render_radio runs they are
+# trusted (an unknown demod falls back to the AM detector by construction).
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +61,10 @@ def _t (n: int, sr: float) -> numpy.ndarray:
 
 
 def _analytic (x: numpy.ndarray) -> numpy.ndarray:
+	# ⓒ Buffers shorter than ~10 frames make the zero-phase filters below
+	# raise (sosfiltfilt padlen).  That is out of contract by design: no
+	# capture or pipeline path produces sub-10-frame audio, and guarding
+	# every helper would add noise to the hot DSP for an unreachable case.
 	return scipy.signal.hilbert(numpy.asarray(x, dtype=numpy.float64))
 
 
@@ -190,18 +194,23 @@ def channel_filter (
 	"""Per-mode transmit/IF band-limit.  am/lw keep the lows (steep low-pass);
 	fm/ssb are the band-passed 'comms' band.  `bandwidth` overrides the top."""
 	msg = numpy.asarray(msg, dtype=numpy.float64)
+
+	# Bandwidth is validated at MIDI-map parse time and clamped for CC
+	# bindings at build time; the floors here are a last-resort guard for
+	# direct construction so the filter design can never raise mid-render.
 	if mode in ("am", "lw"):
 		hi = bandwidth if bandwidth is not None else (4200.0 if mode == "lw" else 4500.0)
-		hi = min(hi, sr / 2.0 - 100.0)
+		hi = min(max(hi, 1.0), sr / 2.0 - 100.0)
 		if mode == "lw":
 			sos = scipy.signal.ellip(8, 0.5, 60.0, hi, btype="low", fs=sr, output="sos")
 		else:
 			sos = scipy.signal.butter(6, hi, btype="low", fs=sr, output="sos")
 		return scipy.signal.sosfiltfilt(sos, msg)
+
 	# fm / ssb: band-pass comms band
 	lo = 300.0
 	hi = bandwidth if bandwidth is not None else (3000.0 if mode == "fm" else 2700.0)
-	hi = min(hi, sr / 2.0 - 100.0)
+	hi = min(max(hi, lo + 1.0), sr / 2.0 - 100.0)
 	sos = scipy.signal.butter(6, [lo, hi], btype="band", fs=sr, output="sos")
 	return scipy.signal.sosfiltfilt(sos, msg)
 
@@ -314,6 +323,20 @@ def _soft_ceiling (x: numpy.ndarray, ceil: float = 0.99) -> numpy.ndarray:
 	return ceil * numpy.tanh(x / ceil)
 
 
+def _max_windowed_rms (energy: numpy.ndarray, sr: float, win_s: float = 0.05) -> float:
+	"""RMS of the loudest `win_s` window, from per-sample energy (x^2).
+
+	O(n) via a cumulative sum; buffers shorter than one window fall back to
+	the whole-buffer RMS."""
+	w = max(1, int(win_s * sr))
+
+	if len(energy) <= w:
+		return float(numpy.sqrt(numpy.mean(energy))) if len(energy) else 0.0
+
+	cum = numpy.cumsum(numpy.concatenate([[0.0], energy]))
+	return float(numpy.sqrt(numpy.max(cum[w:] - cum[:-w]) / w))
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -421,10 +444,12 @@ def render_radio (
 	else:
 		messages = [audio[:, c] for c in range(channels)]
 
-	# Shared normalisation across channels preserves the L/R balance.
+	# Shared normalisation across channels preserves the L/R balance.  A
+	# silent message (e.g. out-of-phase stereo collapsed to mono) recovers
+	# silence, so blend the dry per mix exactly like the silence guard below.
 	peak = max(float(numpy.max(numpy.abs(m))) for m in messages) + 1e-12
 	if peak < 1e-9:
-		return audio.astype(numpy.float32)
+		return (audio * numpy.float32(1.0 - mix)).astype(numpy.float32)
 
 	received = [
 		_receive_one(
@@ -442,13 +467,17 @@ def render_radio (
 		wet = numpy.stack(received, axis=1)
 
 	# Silence guard: a near-silent wrong-demod must not be level-matched into
-	# hash.  Demods are message-scaled, so a recovered signal sits at ~0.1-0.8
-	# RMS while a dead cross-demod (AM-of-FM, FM-of-AM) collapses to ~1e-3.
-	pre_rms = float(numpy.sqrt(numpy.mean(wet ** 2)))
-	if pre_rms < 0.02:
+	# hash.  The statistic is the LOUDEST 50 ms window's RMS, not whole-buffer
+	# RMS — a real hit followed by a long silent tail must not be muted by its
+	# own tail (whole-buffer RMS shrinks with the silent fraction; the loudest
+	# window does not).  Measured separation: recovered content ≥ ~0.16 in its
+	# loudest window while a dead cross-demod (AM-of-FM, FM-of-AM) leaves only
+	# isolated edge clicks ≤ ~0.06, so 0.02 splits the classes with margin.
+	guard_rms = _max_windowed_rms(numpy.mean(wet ** 2, axis=1), float(sample_rate))
+	if guard_rms < 0.02:
 		_log.warning(
-			"radio: mode=%r demod=%r recovered no signal (rms %.2e) — output muted",
-			mode, demod, pre_rms,
+			"radio: mode=%r demod=%r recovered no signal (loudest-window rms %.2e) — output muted",
+			mode, demod, guard_rms,
 		)
 		return (audio * numpy.float32(1.0 - mix)).astype(numpy.float32)
 

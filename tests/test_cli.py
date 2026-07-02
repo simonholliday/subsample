@@ -1,9 +1,12 @@
 """Tests for subsample.cli — argument parsing and detection pipeline helpers."""
 
+import logging
 import pathlib
 import sys
+import textwrap
 import typing
 import unittest.mock
+import wave
 
 import numpy
 import pytest
@@ -224,6 +227,66 @@ def _make_record (
 		duration    = 1.0,
 		audio       = audio,
 	)
+
+
+class TestProcessInputFiles:
+
+	"""End-to-end smoke for the file-input mode entry point: a real WAV with
+	a clear burst goes through detection and lands as segment file(s) in the
+	output directory.  This ~140-line path previously had no test at all."""
+
+	def test_burst_wav_produces_segments (self, tmp_path: pathlib.Path) -> None:
+		out_dir = tmp_path / "out"
+		out_dir.mkdir()
+
+		# 0.4 s near-silence, 0.8 s loud 440 Hz burst, 0.6 s near-silence.
+		sr = 44100
+		rng = numpy.random.default_rng(42)
+		quiet_a = (rng.standard_normal(int(0.4 * sr)) * 20).astype(numpy.int16)
+		t = numpy.arange(int(0.8 * sr)) / sr
+		burst = (0.8 * 32767 * numpy.sin(2 * numpy.pi * 440 * t)).astype(numpy.int16)
+		quiet_b = (rng.standard_normal(int(0.6 * sr)) * 20).astype(numpy.int16)
+		samples = numpy.concatenate([quiet_a, burst, quiet_b])
+
+		wav_path = tmp_path / "field.wav"
+		with wave.open(str(wav_path), "wb") as wf:
+			wf.setnchannels(1)
+			wf.setsampwidth(2)
+			wf.setframerate(sr)
+			wf.writeframes(samples.tobytes())
+
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(textwrap.dedent(f"""\
+			output:
+			  directory: {out_dir}
+			detection:
+			  snr_threshold_db: 10.0
+			  warmup_seconds: 0.0
+			  hold_time: 0.15
+		"""))
+		cfg = subsample.config.load_config(config_file)
+
+		subsample.cli._process_input_files([wav_path], cfg)
+
+		segments = sorted(out_dir.glob("field*"))
+		assert segments, "no segments written for a clear burst"
+
+	def test_missing_and_unreadable_files_skipped (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		bad = tmp_path / "not_audio.wav"
+		bad.write_bytes(b"this is not a wav file")
+
+		cfg = subsample.config.load_config(None)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.cli"):
+			subsample.cli._process_input_files(
+				[tmp_path / "missing.wav", bad], cfg,
+			)
+
+		messages = " | ".join(r.message for r in caplog.records)
+		assert "not found" in messages
+		assert "Could not read" in messages
 
 
 class TestIntegrateSample:

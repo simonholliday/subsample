@@ -642,25 +642,28 @@ def load_instrument_library (
 	# Phase 2 — sequential: construct SampleRecords and add to the library in
 	# sorted path order. allocate_id() is called here (not in workers) so
 	# IDs are assigned in a deterministic order and FIFO eviction works correctly.
-	# Collision detection lives here too — by the time Phase 2 runs we know
-	# every successfully-loaded sample's stem, so a duplicate is a fatal
-	# user error rather than a load-order race.
+	# Collision detection lives here too — against a LOAD-SCOPED seen-stem map,
+	# not the live library: FIFO eviction under a tight memory budget can
+	# remove the first duplicate mid-load, and querying the live library would
+	# then silently miss the collision.  The seen map makes detection
+	# unconditional, as the error message promises.
 	loaded = 0
+	seen_stems: dict[str, pathlib.Path] = {}
 
 	for loaded_sample in raw_results:
 		if loaded_sample is None:
 			continue
 
-		existing_id = lib.find_by_name(loaded_sample.name)
-		if existing_id is not None:
-			existing = lib.get(existing_id)
-			existing_path = existing.filepath if existing is not None else None
+		first_path = seen_stems.get(loaded_sample.name)
+		if first_path is not None:
 			raise InstrumentLibraryError(
 				f"Stem collision: '{loaded_sample.name}' appears at both "
-				f"{existing_path} and {loaded_sample.audio_path}. "
+				f"{first_path} and {loaded_sample.audio_path}. "
 				f"The instrument library is keyed by filename stem; rename "
 				f"or move one file so each stem is unique across the library."
 			)
+
+		seen_stems[loaded_sample.name] = loaded_sample.audio_path
 
 		record = SampleRecord(
 			sample_id      = allocate_id(),

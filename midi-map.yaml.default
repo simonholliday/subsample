@@ -9,7 +9,8 @@
 #   2. Uncomment any of the EXAMPLES below to try them
 #   3. Delete or comment out the ACTIVE assignments at the bottom
 #      if you don't want the default drum kit + pitched keyboard
-#   4. Save - Subsample reloads the map automatically
+#   4. Save - Subsample reloads the map automatically when
+#      player.watch_midi_map is true in config.yaml (else restart)
 #
 # Conventions:
 #   Channels   1-16 (standard MIDI numbering)

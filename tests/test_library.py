@@ -566,6 +566,35 @@ class TestLoadInstrumentLibrary:
 		messages = [r.message for r in caplog.records]
 		assert any("orphaned" in m.lower() for m in messages)
 
+	def test_stem_collision_detected_despite_mid_load_eviction (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+		"""The duplicate-stem check must be unconditional: under a tight
+		memory budget, FIFO eviction can remove the FIRST duplicate before
+		the second loads — querying the live library would silently miss
+		the collision (the load-scoped seen-stem map must not)."""
+
+		for sub in ("a_kicks", "m_fillers", "z_snares"):
+			(tmp_path / sub).mkdir()
+
+		_write_wav_and_sidecar(tmp_path / "a_kicks", "01", n_frames=4096)
+		for i in range(3):
+			_write_wav_and_sidecar(tmp_path / "m_fillers", f"f{i}", n_frames=4096)
+		_write_wav_and_sidecar(tmp_path / "z_snares", "01", n_frames=4096)
+
+		# Generous budget: collision detected while both copies coexist.
+		with pytest.raises(subsample.library.InstrumentLibraryError, match="Stem collision"):
+			subsample.library.load_instrument_library(
+				tmp_path, 10 * 1024 * 1024, with_preview=False,
+			)
+
+		# Tight budget: the first '01' is FIFO-evicted mid-load — the
+		# collision must STILL raise.
+		with pytest.raises(subsample.library.InstrumentLibraryError, match="Stem collision"):
+			subsample.library.load_instrument_library(
+				tmp_path, 16000, with_preview=False,
+			)
+
 	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
 		_write_wav_and_sidecar(tmp_path, "KICK")
 		_write_wav_and_sidecar(tmp_path, "SNARE")

@@ -842,6 +842,60 @@ class TestParseProcess:
 			with pytest.raises(ValueError, match=f"radio {amount} must be"):
 				subsample.query.parse_process([{"radio": {amount: 1.5}}], "test")
 
+	def test_radio_bandwidth_validated_at_parse (self) -> None:
+		"""bandwidth at/below the band-pass floor (fm/ssb) or non-positive
+		(am/lw) must fail at load — at render time the filter design raises
+		inside the worker and the variant silently never appears."""
+
+		for bad_mode, bad_bw in (("fm", 200), ("ssb", 300), ("am", 0), ("lw", -50)):
+			with pytest.raises(ValueError, match="radio bandwidth"):
+				subsample.query.parse_process(
+					[{"radio": {"mode": bad_mode, "bandwidth": bad_bw}}], "test",
+				)
+
+		# Legal values and CC bindings still parse.
+		subsample.query.parse_process([{"radio": {"mode": "fm", "bandwidth": 2500}}], "test")
+		subsample.query.parse_process(
+			[{"radio": {"mode": "fm", "bandwidth": {"cc": 70, "min": 500, "max": 3000}}}], "test",
+		)
+
+	def test_repitch_note_validated_at_parse (self) -> None:
+		"""An invalid fixed note must fail at load, not on every note-on."""
+
+		for good in (60, "C4", "F#3"):
+			subsample.query.parse_process([{"repitch": {"note": good}}], "test")
+
+		with pytest.raises(ValueError, match="not a valid note name"):
+			subsample.query.parse_process([{"repitch": {"note": "H4"}}], "test")
+
+		with pytest.raises(ValueError, match="outside the MIDI range"):
+			subsample.query.parse_process([{"repitch": {"note": 200}}], "test")
+
+		with pytest.raises(ValueError, match="repitch note"):
+			subsample.query.parse_process([{"repitch": {"note": True}}], "test")
+
+	def test_cc_binding_ranges_validated_at_parse (self) -> None:
+		"""Out-of-range cc/channel can never match an incoming message — the
+		knob would be silently dead, so reject at load."""
+
+		with pytest.raises(ValueError, match="cc 200 outside"):
+			subsample.query.parse_process(
+				[{"filter_low": {"freq": {"cc": 200}}}], "test",
+			)
+
+		for bad_channel in (0, 17):
+			with pytest.raises(ValueError, match="outside the MIDI range 1-16"):
+				subsample.query.parse_process(
+					[{"filter_low": {"freq": {"cc": 74, "channel": bad_channel}}}], "test",
+				)
+
+		# The extremes of the legal ranges still parse.
+		spec = subsample.query.parse_process(
+			[{"filter_low": {"freq": {"cc": 127, "channel": 16}}}], "test",
+		)
+		binding = spec.steps[0].get("freq")
+		assert isinstance(binding, subsample.query.CcBinding)
+
 	def test_radio_amount_cc_binding_accepted (self) -> None:
 		spec = subsample.query.parse_process(
 			[{"radio": {"mode": "am", "signal": {"cc": 70, "min": 0, "max": 1}}}], "test",
@@ -1274,6 +1328,19 @@ class TestParsePick:
 	def test_dict_gte_lte (self) -> None:
 		specs = subsample.query.parse_select({"pick": {"gte": 1, "lte": 3}}, "test")
 		assert specs[0].pick == subsample.query.PickSpec(1, 3)
+
+	def test_conflicting_operators_rejected (self) -> None:
+		"""Conflicting operator combinations must fail loudly, not be
+		silently resolved by elif precedence."""
+
+		with pytest.raises(ValueError, match="'eq' cannot be combined"):
+			subsample.query.parse_select({"pick": {"eq": 2, "gte": 1}}, "test")
+
+		with pytest.raises(ValueError, match="'gte' and 'gt'"):
+			subsample.query.parse_select({"pick": {"gte": 1, "gt": 2}}, "test")
+
+		with pytest.raises(ValueError, match="'lte' and 'lt'"):
+			subsample.query.parse_select({"pick": {"lte": 3, "lt": 4}}, "test")
 
 	def test_dict_gt_lt (self) -> None:
 		"""gt/lt shift bounds: gt: 1 → lo=2, lt: 5 → hi=4."""
@@ -1758,6 +1825,26 @@ class TestParseNamePatternForms:
 	and regex (`regex:`).  Existing scalar string form is still covered
 	by TestNamePathSplit."""
 
+	def test_leading_dot_regex_accepted (self) -> None:
+		"""`regex: ".*kick.*"` is the natural fullmatch-contains spelling —
+		a leading '.' is the regex wildcard, not a path.  Slashes are still
+		path-like; globs keep the leading-dot (hidden-file) rejection."""
+
+		specs = subsample.query.parse_select(
+			{"where": {"name": {"regex": ".*kick.*"}}}, "test",
+		)
+		assert specs[0].where.name_regex == ".*kick.*"
+
+		with pytest.raises(ValueError, match="path-like"):
+			subsample.query.parse_select(
+				{"where": {"name": {"regex": "kicks/deep.*"}}}, "test",
+			)
+
+		with pytest.raises(ValueError, match="path-like"):
+			subsample.query.parse_select(
+				{"where": {"name": {"matches": ".hidden*"}}}, "test",
+			)
+
 	# -- Happy paths --
 
 	def test_list_form_parses_to_tuple (self) -> None:
@@ -2185,6 +2272,28 @@ class TestBeatMatchHelpers:
 	def test_downsample_empty (self) -> None:
 		assert subsample.query._downsample_to_beats([], resolution=16) == ()
 
+	def test_downsample_triplet_resolution_fallback (self) -> None:
+		"""Non-multiple-of-4 resolutions take the array_split fallback: 6
+		slots @ resolution=6 → 4 beats, buckets differing by at most one
+		slot (best-effort aggregation the docstring advertises)."""
+
+		energy = [1.0, 1.0, 0.0, 0.0, 0.5, 0.5]
+		beats = subsample.query._downsample_to_beats(energy, resolution=6)
+
+		assert len(beats) == 4
+		# array_split(6, 4) → sizes (2, 2, 1, 1): means are deterministic.
+		assert beats == (1.0, 0.0, 0.5, 0.5)
+
+	def test_downsample_uneven_slot_count_fallback (self) -> None:
+		"""A slot count that does not divide by slots-per-beat also takes
+		the fallback path rather than raising."""
+
+		energy = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]   # 7 slots @ res 8
+		beats = subsample.query._downsample_to_beats(energy, resolution=8)
+
+		assert len(beats) == 4
+		assert all(0.0 <= b <= 1.0 for b in beats)
+
 	def test_cosine_identical_vectors (self) -> None:
 		score = subsample.query._cosine_similarity_truncated(
 			[1.0, 0.0, 1.0, 0.0], [1.0, 0.0, 1.0, 0.0], 4,
@@ -2247,6 +2356,28 @@ class TestBeatMatchParseValidation:
 			subsample.query.parse_select(
 				{"order": [{"by": "beat_match"}]}, "test",
 			)
+
+	def test_omitted_dir_defaults_to_best_match_first (self) -> None:
+		"""Match-quality scorers default desc (best first) when dir is
+		omitted — the README's own beat_match example relies on this; the
+		generic asc default would rank WORST matches first."""
+
+		specs = subsample.query.parse_select(
+			{"order": [{"by": "beat_match", "pattern": [1, 0, 1, 0]}]}, "test",
+		)
+		assert specs[0].order[0].dir == "desc"
+
+		specs = subsample.query.parse_select(
+			{"order": [{"by": "similarity"}], "where": {"reference": "samples/reference/GM36_BassDrum1.wav"}}, "test",
+		)
+		assert specs[0].order[0].dir == "desc"
+
+		# Explicit asc is still honoured, and other scorers keep asc.
+		specs = subsample.query.parse_select(
+			{"order": [{"by": "beat_match", "pattern": [1, 0], "dir": "asc"}, {"by": "duration"}]}, "test",
+		)
+		assert specs[0].order[0].dir == "asc"
+		assert specs[0].order[1].dir == "asc"
 
 	def test_non_list_pattern_raises (self) -> None:
 		with pytest.raises(ValueError, match="must be a list"):

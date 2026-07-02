@@ -1,6 +1,7 @@
 """Tests for subsample.config config loading and validation."""
 
 import dataclasses
+import logging
 import pathlib
 import textwrap
 import typing
@@ -134,6 +135,39 @@ class TestLoadDefault:
 
 
 class TestLoadCustomConfig:
+
+	def test_unknown_keys_warn_by_name (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A typo'd key must warn with its name and section — previously it
+		was silently ignored and the default silently used."""
+
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(textwrap.dedent("""\
+			player:
+			  enabled: false
+			  audio:
+			    max_polyphony: 16
+			transform:
+			  target_bmp: 120.0
+		"""))
+
+		with caplog.at_level(logging.WARNING, logger="subsample.config"):
+			subsample.config.load_config(config_file)
+
+		messages = " | ".join(r.message for r in caplog.records)
+		assert "max_polyphony" in messages and "player.audio" in messages
+		assert "target_bmp" in messages and "transform" in messages
+
+	def test_default_config_loads_without_unknown_key_warnings (
+		self, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""The shipped default file must never trip the unknown-key sweep."""
+
+		with caplog.at_level(logging.WARNING, logger="subsample.config"):
+			subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		assert not [r for r in caplog.records if "unknown key" in r.message]
 
 	def test_loads_custom_yaml (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
