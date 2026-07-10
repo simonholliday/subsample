@@ -741,9 +741,20 @@ def load_wav_audio (
 
 		# Convert back to original integer dtype.
 		if original_dtype == numpy.int16:
+			# 32767 is exactly representable in float32, so the clip ceiling
+			# genuinely caps here — no promotion needed.
 			audio = numpy.clip(resampled * 32768.0, -32768, 32767).astype(numpy.int16)
 		elif original_dtype == numpy.int32:
-			audio = numpy.clip(resampled * 2147483648.0, -2147483648, 2147483647).astype(numpy.int32)
+			# Promote to float64 for the scale+clip+cast.  In float32 the ceiling
+			# 2147483647 rounds UP to 2^31, so a full-scale sample that overshoots
+			# on resampling (Gibbs ringing pushes the peak past 1.0) survives the
+			# clip as 2^31 and then overflows int32 on the cast — warning aside,
+			# the peak wraps to the full-negative rail (an audible click).  float64
+			# represents 2147483647 exactly, so the clip caps and the cast is in
+			# range.  Mirrors audio.float32_to_pcm_bytes's 24-bit path.
+			audio = numpy.clip(
+				resampled.astype(numpy.float64) * 2147483648.0, -2147483648, 2147483647,
+			).astype(numpy.int32)
 		else:
 			audio = resampled
 

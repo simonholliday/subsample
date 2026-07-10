@@ -1390,6 +1390,134 @@ class TestHasStablePitch:
 		assert subsample.analysis.has_stable_pitch(self._spectral(), self._pitch(), 0.05) is False
 
 
+class TestEffectiveAttackTimes:
+
+	"""Tests for effective_attack_times()."""
+
+	def _rhythm (
+		self,
+		attack_times: tuple[float, ...] = (),
+		onset_times: tuple[float, ...] = (),
+	) -> subsample.analysis.RhythmResult:
+		return subsample.analysis.RhythmResult(
+			tempo_bpm        = 120.0,
+			beat_times       = (),
+			pulse_curve      = numpy.zeros(4, dtype=numpy.float32),
+			pulse_peak_times = (),
+			onset_times      = onset_times,
+			attack_times     = attack_times,
+			onset_count      = len(onset_times),
+		)
+
+	def test_prefers_attack_times (self) -> None:
+		"""Sample-accurate attack times win when present."""
+		rhythm = self._rhythm(attack_times=(0.08, 0.57), onset_times=(0.1, 0.6))
+
+		assert subsample.analysis.effective_attack_times(rhythm) == (0.08, 0.57)
+
+	def test_falls_back_to_onset_times (self) -> None:
+		"""Pre-v10 sidecars have no attack_times — onsets are used instead."""
+		rhythm = self._rhythm(attack_times=(), onset_times=(0.1, 0.6))
+
+		assert subsample.analysis.effective_attack_times(rhythm) == (0.1, 0.6)
+
+	def test_both_empty_returns_empty (self) -> None:
+		"""A hit-less sample yields an empty map, not an error."""
+		assert subsample.analysis.effective_attack_times(self._rhythm()) == ()
+
+
+class TestHasBeatMap:
+
+	"""Tests for has_beat_map() — the quantize-eligibility test shared by the
+	transform handlers and the sample catalog."""
+
+	def _rhythm (
+		self,
+		attack_times: tuple[float, ...] = (),
+		onset_times: tuple[float, ...] = (),
+	) -> subsample.analysis.RhythmResult:
+		return subsample.analysis.RhythmResult(
+			tempo_bpm        = 120.0,
+			beat_times       = (),
+			pulse_curve      = numpy.zeros(4, dtype=numpy.float32),
+			pulse_peak_times = (),
+			onset_times      = onset_times,
+			attack_times     = attack_times,
+			onset_count      = len(onset_times),
+		)
+
+	def test_two_attacks_pass (self) -> None:
+		"""Two detected hits are enough to align to a beat grid."""
+		assert subsample.analysis.has_beat_map(self._rhythm(attack_times=(0.1, 0.5))) is True
+
+	def test_single_attack_fails (self) -> None:
+		"""A one-shot has no internal rhythm to quantize."""
+		assert subsample.analysis.has_beat_map(self._rhythm(attack_times=(0.1,))) is False
+
+	def test_no_attacks_fails (self) -> None:
+		"""Silence / onset-less audio is not quantizable."""
+		assert subsample.analysis.has_beat_map(self._rhythm()) is False
+
+	def test_legacy_onsets_pass (self) -> None:
+		"""Pre-v10 sidecars qualify via onset_times when attack_times is empty."""
+		assert subsample.analysis.has_beat_map(self._rhythm(onset_times=(0.1, 0.5))) is True
+
+
+class TestNoisiness:
+
+	"""Tests for noisiness() — the [0, 1] noise-likeness compound."""
+
+	def _spectral (self, voiced_fraction: float) -> subsample.analysis.AnalysisResult:
+		return subsample.analysis.AnalysisResult(
+			spectral_flatness=0.0, attack=0.0, release=0.0,
+			spectral_centroid=0.0, spectral_bandwidth=0.0,
+			zcr=0.0, harmonic_ratio=0.0, spectral_contrast=0.0,
+			voiced_fraction=voiced_fraction, log_attack_time=0.0, spectral_flux=0.0,
+		)
+
+	def _level (self, rms: float, noise_floor: float) -> subsample.analysis.LevelResult:
+		return subsample.analysis.LevelResult(peak=1.0, rms=rms, noise_floor=noise_floor)
+
+	def test_silence_is_zero (self) -> None:
+		"""rms == 0 (silent sample) → 0.0, not a divide-by-zero."""
+		assert subsample.analysis.noisiness(self._spectral(0.0), self._level(0.0, 0.0)) == 0.0
+
+	def test_stationary_unpitched_scores_high (self) -> None:
+		"""Static: noise_floor near rms (never quiet) and no pitch → near 1."""
+		score = subsample.analysis.noisiness(self._spectral(0.0), self._level(1.0, 0.9))
+		assert score == pytest.approx(0.9)
+
+	def test_pitched_sustained_is_rescued (self) -> None:
+		"""A held tone is stationary too, but voiced_fraction 1.0 zeroes the score."""
+		score = subsample.analysis.noisiness(self._spectral(1.0), self._level(1.0, 0.9))
+		assert score == pytest.approx(0.0)
+
+	def test_decaying_hit_scores_low (self) -> None:
+		"""A hit that rings into silence has near-zero noise_floor → low score."""
+		score = subsample.analysis.noisiness(self._spectral(0.3), self._level(0.5, 0.01))
+		assert score < 0.05
+
+	def test_noise_floor_clamped_to_one (self) -> None:
+		"""noise_floor > rms clamps stationarity to 1 (never exceeds the [0,1] range)."""
+		score = subsample.analysis.noisiness(self._spectral(0.0), self._level(1.0, 2.0))
+		assert score == pytest.approx(1.0)
+
+	def test_zero_noise_floor_is_zero (self) -> None:
+		"""Unmeasured noise_floor (0.0) → conservative 0.0, not a false positive."""
+		assert subsample.analysis.noisiness(self._spectral(0.0), self._level(0.5, 0.0)) == 0.0
+
+	def test_partial_voicing_scales_linearly (self) -> None:
+		"""voiced_fraction 0.5 halves the stationarity contribution."""
+		score = subsample.analysis.noisiness(self._spectral(0.5), self._level(1.0, 0.8))
+		assert score == pytest.approx(0.4)
+
+	def test_always_in_unit_range (self) -> None:
+		for vf in (0.0, 0.25, 0.5, 1.0):
+			for rms, nf in ((1.0, 0.0), (1.0, 0.5), (1.0, 1.0), (0.5, 0.9), (1.0, 3.0)):
+				score = subsample.analysis.noisiness(self._spectral(vf), self._level(rms, nf))
+				assert 0.0 <= score <= 1.0
+
+
 # ---------------------------------------------------------------------------
 # TestAnalyzeBandEnergy
 # ---------------------------------------------------------------------------

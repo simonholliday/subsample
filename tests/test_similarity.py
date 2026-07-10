@@ -808,3 +808,154 @@ class TestBandEnergyGroup:
 		kick_score  = next(s for s in scores if s.name == "BD")
 		hihat_score = next(s for s in scores if s.name == "HH")
 		assert kick_score.score > hihat_score.score
+
+
+# ---------------------------------------------------------------------------
+# Self-similarity: clustering and ordering (curation support)
+# ---------------------------------------------------------------------------
+
+def _distinct_record (name: str) -> subsample.library.SampleRecord:
+
+	"""Return a record whose feature vector differs sharply from the _make_record
+	default (all-0.5 spectral, all-1.0 timbre).
+
+	Negated MFCCs make the timbre groups point opposite to the default, dragging
+	the composite cosine well below an identical pair — enough for a threshold
+	placed between "identical" and "this" to separate them deterministically.
+	"""
+
+	spectral = _make_spectral(
+		spectral_flatness=0.9, harmonic_ratio=0.05, spectral_centroid=0.95,
+		zcr=0.9, spectral_contrast=0.05,
+	)
+	timbre = _make_timbre(
+		mfcc       = tuple(-1.0 for _ in range(13)),
+		mfcc_delta = tuple(-1.0 for _ in range(13)),
+		mfcc_onset = tuple(-1.0 for _ in range(13)),
+	)
+	return _make_record(name, spectral, timbre)
+
+
+class TestSelfSimilarityMatrix:
+
+	def test_empty_returns_empty (self) -> None:
+		m = subsample.similarity.self_similarity_matrix([], _DEFAULT_CFG)
+		assert m.shape == (0, 0)
+
+	def test_shape_and_symmetry (self) -> None:
+		records = [_make_record("A", _make_spectral()), _distinct_record("B")]
+		m = subsample.similarity.self_similarity_matrix(records, _DEFAULT_CFG)
+
+		assert m.shape == (2, 2)
+		assert m[0, 1] == pytest.approx(m[1, 0], abs=1e-6)
+
+	def test_identical_records_score_one (self) -> None:
+		records = [_make_record("A", _make_spectral()), _make_record("B", _make_spectral())]
+		m = subsample.similarity.self_similarity_matrix(records, _DEFAULT_CFG)
+
+		assert m[0, 1] == pytest.approx(1.0, abs=1e-5)
+
+	def test_distinct_scores_below_identical (self) -> None:
+		records = [_make_record("A", _make_spectral()), _distinct_record("B")]
+		m = subsample.similarity.self_similarity_matrix(records, _DEFAULT_CFG)
+
+		assert m[0, 1] < 1.0 - 1e-3
+
+	def test_dtype_float32 (self) -> None:
+		records = [_make_record("A", _make_spectral())]
+		m = subsample.similarity.self_similarity_matrix(records, _DEFAULT_CFG)
+		assert m.dtype == numpy.float32
+
+
+class TestConnectedComponents:
+
+	def test_no_edges_all_singletons (self) -> None:
+		groups = subsample.similarity._connected_components(3, [])
+		assert groups == [[0], [1], [2]]
+
+	def test_single_edge_merges_pair (self) -> None:
+		groups = subsample.similarity._connected_components(3, [(0, 2)])
+		# Largest first: {0,2} then {1}.
+		assert groups == [[0, 2], [1]]
+
+	def test_transitive_chain (self) -> None:
+		# 0-1 and 1-2 → all three in one component even without a direct 0-2 edge.
+		groups = subsample.similarity._connected_components(3, [(0, 1), (1, 2)])
+		assert groups == [[0, 1, 2]]
+
+	def test_largest_group_first_then_by_member (self) -> None:
+		# {2,3,4} (size 3) should precede {0,1} (size 2).
+		groups = subsample.similarity._connected_components(5, [(2, 3), (3, 4), (0, 1)])
+		assert groups == [[2, 3, 4], [0, 1]]
+
+	def test_members_sorted (self) -> None:
+		groups = subsample.similarity._connected_components(4, [(3, 1), (1, 0)])
+		assert groups[0] == [0, 1, 3]
+
+
+class TestGroupNearDuplicates:
+
+	def test_empty (self) -> None:
+		assert subsample.similarity.group_near_duplicates([], _DEFAULT_CFG, 0.9) == []
+
+	def test_identical_pair_groups (self) -> None:
+		records = [_make_record("A", _make_spectral()), _make_record("B", _make_spectral())]
+		groups  = subsample.similarity.group_near_duplicates(records, _DEFAULT_CFG, 0.99)
+		assert groups == [[0, 1]]
+
+	def test_distinct_stay_separate (self) -> None:
+		records = [_make_record("A", _make_spectral()), _distinct_record("B")]
+
+		# Threshold placed between the identical-diagonal (1.0) and the observed
+		# off-diagonal, so the split is deterministic regardless of exact cosine.
+		sim    = subsample.similarity.self_similarity_matrix(records, _DEFAULT_CFG)
+		thresh = (1.0 + float(sim[0, 1])) / 2.0
+		groups = subsample.similarity.group_near_duplicates(records, _DEFAULT_CFG, thresh)
+
+		assert sorted(len(g) for g in groups) == [1, 1]
+
+	def test_two_clusters (self) -> None:
+		# Two identical A's and two identical B's → two groups of two.
+		records = [
+			_make_record("A1", _make_spectral()),
+			_distinct_record("B1"),
+			_make_record("A2", _make_spectral()),
+			_distinct_record("B2"),
+		]
+		sim    = subsample.similarity.self_similarity_matrix(records, _DEFAULT_CFG)
+		# A1~B1 is the cross-cluster score; place the threshold above it.
+		thresh = (1.0 + float(sim[0, 1])) / 2.0
+		groups = subsample.similarity.group_near_duplicates(records, _DEFAULT_CFG, thresh)
+
+		assert sorted(sorted(g) for g in groups) == [[0, 2], [1, 3]]
+
+	def test_every_sample_in_exactly_one_group (self) -> None:
+		records = [_make_record(str(i), _make_spectral()) for i in range(3)] + [_distinct_record("X")]
+		groups  = subsample.similarity.group_near_duplicates(records, _DEFAULT_CFG, 0.99)
+
+		flat = sorted(i for g in groups for i in g)
+		assert flat == [0, 1, 2, 3]
+
+
+class TestSimilarityOrder:
+
+	def test_empty (self) -> None:
+		assert subsample.similarity.similarity_order([], _DEFAULT_CFG) == []
+
+	def test_single (self) -> None:
+		records = [_make_record("A", _make_spectral())]
+		assert subsample.similarity.similarity_order(records, _DEFAULT_CFG) == [0]
+
+	def test_is_a_permutation (self) -> None:
+		records = [_make_record("A", _make_spectral()), _distinct_record("B"), _make_record("C", _make_spectral())]
+		order   = subsample.similarity.similarity_order(records, _DEFAULT_CFG)
+		assert sorted(order) == [0, 1, 2]
+
+	def test_alike_samples_adjacent (self) -> None:
+		# Layout [A, B, A_copy]: from A (index 0) the nearest is A_copy (index 2),
+		# so the chain visits 0 → 2 → 1, keeping the two A's adjacent.
+		records = [_make_record("A", _make_spectral()), _distinct_record("B"), _make_record("A_copy", _make_spectral())]
+		order   = subsample.similarity.similarity_order(records, _DEFAULT_CFG)
+
+		pos = {idx: i for i, idx in enumerate(order)}
+		assert abs(pos[0] - pos[2]) == 1   # the two identical records are neighbours

@@ -1142,6 +1142,109 @@ def has_stable_pitch (
 	)
 
 
+def effective_attack_times (rhythm: RhythmResult) -> tuple[float, ...]:
+
+	"""Return the sample's usable hit positions: sample-accurate attack times
+	when available, falling back to onset_times for pre-v10 analysis data.
+
+	Single source of the fallback rule — every consumer that asks "where are
+	the hits?" (the beat-quantize handlers, the sample catalog) goes through
+	here so they can never disagree.
+
+	Args:
+		rhythm: RhythmResult for the sample.
+
+	Returns:
+		attack_times when non-empty, otherwise onset_times (possibly empty).
+	"""
+
+	if rhythm.attack_times:
+		return rhythm.attack_times
+
+	return rhythm.onset_times
+
+
+def has_beat_map (rhythm: RhythmResult) -> bool:
+
+	"""Return True if this sample has enough detected hits to align to a beat grid.
+
+	Samples that pass this test are eligible for beat quantization: their hits
+	can be snapped or stretched onto a tempo grid (`stretch_quantize:` /
+	`pad_quantize:`).  Samples that fail degrade gracefully — stretch_quantize
+	falls back to a plain global stretch and pad_quantize passes the audio
+	through unchanged, because with fewer than two detected hits there is no
+	internal rhythm to align.
+
+	Like has_stable_pitch, this is a compound query over existing analysis
+	fields; the threshold lives here and the transform handlers call this same
+	test, so reported eligibility can never drift from rendering behaviour.
+
+	Args:
+		rhythm: RhythmResult for the sample.
+
+	Returns:
+		True when the sample has 2+ detected attacks (or legacy onsets).
+	"""
+
+	return len(effective_attack_times(rhythm)) >= 2
+
+
+def noisiness (spectral: AnalysisResult, level: LevelResult) -> float:
+
+	"""Return how noise-like a sample is over its whole length, in [0, 1].
+
+	0.0 = a clean event (a hit that rings out and decays, or a pitched tone);
+	1.0 = wall-to-wall unpitched noise (radio static, tape hiss, a dead channel).
+	Aimed at curating out captures that were transient-triggered but are mostly
+	noise thereafter — a squelch opening onto static, say.
+
+	Two existing measurements are multiplied:
+
+	  stationarity = noise_floor / rms  — "the signal never gets quiet".  Static
+	                 sits at a near-constant level, so its quietest frames (the
+	                 noise_floor, a low percentile of frame RMS) are almost as
+	                 loud as its overall RMS → ratio near 1.  A hit that decays
+	                 into silence has near-silent frames → ratio near 0.  Clamped
+	                 to [0, 1].
+	  1 - voiced_fraction              — "and it carries no pitch".  pyin tracks a
+	                 fundamental through even a fairly noisy voice or tone
+	                 (voiced_fraction high → this term low), but finds nothing in
+	                 static (voiced_fraction 0 → this term 1).
+
+	Multiplying is deliberately an AND: a sample scores high only when it is BOTH
+	relentless AND unpitched.  Either alone is not noise — a held organ note is
+	stationary but pitched (rescued by the voiced term); a machine-gun of dry
+	clicks is unpitched but not stationary (rescued by the stationarity term).
+
+	A compound query over existing fields, like has_stable_pitch / has_beat_map:
+	the formula lives here, nothing new is stored, so it works on every existing
+	sidecar with no re-analysis.
+
+	Caveats:
+	  - Sustained UNPITCHED textures (cymbal roll, rain stick, a synth noise
+	    sweep) score high.  That is arguably correct — they are noise-like — but
+	    they can be musically useful, so treat this as a sort-and-audition
+	    indicator, not an automatic discard.
+	  - When noise_floor is unavailable (0.0 — e.g. analysed without
+	    AnalysisParams) stationarity is 0, so the score is 0: a conservative
+	    "not flagged" rather than a false positive.
+
+	Args:
+		spectral: AnalysisResult for the sample (voiced_fraction).
+		level:    LevelResult for the sample (noise_floor, rms).
+
+	Returns:
+		Noise-likeness in [0, 1].  0.0 for a silent sample (rms 0).
+	"""
+
+	if level.rms <= 0.0:
+		return 0.0
+
+	stationarity = min(max(level.noise_floor / level.rms, 0.0), 1.0)
+
+	return stationarity * (1.0 - spectral.voiced_fraction)
+
+
 def compute_level (
 	mono: numpy.ndarray,
 	params: AnalysisParams | None = None,

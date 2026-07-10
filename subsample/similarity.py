@@ -593,3 +593,183 @@ def _cosine_similarity (a: numpy.ndarray, b: numpy.ndarray) -> float:
 		return 0.0
 
 	return float(numpy.dot(a, b) / (norm_a * norm_b))
+
+
+# ---------------------------------------------------------------------------
+# Self-similarity: clustering and ordering a single set of samples
+#
+# The primary API above ranks instrument samples AGAINST a set of references.
+# These functions instead compare a set of samples against ITSELF — the
+# all-pairs cosine matrix — which powers curation tools: grouping near-
+# duplicates (so days of a running mic collapse to one decision per distinct
+# sound) and ordering samples so sonically-alike ones are adjacent (so a
+# manual audition compares like with like).  Both build on the same weighted
+# feature vector the ranking path uses, so "similar" means the same thing
+# everywhere.  See scripts/catalog_samples.py.
+# ---------------------------------------------------------------------------
+
+
+def self_similarity_matrix (
+	records: list[subsample.library.SampleRecord],
+	cfg:     subsample.config.SimilarityConfig,
+) -> numpy.ndarray:
+
+	"""Return the N×N cosine similarity matrix of records against themselves.
+
+	Entry [i, j] is the cosine similarity of records[i] and records[j] on the
+	weighted composite feature vector, in [0, 1] (the fingerprint is non-
+	negative, so no pair is anti-correlated).  The diagonal is ~1.0 for any
+	sample with a non-zero fingerprint, 0.0 for a degenerate (silent) one.
+
+	Memory is O(N²): a few thousand samples is fine (~36 MB at N=3000), but the
+	matrix grows quadratically — callers cataloging very large directories
+	should expect the cost.
+
+	Args:
+		records: Samples to compare.  Order is preserved in the row/column index.
+		cfg:     Feature-group weights (typically cfg.similarity).
+
+	Returns:
+		float32 array of shape (N, N).  Empty (0, 0) array when records is empty.
+	"""
+
+	if not records:
+		return numpy.zeros((0, 0), dtype=numpy.float32)
+
+	matrix = numpy.array(
+		[_build_feature_vector(r, cfg) for r in records],
+		dtype=numpy.float32,
+	)  # N × D
+
+	# Row-normalise so the dot product is cosine similarity.  Zero-norm rows
+	# (silent samples) stay zero via the where= mask — a plain divide would
+	# raise a divide-by-zero warning on every degenerate sample.
+	norms  = numpy.linalg.norm(matrix, axis=1, keepdims=True)
+	normed = numpy.zeros_like(matrix)
+	numpy.divide(matrix, norms, where=norms > 0, out=normed)
+
+	return (normed @ normed.T).astype(numpy.float32)
+
+
+def _connected_components (n: int, edges: list[tuple[int, int]]) -> list[list[int]]:
+
+	"""Group 0..n-1 into connected components given an edge list (union-find).
+
+	Two nodes joined by any edge — directly or transitively — land in the same
+	component.  Returns each component as a sorted list of node indices; the
+	components themselves are ordered largest-first, then by smallest member,
+	so the biggest duplicate piles surface first and the order is deterministic.
+	"""
+
+	parent = list(range(n))
+
+	def find (x: int) -> int:
+		# Iterative find with path compression (recursion would risk a deep
+		# stack on a long single-linkage chain).
+		root = x
+		while parent[root] != root:
+			root = parent[root]
+		while parent[x] != root:
+			parent[x], x = root, parent[x]
+		return root
+
+	for a, b in edges:
+		ra, rb = find(a), find(b)
+		if ra != rb:
+			parent[ra] = rb
+
+	groups: dict[int, list[int]] = {}
+	for node in range(n):
+		groups.setdefault(find(node), []).append(node)
+
+	members = [sorted(g) for g in groups.values()]
+	members.sort(key=lambda g: (-len(g), g[0]))
+	return members
+
+
+def group_near_duplicates (
+	records:   list[subsample.library.SampleRecord],
+	cfg:       subsample.config.SimilarityConfig,
+	threshold: float,
+) -> list[list[int]]:
+
+	"""Cluster records into near-duplicate groups by self-similarity.
+
+	Any two samples whose cosine similarity is >= threshold are placed in the
+	same group, transitively (single-linkage / connected components): if A~B and
+	B~C, then A, B and C share a group even if A and C fall just below the
+	threshold.  At a high threshold (near-identical repeats of one sound) this
+	is the intuitive "these are all the same event" grouping; lowering it risks
+	chaining distinct sounds together, so it is a tunable.
+
+	Every sample belongs to exactly one group; a sample with no near-duplicate
+	forms a group of one.  Groups are returned largest-first (see
+	_connected_components), so callers can surface the biggest piles first.
+
+	Args:
+		records:   Samples to cluster (indices into this list are returned).
+		cfg:       Feature-group weights (typically cfg.similarity).
+		threshold: Minimum cosine similarity (0..1) for two samples to group.
+
+	Returns:
+		List of groups, each a sorted list of indices into records.
+	"""
+
+	n = len(records)
+
+	if n == 0:
+		return []
+
+	sim = self_similarity_matrix(records, cfg)
+
+	# Edges are the above-threshold pairs in the strict upper triangle; usually
+	# a small fraction of all pairs, so union-find stays cheap even though the
+	# matrix itself is dense.
+	upper       = numpy.triu(sim >= threshold, k=1)
+	edge_coords = numpy.argwhere(upper)
+	edges       = [(int(i), int(j)) for i, j in edge_coords]
+
+	return _connected_components(n, edges)
+
+
+def similarity_order (
+	records: list[subsample.library.SampleRecord],
+	cfg:     subsample.config.SimilarityConfig,
+) -> list[int]:
+
+	"""Return a permutation of record indices that places alike samples adjacent.
+
+	Builds a greedy nearest-neighbour chain: start at the first record, then
+	repeatedly step to the most-similar not-yet-visited record.  Auditioning in
+	this order means each sample is followed by its closest sonic neighbour, so
+	keep/discard becomes a comparison with the sound just heard rather than a
+	cold judgement.  Deterministic for a given input order (ties broken by
+	lowest index).
+
+	Args:
+		records: Samples to order (indices into this list are returned).
+		cfg:     Feature-group weights (typically cfg.similarity).
+
+	Returns:
+		A list containing each index 0..N-1 exactly once.
+	"""
+
+	n = len(records)
+
+	if n <= 1:
+		return list(range(n))
+
+	sim = self_similarity_matrix(records, cfg)
+
+	visited = numpy.zeros(n, dtype=bool)
+	order   = [0]
+	visited[0] = True
+
+	for _ in range(n - 1):
+		current   = order[-1]
+		neighbours = sim[current].copy()
+		neighbours[visited] = -numpy.inf   # never revisit
+		order.append(int(numpy.argmax(neighbours)))
+		visited[order[-1]] = True
+
+	return order

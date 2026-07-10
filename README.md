@@ -2293,6 +2293,7 @@ rhythm:   tempo=120.2bpm  beats=4  pulses=12  onsets=4
 spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001  zcr=0.120  harmonic=0.821  contrast=0.310  voiced=0.940  log_attack=0.000  flux=0.312  rolloff=0.451  slope=0.023
 pitch:    pitch=440.0Hz  chroma=A  pitch_conf=0.89  stability=0.120st  voiced_frames=86
 level:    peak -1.2dBFS  rms -12.6dBFS  crest 11.4dB  floor -42.3dBFS
+noisiness: 0.012  (0 = clean event, 1 = wall-to-wall noise)
 ```
 
 Spectral metrics (all [0, 1]):
@@ -2323,9 +2324,99 @@ Amplitude metadata:
 - **crest** - crest factor (peak-to-RMS ratio) in dB
 - **floor** - noise floor in dBFS (shown when detectable)
 
+Noise-likeness:
+- **noisiness** - 0-to-1 rating of how noise-like the sample is across its whole
+  length; near 1 = wall-to-wall unpitched noise (radio static, a dead channel),
+  near 0 = a clean hit or pitched tone. Computed as *stationarity* (the signal
+  never gets quiet) times *lack of pitch*, so a held tone or a decaying hit both
+  score low. Sustained unpitched textures (cymbal rolls, noise sweeps) score
+  high too, so use it to sort and audition, not to auto-delete.
+
 Three MFCC timbre fingerprints are stored in the sidecar (used for similarity,
 not shown in script output): `mfcc` (mean, average timbre), `mfcc_delta`
 (first-order trajectory), and `mfcc_onset` (onset-weighted, attack emphasis).
+
+### Cataloging a sample directory
+
+```bash
+python scripts/catalog_samples.py                          # configured instrument.directory
+python scripts/catalog_samples.py path/to/samples          # any directory
+python scripts/catalog_samples.py -o samples.csv           # write to a file
+python scripts/catalog_samples.py --full                   # every property incl. MFCC vectors
+```
+
+Walks a directory (recursively, the same walk the instrument library performs
+at startup) and writes one CSV row per audio file with its detected
+properties. Two capability columns show which musical behaviours each sample
+is eligible for:
+
+- **pitched** - passes the stable-pitch test, so `pitched: true` selects it in
+  a MIDI map and it can be re-pitched across a keyboard range
+- **quantizable** - has at least 2 detected hits, so `stretch_quantize` /
+  `pad_quantize` can align them to a beat grid; below that, quantize degrades
+  to a plain stretch or a pass-through
+
+Both columns run exactly the tests the player runs, so the catalog shows the
+selection pool a MIDI map would draw from. All seven inputs to the pitched
+test are included as columns (`pitch_hz`, `voiced_fraction`,
+`voiced_frame_count`, `pitch_confidence`, `pitch_stability_st`,
+`harmonic_ratio`, `duration_s`), so a sample that unexpectedly fails can be
+diagnosed against the thresholds documented on the test.
+
+With `--pitched` and/or `--quantizable` (combined: both must hold), the CSV is
+replaced by matching file paths, one per line - pipe them into a player to
+audition a capability group, or into file tools to build curated sets:
+
+```bash
+python scripts/catalog_samples.py --pitched | mpv --playlist=-
+python scripts/catalog_samples.py ~/samples --quantizable | xargs -I{} cp {} ~/curated/
+```
+
+Files without an `.analysis.json` sidecar are analyzed on the way (slow on the
+first run, same cost as a startup load - progress goes to stderr); results are
+cached as sidecars so later runs are instant.
+
+#### Curation aids
+
+Leaving a mic running for hours or days produces thousands of samples, many of
+them the same sound over and over. Three options help thin them down:
+
+```bash
+python scripts/catalog_samples.py --group              # cluster near-duplicates
+python scripts/catalog_samples.py --group --pitched    # one keeper path per pitched-sound group
+python scripts/catalog_samples.py --order similarity   # rows ordered by how alike they sound
+```
+
+- **`--group`** clusters samples that sound nearly identical (the same event
+  captured repeatedly) so days of recordings collapse to one decision per
+  distinct sound. It adds `group`, `group_size`, and `group_keeper` columns -
+  the biggest pile first, with a suggested keeper (the loudest, usually
+  cleanest take) marked in each. In paths mode it emits only each group's
+  keeper, a deduplicated set. `--similarity-threshold T` (default 0.98) tunes
+  how alike samples must be to group: higher groups only near-identical takes,
+  lower groups more loosely. **On a homogeneous corpus (e.g. one mic in one
+  room) everything is somewhat alike, so this is sensitive - audition a group
+  or two to calibrate the threshold to your ears before trusting it to bin
+  samples.**
+- **`--order similarity`** orders the rows (or paths) as a nearest-neighbour
+  chain, so each sample is followed by its closest-sounding neighbour.
+  Auditioning alike-with-alike turns keep/discard into a quick comparison
+  rather than a cold judgement.
+- Four **junk-triage** columns flag the obvious discards so they sort to the
+  top of the bin pile: `snr_db` (how far the loudest moment rises above the
+  quiet-frame floor - low means room tone with no real event), `near_silent`
+  (nothing loud enough to be an event), `clipping_risk` (peak at digital full
+  scale, possibly distorted), and `noisiness` (a 0-to-1 rating of how noise-like
+  the sample is across its whole length - near 1 means wall-to-wall unpitched
+  noise like radio static or a dead channel, near 0 means a clean hit or a
+  pitched tone). `noisiness` is aimed at captures that were triggered by a
+  transient but are mostly noise thereafter; sustained *unpitched* textures
+  (cymbal rolls, noise sweeps) also score high, so treat it as a
+  sort-and-audition signal rather than an automatic discard.
+
+Grouping and similarity ordering compare samples on the same acoustic
+fingerprint the MIDI mapper uses for its similarity matching, so "alike" means
+the same thing here as in a `beat_match`/`similarity` MIDI-map query.
 
 ### Importing pre-trimmed samples
 

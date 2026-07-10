@@ -900,3 +900,40 @@ class TestLoadWavAudio:
 		with caplog.at_level(logging.WARNING, logger="subsample.library"):
 			result = subsample.library.load_wav_audio(tmp_path / "missing.wav")
 		assert result is None
+
+	def test_24bit_fullscale_resample_no_overflow (self, tmp_path: pathlib.Path) -> None:
+		"""A full-scale 24-bit sample that Gibbs-overshoots on resampling must not
+		overflow the int32 cast.
+
+		In float32 the int32 ceiling (2147483647) rounds up to 2^31, so a peak
+		pushed past 1.0 by resampling ringing used to survive the clip as 2^31 and
+		wrap to the full-negative rail on the cast (an audible click), emitting
+		"invalid value encountered in cast".  The conversion now promotes to
+		float64, where the ceiling is exact.
+		"""
+		import warnings
+
+		import soundfile
+
+		# A full-scale step (-1 -> +1) at 44100 Hz; band-limited resampling to
+		# 48000 rings past 1.0 at the discontinuity.  PCM_24 so the int32 path runs.
+		n      = 4096
+		signal = numpy.concatenate([
+			-numpy.ones(n // 2, dtype=numpy.float32),
+			numpy.ones(n // 2, dtype=numpy.float32),
+		])
+		path = tmp_path / "fullscale24.wav"
+		soundfile.write(str(path), signal, 44100, subtype="PCM_24")
+
+		# The bug surfaced as a RuntimeWarning — promote it to an error so the
+		# regression fails loudly if the float32 conversion ever returns.
+		with warnings.catch_warnings():
+			warnings.simplefilter("error", RuntimeWarning)
+			audio = subsample.library.load_wav_audio(path, target_sample_rate=48000)
+
+		assert audio is not None
+		assert audio.dtype == numpy.int32
+
+		# The overshoot clamps to the positive int32 rail — under the bug it would
+		# have wrapped to the negative rail, so the max would be negative/garbage.
+		assert int(audio.max()) == 2147483647

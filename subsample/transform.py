@@ -2132,14 +2132,13 @@ def _apply_time_stretch (
 
 	# Prefer sample-accurate attack times for grid alignment — they mark
 	# where each transient becomes audible, not where spectral flux peaks.
-	# Fall back to onset_times for pre-v10 analysis data.
-	attack_times = record.rhythm.attack_times
+	# Falls back to onset_times for pre-v10 analysis data (inside the helper).
+	attack_times = subsample.analysis.effective_attack_times(record.rhythm)
 
-	if not attack_times:
-		attack_times = record.rhythm.onset_times
-
-	# Single-hit or no-onset samples: simple global stretch.
-	if len(attack_times) < 2:
+	# Single-hit or no-onset samples: simple global stretch.  has_beat_map is
+	# the shared eligibility test, so tools that report "quantizable" can
+	# never disagree with what actually renders.
+	if not subsample.analysis.has_beat_map(record.rhythm):
 		return pyrubberband.time_stretch(  # type: ignore[no-any-return]  # pyrubberband ships no stubs
 			audio, sample_rate, 1.0 / duration_ratio, rbargs={"--fine": "", "--smoothing": ""},
 		)
@@ -3313,13 +3312,10 @@ def _apply_pad_quantize (
 		return audio
 
 	# Prefer sample-accurate attack times, same as stretch_quantize.
-	attack_times = record.rhythm.attack_times
+	attack_times = subsample.analysis.effective_attack_times(record.rhythm)
 
-	if not attack_times:
-		attack_times = record.rhythm.onset_times
-
-	# Fewer than 2 attacks: nothing to quantize.
-	if len(attack_times) < 2:
+	# Fewer than 2 attacks: nothing to quantize (shared eligibility test).
+	if not subsample.analysis.has_beat_map(record.rhythm):
 		return audio
 
 	n_channels = audio.shape[1]

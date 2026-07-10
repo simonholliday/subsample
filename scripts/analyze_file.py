@@ -96,6 +96,7 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 	print(f"spectral: {subsample.analysis.format_result(result, duration)}")
 	print(f"pitch:    {subsample.analysis.format_pitch_result(pitch)}")
 	print(f"level:    {subsample.analysis.format_level_result(level)}")
+	print(f"noisiness: {subsample.analysis.noisiness(result, level):.3f}  (0 = clean event, 1 = wall-to-wall noise)")
 
 
 def main () -> None:
