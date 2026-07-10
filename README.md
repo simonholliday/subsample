@@ -455,6 +455,7 @@ when you want to try something the tutorial didn't show.
 | `select` | yes | Which sample to play (see Select below) |
 | `process` | no | How to present it (see Process below) |
 | `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
+| `release` | no | Shape the note-off fade for a sustained voice (needs `one_shot: false`; ignored with a warning otherwise). A number of ms, `true` for an adaptive tail, or `{time, curve}` where `curve` is `cosine` (default) or `exponential`; `time` may be CC-bound. See Release below |
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
@@ -462,6 +463,59 @@ when you want to try something the tutorial didn't show.
 | `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
 | `stack` | no | `true` lets this sound play together with other `stack: true` assignments on the same note and velocity, instead of being rejected as an overlap (see Stacking below). Default `false` |
 | `template` | no | Inherit fields from one or more named templates (see Templates below). The assignment's own fields override the template's; lists (`process`) and nested blocks (`select`) are replaced wholesale, not merged |
+
+### Release - shape how a held note fades
+
+By default a sustained sound (`one_shot: false`) fades out over a fixed 10 ms
+when you lift the key - just enough to avoid a click. `release` lets you set
+how long that fade is, and its shape:
+
+```yaml
+Warm pad:
+  channel: 1
+  notes: 48
+  one_shot: false
+  release: 800                       # fade over 800 ms after key-up
+  select: [ where: { name: "*pad*" } ]
+
+Stab:
+  channel: 1
+  notes: 60
+  one_shot: false
+  release: { time: 120, curve: exponential }   # fast drop, long tail
+
+Expressive pad:
+  channel: 1
+  notes: 64
+  one_shot: false
+  release: { time: { cc: 72, min: 20, max: 3000 } }   # a pedal sets the length
+```
+
+- A bare number is the fade time in milliseconds.
+- `true` gives an adaptive tail - short for percussive material, longer for
+  sustained sounds.
+- The mapping form sets `time` and/or `curve`. `curve` is `cosine` (smooth,
+  the default) or `exponential` (fast initial drop, long tail, like a damped
+  string). `time` may be a `{cc, min, max}` mapping, read the instant each note
+  is struck - so the knob shapes the notes you play next, not the one already
+  ringing.
+
+`release` only applies to voices that actually receive a note-off, so it needs
+`one_shot: false`. Declared on a one-shot (play-to-end) voice it is ignored,
+with a warning at startup.
+
+**`release` vs `reshape`.** These are different tools: `reshape` (a `process:`
+step) shapes the sample's *own* amplitude body - baked in, fired on every hit,
+the same regardless of how long you hold the key. `release` shapes the fade
+when you *lift* the key - applied live, timed from the note-off. Both can be
+set at once (they multiply), but for amplitude you usually want one or the
+other.
+
+One honest limit: `release` can only fade whatever sample audio is still
+playing when you lift the key. A long release on a short sample fades what is
+left - it cannot invent a sustain tail, and a note held past the sample's
+natural end still stops there. True held sustain waits on loop playback (see
+Roadmap).
 
 ### Templates - share fields across assignments
 

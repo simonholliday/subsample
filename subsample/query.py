@@ -950,6 +950,39 @@ class CcBinding:
 		return self.min_val + (cc_value / 127.0) * (self.max_val - self.min_val)
 
 
+# Release-fade shapes accepted by ReleaseSpec.curve.  cosine = the smooth
+# raised-cosine declick the player has always used; exponential = a fast
+# initial drop with a long tail (natural, damped-string decay).
+VALID_RELEASE_CURVES: frozenset[str] = frozenset({"cosine", "exponential"})
+
+
+@dataclasses.dataclass(frozen=True)
+class ReleaseSpec:
+
+	"""Note-off amplitude release for a sustained (``one_shot: false``) voice.
+
+	Controls how a held voice fades to silence after the key is lifted.  This is
+	applied live as per-voice gain in the audio callback — it is NOT baked into
+	the sample.  Contrast the ``reshape`` processor, which shapes the sample's
+	own amplitude body at render time and is blind to when the key is released:
+	``reshape`` fires on every hit and is anchored to the sample; ``release``
+	fires only on note-off and is anchored to the moment you lift the key.
+
+	Because it can only fade whatever pre-rendered audio remains at note-off, a
+	release longer than the audio left simply fades what is there — it cannot
+	synthesise a sustain tail (that awaits loop playback).
+
+	time:  Fade duration after note-off.  A float in milliseconds, a CcBinding
+	       (resolved once at note-on), or None for an adaptive tail derived from
+	       the sample's own release character (~30-200 ms).
+	curve: Fade shape — one of VALID_RELEASE_CURVES ("cosine" default, or
+	       "exponential").
+	"""
+
+	time:  typing.Union[float, CcBinding, None] = None
+	curve: str                                  = "cosine"
+
+
 @dataclasses.dataclass(frozen=True)
 class ProcessSpec:
 
@@ -998,6 +1031,7 @@ class Assignment:
 	select:    tuple[SelectSpec, ...]
 	process:   ProcessSpec        = dataclasses.field(default_factory=ProcessSpec)
 	one_shot:  bool               = True
+	release:   typing.Optional[ReleaseSpec] = None
 	gain_db:   float              = 0.0
 	pan_weights:    typing.Optional[numpy.ndarray]  = None
 	output_routing: typing.Optional[tuple[int, ...]] = None

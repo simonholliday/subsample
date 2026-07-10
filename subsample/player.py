@@ -47,6 +47,7 @@ See midi-map.yaml.default for the format specification.
 
 import dataclasses
 import logging
+import math
 import pathlib
 import random
 import threading
@@ -77,11 +78,19 @@ import subsample.transform
 
 _log = logging.getLogger(__name__)
 
-# Cosine fade-out duration applied when a note_off is received.
-# Long enough to prevent a click on hard cutoff; short enough to be imperceptible.
-# Stored as seconds; converted to frames in MidiPlayer.__init__() using the
-# actual output sample rate so the duration is correct regardless of device.
+# Cosine fade-out duration applied when a note_off is received and no explicit
+# release: is configured.  Long enough to prevent a click on hard cutoff; short
+# enough to be imperceptible.  Stored as seconds; converted to frames in
+# MidiPlayer.__init__() using the actual output sample rate so the duration is
+# correct regardless of device.
 _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
+
+# Decay steepness for the "exponential" release curve.  The ramp is
+# (exp(-k*x) - exp(-k)) / (1 - exp(-k)) for x in [0, 1], which starts at 1.0 and
+# reaches EXACTLY 0 at x=1 (so the fade is click-free, unlike a raw exp(-k*x)
+# that leaves an audible residual).  k=9 gives a musically natural fast-then-slow
+# tail; exp(-9) ≈ 1.2e-4.
+_RELEASE_EXP_K: float = 9.0
 
 # Note map: (mido_channel, midi_note) → list of (Assignment, PickSpec) layers.
 #
@@ -152,6 +161,7 @@ class ZoneTemplate:
 	velocity_trigger:    tuple[int, int]
 	velocity_rescale_to: typing.Optional[tuple[int, int]]
 	stack:               bool                                = False
+	release:             typing.Optional[subsample.query.ReleaseSpec] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -542,6 +552,152 @@ def _parse_extract (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 	raise ValueError(
 		f"MIDI map assignment {assignment_name!r}: unknown extract {raw!r} "
 		f"(valid: {valid}, or channel.<n>)"
+	)
+
+
+# Accepted keys inside a release: mapping.  Explicit form is {time, curve};
+# the {cc: ...} shorthand additionally allows the CcBinding keys.  Enforced so a
+# typo fails loudly rather than silently using a default (as _parse_velocity does).
+_RELEASE_INNER_KEYS:        typing.Final[frozenset[str]] = frozenset({"time", "curve"})
+_RELEASE_CC_SHORTHAND_KEYS: typing.Final[frozenset[str]] = frozenset({"cc", "channel", "min", "max", "default", "curve"})
+
+
+def _parse_release (raw: typing.Any, assignment_name: str) -> typing.Optional[subsample.query.ReleaseSpec]:
+
+	"""Parse the ``release:`` field from a MIDI map assignment into a ReleaseSpec.
+
+	Sets how a sustained (``one_shot: false``) voice fades to silence after
+	note-off.  Accepted forms:
+	  - ``None`` / ``false``  — no release declared; the player keeps its
+	    built-in fixed declick fade.
+	  - ``true``              — adaptive tail (shape derived from the sample).
+	  - a number (ms)         — fade time, cosine shape.
+	  - ``{time: <ms|cc-map>, curve: cosine|exponential}`` — explicit; either
+	    inner key may be omitted (time → adaptive, curve → cosine).  ``time``
+	    may itself be a ``{cc: N, min:, max:, ...}`` mapping, resolved at note-on.
+
+	Syntactic + range validation only; the one_shot interaction (a release on a
+	one_shot voice is inert) is handled at the assignment level in load_midi_map.
+
+	Args:
+		raw:             Raw YAML value.
+		assignment_name: Name for error messages.
+
+	Returns:
+		ReleaseSpec, or None when no release is declared.
+
+	Raises:
+		ValueError: On a negative time, unknown curve, bad cc/channel range, or
+		            wrong type.
+	"""
+
+	if raw is None or raw is False:
+		return None
+
+	if raw is True:
+		return subsample.query.ReleaseSpec(time=None, curve="cosine")
+
+	if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+		return subsample.query.ReleaseSpec(time=_parse_release_time(raw, assignment_name), curve="cosine")
+
+	if isinstance(raw, dict):
+		# curve is read for BOTH the explicit and the {cc: ...} shorthand forms,
+		# so `release: { cc: 5, curve: exponential }` keeps its curve.
+		curve_raw = raw.get("curve", "cosine")
+
+		# A bare {cc: ...} at the top level is shorthand for {time: {cc: ...}}.
+		# Whitelist the accepted keys either way so a typo (curev:, tim:) fails
+		# loud rather than silently falling back to a default — matching
+		# _parse_velocity / the notes and top-level-map parsers.
+		if "cc" in raw and "time" not in raw:
+			unknown = set(raw) - _RELEASE_CC_SHORTHAND_KEYS
+			allowed = _RELEASE_CC_SHORTHAND_KEYS
+			time_raw: typing.Any = raw
+		else:
+			unknown = set(raw) - _RELEASE_INNER_KEYS
+			allowed = _RELEASE_INNER_KEYS
+			time_raw = raw.get("time")
+
+		if unknown:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: unknown release key(s) "
+				f"{sorted(unknown)} — valid: {sorted(allowed)}"
+			)
+
+		time  = _parse_release_time(time_raw, assignment_name) if time_raw is not None else None
+		curve = str(curve_raw).strip().lower()
+
+		if curve not in subsample.query.VALID_RELEASE_CURVES:
+			valid = ", ".join(sorted(subsample.query.VALID_RELEASE_CURVES))
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: unknown release curve "
+				f"{curve_raw!r} (valid: {valid})"
+			)
+
+		return subsample.query.ReleaseSpec(time=time, curve=curve)
+
+	raise ValueError(
+		f"MIDI map assignment {assignment_name!r}: release must be a number of "
+		f"milliseconds, true, or a mapping — got {type(raw).__name__}"
+	)
+
+
+def _parse_release_time (
+	raw:             typing.Any,
+	assignment_name: str,
+) -> typing.Union[float, subsample.query.CcBinding]:
+
+	"""Parse a release ``time`` — a non-negative ms scalar or a ``{cc: ...}`` map."""
+
+	if isinstance(raw, dict) and "cc" in raw:
+		# Re-raise numeric-coercion errors with the assignment name and offending
+		# mapping, matching _parse_velocity_range / the sibling gain parse.
+		try:
+			cc_num     = int(raw["cc"])
+			cc_channel = int(raw["channel"]) if "channel" in raw else None
+			min_val    = float(raw.get("min", 0.0))
+			max_val    = float(raw.get("max", 1.0))
+			default    = float(raw["default"]) if "default" in raw else None
+		except (TypeError, ValueError) as exc:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: malformed release time "
+				f"cc mapping {raw!r} — {exc}"
+			) from exc
+
+		if not (0 <= cc_num <= 127):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: release time cc "
+				f"{cc_num} outside the MIDI range 0-127"
+			)
+
+		if cc_channel is not None and not (1 <= cc_channel <= 16):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: release time channel "
+				f"{cc_channel} outside the MIDI range 1-16"
+			)
+
+		return subsample.query.CcBinding(
+			cc=cc_num,
+			min_val=min_val,
+			max_val=max_val,
+			default=default,
+			channel=cc_channel,
+		)
+
+	if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+		# Reject non-finite (.inf/.nan from YAML) here — it would otherwise slip
+		# through to note-on and crash round() in _resolve_release.
+		if not math.isfinite(raw) or raw < 0.0:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: release time "
+				f"{raw} must be a finite value >= 0 ms"
+			)
+		return float(raw)
+
+	raise ValueError(
+		f"MIDI map assignment {assignment_name!r}: release time must be a "
+		f"non-negative number of milliseconds or a {{cc: ...}} mapping — "
+		f"got {type(raw).__name__}"
 	)
 
 
@@ -1823,6 +1979,21 @@ def load_midi_map (
 
 		one_shot = bool(assignment_raw.get("one_shot", True))
 
+		# release: shapes the note-off fade, and only a voice that RECEIVES a
+		# note-off ever releases.  A one_shot voice plays to its natural end and
+		# ignores note-off, so a release declared alongside one_shot: true (the
+		# default) can never fire — warn and drop it rather than carry dead state.
+		release = _parse_release(assignment_raw.get("release"), name)
+
+		if release is not None and one_shot:
+			_log.warning(
+				"MIDI map assignment %r: 'release' is ignored because one_shot is "
+				"true — a play-to-end voice never receives note-off.  Set "
+				"one_shot: false to use release.",
+				name,
+			)
+			release = None
+
 		try:
 			gain_db = float(assignment_raw.get("gain", 0.0))
 		except (TypeError, ValueError) as exc:
@@ -1898,6 +2069,7 @@ def load_midi_map (
 				velocity_trigger=velocity_trigger,
 				velocity_rescale_to=velocity_rescale_to,
 				stack=stack,
+				release=release,
 			))
 			continue
 
@@ -1910,6 +2082,7 @@ def load_midi_map (
 			select=select_specs,
 			process=process,
 			one_shot=one_shot,
+			release=release,
 			gain_db=gain_db,
 			pan_weights=pan_weights,
 			output_routing=output_routing,
@@ -2008,8 +2181,23 @@ class _Voice:
 	releasing: bool = False
 	one_shot:  bool = False
 	fade_pos:  int  = 0
-	"""Frames of release fade already applied.  Lets the cosine fade-out span
+	"""Frames of release fade already applied.  Lets the release fade span
 	multiple audio callbacks so small buffer_frames don't truncate it."""
+
+	release_frames: typing.Optional[int] = None
+	"""Configured note-off fade length in output-rate frames (from the
+	assignment's ``release:``).  None → use the player's global default declick
+	length (_release_fade_frames)."""
+
+	release_curve: int = 0
+	"""Fade shape as an int so the audio callback does no string work:
+	0 = cosine (raised-cosine declick, the default), 1 = exponential."""
+
+	release_total: int = 0
+	"""Effective fade length for THIS release, fixed the first callback the
+	voice releases (0 until then).  Capped to the audio remaining at note-off so
+	the ramp always reaches 0 before the buffer runs out — otherwise a long
+	release on a short remainder would retire the voice mid-ramp (a click)."""
 
 
 def list_midi_input_devices () -> list[str]:
@@ -2132,6 +2320,13 @@ def _collect_mapped_ccs (
 
 	for template in zone_templates:
 		_scan_process(template.process)
+
+	# NOTE: a CC-bound release: time is deliberately NOT registered here.
+	# _mapped_ccs only arms the debounced VARIANT RE-BAKE; the raw CC value is
+	# recorded on every control_change regardless (see _handle_message), and the
+	# release time is read live from that state at note-on.  Registering it would
+	# trigger pointless re-bakes on every release-knob move — release changes no
+	# variant.
 
 	return ccs
 
@@ -2862,20 +3057,44 @@ class MidiPlayer:
 				remaining = len(voice.audio) - voice.position
 
 				if voice.releasing:
-					# Cosine fade-out over self._release_fade_frames, spread across
-					# however many callbacks that takes — voice.fade_pos tracks the
-					# progress.  A previous single-callback fade collapsed the whole
-					# 10 ms ramp into one buffer, so at small buffer_frames the
-					# note-off cut off abruptly (e.g. ~1.5 ms at 64 frames).
-					fade_total = max(1, self._release_fade_frames)
+					# Note-off fade, spread across however many callbacks it takes
+					# — voice.fade_pos tracks the progress.  A previous single-
+					# callback fade collapsed the whole ramp into one buffer, so at
+					# small buffer_frames the note-off cut off abruptly (e.g.
+					# ~1.5 ms at 64 frames).
+					#
+					# Length: the assignment's configured release (voice.release_
+					# frames) or the global default declick when unset.  Fixed once
+					# (fade_pos == 0) and CAPPED to the audio remaining at note-off,
+					# so the ramp always reaches 0 before the buffer runs out — a
+					# long release on a short remainder would otherwise retire the
+					# voice mid-ramp at high amplitude (an audible click).
+					if voice.fade_pos == 0:
+						base_frames = (
+							voice.release_frames
+							if voice.release_frames is not None
+							else self._release_fade_frames
+						)
+						voice.release_total = max(1, min(base_frames, remaining))
+
+					fade_total = voice.release_total
 					n = min(frame_count, remaining, fade_total - voice.fade_pos)
 
 					if n > 0:
-						idx  = numpy.arange(voice.fade_pos, voice.fade_pos + n, dtype=numpy.float32)
-						# The ramp's final value is cos(π(N-1)/N), not exactly 0
-						# — a residual of ~1.3e-5 at 441 frames, far below
-						# audibility.  Intentional; not an off-by-one.
-						ramp = ((1.0 + numpy.cos(numpy.pi * idx / fade_total)) / 2.0).astype(numpy.float32)
+						idx = numpy.arange(voice.fade_pos, voice.fade_pos + n, dtype=numpy.float32)
+
+						if voice.release_curve == 1:
+							# Exponential: normalised so it reaches EXACTLY 0 at the
+							# end (a raw exp(-k*x) would leave an audible residual).
+							x    = idx / fade_total
+							ek   = math.exp(-_RELEASE_EXP_K)
+							ramp = ((numpy.exp(-_RELEASE_EXP_K * x) - ek) / (1.0 - ek)).astype(numpy.float32)
+						else:
+							# Cosine: the raised-cosine declick.  Final value is
+							# cos(π(N-1)/N), not exactly 0 — a residual ~1.3e-5 at
+							# 441 frames, far below audibility.  Not an off-by-one.
+							ramp = ((1.0 + numpy.cos(numpy.pi * idx / fade_total)) / 2.0).astype(numpy.float32)
+
 						output[:n] += voice.audio[voice.position : voice.position + n] * ramp[:, numpy.newaxis]
 						voice.position += n
 						voice.fade_pos += n
@@ -3251,6 +3470,53 @@ class MidiPlayer:
 			cc_omni=cc_omni_snapshot,
 		)
 
+	def _resolve_release (
+		self,
+		release: typing.Optional[subsample.query.ReleaseSpec],
+		record:  subsample.library.SampleRecord,
+	) -> tuple[typing.Optional[int], int]:
+
+		"""Resolve an assignment's ReleaseSpec to (frames, curve_code) for a voice.
+
+		Returns ``(None, 0)`` when no release is configured — the callback then
+		uses the player's global default declick length, so behaviour is
+		unchanged.  Otherwise returns the fade length in output-rate frames and
+		the curve code (0=cosine, 1=exponential).
+
+		A CC-bound release time is frozen HERE, at note-on, from a CC snapshot —
+		so turning the knob shapes the notes you play next, not the one already
+		ringing.  (Reading CC state at note-off would need _state_lock while the
+		note-off handler holds _voices_lock, which the lock ordering forbids.)
+		The adaptive form (time is None) derives ~30-200 ms from the sample's own
+		release character, mirroring ``reshape: true``.
+		"""
+
+		if release is None:
+			return None, 0
+
+		curve_code = 1 if release.curve == "exponential" else 0
+
+		time_ms = release.time
+
+		if isinstance(time_ms, subsample.query.CcBinding):
+			cc_state, cc_omni = self._snapshot_cc_state()
+			binding = time_ms
+
+			if binding.channel is not None:
+				cc_val = cc_state.get((binding.channel - 1, binding.cc))
+			else:
+				cc_val = cc_omni.get(binding.cc)
+
+			time_ms = binding.resolve(cc_val) if cc_val is not None else binding.default_value
+
+		if time_ms is None:
+			# Adaptive: short for percussive material, longer for sustained,
+			# matching the reshape auto-release mapping (30 + 170 * release).
+			time_ms = 30.0 + 170.0 * record.spectral.release
+
+		frames = max(1, round(float(time_ms) / 1000.0 * self._output_sample_rate))
+		return frames, curve_code
+
 	def _trigger_one (
 		self,
 		msg:                mido.Message,
@@ -3309,6 +3575,12 @@ class MidiPlayer:
 			_log.debug("Sample %d not found or audio not loaded", sample_id)
 			return
 
+		# Resolve the note-off release once for this trigger (needs `record` for
+		# the adaptive form and for the note-on CC snapshot).  Every voice this
+		# note-on spawns — variant, previous-variant, base, int-PCM fallback —
+		# carries the same resolved values.
+		release_frames, release_curve = self._resolve_release(assignment.release, record)
+
 		# ── Variant lookup based on ProcessSpec ───────────────────────────
 		# eff_transform was captured at the top of the handler alongside
 		# eff_library so both read the same bank for this note-on — guaranteed
@@ -3335,7 +3607,7 @@ class MidiPlayer:
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
-							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
+							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot, release_frames=release_frames, release_curve=release_curve))
 						with self._state_lock:
 							self._last_played[state_key] = variant
 						_log.debug(
@@ -3361,7 +3633,7 @@ class MidiPlayer:
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
 						with self._voices_lock:
-							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
+							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot, release_frames=release_frames, release_curve=release_curve))
 						_log.debug(
 							"note %d (vel %d → %d) → %r → %r (previous variant)  (%.2fs)",
 							msg.note, msg.velocity, effective_velocity, assignment.name, record.name, prev.duration,
@@ -3380,7 +3652,7 @@ class MidiPlayer:
 				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 				rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
 				with self._voices_lock:
-					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot))
+					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot, release_frames=release_frames, release_curve=release_curve))
 				_log.debug(
 					"note %d (vel %d → %d) → %r → %r (base variant)  (%.2fs)",
 					msg.note, msg.velocity, effective_velocity, assignment.name, record.name, base.duration,
@@ -3395,7 +3667,7 @@ class MidiPlayer:
 			return
 
 		with self._voices_lock:
-			self._voices.append(_Voice(audio=original, note=msg.note, channel=msg.channel, one_shot=one_shot))
+			self._voices.append(_Voice(audio=original, note=msg.note, channel=msg.channel, one_shot=one_shot, release_frames=release_frames, release_curve=release_curve))
 
 		_log.debug(
 			"note %d (vel %d → %d) → %r → %r  (%.2fs)",
@@ -3634,6 +3906,7 @@ class MidiPlayer:
 					select              = sample_select,
 					process             = template.process,
 					one_shot            = template.one_shot,
+					release             = template.release,
 					gain_db             = template.gain_db,
 					pan_weights         = template.pan_weights,
 					output_routing      = template.output_routing,

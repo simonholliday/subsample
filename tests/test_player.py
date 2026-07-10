@@ -826,6 +826,393 @@ class TestOneShot:
 
 
 # ---------------------------------------------------------------------------
+# release: — note-off amplitude release
+# ---------------------------------------------------------------------------
+
+class TestParseRelease:
+
+	"""_parse_release / _parse_release_time — the release: YAML surface."""
+
+	def test_none_and_false (self) -> None:
+		assert subsample.player._parse_release(None, "a") is None
+		assert subsample.player._parse_release(False, "a") is None
+
+	def test_true_is_adaptive_cosine (self) -> None:
+		spec = subsample.player._parse_release(True, "a")
+		assert spec == subsample.query.ReleaseSpec(time=None, curve="cosine")
+
+	def test_scalar_ms (self) -> None:
+		spec = subsample.player._parse_release(800, "a")
+		assert spec == subsample.query.ReleaseSpec(time=800.0, curve="cosine")
+
+	def test_dict_time_and_curve (self) -> None:
+		spec = subsample.player._parse_release({"time": 120, "curve": "exponential"}, "a")
+		assert spec == subsample.query.ReleaseSpec(time=120.0, curve="exponential")
+
+	def test_dict_curve_case_insensitive (self) -> None:
+		spec = subsample.player._parse_release({"time": 50, "curve": "COSINE"}, "a")
+		assert spec is not None and spec.curve == "cosine"
+
+	def test_cc_shorthand (self) -> None:
+		spec = subsample.player._parse_release({"cc": 72, "min": 20, "max": 3000}, "a")
+		assert spec is not None
+		assert isinstance(spec.time, subsample.query.CcBinding)
+		assert spec.time.cc == 72 and spec.time.min_val == 20.0 and spec.time.max_val == 3000.0
+
+	def test_cc_nested_under_time (self) -> None:
+		spec = subsample.player._parse_release({"time": {"cc": 72}, "curve": "exponential"}, "a")
+		assert spec is not None and isinstance(spec.time, subsample.query.CcBinding)
+		assert spec.curve == "exponential"
+
+	def test_bad_curve_rejected (self) -> None:
+		with pytest.raises(ValueError, match="unknown release curve"):
+			subsample.player._parse_release({"curve": "linear"}, "a")
+
+	def test_negative_time_rejected (self) -> None:
+		with pytest.raises(ValueError, match=">= 0 ms"):
+			subsample.player._parse_release(-5, "a")
+
+	def test_wrong_type_rejected (self) -> None:
+		with pytest.raises(ValueError, match="release must be"):
+			subsample.player._parse_release("nonsense", "a")
+
+	def test_cc_out_of_range_rejected (self) -> None:
+		with pytest.raises(ValueError, match="0-127"):
+			subsample.player._parse_release({"cc": 200}, "a")
+
+	def test_bool_not_treated_as_number (self) -> None:
+		# True/False must hit the adaptive/None branches, never the ms-scalar path.
+		assert subsample.player._parse_release(True, "a").time is None
+
+	def test_shorthand_keeps_sibling_curve (self) -> None:
+		# Regression: {cc: ...} shorthand must not drop a sibling curve: key.
+		spec = subsample.player._parse_release({"cc": 5, "curve": "exponential", "min": 20, "max": 3000}, "a")
+		assert spec is not None and spec.curve == "exponential"
+
+	def test_shorthand_validates_curve (self) -> None:
+		# Regression: the shorthand path must not bypass curve validation.
+		with pytest.raises(ValueError, match="unknown release curve"):
+			subsample.player._parse_release({"cc": 5, "curve": "banana"}, "a")
+
+	def test_unknown_key_rejected_explicit (self) -> None:
+		# A typo'd inner key must fail loud, not silently default (house convention).
+		with pytest.raises(ValueError, match="unknown release key"):
+			subsample.player._parse_release({"time": 100, "curev": "exponential"}, "a")
+
+	def test_unknown_key_rejected_time_typo (self) -> None:
+		with pytest.raises(ValueError, match="unknown release key"):
+			subsample.player._parse_release({"tim": 100}, "a")
+
+	def test_unknown_key_rejected_shorthand (self) -> None:
+		with pytest.raises(ValueError, match="unknown release key"):
+			subsample.player._parse_release({"cc": 5, "maxx": 3000}, "a")
+
+	def test_non_finite_time_rejected (self) -> None:
+		# .inf / .nan would otherwise slip to note-on and crash round().
+		with pytest.raises(ValueError, match="finite"):
+			subsample.player._parse_release(float("inf"), "a")
+		with pytest.raises(ValueError, match="finite"):
+			subsample.player._parse_release(float("nan"), "a")
+
+	def test_malformed_cc_names_assignment (self) -> None:
+		with pytest.raises(ValueError, match="malformed release time cc"):
+			subsample.player._parse_release({"cc": "notanumber"}, "a")
+
+
+class TestReleaseLoadOneShot:
+
+	"""release: parsing at load and its one_shot interaction — a release on a
+	one_shot (play-to-end) voice is warned and dropped, since such a voice never
+	receives note-off."""
+
+	def _write_map (self, tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		p = tmp_path / "test-map.yaml"
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def test_release_kept_when_one_shot_false (self, tmp_path: pathlib.Path) -> None:
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Pad
+    channel: 1
+    notes: 48
+    one_shot: false
+    release: 800
+    select:
+      where:
+        reference: BD0025
+""")
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+		asgn, _ = note_map[(0, 48)][0]
+		assert asgn.release == subsample.query.ReleaseSpec(time=800.0, curve="cosine")
+
+	def test_release_dropped_and_warned_when_one_shot_default (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 1
+    notes: 36
+    release: 800
+    select:
+      where:
+        reference: BD0025
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		asgn, _ = note_map[(0, 36)][0]
+		assert asgn.release is None
+		assert any("release" in r.message and "one_shot" in r.message for r in caplog.records)
+
+	def test_release_dropped_when_one_shot_explicit_true (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		import logging
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 1
+    notes: 36
+    one_shot: true
+    release: 400
+    select:
+      where:
+        reference: BD0025
+""")
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+		asgn, _ = note_map[(0, 36)][0]
+		assert asgn.release is None
+
+	def test_zone_template_carries_release (self, tmp_path: pathlib.Path) -> None:
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Lead
+    channel: 1
+    notes: zone-tuned
+    one_shot: false
+    release: { time: 500, curve: exponential }
+    process:
+      - repitch: true
+    select:
+      where:
+        pitched: true
+""")
+		result = subsample.player.load_midi_map(path, [])
+		assert len(result.zone_templates) == 1
+		assert result.zone_templates[0].release == subsample.query.ReleaseSpec(time=500.0, curve="exponential")
+
+
+class TestResolveRelease:
+
+	"""MidiPlayer._resolve_release — spec → (frames, curve_code) at note-on."""
+
+	def _player (self, sample_rate: int = 44100, cc_state: typing.Optional[dict] = None) -> unittest.mock.MagicMock:
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._output_sample_rate = sample_rate
+		player._snapshot_cc_state.return_value = (cc_state or {}, {})
+		return player
+
+	def _record (self, release_char: float = 0.3) -> typing.Any:
+		import types
+		return types.SimpleNamespace(spectral=types.SimpleNamespace(release=release_char))
+
+	def test_none_spec_returns_default_sentinel (self) -> None:
+		frames, curve = subsample.player.MidiPlayer._resolve_release(self._player(), None, self._record())
+		assert frames is None and curve == 0
+
+	def test_scalar_ms_to_frames (self) -> None:
+		spec = subsample.query.ReleaseSpec(time=1000.0, curve="cosine")
+		frames, curve = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
+		assert frames == 44100 and curve == 0   # 1000 ms at 44100 Hz
+
+	def test_exponential_curve_code (self) -> None:
+		spec = subsample.query.ReleaseSpec(time=100.0, curve="exponential")
+		_frames, curve = subsample.player.MidiPlayer._resolve_release(self._player(), spec, self._record())
+		assert curve == 1
+
+	def test_adaptive_from_spectral_release (self) -> None:
+		# time None → 30 + 170 * release_char ms.
+		spec = subsample.query.ReleaseSpec(time=None, curve="cosine")
+		frames, _curve = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record(0.5))
+		expected_ms = 30.0 + 170.0 * 0.5   # 115 ms
+		assert frames == round(expected_ms / 1000.0 * 44100)
+
+	def test_cc_time_resolved_from_snapshot (self) -> None:
+		binding = subsample.query.CcBinding(cc=72, min_val=0.0, max_val=2000.0, channel=None)
+		spec = subsample.query.ReleaseSpec(time=binding, curve="cosine")
+		# omni CC 72 at 127 → max_val = 2000 ms.
+		player = self._player(44100)
+		player._snapshot_cc_state.return_value = ({}, {72: 127})
+		frames, _curve = subsample.player.MidiPlayer._resolve_release(player, spec, self._record())
+		assert frames == round(2000.0 / 1000.0 * 44100)
+
+	def test_cc_time_falls_back_to_default_when_absent (self) -> None:
+		binding = subsample.query.CcBinding(cc=72, min_val=100.0, max_val=2000.0, default=500.0)
+		spec = subsample.query.ReleaseSpec(time=binding, curve="cosine")
+		frames, _curve = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
+		assert frames == round(500.0 / 1000.0 * 44100)   # default_value
+
+
+class TestReleaseCallback:
+
+	"""The audio-callback release fade: per-voice length, curves, and the
+	truncation cap that keeps a long release click-free on a short remainder."""
+
+	def _drive (
+		self,
+		voice: subsample.player._Voice,
+		release_fade_frames: int = 441,
+		frame_count: int = 256,
+		max_iters: int = 4000,
+	) -> numpy.ndarray:
+		"""Run the real callback to completion; return the decoded mono envelope
+		(channel 0, float) of the voice as it fades out."""
+		import pyaudio
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices              = [voice]
+		player._voices_lock         = threading.Lock()
+		player._output_channels     = voice.audio.shape[1]
+		player._output_bit_depth    = 16
+		player._release_fade_frames = release_fade_frames
+		player._limiter_enabled     = False   # decoded PCM == raw mix (no tanh)
+		player._max_polyphony       = 8
+
+		chunks: list[numpy.ndarray] = []
+		for _ in range(max_iters):
+			if not player._voices:
+				break
+			pcm, _flag = subsample.player.MidiPlayer._audio_callback_impl(player, None, frame_count, {}, 0)
+			arr = numpy.frombuffer(pcm, dtype=numpy.int16).reshape(-1, player._output_channels)
+			chunks.append(arr[:, 0].astype(numpy.float32) / 32767.0)
+
+		return numpy.concatenate(chunks) if chunks else numpy.array([], dtype=numpy.float32)
+
+	def _voice (self, n_frames: int, amp: float = 0.5, **kw: typing.Any) -> subsample.player._Voice:
+		audio = numpy.full((n_frames, 2), amp, dtype=numpy.float32)
+		return subsample.player._Voice(audio=audio, note=36, channel=9, releasing=True, **kw)
+
+	def test_default_uses_global_fade_length (self) -> None:
+		# release_frames=None → fades over the global _release_fade_frames.
+		env = self._drive(self._voice(44100), release_fade_frames=441)
+		fade_len = int(numpy.count_nonzero(env > 1e-4))
+		# The fade spans ~441 frames; allow a small margin for the residual tail.
+		assert 400 <= fade_len <= 460
+
+	def test_configured_length_overrides_default (self) -> None:
+		# 2205 frames ≈ 50 ms at 44100 — far longer than the 441 default.
+		env = self._drive(self._voice(44100, release_frames=2205), release_fade_frames=441)
+		fade_len = int(numpy.count_nonzero(env > 1e-4))
+		assert 2100 <= fade_len <= 2300
+
+	def test_fade_is_monotonic_non_increasing (self) -> None:
+		env = self._drive(self._voice(44100, release_frames=2205))
+		fade = env[env > 1e-5]
+		# A release only ever gets quieter.
+		assert numpy.all(numpy.diff(fade) <= 1e-6)
+
+	def test_truncation_reaches_zero_on_short_remainder (self) -> None:
+		# A very long release (1 s) on a short buffer (500 frames) must still
+		# fade to ~0 by the buffer's end — no mid-ramp hard cut (a click).
+		env = self._drive(self._voice(500, release_frames=44100))
+		assert env.size >= 490
+		# The last audible sample before retirement is near zero.
+		nonzero = env[numpy.abs(env) > 1e-5]
+		assert nonzero.size > 0
+		assert abs(float(nonzero[-1])) < 0.05   # would be ~0.5 (full amplitude) under the bug
+
+	def test_exponential_drops_faster_than_cosine (self) -> None:
+		cos_env = self._drive(self._voice(44100, release_frames=4410, release_curve=0))
+		exp_env = self._drive(self._voice(44100, release_frames=4410, release_curve=1))
+		# Sample both a quarter of the way through the fade; exponential is lower.
+		q = 4410 // 4
+		assert exp_env[q] < cos_env[q]
+
+	def test_both_curves_end_near_zero (self) -> None:
+		for curve in (0, 1):
+			env = self._drive(self._voice(44100, release_frames=4410, release_curve=curve))
+			nonzero = env[numpy.abs(env) > 1e-6]
+			assert abs(float(nonzero[-1])) < 0.02
+
+	def test_one_shot_voice_never_reads_release (self) -> None:
+		# Sanity: a non-releasing (one_shot playing-through) voice is unaffected —
+		# it plays at full amplitude, no fade applied.
+		voice = subsample.player._Voice(
+			audio=numpy.full((1000, 2), 0.5, dtype=numpy.float32),
+			note=36, channel=9, releasing=False, one_shot=True, release_frames=100,
+		)
+		env = self._drive(voice)
+		# First 1000 frames are full amplitude (no release ramp).
+		assert float(numpy.min(env[:1000])) == pytest.approx(0.5, abs=1e-3)
+
+
+class TestReleaseThreadingThroughTrigger:
+
+	"""Every voice-append path in _trigger_one must carry the resolved release.
+	The base-variant path (no process pipeline — the common case) once silently
+	dropped it; this guards each path."""
+
+	def _run_trigger (self, process_steps: tuple, which: str) -> subsample.player._Voice:
+		"""Drive _trigger_one so a voice is served from the named path; return it.
+
+		which: "base" (empty process → get_base) or "int_pcm" (transform manager
+		absent → int-PCM fallback render)."""
+		import mido
+
+		rendered = numpy.zeros((100, 2), dtype=numpy.float32)
+		record = unittest.mock.MagicMock()
+		record.audio          = numpy.zeros((100, 2), dtype=numpy.int16)
+		record.channel_format = "pcm"
+		record.name           = "pad"
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices      = []
+		player._voices_lock = threading.Lock()
+		player._resolve_sample_id.return_value = 1
+		player._effective_instrument_library.get.return_value = record
+		player._resolve_release.return_value = (1234, 1)   # sentinel (frames, curve)
+		player._select_segment.return_value = (rendered, 0.5)
+		player._get_mix_matrix.return_value = numpy.eye(2, dtype=numpy.float32)
+		player._render_float.return_value = rendered
+		player._render.return_value       = rendered
+
+		if which == "base":
+			base = unittest.mock.MagicMock()
+			base.audio = rendered; base.level = 0.5; base.segment_bounds = None; base.duration = 1.0
+			player._effective_transform_manager.get_base.return_value = base
+		else:  # int_pcm: no transform manager at all
+			player._effective_transform_manager = None
+
+		assignment = subsample.query.Assignment(
+			name="Pad", select=(),
+			process=subsample.query.ProcessSpec(steps=process_steps),
+			one_shot=False,
+			release=subsample.query.ReleaseSpec(time=800.0, curve="exponential"),
+		)
+		msg  = mido.Message("note_on", channel=0, note=48, velocity=100)
+		pick = subsample.query.PickSpec(1, 1)
+
+		subsample.player.MidiPlayer._trigger_one(player, msg, assignment, pick, 100)
+
+		assert len(player._voices) == 1
+		return player._voices[0]
+
+	def test_base_variant_path_carries_release (self) -> None:
+		voice = self._run_trigger(process_steps=(), which="base")
+		assert voice.release_frames == 1234
+		assert voice.release_curve == 1
+
+	def test_int_pcm_fallback_path_carries_release (self) -> None:
+		voice = self._run_trigger(process_steps=(), which="int_pcm")
+		assert voice.release_frames == 1234
+		assert voice.release_curve == 1
+
+
+# ---------------------------------------------------------------------------
 # max_polyphony and target_rms
 # ---------------------------------------------------------------------------
 
