@@ -1503,7 +1503,14 @@ def _main_impl () -> None:
 
 def _print_banner (cfg: subsample.config.Config) -> None:
 
-	"""Print the startup summary line."""
+	"""Print the startup summary line.
+
+	Each enabled subsystem contributes its OWN real settings — the recorder its
+	capture format + capture-only fields (buffer, SNR, capture directory), the
+	player its resolved OUTPUT format + the map and sample source it plays from.
+	A player-only run therefore reports the player's output (e.g. 48000 Hz, 8ch),
+	not the disabled recorder's capture rate.
+	"""
 
 	modes = []
 	if cfg.recorder.enabled:
@@ -1512,22 +1519,47 @@ def _print_banner (cfg: subsample.config.Config) -> None:
 		modes.append("player")
 	mode_str = " + ".join(modes) if modes else "file-only"
 
-	# channels may be None when auto-detect is configured; show "auto" until resolved.
-	ch_str = (
-		f"{cfg.recorder.audio.channels}ch"
-		if cfg.recorder.audio.channels is not None
-		else "auto"
-	)
+	segments: list[str] = []
 
-	print(
-		f"Subsample  |  {mode_str}  |  "
-		f"{cfg.recorder.audio.sample_rate} Hz  "
-		f"{cfg.recorder.audio.bit_depth}-bit  "
-		f"{ch_str}  |  "
-		f"buffer {cfg.recorder.buffer.max_seconds}s  |  "
-		f"SNR ≥ {cfg.detection.snr_threshold_db} dB  |  "
-		f"→ {cfg.output.directory}"
-	)
+	if cfg.recorder.enabled:
+		# channels may be None when auto-detect is configured; show "auto" until resolved.
+		ch_str = (
+			f"{cfg.recorder.audio.channels}ch"
+			if cfg.recorder.audio.channels is not None
+			else "auto"
+		)
+		segments.append(
+			f"rec {cfg.recorder.audio.sample_rate} Hz  "
+			f"{cfg.recorder.audio.bit_depth}-bit  {ch_str}  |  "
+			f"buffer {cfg.recorder.buffer.max_seconds}s  |  "
+			f"SNR ≥ {cfg.detection.snr_threshold_db} dB  |  "
+			f"→ {cfg.output.directory}"
+		)
+
+	if cfg.player.enabled:
+		# Mirror the engine's own output resolution so the banner matches the
+		# stream that actually opens: rate falls back to the recorder's when
+		# player.audio.sample_rate is unset (cli output_sample_rate); bit depth
+		# likewise (MidiPlayer output_bit_depth); channels default to stereo.
+		out_rate = (
+			cfg.player.audio.sample_rate
+			if cfg.player.audio.sample_rate is not None
+			else cfg.recorder.audio.sample_rate
+		)
+		out_bits = (
+			cfg.player.audio.bit_depth
+			if cfg.player.audio.bit_depth is not None
+			else cfg.recorder.audio.bit_depth
+		)
+		out_ch  = cfg.player.audio.channels if cfg.player.audio.channels is not None else 2
+		map_str = cfg.player.midi_map if cfg.player.midi_map is not None else "(no map)"
+		segments.append(
+			f"out {out_rate} Hz  {out_bits}-bit  {out_ch}ch  |  "
+			f"map {map_str}  |  ← {cfg.instrument.directory}"
+		)
+
+	body = "  ||  ".join(segments) if segments else "file-only"
+	print(f"Subsample  |  {mode_str}  |  {body}")
 
 
 def _integrate_sample (

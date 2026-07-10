@@ -407,3 +407,86 @@ class TestIntegrateSample:
 		)
 
 		assert library.get(record.sample_id) is record
+
+
+class TestPrintBanner:
+
+	"""_print_banner reports each ACTIVE subsystem's own settings — a player-only
+	run must show the player's output, not the (possibly disabled) recorder."""
+
+	_DEFAULT = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+
+	def _player_only (self) -> subsample.config.Config:
+		import dataclasses
+		cfg = subsample.config.load_config(self._DEFAULT)
+		# Recorder disabled, but its bit_depth (24) is the fallback source for the
+		# player's unset output bit depth — pin it so the fallback is deterministic.
+		recorder = dataclasses.replace(
+			cfg.recorder, enabled=False,
+			audio=dataclasses.replace(cfg.recorder.audio, bit_depth=24),
+		)
+		player   = dataclasses.replace(
+			cfg.player,
+			enabled=True,
+			midi_map="midi-map-gm-drums.yaml",
+			audio=dataclasses.replace(cfg.player.audio, sample_rate=48000, channels=8, bit_depth=None),
+		)
+		instrument = dataclasses.replace(cfg.instrument, directory="samples/captures")
+		return dataclasses.replace(cfg, recorder=recorder, player=player, instrument=instrument)
+
+	def _recorder_only (self) -> subsample.config.Config:
+		import dataclasses
+		cfg = subsample.config.load_config(self._DEFAULT)
+		recorder = dataclasses.replace(
+			cfg.recorder, enabled=True,
+			audio=dataclasses.replace(cfg.recorder.audio, sample_rate=44100, bit_depth=24, channels=2),
+		)
+		player = dataclasses.replace(cfg.player, enabled=False)
+		return dataclasses.replace(cfg, recorder=recorder, player=player)
+
+	def test_player_only_shows_player_output (self, capsys: pytest.CaptureFixture) -> None:
+		subsample.cli._print_banner(self._player_only())
+		line = capsys.readouterr().out
+
+		assert "player" in line
+		assert "48000 Hz" in line          # player output rate, not recorder 44100
+		assert "8ch" in line               # player output channels, not recorder 2
+		assert "midi-map-gm-drums.yaml" in line
+
+	def test_player_only_hides_recorder_fields (self, capsys: pytest.CaptureFixture) -> None:
+		subsample.cli._print_banner(self._player_only())
+		line = capsys.readouterr().out
+
+		# The disabled recorder's rate and capture-only fields must not appear.
+		assert "44100" not in line
+		assert "SNR" not in line
+		assert "buffer" not in line
+
+	def test_player_output_bit_depth_falls_back_to_recorder (self, capsys: pytest.CaptureFixture) -> None:
+		# player.audio.bit_depth is None → resolves to the recorder's 24, matching
+		# MidiPlayer's own output_bit_depth fallback.
+		subsample.cli._print_banner(self._player_only())
+		assert "24-bit" in capsys.readouterr().out
+
+	def test_recorder_only_shows_capture_format (self, capsys: pytest.CaptureFixture) -> None:
+		subsample.cli._print_banner(self._recorder_only())
+		line = capsys.readouterr().out
+
+		assert "recorder" in line
+		assert "44100 Hz" in line
+		assert "SNR" in line
+		assert "buffer" in line
+		# No player output segment.
+		assert "map " not in line
+
+	def test_both_modes_show_both_segments (self, capsys: pytest.CaptureFixture) -> None:
+		import dataclasses
+		cfg = self._player_only()
+		cfg = dataclasses.replace(cfg, recorder=dataclasses.replace(cfg.recorder, enabled=True))
+		subsample.cli._print_banner(cfg)
+		line = capsys.readouterr().out
+
+		assert "recorder + player" in line
+		assert "48000 Hz" in line          # player output
+		assert "SNR" in line               # recorder capture-only field
+		assert "||" in line                # two segments joined
