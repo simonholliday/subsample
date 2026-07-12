@@ -36,6 +36,7 @@ import subsample.ambisonic
 import subsample.analysis
 import subsample.cache
 import subsample.config
+import subsample.loopfind
 import subsample.preview
 
 
@@ -414,6 +415,16 @@ class SampleProcessor:
 					duration=preview_duration,
 				)
 
+			# Find the seamless loop on the same mono float the analysis and
+			# preview used (frame-aligned with the audio about to be written), so a
+			# freshly captured loopable sample carries its loop immediately — a
+			# sidecar saved with loop=None would match on version + MD5 forever and
+			# never re-analyse, leaving it permanently unloopable.
+			loop = subsample.cache.compute_loop(
+				mono, effective_sample_rate, result, pitch, level,
+				len(mono) / effective_sample_rate,
+			)
+
 			write_result = self._write_audio_file(
 				req.audio, req.timestamp, rhythm, result, pitch, timbre, level, band_energy,
 				filename_base=req.filename_base,
@@ -421,6 +432,7 @@ class SampleProcessor:
 				bit_depth=req.bit_depth,
 				channel_format=channel_format_tag,
 				preview_data=preview_data,
+				loop=loop,
 			)
 
 			if self._on_complete is not None and write_result is not None:
@@ -459,6 +471,7 @@ class SampleProcessor:
 		bit_depth: typing.Optional[int] = None,
 		channel_format: str = "pcm",
 		preview_data: typing.Optional[subsample.preview.PreviewData] = None,
+		loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
 	) -> tuple[pathlib.Path, float] | None:
 
 		"""Write a single audio segment to disk and save its analysis sidecar.
@@ -603,6 +616,7 @@ class SampleProcessor:
 			captured_at    = timestamp.isoformat(),
 			channel_format = channel_format,
 			preview_data   = preview_data,
+			loop           = loop,
 		)
 
 		# Raster preview: written only when preview_data was computed.  The

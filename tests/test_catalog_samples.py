@@ -94,6 +94,22 @@ def _make_unpitched_sample (directory: pathlib.Path, stem: str) -> pathlib.Path:
 	return wav_path
 
 
+def _make_non_loopable_sample (directory: pathlib.Path, stem: str) -> pathlib.Path:
+
+	"""Create a WAV + sidecar that fails is_loopable on BOTH branches: unpitched
+	(fails the tonal branch) and non-stationary — the default noise_floor/rms
+	gives a low noisiness that fails the textural branch."""
+
+	wav_path, sidecar_path = tests.helpers._write_wav_and_sidecar(directory, stem)
+	_edit_sidecar(
+		sidecar_path,
+		spectral = {"voiced_fraction": 0.0, "harmonic_ratio": 0.1},
+		pitch    = {"dominant_pitch_hz": 0.0, "pitch_confidence": 0.0, "dominant_pitch_class": -1},
+	)
+	_fix_sidecar_md5(wav_path, sidecar_path)
+	return wav_path
+
+
 def _run_csv (
 	capsys: pytest.CaptureFixture,
 	argv: list[str],
@@ -116,11 +132,12 @@ class TestColumns:
 	"""Tests for the column sets."""
 
 	def test_base_includes_capability_indicators (self) -> None:
-		"""The default CSV must carry the two capability columns."""
+		"""The default CSV must carry the three capability columns."""
 		columns = catalog_samples._columns(full=False)
 
 		assert "pitched" in columns
 		assert "quantizable" in columns
+		assert "loopable" in columns
 
 	def test_base_includes_all_stable_pitch_inputs (self) -> None:
 		"""All seven has_stable_pitch inputs are present, so a failing sample
@@ -239,6 +256,7 @@ class TestCsvOutput:
 		assert row["path"] == "tone.wav"
 		assert row["pitched"] == "yes"
 		assert row["quantizable"] == "yes"
+		assert row["loopable"] == "yes"   # tonal helper sidecar → loop candidate
 		assert row["pitch_note"] == "A4"
 		assert row["pitch_hz"] == "440"
 		assert row["tempo_bpm"] == "120"
@@ -334,13 +352,24 @@ class TestCsvOutput:
 
 class TestPathsMode:
 
-	"""--pitched / --quantizable replace the CSV with matching paths."""
+	"""--pitched / --quantizable / --loopable replace the CSV with matching paths."""
 
 	def test_pitched_filter (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
 		_make_pitched_sample(tmp_path, "tone")
 		_make_unpitched_sample(tmp_path, "hit")
 
 		catalog_samples.main([str(tmp_path), "--pitched"])
+
+		out_lines = capsys.readouterr().out.splitlines()
+		assert out_lines == [str(tmp_path / "tone.wav")]
+
+	def test_loopable_filter (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+		# Tonal helper sidecar → loop candidate; the unpitched, non-stationary
+		# sample fails both branches.
+		_make_pitched_sample(tmp_path, "tone")
+		_make_non_loopable_sample(tmp_path, "hit")
+
+		catalog_samples.main([str(tmp_path), "--loopable"])
 
 		out_lines = capsys.readouterr().out.splitlines()
 		assert out_lines == [str(tmp_path / "tone.wav")]

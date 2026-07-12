@@ -115,7 +115,7 @@ warnings.filterwarnings("ignore", message="Empty filters detected in mel frequen
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "13"
+ANALYSIS_VERSION: str = "14"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -1243,6 +1243,78 @@ def noisiness (spectral: AnalysisResult, level: LevelResult) -> float:
 	stationarity = min(max(level.noise_floor / level.rms, 0.0), 1.0)
 
 	return stationarity * (1.0 - spectral.voiced_fraction)
+
+
+# Loopability thresholds.  This is a COARSE candidate gate over existing summary
+# fields — it decides "could this sample sustain a loop at all", not the final
+# loop (which needs the raw audio to find and score an actual seamless junction).
+# Tuned to agree with an audio-level reference on a labelled corpus (tonal:
+# flute/hum; textural: machine rumble/dynamic bed; rejects: short percussive
+# hits) while erring toward recall — a false candidate is caught later by the
+# audio search, a missed one is never offered.
+_LOOP_MIN_DURATION_S:      float = 0.5   # room for a >=0.35 s loop + attack + release tail
+_LOOP_MIN_VOICED:          float = 0.5   # harmonic branch: sustained pitched (not noise) energy
+_LOOP_MIN_HARMONIC_RATIO:  float = 0.5   # harmonic branch: more harmonic than percussive
+_LOOP_MIN_NOISINESS:       float = 0.25  # textural branch: a steady, unpitched bed
+
+
+def is_loopable (
+	spectral: AnalysisResult,
+	level: LevelResult,
+	duration: float,
+) -> bool:
+
+	"""Return True if this sample could plausibly sustain a held-note loop.
+
+	A coarse candidate test, like has_stable_pitch / has_beat_map: a compound
+	query over EXISTING analysis fields, so it works on every stored sidecar with
+	no re-analysis and powers a ``loopable:`` MIDI-map predicate and catalog
+	column.  It answers "is there a steady sustaining region worth trying to
+	loop", NOT "where is the seamless loop" — finding and scoring an actual
+	click-free junction needs the raw audio and happens later, at loop-render
+	time.  So this errs toward recall: it lets marginal candidates through (the
+	audio search rejects the ones with no clean loop) and only excludes samples
+	that plainly cannot sustain.
+
+	Two ways to qualify (a sample needs either):
+
+	  harmonic — a sustained tone with more harmonic than percussive energy: a
+	             held, bowed, blown, or synthesised note.  This deliberately does
+	             NOT require a confident or stable tracked pitch: a fat detuned
+	             synth pad, or a tone with heavy vibrato / LFO modulation, has
+	             ambiguous wandering pitch (low pitch_confidence, high
+	             pitch_stability) yet loops perfectly well.  Requiring stable pitch
+	             here silently dropped exactly that material, so the test keys on
+	             harmonic and voiced energy — the signals that survive detuning and
+	             modulation — and leaves junction quality to the audio search.
+	  textural — a steady bed with no clean pitch: high ``noisiness`` (stationary
+	             AND unpitched), e.g. a noise wash, drone, or machine rumble.
+	             A decaying or gappy sound scores low here and is excluded,
+	             because noisiness already folds in "never gets quiet".
+
+	Both require a minimum duration — there must be room for a loop region plus
+	the attack the note keeps and the tail the release plays out into.
+
+	Args:
+		spectral: AnalysisResult (voiced_fraction, harmonic_ratio).
+		level:    LevelResult (feeds noisiness).
+		duration: Recording length in seconds.
+
+	Returns:
+		True if the sample is a loop candidate.
+	"""
+
+	if duration < _LOOP_MIN_DURATION_S:
+		return False
+
+	harmonic = (
+		spectral.voiced_fraction > _LOOP_MIN_VOICED
+		and spectral.harmonic_ratio > _LOOP_MIN_HARMONIC_RATIO
+	)
+
+	textural = noisiness(spectral, level) >= _LOOP_MIN_NOISINESS
+
+	return harmonic or textural
 
 
 def compute_level (

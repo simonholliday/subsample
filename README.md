@@ -351,7 +351,7 @@ keyboard range, pitch-shifted to each MIDI note:
     pick: 1                      # take the top result
   process:
     - repitch: true              # pitch-shift each note to its MIDI value
-  one_shot: false                # release on note-off (sustained playback)
+  mode: gated                # release on note-off (sustained playback)
 ```
 
 The `notes: C2..C6` range expands to every MIDI note between C2 and C6 - one
@@ -374,7 +374,7 @@ the sample flows through top to bottom.
     - saturate: { drive: 4 }                      # analog-style soft-clip
     - compress: true                              # adaptive dynamics
     - repitch: true                               # then pitch-shift
-  one_shot: false
+  mode: gated
 ```
 
 Every processor accepts `true` for sensible defaults, or a dict for
@@ -399,7 +399,7 @@ locked to the session. Combine it with filtering for a length+rhythm pick:
       - { by: duration, dir: desc }     # prefer longer loops
   process:
     - stretch_quantize: { strength: 0.7 }  # 70% snap - loose but locked
-  one_shot: false
+  mode: gated
 ```
 
 `duration`, `onsets`, and other numeric predicates take per-field operator
@@ -454,8 +454,9 @@ when you want to try something the tutorial didn't show.
 | `notes` | yes | Single note, list, range, or `zone-tuned` for auto-derived keyboard layout (see Note syntax + Zone-tuned below) |
 | `select` | yes | Which sample to play (see Select below) |
 | `process` | no | How to present it (see Process below) |
-| `one_shot` | no | `true` = play to natural end regardless of note-off (default). `false` = fade out on note-off |
-| `release` | no | Shape the note-off fade for a sustained voice (needs `one_shot: false`; ignored with a warning otherwise). A number of ms, `true` for an adaptive tail, or `{time, curve}` where `curve` is `cosine` (default) or `exponential`; `time` may be CC-bound. See Release below |
+| `mode` | no | Playback behaviour: `one_shot` (default) plays to the natural end and ignores note-off; `gated` fades out on note-off; `loop` holds a seamless loop while the key is held, then plays past it on release. Replaces the old `one_shot` flag - `one_shot: true` is now `mode: one_shot`, `one_shot: false` is `mode: gated`, and a leftover `one_shot:` key is a load error |
+| `loop` | no | Manual loop-point override, e.g. `{ start: 1.2, end: 3.4, crossfade: 40 }` (start/end in seconds, crossfade in ms; each optional). Implies `mode: loop`. Omit to use the sample's auto-detected loop |
+| `release` | no | Shape the note-off fade for a sustained voice (`mode: gated` or `loop`; ignored with a warning on `mode: one_shot`). A number of ms, `true` for an adaptive tail, `full` to play the remaining audio to its natural end with no fade (a loop rings out its real tail), or `{time, curve}` where `curve` is `cosine` (default) or `exponential`; `time` may be CC-bound. `mode: loop` defaults to the adaptive tail when unset. See Release below |
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
@@ -466,7 +467,7 @@ when you want to try something the tutorial didn't show.
 
 ### Release - shape how a held note fades
 
-By default a sustained sound (`one_shot: false`) fades out over a fixed 10 ms
+By default a sustained sound (`mode: gated`) fades out over a fixed 10 ms
 when you lift the key - just enough to avoid a click. `release` lets you set
 how long that fade is, and its shape:
 
@@ -474,20 +475,20 @@ how long that fade is, and its shape:
 Warm pad:
   channel: 1
   notes: 48
-  one_shot: false
+  mode: gated
   release: 800                       # fade over 800 ms after key-up
   select: [ where: { name: "*pad*" } ]
 
 Stab:
   channel: 1
   notes: 60
-  one_shot: false
+  mode: gated
   release: { time: 120, curve: exponential }   # fast drop, long tail
 
 Expressive pad:
   channel: 1
   notes: 64
-  one_shot: false
+  mode: gated
   release: { time: { cc: 72, min: 20, max: 3000 } }   # a pedal sets the length
 ```
 
@@ -501,8 +502,8 @@ Expressive pad:
   ringing.
 
 `release` only applies to voices that actually receive a note-off, so it needs
-`one_shot: false`. Declared on a one-shot (play-to-end) voice it is ignored,
-with a warning at startup.
+`mode: gated` or `mode: loop`. Declared on a `mode: one_shot` (play-to-end)
+voice it is ignored, with a warning at startup.
 
 **`release` vs `reshape`.** These are different tools: `reshape` (a `process:`
 step) shapes the sample's *own* amplitude body - baked in, fired on every hit,
@@ -511,11 +512,60 @@ when you *lift* the key - applied live, timed from the note-off. Both can be
 set at once (they multiply), but for amplitude you usually want one or the
 other.
 
-One honest limit: `release` can only fade whatever sample audio is still
+**`release: full`** is the exception to a fade: on note-off the voice plays the
+remaining audio to its natural end with no fade at all. On a plain sample that
+just lets it ring out; on a `mode: loop` voice it stops looping and plays the
+real tail - the natural decay of the held note.
+
+One honest limit: `release` can only shape whatever sample audio is still
 playing when you lift the key. A long release on a short sample fades what is
 left - it cannot invent a sustain tail, and a note held past the sample's
-natural end still stops there. True held sustain waits on loop playback (see
-Roadmap).
+natural end still stops there. For a sound that sustains as long as you hold the
+key, use `mode: loop` (below).
+
+
+### Loop - hold a sustain for as long as the key is down
+
+`mode: loop` turns a sustaining sample into a held instrument: the attack plays
+once, then a seamless slice of the steady part loops for as long as you hold the
+key. Lift the key and it stops looping and plays on through the sample's real
+tail, shaped by `release`.
+
+```yaml
+- name: Pad
+  channel: 1
+  notes: C2..C4
+  mode: loop            # attack, then loop the sustain while held
+  release: full         # on note-off, ring out the natural tail (no fade)
+```
+
+subsample finds the loop points automatically - the steadiest slice of the
+sustain, with a short crossfade so the wrap is inaudible. The `loopable` catalog
+column and `scripts/suggest_loops.py` let you preview which samples loop well. To
+place the loop by hand, give `loop:` in seconds (crossfade in ms):
+
+```yaml
+  loop: { start: 1.2, end: 3.4, crossfade: 40 }
+```
+
+Any field you omit falls back to the automatic value, and a `loop:` block on its
+own implies `mode: loop`. If a sample has no clean loop point - too evolving to
+wrap seamlessly - it plays *gated* instead (held, then released) and a line in
+the log says so.
+
+Loop playback can't yet be combined with `repitch` or time/pad `*_quantize`
+(those change the timeline the loop points are measured in); an assignment that
+asks for both plays gated with a warning.
+
+**Re-pressing a held note.** Re-striking a `mode: gated` or `mode: loop` note
+that is already sounding replaces it: the sounding voice is released - it stops
+looping and fades over its `release`, or rings out its natural tail under
+`release: full` - while the new press starts instantly over the top. One held key
+is one voice, so a trill or a re-triggering sequencer restarts the note instead
+of stacking loops that never stop. (`release: full` still rings its tail out as
+asked, so a released tail and the new note can overlap - your choice to let them.)
+`mode: one_shot` is unchanged: repeated hits layer, the way striking a drum twice
+should.
 
 ### Templates - share fields across assignments
 
@@ -638,6 +688,7 @@ is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
 | `pitch` | Hz or note name | Filter by detected frequency. Each operator value is either a Hz float (`{ gte: 130.8 }`) or a note name (`{ gte: C3, lt: C6 }`). The two forms are interchangeable - note names are converted to Hz at parse time. Sharps: `C#4`; flats: `Db4`. |
 | `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
+| `loopable` | bool | `true` = has a steady sustaining region (tonal or textural) worth looping while a key is held; `false` = does not. A coarse candidate flag over existing analysis - see the loopable column of `catalog_samples.py` to preview which samples pass |
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
 | `name` | string / list / dict | Filename stem match. Four forms — see below. Legacy: a path-like scalar value (containing `/` or starting with `.`) is still auto-detected as a `path:` |
 | `path` | path | Match a specific WAV file at this path (relative paths resolved against the MIDI map's directory). Preferred over `name:` for file references |
@@ -720,7 +771,7 @@ common case concise, but it helps to know which ones are on:
 | `process` | Empty (unprocessed playback) | `process` block omitted |
 | `grid` | `16` (sixteenth-note) | `stretch_quantize` / `pad_quantize` without explicit grid |
 | `tempo` | Session `target_bpm` from `config.yaml` | `stretch_quantize` / `pad_quantize` without explicit tempo |
-| `one_shot` | `true` | Omitted from assignment |
+| `mode` | `one_shot` | Omitted from assignment |
 | `gain` | `0.0` dB | Omitted from assignment |
 | `pan` | Identity routing | Omitted from assignment |
 | `output` | Outputs `1..N` | Omitted from assignment |
@@ -1267,7 +1318,7 @@ explicit "yes, I meant these to overlap":
 ```
 
 Each stacked sample keeps its own settings - gain, pan, output routing,
-processing, and `one_shot` - so you can shape and route the layers
+processing, and `mode` - so you can shape and route the layers
 independently, then a single note-off releases them together.
 
 Stacking composes with velocity layering: stack two samples across the soft
@@ -2401,7 +2452,7 @@ python scripts/catalog_samples.py --full                   # every property incl
 
 Walks a directory (recursively, the same walk the instrument library performs
 at startup) and writes one CSV row per audio file with its detected
-properties. Two capability columns show which musical behaviours each sample
+properties. Three capability columns show which musical behaviours each sample
 is eligible for:
 
 - **pitched** - passes the stable-pitch test, so `pitched: true` selects it in
@@ -2409,21 +2460,30 @@ is eligible for:
 - **quantizable** - has at least 2 detected hits, so `stretch_quantize` /
   `pad_quantize` can align them to a beat grid; below that, quantize degrades
   to a plain stretch or a pass-through
+- **loopable** - has a steady sustaining region (a held tone, or a stationary
+  textural bed) worth looping while a key is held, so `loopable: true` selects
+  it. This is a coarse candidate flag - it means "worth trying to loop", not
+  "here is the seamless loop point" (that is found later from the audio itself).
+  The companion **loop_ms** column shows the actual detected loop length in
+  milliseconds; it is blank when a sample is loopable but too evolving to wrap
+  seamlessly (no clean loop point was found)
 
-Both columns run exactly the tests the player runs, so the catalog shows the
-selection pool a MIDI map would draw from. All seven inputs to the pitched
+All three columns run exactly the tests the player runs, so the catalog shows
+the selection pool a MIDI map would draw from. All seven inputs to the pitched
 test are included as columns (`pitch_hz`, `voiced_fraction`,
 `voiced_frame_count`, `pitch_confidence`, `pitch_stability_st`,
 `harmonic_ratio`, `duration_s`), so a sample that unexpectedly fails can be
 diagnosed against the thresholds documented on the test.
 
-With `--pitched` and/or `--quantizable` (combined: both must hold), the CSV is
-replaced by matching file paths, one per line - pipe them into a player to
-audition a capability group, or into file tools to build curated sets:
+With `--pitched`, `--quantizable` and/or `--loopable` (combined: all must
+hold), the CSV is replaced by matching file paths, one per line - pipe them
+into a player to audition a capability group, or into file tools to build
+curated sets:
 
 ```bash
 python scripts/catalog_samples.py --pitched | mpv --playlist=-
 python scripts/catalog_samples.py ~/samples --quantizable | xargs -I{} cp {} ~/curated/
+python scripts/catalog_samples.py ~/samples --loopable | mpv --playlist=-
 ```
 
 Files without an `.analysis.json` sidecar are analyzed on the way (slow on the
@@ -2517,11 +2577,6 @@ Reference: GM36_BassDrum1
   repeated triggers to avoid the machine-gun effect on rapid notes. (Distinct
   from the existing per-hit segment round-robin, which cycles through detected
   hits inside a single sliced loop.)
-
-### Playback and sound design
-
-- **Loop playback** - sustain loops for pads, drones, and textures that play
-  continuously while a key is held.
 
 ### Sample management
 

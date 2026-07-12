@@ -12,6 +12,7 @@ import pytest
 
 import subsample.bank
 import subsample.library
+import subsample.loopfind
 import subsample.player
 import subsample.query
 import subsample.similarity
@@ -72,7 +73,7 @@ def _make_assignment (
 		name=name,
 		select=select,
 		process=process,
-		one_shot=one_shot,
+		mode="one_shot" if one_shot else "gated",
 		gain_db=gain_db,
 		pan_weights=pan_weights,
 	)
@@ -667,6 +668,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
+		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
 
 		# Call the real _handle_message on the mock's behalf
 		msg = mido.Message("note_off", channel=9, note=36)
@@ -685,6 +687,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice_36, voice_38]
 		player._voices_lock = threading.Lock()
+		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
 
 		msg = mido.Message("note_off", channel=9, note=36)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -702,6 +705,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
+		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
 
 		msg = mido.Message("note_on", channel=9, note=42, velocity=0)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -786,6 +790,7 @@ class TestOneShot:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
+		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
 
 		msg = mido.Message("note_off", channel=9, note=36)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -801,6 +806,7 @@ class TestOneShot:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
+		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
 
 		msg = mido.Message("note_off", channel=9, note=42)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -817,6 +823,7 @@ class TestOneShot:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [one_shot_voice, normal_voice]
 		player._voices_lock = threading.Lock()
+		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
 
 		msg = mido.Message("note_off", channel=9, note=36)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -936,7 +943,7 @@ assignments:
   - name: Pad
     channel: 1
     notes: 48
-    one_shot: false
+    mode: gated
     release: 800
     select:
       where:
@@ -976,7 +983,7 @@ assignments:
   - name: Kick
     channel: 1
     notes: 36
-    one_shot: true
+    mode: one_shot
     release: 400
     select:
       where:
@@ -993,7 +1000,7 @@ assignments:
   - name: Lead
     channel: 1
     notes: zone-tuned
-    one_shot: false
+    mode: gated
     release: { time: 500, curve: exponential }
     process:
       - repitch: true
@@ -1008,7 +1015,7 @@ assignments:
 
 class TestResolveRelease:
 
-	"""MidiPlayer._resolve_release — spec → (frames, curve_code) at note-on."""
+	"""MidiPlayer._resolve_release — spec → (frames, curve_code, to_end) at note-on."""
 
 	def _player (self, sample_rate: int = 44100, cc_state: typing.Optional[dict] = None) -> unittest.mock.MagicMock:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
@@ -1021,23 +1028,23 @@ class TestResolveRelease:
 		return types.SimpleNamespace(spectral=types.SimpleNamespace(release=release_char))
 
 	def test_none_spec_returns_default_sentinel (self) -> None:
-		frames, curve = subsample.player.MidiPlayer._resolve_release(self._player(), None, self._record())
+		frames, curve, _to_end = subsample.player.MidiPlayer._resolve_release(self._player(), None, self._record())
 		assert frames is None and curve == 0
 
 	def test_scalar_ms_to_frames (self) -> None:
 		spec = subsample.query.ReleaseSpec(time=1000.0, curve="cosine")
-		frames, curve = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
+		frames, curve, _to_end = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
 		assert frames == 44100 and curve == 0   # 1000 ms at 44100 Hz
 
 	def test_exponential_curve_code (self) -> None:
 		spec = subsample.query.ReleaseSpec(time=100.0, curve="exponential")
-		_frames, curve = subsample.player.MidiPlayer._resolve_release(self._player(), spec, self._record())
+		_frames, curve, _to_end = subsample.player.MidiPlayer._resolve_release(self._player(), spec, self._record())
 		assert curve == 1
 
 	def test_adaptive_from_spectral_release (self) -> None:
 		# time None → 30 + 170 * release_char ms.
 		spec = subsample.query.ReleaseSpec(time=None, curve="cosine")
-		frames, _curve = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record(0.5))
+		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record(0.5))
 		expected_ms = 30.0 + 170.0 * 0.5   # 115 ms
 		assert frames == round(expected_ms / 1000.0 * 44100)
 
@@ -1047,13 +1054,13 @@ class TestResolveRelease:
 		# omni CC 72 at 127 → max_val = 2000 ms.
 		player = self._player(44100)
 		player._snapshot_cc_state.return_value = ({}, {72: 127})
-		frames, _curve = subsample.player.MidiPlayer._resolve_release(player, spec, self._record())
+		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(player, spec, self._record())
 		assert frames == round(2000.0 / 1000.0 * 44100)
 
 	def test_cc_time_falls_back_to_default_when_absent (self) -> None:
 		binding = subsample.query.CcBinding(cc=72, min_val=100.0, max_val=2000.0, default=500.0)
 		spec = subsample.query.ReleaseSpec(time=binding, curve="cosine")
-		frames, _curve = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
+		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
 		assert frames == round(500.0 / 1000.0 * 44100)   # default_value
 
 
@@ -1150,6 +1157,330 @@ class TestReleaseCallback:
 		assert float(numpy.min(env[:1000])) == pytest.approx(0.5, abs=1e-3)
 
 
+class TestLoopPlayback:
+
+	"""Stage 5 — the audio-callback loop branch: seamless wrap, crossfade
+	(reproducing loopfind.bake_loop_body), attack-on-first-lap, and note-off
+	playing straight past loop_end into the real tail."""
+
+	def _loop_voice (
+		self, audio: numpy.ndarray, loop_start: int, loop_end: int,
+		crossfade: int = 0, **kw: typing.Any,
+	) -> subsample.player._Voice:
+		xfade_in = audio[loop_start - crossfade : loop_start] if crossfade > 0 else None
+		return subsample.player._Voice(
+			audio=audio, note=36, channel=9, looping=True,
+			loop_start=loop_start, loop_end=loop_end, loop_crossfade=crossfade,
+			loop_xfade_in=xfade_in, **kw,
+		)
+
+	def _drive (
+		self, voice: subsample.player._Voice, frame_count: int = 64, n_buffers: int = 40,
+	) -> tuple[numpy.ndarray, typing.Any]:
+		"""Run the real callback; return (decoded channel-0 float output, player)."""
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices              = [voice]
+		player._voices_lock         = threading.Lock()
+		player._output_channels     = voice.audio.shape[1]
+		player._output_bit_depth    = 16
+		player._release_fade_frames = 441
+		player._limiter_enabled     = False
+		player._max_polyphony       = 8
+
+		out: list[numpy.ndarray] = []
+		for _ in range(n_buffers):
+			if not player._voices:
+				break
+			pcm, _flag = subsample.player.MidiPlayer._audio_callback_impl(player, None, frame_count, {}, 0)
+			arr = numpy.frombuffer(pcm, dtype=numpy.int16).reshape(-1, player._output_channels)
+			out.append(arr[:, 0].astype(numpy.float32) / 32767.0)
+
+		return (numpy.concatenate(out) if out else numpy.array([], dtype=numpy.float32)), player
+
+	def _ramp (self, n: int = 1000) -> numpy.ndarray:
+		"""A distinct-per-frame signal in [0, 0.9] so the cursor path is legible."""
+		return numpy.tile((numpy.arange(n, dtype=numpy.float32) / n * 0.9)[:, None], (1, 2))
+
+	def test_butt_loop_wraps_over_the_region (self) -> None:
+		audio  = self._ramp(1000)
+		voice  = self._loop_voice(audio, 100, 200, crossfade=0)
+		out, _ = self._drive(voice, frame_count=64, n_buffers=20)
+		# Reference cursor: 0..199 (attack + first lap), then wrap to 100..199 forever.
+		ref = numpy.empty(len(out), dtype=numpy.float32)
+		pos = 0
+		for t in range(len(out)):
+			ref[t] = audio[pos, 0]
+			pos    = pos + 1 if pos + 1 < 200 else 100
+		numpy.testing.assert_allclose(out, ref, atol=3e-4)
+
+	def test_loop_voice_never_retires (self) -> None:
+		voice       = self._loop_voice(self._ramp(1000), 100, 200)
+		_out, player = self._drive(voice, frame_count=64, n_buffers=100)
+		assert player._voices == [voice]        # still active after 6400 frames
+		assert 100 <= voice.position < 200       # cursor parked in the loop
+
+	def test_loop_fills_the_whole_buffer (self) -> None:
+		# A short loop (50 frames) under a large buffer (256): the whole buffer
+		# must be filled — the old short-read path would leave a silent tail.
+		audio  = numpy.full((1000, 2), 0.5, dtype=numpy.float32)
+		voice  = self._loop_voice(audio, 100, 150)
+		out, _ = self._drive(voice, frame_count=256, n_buffers=1)
+		assert out.size == 256
+		assert numpy.all(numpy.abs(out) > 0.4)   # no silent gap
+
+	def test_crossfade_reproduces_bake_loop_body (self) -> None:
+		# The realtime wrap crossfade must equal loopfind.bake_loop_body (the
+		# ear-validated artifact), so a played lap == the baked body.
+		ls, le, xf = 100, 400, 30
+		sig   = numpy.sin(numpy.linspace(0, 12 * numpy.pi, 1000, dtype=numpy.float32)) * 0.8
+		audio = numpy.tile(sig[:, None], (1, 2))
+		body  = subsample.loopfind.bake_loop_body(audio, subsample.loopfind.LoopPoints(ls, le, xf, 0.0))[:, 0]
+		voice = self._loop_voice(audio, ls, le, crossfade=xf)
+		out, _ = self._drive(voice, frame_count=64, n_buffers=40)
+		lap = out[le : le + (le - ls)]           # the lap after the attack
+		numpy.testing.assert_allclose(lap, body, atol=3e-4)
+
+	def test_note_off_stops_looping_and_plays_tail (self) -> None:
+		audio = self._ramp(1000)                 # tail = [200, 1000)
+		voice = self._loop_voice(audio, 100, 200)
+		self._drive(voice, frame_count=64, n_buffers=5)   # loop a while
+		voice.looping = False                    # note-off (no release: full → will fade)
+		voice.releasing = True
+		out, player = self._drive(voice, frame_count=64, n_buffers=80)
+		assert player._voices == []              # retired: played out
+		assert out.size > 0
+		# The cursor left the loop region and advanced monotonically into the real
+		# tail (past loop_end=200) rather than wrapping — proof the note-off broke
+		# the loop instead of just fading in place inside it.
+		assert voice.position > 200
+
+	def test_release_full_plays_full_tail_unfaded (self) -> None:
+		# release: full after note-off: no fade, full amplitude straight to the end.
+		audio = numpy.full((600, 2), 0.5, dtype=numpy.float32)
+		voice = self._loop_voice(audio, 100, 200, release_to_end=True)
+		self._drive(voice, frame_count=64, n_buffers=5)
+		voice.looping = False                    # note-off; release_to_end → no fade
+		out, player = self._drive(voice, frame_count=64, n_buffers=40)
+		assert player._voices == []
+		# Everything that played did so at full amplitude — no release ramp.
+		sounding = out[numpy.abs(out) > 1e-4]
+		assert float(numpy.min(sounding)) == pytest.approx(0.5, abs=1e-2)
+
+
+class TestLoopResolution:
+
+	"""_resolve_loop: manual override (seconds) vs auto points (native frames
+	rescaled to the output rate), and the fail-musical None."""
+
+	def _player (self, output_rate: int = 48000) -> typing.Any:
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._output_sample_rate = output_rate
+		return player
+
+	def _record (self, native_rate: int, loop: typing.Optional[subsample.loopfind.LoopPoints]) -> subsample.library.SampleRecord:
+		return subsample.library.SampleRecord(
+			sample_id=1, name="pad",
+			spectral=tests.helpers._make_spectral(), rhythm=tests.helpers._make_rhythm(),
+			pitch=tests.helpers._make_pitch(), timbre=tests.helpers._make_timbre(),
+			level=tests.helpers._make_level(), band_energy=tests.helpers._make_band_energy(),
+			params=tests.helpers._make_params(sample_rate=native_rate), duration=2.0,
+			loop=loop,
+		)
+
+	def _loop_assignment (self, loop: typing.Optional[subsample.query.LoopSpec] = None) -> subsample.query.Assignment:
+		return subsample.query.Assignment(name="Pad", select=(), mode="loop", loop=loop)
+
+	def test_auto_points_rescaled_native_to_output (self) -> None:
+		# 44100-native points → 48000 output: ×48000/44100.
+		record = self._record(44100, subsample.loopfind.LoopPoints(44100, 88200, 1323, 0.0))
+		cfg = subsample.player.MidiPlayer._resolve_loop(self._player(48000), self._loop_assignment(), record)
+		assert cfg == (48000, 96000, round(1323 * 48000 / 44100))
+
+	def test_no_rescale_when_rates_match (self) -> None:
+		record = self._record(48000, subsample.loopfind.LoopPoints(1000, 5000, 1440, 0.0))
+		cfg = subsample.player.MidiPlayer._resolve_loop(self._player(48000), self._loop_assignment(), record)
+		assert cfg == (1000, 5000, 1440)
+
+	def test_override_seconds_to_output_frames (self) -> None:
+		# Manual loop: {start, end, crossfade} in seconds/ms → output frames, no auto needed.
+		record = self._record(44100, None)
+		override = subsample.query.LoopSpec(start=1.0, end=2.0, crossfade=30.0)
+		cfg = subsample.player.MidiPlayer._resolve_loop(self._player(48000), self._loop_assignment(override), record)
+		assert cfg == (48000, 96000, round(0.030 * 48000))
+
+	def test_override_start_falls_back_to_auto_end (self) -> None:
+		# Partial override: start in seconds, end from the auto points.
+		record = self._record(48000, subsample.loopfind.LoopPoints(1000, 9000, 1440, 0.0))
+		override = subsample.query.LoopSpec(start=0.05, end=None, crossfade=None)
+		cfg = subsample.player.MidiPlayer._resolve_loop(self._player(48000), self._loop_assignment(override), record)
+		assert cfg == (round(0.05 * 48000), 9000, 1440)
+
+	def test_none_when_no_points_fail_musical (self) -> None:
+		record = self._record(48000, None)
+		cfg = subsample.player.MidiPlayer._resolve_loop(self._player(48000), self._loop_assignment(), record)
+		assert cfg is None
+
+	def test_none_when_override_too_short (self) -> None:
+		# A manual loop shorter than _MIN_LOOP_SECONDS (5 ms) is a buzz, not a loop
+		# — reject it (→ gated) rather than let the callback wrap dozens of times
+		# per buffer.  1 ms here (48 frames at 48 kHz) is well under the floor.
+		record   = self._record(48000, subsample.loopfind.LoopPoints(1000, 9000, 1440, 0.0))
+		override = subsample.query.LoopSpec(start=1.0, end=1.001, crossfade=None)
+		cfg = subsample.player.MidiPlayer._resolve_loop(self._player(48000), self._loop_assignment(override), record)
+		assert cfg is None
+
+	def test_none_when_not_loop_mode (self) -> None:
+		record = self._record(48000, subsample.loopfind.LoopPoints(1000, 5000, 1440, 0.0))
+		gated  = subsample.query.Assignment(name="Pad", select=(), mode="gated")
+		assert subsample.player.MidiPlayer._resolve_loop(self._player(48000), gated, record) is None
+
+
+class TestSameNoteSteal:
+
+	"""Stage 6 - same-note steal.
+
+	Re-striking a note that is already sounding retires the held gated/loop
+	instance (an implied note-off, so it releases per its own configured
+	release) before the new strike's voices are appended, so a held note is
+	replaced rather than stacked.  one_shot voices are never stolen, so
+	overlapping one-shots still layer.
+	"""
+
+	def _make_voice (self, **kw: typing.Any) -> subsample.player._Voice:
+		import numpy
+		audio = numpy.zeros((4410, 2), dtype=numpy.float32)
+		fields: dict[str, typing.Any] = dict(audio=audio, note=36, channel=9)
+		fields.update(kw)
+		return subsample.player._Voice(**fields)
+
+	def _mock_player (self, voices: list) -> typing.Any:
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices      = voices
+		player._voices_lock = threading.Lock()
+		return player
+
+	def _real_player (self) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+	# --- _release_held retirement semantics ------------------------------
+
+	def test_held_loop_stops_and_releases (self) -> None:
+		"""A held loop voice stops looping and begins its release fade."""
+		voice  = self._make_voice(looping=True, loop_end=4410)
+		player = self._mock_player([voice])
+		subsample.player.MidiPlayer._release_held(player, 36, 9)
+		assert voice.looping   is False
+		assert voice.releasing is True
+
+	def test_release_full_rings_out_unfaded (self) -> None:
+		"""release: full stops looping but is NOT marked releasing - it plays
+		its remaining audio to the natural end rather than fading."""
+		voice  = self._make_voice(looping=True, loop_end=4410, release_to_end=True)
+		player = self._mock_player([voice])
+		subsample.player.MidiPlayer._release_held(player, 36, 9)
+		assert voice.looping   is False
+		assert voice.releasing is False
+
+	def test_one_shot_never_stolen (self) -> None:
+		"""A one_shot voice is left untouched, so overlapping one-shots stack."""
+		voice  = self._make_voice(one_shot=True)
+		player = self._mock_player([voice])
+		subsample.player.MidiPlayer._release_held(player, 36, 9)
+		assert voice.releasing is False
+
+	def test_only_matching_note_and_channel (self) -> None:
+		"""Only voices on the exact (note, channel) are retired."""
+		v_match = self._make_voice(note=36, channel=9)
+		v_note  = self._make_voice(note=38, channel=9)
+		v_chan  = self._make_voice(note=36, channel=0)
+		player  = self._mock_player([v_match, v_note, v_chan])
+		subsample.player.MidiPlayer._release_held(player, 36, 9)
+		assert v_match.releasing is True
+		assert v_note.releasing  is False
+		assert v_chan.releasing  is False
+
+	def test_idempotent_on_already_releasing (self) -> None:
+		"""A re-strike retires the still-held loop voice but must NOT disturb a
+		sibling already mid-release: fade_pos / release_total belong to the
+		callback, not the handler, so re-applying _release_held cannot restart a
+		fade that is already under way."""
+		retiring = self._make_voice(releasing=True, fade_pos=200, release_total=441)
+		held     = self._make_voice(looping=True, loop_end=4410)
+		player   = self._mock_player([retiring, held])
+
+		subsample.player.MidiPlayer._release_held(player, 36, 9)
+
+		# The still-held loop was stolen (implied note-off) ...
+		assert held.looping   is False
+		assert held.releasing is True
+		# ... while the in-flight fade was left exactly where the callback had it.
+		assert retiring.releasing     is True
+		assert retiring.fade_pos      == 200
+		assert retiring.release_total == 441
+
+	# --- ordering guarantee on the note-on path --------------------------
+
+	def test_note_on_steals_prior_but_spares_own_layers (self) -> None:
+		"""A re-strike retires the prior held voice, but the steal fires BEFORE
+		this note-on's own (stacked) layers, so the freshly-triggered voices
+		survive rather than stealing each other."""
+		import mido
+
+		player = self._real_player()
+		old    = self._make_voice(note=36, channel=9, looping=True, loop_end=4410)
+		player._voices.append(old)
+
+		body = subsample.query.Assignment(name="A", select=(subsample.query.SelectSpec(),), stack=True)
+		sub  = subsample.query.Assignment(name="B", select=(subsample.query.SelectSpec(),), stack=True)
+		pick = subsample.query.PickSpec(1, 1)
+		player._note_map = {(9, 36): [(body, pick), (sub, pick)]}
+
+		def _fake_trigger (msg: typing.Any, assignment: typing.Any, pick_spec: typing.Any, effective_velocity: typing.Any) -> None:
+			with player._voices_lock:
+				player._voices.append(self._make_voice(note=msg.note, channel=msg.channel, looping=True, loop_end=4410))
+
+		player._trigger_one = _fake_trigger  # type: ignore[method-assign]
+
+		player._handle_message(mido.Message("note_on", channel=9, note=36, velocity=64))
+
+		# The prior held voice was stolen (implied note-off).
+		assert old.looping   is False
+		assert old.releasing is True
+
+		# This note-on's own two stacked voices survived the steal.
+		survivors = [v for v in player._voices if v is not old]
+		assert len(survivors) == 2
+		assert all(v.looping is True and v.releasing is False for v in survivors)
+
+	def test_no_covering_layer_does_not_steal (self) -> None:
+		"""A note-on that no velocity layer covers must not retire a held voice:
+		the steal accompanies an actual trigger, so an un-fired note is a no-op."""
+		import mido
+
+		player = self._real_player()
+		old    = self._make_voice(note=36, channel=9, looping=True, loop_end=4410)
+		player._voices.append(old)
+
+		# Mapping exists, but selection returns nothing (e.g. a velocity gap).
+		player._note_map = {(9, 36): [("entry",)]}
+		player._select_velocity_layers = unittest.mock.MagicMock(return_value=[])  # type: ignore[method-assign]
+
+		player._handle_message(mido.Message("note_on", channel=9, note=36, velocity=64))
+
+		assert old.looping   is True
+		assert old.releasing is False
+
+
 class TestReleaseThreadingThroughTrigger:
 
 	"""Every voice-append path in _trigger_one must carry the resolved release.
@@ -1174,7 +1505,9 @@ class TestReleaseThreadingThroughTrigger:
 		player._voices_lock = threading.Lock()
 		player._resolve_sample_id.return_value = 1
 		player._effective_instrument_library.get.return_value = record
-		player._resolve_release.return_value = (1234, 1)   # sentinel (frames, curve)
+		player._resolve_release.return_value = (1234, 1, False)   # sentinel (frames, curve, to_end)
+		player._resolve_loop.return_value    = None               # gated → not a loop voice
+		player._append_voice = lambda *a, **k: subsample.player.MidiPlayer._append_voice(player, *a, **k)
 		player._select_segment.return_value = (rendered, 0.5)
 		player._get_mix_matrix.return_value = numpy.eye(2, dtype=numpy.float32)
 		player._render_float.return_value = rendered
@@ -1190,7 +1523,7 @@ class TestReleaseThreadingThroughTrigger:
 		assignment = subsample.query.Assignment(
 			name="Pad", select=(),
 			process=subsample.query.ProcessSpec(steps=process_steps),
-			one_shot=False,
+			mode="gated",
 			release=subsample.query.ReleaseSpec(time=800.0, curve="exponential"),
 		)
 		msg  = mido.Message("note_on", channel=0, note=48, velocity=100)
@@ -1712,7 +2045,7 @@ class TestLoadMidiMap:
 templates:
   perc:
     channel: 10
-    one_shot: false
+    mode: gated
     select:
       where:
         reference: BD0025
@@ -1725,7 +2058,7 @@ assignments:
 
 		assert (9, 36) in note_map
 		asgn, _pick = note_map[(9, 36)][0]
-		assert asgn.one_shot is False
+		assert asgn.mode == "gated"
 		assert asgn.select[0].where.reference == "BD0025"
 
 	def test_zone_tuned_assignment_uses_template (self, tmp_path: pathlib.Path) -> None:
@@ -1778,15 +2111,123 @@ assignments:
       where:
         reference: BD0025
       order_by: similarity
-    one_shot: true
+    mode: one_shot
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		assert (9, 36) in note_map
 		asgn, pick = note_map[(9, 36)][0]
 		assert asgn.select[0].where.reference == "BD0025"
-		assert asgn.one_shot is True
+		assert asgn.mode == "one_shot"
 		assert pick == subsample.query.PickSpec(1, 1)
+
+	# --- Stage 4: playback mode + loop override ---------------------------------
+
+	def _mode_map (self, tmp_path: pathlib.Path, extra: str) -> pathlib.Path:
+		"""A one-note assignment with arbitrary extra keys spliced in."""
+		return self._write_map(tmp_path, f"""
+assignments:
+  - name: Pad
+    channel: 10
+    notes: 36
+{extra}
+    select:
+      where:
+        reference: BD0025
+""")
+
+	def _first_assignment (self, tmp_path: pathlib.Path, extra: str) -> subsample.query.Assignment:
+		note_map = subsample.player.load_midi_map(self._mode_map(tmp_path, extra), ["BD0025"]).note_map
+		return note_map[(9, 36)][0][0]
+
+	def test_one_shot_key_is_a_hard_error (self, tmp_path: pathlib.Path) -> None:
+		"""The removed one_shot: alias raises a clear migration error, not silence."""
+		with pytest.raises(ValueError, match="'one_shot' is no longer supported"):
+			subsample.player.load_midi_map(self._mode_map(tmp_path, "    one_shot: true"), ["BD0025"])
+
+	def test_invalid_mode_rejected (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="invalid mode 'bogus'"):
+			subsample.player.load_midi_map(self._mode_map(tmp_path, "    mode: bogus"), ["BD0025"])
+
+	def test_default_mode_is_one_shot (self, tmp_path: pathlib.Path) -> None:
+		assert self._first_assignment(tmp_path, "").mode == "one_shot"
+
+	def test_mode_gated_parsed (self, tmp_path: pathlib.Path) -> None:
+		assert self._first_assignment(tmp_path, "    mode: gated").mode == "gated"
+
+	def test_mode_loop_parsed (self, tmp_path: pathlib.Path) -> None:
+		assert self._first_assignment(tmp_path, "    mode: loop").mode == "loop"
+
+	def test_loop_block_implies_mode_loop (self, tmp_path: pathlib.Path) -> None:
+		asgn = self._first_assignment(tmp_path, "    loop: { start: 1.0, end: 2.5, crossfade: 40 }")
+		assert asgn.mode == "loop"
+		assert asgn.loop == subsample.query.LoopSpec(start=1.0, end=2.5, crossfade=40.0)
+
+	def test_bare_loop_block_forces_loop_with_auto_points (self, tmp_path: pathlib.Path) -> None:
+		asgn = self._first_assignment(tmp_path, "    loop: {}")
+		assert asgn.mode == "loop"
+		assert asgn.loop == subsample.query.LoopSpec(start=None, end=None, crossfade=None)
+
+	def test_loop_block_contradicting_mode_errors (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="implies 'mode: loop'"):
+			subsample.player.load_midi_map(
+				self._mode_map(tmp_path, "    mode: gated\n    loop: { start: 1.0, end: 2.0 }"), ["BD0025"],
+			)
+
+	def test_loop_block_end_before_start_errors (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="loop end .* must be greater than start"):
+			subsample.player.load_midi_map(
+				self._mode_map(tmp_path, "    loop: { start: 2.0, end: 1.0 }"), ["BD0025"],
+			)
+
+	def test_unknown_loop_key_rejected (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="unknown loop key"):
+			subsample.player.load_midi_map(
+				self._mode_map(tmp_path, "    loop: { start: 1.0, endd: 2.0 }"), ["BD0025"],
+			)
+
+	def test_release_ignored_on_one_shot (self, tmp_path: pathlib.Path) -> None:
+		"""A release on the default one_shot mode is dropped — it can never fire."""
+		asgn = self._first_assignment(tmp_path, "    mode: one_shot\n    release: 100")
+		assert asgn.release is None
+
+	def test_release_kept_on_gated (self, tmp_path: pathlib.Path) -> None:
+		asgn = self._first_assignment(tmp_path, "    mode: gated\n    release: 100")
+		assert asgn.release is not None
+
+	def test_loop_gets_adaptive_release_by_default (self, tmp_path: pathlib.Path) -> None:
+		"""mode: loop sustains, so an unset release defaults to the adaptive tail."""
+		asgn = self._first_assignment(tmp_path, "    mode: loop")
+		assert asgn.release == subsample.query.ReleaseSpec(time=None, curve="cosine")
+
+	def test_loop_with_stretch_falls_back_to_gated (self, tmp_path: pathlib.Path) -> None:
+		"""mode: loop + a timeline-altering step is deferred to gated in v1."""
+		asgn = self._first_assignment(
+			tmp_path, "    mode: loop\n    process:\n      - stretch_quantize: { grid: 16 }",
+		)
+		assert asgn.mode == "gated"
+		assert asgn.loop is None
+
+	def test_loop_with_reverse_falls_back_to_gated (self, tmp_path: pathlib.Path) -> None:
+		"""mode: loop + reverse is deferred to gated: reverse mirrors the timeline,
+		so the forward loop points would wrap the wrong region on the reversed
+		buffer.  reverse must be in the timeline-altering drop set alongside the
+		re-timing steps."""
+		asgn = self._first_assignment(
+			tmp_path, "    mode: loop\n    process:\n      - reverse: true",
+		)
+		assert asgn.mode == "gated"
+		assert asgn.loop is None
+
+	def test_release_full_parsed (self, tmp_path: pathlib.Path) -> None:
+		"""release: full → play the tail to its natural end, no fade."""
+		asgn = self._first_assignment(tmp_path, "    mode: gated\n    release: full")
+		assert asgn.release == subsample.query.ReleaseSpec(to_end=True)
+
+	def test_loop_release_full_overrides_adaptive_default (self, tmp_path: pathlib.Path) -> None:
+		"""mode: loop keeps an explicit release: full instead of the adaptive default."""
+		asgn = self._first_assignment(tmp_path, "    mode: loop\n    release: full")
+		assert asgn.release == subsample.query.ReleaseSpec(to_end=True)
 
 	def test_multi_note_rank_distribution (self, tmp_path: pathlib.Path) -> None:
 		"""Note list distributes picks: first note = pick 1, second = pick 2."""
@@ -1799,7 +2240,7 @@ assignments:
       where:
         reference: BD0025
       order_by: similarity
-    one_shot: true
+    mode: one_shot
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
@@ -1836,7 +2277,7 @@ assignments:
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
 		asgn, _ = note_map[(9, 36)][0]
-		assert asgn.one_shot is True
+		assert asgn.mode == "one_shot"
 
 	def test_unknown_reference_skipped (
 		self,
@@ -1955,14 +2396,14 @@ assignments:
     select:
       where:
         name: 2026-03-24_14-37-14
-    one_shot: true
+    mode: one_shot
 """)
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (9, 36) in note_map
 		asgn, _ = note_map[(9, 36)][0]
 		assert asgn.select[0].where.name == "2026-03-24_14-37-14"
-		assert asgn.one_shot is True
+		assert asgn.mode == "one_shot"
 
 	def test_name_filter_no_reference_validation (self, tmp_path: pathlib.Path) -> None:
 		"""name filters are not validated against the reference library."""
@@ -2123,7 +2564,7 @@ assignments:
       order_by: similarity
     process:
       - repitch: true
-    one_shot: false
+    mode: gated
 """)
 		note_map = subsample.player.load_midi_map(path, ["BASS_TONE"]).note_map
 
@@ -2143,7 +2584,7 @@ assignments:
       where:
         reference: BD0025
       order_by: similarity
-    one_shot: true
+    mode: one_shot
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
@@ -2683,7 +3124,7 @@ class TestStripOobRouting:
 			name="zone", channel=9, keyboard_range=(36, 48),
 			select=(subsample.query.SelectSpec(),),
 			process=subsample.query.ProcessSpec(),
-			one_shot=True, gain_db=0.0, pan_weights=None,
+			mode="one_shot", loop=None, gain_db=0.0, pan_weights=None,
 			output_routing=(5,), extract=None, segment_mode="",
 			velocity_trigger=(0, 127), velocity_rescale_to=None,
 		)
@@ -3312,7 +3753,8 @@ class TestMaterializeZones:
 			process=subsample.query.ProcessSpec(
 				steps=(subsample.query.ProcessorStep(name="repitch"),),
 			),
-			one_shot=False,
+			mode="gated",
+			loop=None,
 			gain_db=0.0,
 			pan_weights=None,
 			output_routing=None,
@@ -3541,7 +3983,8 @@ class TestZoneTunedRuntime:
 			process=subsample.query.ProcessSpec(
 				steps=(subsample.query.ProcessorStep(name="repitch"),),
 			),
-			one_shot=False,
+			mode="gated",
+			loop=None,
 			gain_db=0.0,
 			pan_weights=None,
 			output_routing=None,
@@ -4042,7 +4485,7 @@ class TestUpdatePitchedAssignments:
 			process=subsample.query.ProcessSpec(steps=(
 				subsample.query.ProcessorStep(name="stretch_quantize", params=(("tempo", 120), ("grid", 16))),
 			)),
-			one_shot=False,
+			mode="gated",
 		)
 		note_map: subsample.player.NoteMap = {
 			(0, 60): [(asgn, subsample.query.PickSpec(1, 3))],
@@ -4096,7 +4539,7 @@ class TestUpdatePitchedAssignments:
 			process=subsample.query.ProcessSpec(steps=(
 				subsample.query.ProcessorStep(name="stretch_quantize", params=(("tempo", 120), ("grid", 8))),
 			)),
-			one_shot=False,
+			mode="gated",
 		)
 		note_map: subsample.player.NoteMap = {(0, 60): [(asgn, subsample.query.PickSpec(1, 1))]}
 
@@ -4160,7 +4603,7 @@ assignments:
       pick: 1
     process:
       - repitch: true
-    one_shot: false
+    mode: gated
 """)
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
@@ -4169,7 +4612,7 @@ assignments:
 		assert asgn.select[0].where.pitched is True
 		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="asc"),)
 		assert asgn.process.has_repitch()
-		assert asgn.one_shot is False
+		assert asgn.mode == "gated"
 		assert pick == subsample.query.PickSpec(1, 1)
 
 	def test_pitched_newest (self, tmp_path: pathlib.Path) -> None:
@@ -4230,7 +4673,7 @@ assignments:
       pick: 1
     process:
       - repitch: true
-    one_shot: false
+    mode: gated
 """)
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
@@ -4376,7 +4819,7 @@ assignments:
       pick: 1
     process:
       - repitch: true
-    one_shot: false
+    mode: gated
 """)
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
@@ -4384,7 +4827,7 @@ assignments:
 		asgn, pick = note_map[(1, 36)][0]
 		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="desc"),)
 		assert asgn.process.has_repitch()
-		assert asgn.one_shot is False
+		assert asgn.mode == "gated"
 
 	def test_oldest_order (self, tmp_path: pathlib.Path) -> None:
 		"""order_by: oldest parsed correctly."""
@@ -4396,14 +4839,14 @@ assignments:
     select:
       order_by: oldest
       pick: 1
-    one_shot: false
+    mode: gated
 """)
 		note_map = subsample.player.load_midi_map(path, []).note_map
 
 		assert (2, 36) in note_map
 		asgn, _ = note_map[(2, 36)][0]
 		assert asgn.select[0].order == (subsample.query.OrderClause(by="age", dir="asc"),)
-		assert asgn.one_shot is False
+		assert asgn.mode == "gated"
 
 	def test_newest_no_reference_needed (self, tmp_path: pathlib.Path) -> None:
 		"""newest ordering is accepted with an empty reference list."""
@@ -4446,7 +4889,7 @@ assignments:
           name: my-kick
       - where:
           reference: BD0025
-    one_shot: true
+    mode: one_shot
 """)
 		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
 
@@ -4455,7 +4898,7 @@ assignments:
 		assert len(asgn.select) == 2
 		assert asgn.select[0].where.name == "my-kick"
 		assert asgn.select[1].where.reference == "BD0025"
-		assert asgn.one_shot is True
+		assert asgn.mode == "one_shot"
 
 	def test_fallback_preserves_order (self, tmp_path: pathlib.Path) -> None:
 		"""Fallback specs maintain their YAML list order."""
@@ -6069,7 +6512,7 @@ class TestBeatMatchEndToEnd:
 					name="stretch_quantize", params=(("tempo", 120), ("grid", 4)),
 				),
 			)),
-			one_shot=False,
+			mode="gated",
 		)
 		note_map: subsample.player.NoteMap = {(0, 60): [(asgn, subsample.query.PickSpec(1, 1))]}
 

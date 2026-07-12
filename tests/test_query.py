@@ -147,6 +147,34 @@ class TestWherePredicate:
 		pred = subsample.query.WherePredicate(pitched=False)
 		assert pred.matches(_make_record(dominant_pitch_hz=0.0))
 
+	def test_loopable_true (self) -> None:
+
+		"""loopable: true requires is_loopable() to pass (harmonic branch here)."""
+
+		pred = subsample.query.WherePredicate(loopable=True)
+
+		# A harmonic, voiced tone of adequate length is a candidate (pitch fields
+		# are not consulted — a detuned/modulated tone still qualifies).
+		assert pred.matches(_make_record(
+			voiced_fraction=0.8,
+			harmonic_ratio=0.6,
+			duration=2.0,
+		))
+
+		# Too short → not a candidate.
+		assert not pred.matches(_make_record(
+			voiced_fraction=0.8,
+			harmonic_ratio=0.6,
+			duration=0.3,
+		))
+
+	def test_loopable_false (self) -> None:
+
+		"""loopable: false requires is_loopable() to fail (a short percussive hit)."""
+
+		pred = subsample.query.WherePredicate(loopable=False)
+		assert pred.matches(_make_record(duration=0.2, voiced_fraction=0.0))
+
 	def test_min_tempo (self) -> None:
 		pred = subsample.query.WherePredicate(tempo=subsample.query.Range(gte=100.0))
 		assert not pred.matches(_make_record(tempo_bpm=80.0))

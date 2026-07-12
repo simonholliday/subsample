@@ -45,9 +45,15 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 	cached = subsample.cache.load_cache(filepath)
 
 	if cached is not None:
-		# load_cache returns a 9-tuple (_LoadResult); the trailing element is
-		# the channel_format tag, unused here.
-		result, rhythm, pitch, timbre, params, duration, level, band_energy, _channel_format = cached
+		result      = cached.spectral
+		rhythm      = cached.rhythm
+		pitch       = cached.pitch
+		timbre      = cached.timbre
+		params      = cached.params
+		duration    = cached.duration
+		level       = cached.level
+		band_energy = cached.band_energy
+		loop        = cached.loop
 
 	else:
 		try:
@@ -74,6 +80,8 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 
 		duration = len(data) / samplerate
 
+		loop = subsample.cache.compute_loop(mono, samplerate, result, pitch, level, duration)
+
 		# Save results for next time; log but don't fail if the filesystem is read-only
 		try:
 			audio_md5 = subsample.cache.compute_audio_md5(filepath)
@@ -88,6 +96,7 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 				duration   = duration,
 				level      = level,
 				band_energy = band_energy,
+				loop       = loop,
 			)
 		except OSError as exc:
 			_log.warning("Could not save analysis cache for %s: %s", filepath.name, exc)
@@ -97,6 +106,16 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 	print(f"pitch:    {subsample.analysis.format_pitch_result(pitch)}")
 	print(f"level:    {subsample.analysis.format_level_result(level)}")
 	print(f"noisiness: {subsample.analysis.noisiness(result, level):.3f}  (0 = clean event, 1 = wall-to-wall noise)")
+
+	if loop is not None:
+		sr = params.sample_rate
+		print(
+			f"loop:     {loop.start / sr:.3f}s -> {loop.end / sr:.3f}s "
+			f"({(loop.end - loop.start) / sr * 1000:.0f} ms, xfade {loop.crossfade / sr * 1000:.0f} ms, "
+			f"junction_flux {loop.junction_flux:.2f})"
+		)
+	else:
+		print("loop:     none (not a loop candidate, or no clean junction)")
 
 
 def main () -> None:

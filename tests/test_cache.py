@@ -2,6 +2,7 @@
 
 import json
 import pathlib
+import typing
 
 import numpy
 import pytest
@@ -9,6 +10,7 @@ import pytest
 import subsample.analysis
 import subsample.cache
 import subsample.library
+import subsample.loopfind
 
 import tests.helpers
 
@@ -78,14 +80,12 @@ class TestSaveAndLoadRoundTrip:
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		r_spectral, r_rhythm, r_pitch, r_timbre, r_params, r_duration, r_level, r_band_energy, r_channel_format = result
-
-		assert r_spectral == spectral
-		assert r_pitch    == pitch
-		assert r_timbre   == timbre
-		assert r_params   == params
-		assert abs(r_duration - duration) < 1e-9
-		assert r_level == level
+		assert result.spectral == spectral
+		assert result.pitch    == pitch
+		assert result.timbre   == timbre
+		assert result.params   == params
+		assert abs(result.duration - duration) < 1e-9
+		assert result.level == level
 
 	def test_rhythm_fields_survive_roundtrip (self, tmp_path: pathlib.Path) -> None:
 		wav = tmp_path / "kick.wav"
@@ -99,7 +99,7 @@ class TestSaveAndLoadRoundTrip:
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
 
-		r_rhythm = result[1]
+		r_rhythm = result.rhythm
 		assert r_rhythm.tempo_bpm        == rhythm.tempo_bpm
 		assert r_rhythm.beat_times       == rhythm.beat_times
 		assert r_rhythm.pulse_peak_times == rhythm.pulse_peak_times
@@ -145,8 +145,7 @@ class TestCacheInvalidation:
 
 		# Re-analysis should succeed and return a valid result tuple
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-		assert isinstance(spectral, subsample.analysis.AnalysisResult)
+		assert isinstance(result.spectral, subsample.analysis.AnalysisResult)
 
 	def test_version_mismatch_logs_info (
 		self,
@@ -187,8 +186,7 @@ class TestCacheInvalidation:
 		result = subsample.cache.load_cache(wav)
 
 		assert result is not None
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-		assert isinstance(spectral, subsample.analysis.AnalysisResult)
+		assert isinstance(result.spectral, subsample.analysis.AnalysisResult)
 
 	def test_md5_mismatch_logs_info (
 		self,
@@ -410,7 +408,7 @@ class TestBandEnergyCache:
 
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
-		*_, r_band_energy, _r_channel_format = result
+		r_band_energy = result.band_energy
 
 		assert isinstance(r_band_energy, subsample.analysis.BandEnergyResult)
 		assert len(r_band_energy.energy_fractions) == 4
@@ -445,7 +443,7 @@ class TestBandEnergyCache:
 
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
-		*_, r_band_energy, _r_channel_format = result
+		r_band_energy = result.band_energy
 
 		assert isinstance(r_band_energy, subsample.analysis.BandEnergyResult)
 		assert all(v == 0.0 for v in r_band_energy.energy_fractions)
@@ -625,7 +623,7 @@ class TestV11SidecarBackwardCompat:
 		# Use load_sidecar (skips MD5 check) to test deserialization directly
 		result = subsample.cache.load_sidecar(sidecar)
 		assert result is not None
-		spectral = result[0]
+		spectral = result.spectral
 		assert spectral.spectral_rolloff == 0.0
 		assert spectral.spectral_slope == 0.0
 
@@ -644,7 +642,7 @@ class TestV11SidecarBackwardCompat:
 		# Use load_sidecar (skips MD5 check) to test deserialization directly
 		result = subsample.cache.load_sidecar(sidecar)
 		assert result is not None
-		level = result[6]
+		level = result.level
 		assert level.crest_factor == 0.0
 		assert level.crest_factor_db == 0.0
 		assert level.noise_floor == 0.0
@@ -684,7 +682,7 @@ class TestReanalyzePreservesChannelFormat:
 
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
-		*_, channel_format = result
+		channel_format = result.channel_format
 		assert channel_format == "b_format_ambix"
 
 		# New sidecar on disk should also carry the preserved tag.
@@ -711,7 +709,7 @@ class TestReanalyzePreservesChannelFormat:
 
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
-		*_, channel_format = result
+		channel_format = result.channel_format
 		assert channel_format == "pcm"
 
 
@@ -892,4 +890,80 @@ class TestPreviewRoundtrip:
 
 		result = subsample.cache.load_cache(wav)
 		assert result is not None
-		assert len(result) == 9
+		# The analysis deserializes intact alongside the preview block.
+		assert result.spectral == tests.helpers._make_spectral()
+		assert result.duration == pytest.approx(1.0)
+
+
+class TestLoopPersistence:
+
+	"""Loop points round-trip through the sidecar, and compute_loop's gating."""
+
+	def _loop (self) -> subsample.loopfind.LoopPoints:
+		return subsample.loopfind.LoopPoints(start=1000, end=5000, crossfade=200, junction_flux=1.23)
+
+	def _steady_tone (self, seconds: float = 1.5, sr: int = 44100) -> numpy.ndarray:
+		"""A sustained harmonic tone — a clean loop candidate for the audio search."""
+		t = numpy.arange(int(sr * seconds)) / sr
+		x = sum(numpy.sin(2 * numpy.pi * 220.0 * h * t) / h for h in range(1, 6))
+		x = x * numpy.minimum(t / 0.01, 1.0)
+		return (0.5 * x / numpy.max(numpy.abs(x))).astype(numpy.float32)
+
+	def _save (self, wav: pathlib.Path, loop: typing.Optional[subsample.loopfind.LoopPoints]) -> None:
+		tests.helpers._make_wav(wav)
+		subsample.cache.save_cache(
+			wav, subsample.cache.compute_audio_md5(wav), tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(), loop=loop,
+		)
+
+	def test_loop_round_trip (self, tmp_path: pathlib.Path) -> None:
+		wav  = tmp_path / "pad.wav"
+		loop = self._loop()
+		self._save(wav, loop)
+		result = subsample.cache.load_cache(wav)
+		assert result is not None
+		assert result.loop == loop
+
+	def test_no_loop_serializes_null_and_loads_none (self, tmp_path: pathlib.Path) -> None:
+		wav = tmp_path / "hit.wav"
+		self._save(wav, None)
+		# Stored as an explicit JSON null...
+		payload = json.loads(subsample.cache.cache_path(wav).read_text())
+		assert "loop" in payload and payload["loop"] is None
+		# ...and read back as None.
+		result = subsample.cache.load_cache(wav)
+		assert result is not None
+		assert result.loop is None
+
+	def test_legacy_sidecar_without_loop_key_is_none (self, tmp_path: pathlib.Path) -> None:
+		wav = tmp_path / "old.wav"
+		self._save(wav, self._loop())
+		# Simulate a pre-loop sidecar by dropping the key entirely.
+		sidecar = subsample.cache.cache_path(wav)
+		payload = json.loads(sidecar.read_text())
+		del payload["loop"]
+		sidecar.write_text(json.dumps(payload), encoding="utf-8")
+		result = subsample.cache.load_sidecar(sidecar)
+		assert result is not None
+		assert result.loop is None
+
+	def test_compute_loop_none_when_below_duration_floor (self) -> None:
+		# Too short for a loop: the is_loopable gate rejects before the audio search.
+		loop = subsample.cache.compute_loop(
+			self._steady_tone(), 44100,
+			tests.helpers._make_spectral(), tests.helpers._make_pitch(),
+			tests.helpers._make_level(), 0.3,
+		)
+		assert loop is None
+
+	def test_compute_loop_finds_points_for_loopable_tone (self) -> None:
+		tone = self._steady_tone()
+		loop = subsample.cache.compute_loop(
+			tone, 44100,
+			tests.helpers._make_spectral(), tests.helpers._make_pitch(),
+			tests.helpers._make_level(), len(tone) / 44100,
+		)
+		assert loop is not None
+		assert 0 <= loop.start < loop.end <= len(tone)

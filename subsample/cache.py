@@ -34,6 +34,7 @@ import numpy
 import subsample.analysis
 import subsample.audio
 import subsample.config
+import subsample.loopfind
 import subsample.preview
 
 
@@ -57,21 +58,33 @@ AUDIO_EXTENSIONS:   typing.Final[frozenset[str]] = frozenset({
 
 _MD5_CHUNK_BYTES: int = 65536
 
-# Return type shared by load_cache() and load_sidecar().
-# Trailing channel_format is "pcm" for standard samples, or a B-format tag
-# (e.g. "b_format_ambix") for ambisonic samples.  Sidecars written before
-# this field existed default to "pcm" on load.
-_LoadResult = tuple[
-	subsample.analysis.AnalysisResult,
-	subsample.analysis.RhythmResult,
-	subsample.analysis.PitchResult,
-	subsample.analysis.TimbreResult,
-	subsample.analysis.AnalysisParams,
-	float,
-	subsample.analysis.LevelResult,
-	subsample.analysis.BandEnergyResult,
-	str,
-]
+# Return type shared by load_cache(), load_sidecar(), and ensure_sample_assets().
+@dataclasses.dataclass(frozen=True)
+class SampleAssets:
+
+	"""The analysis payload for one sample: everything a sidecar carries.
+
+	Returned by load_cache / ensure_sample_assets / load_sidecar and consumed by
+	the library, player, watcher, and the CLI scripts.  A frozen dataclass rather
+	than a tuple so fields are named at every use site and new ones (like ``loop``)
+	can be added without re-threading a positional unpack through every consumer.
+
+	``loop`` is the seamless loop found for a loopable sample (None when the
+	sample is not a loop candidate, or is one but has no clean junction — see
+	compute_loop); its start/end/crossfade are frame indices in the sample's own
+	timeline, valid as-is for any transform that preserves that timeline.
+	"""
+
+	spectral:       subsample.analysis.AnalysisResult
+	rhythm:         subsample.analysis.RhythmResult
+	pitch:          subsample.analysis.PitchResult
+	timbre:         subsample.analysis.TimbreResult
+	params:         subsample.analysis.AnalysisParams
+	duration:       float
+	level:          subsample.analysis.LevelResult
+	band_energy:    subsample.analysis.BandEnergyResult
+	channel_format: str
+	loop:           typing.Optional[subsample.loopfind.LoopPoints] = None
 
 
 def cache_path (audio_path: pathlib.Path) -> pathlib.Path:
@@ -111,6 +124,60 @@ def compute_audio_md5 (audio_path: pathlib.Path) -> str:
 	return hasher.hexdigest()
 
 
+def compute_loop (
+	audio: numpy.ndarray,
+	sample_rate: int,
+	spectral: subsample.analysis.AnalysisResult,
+	pitch: subsample.analysis.PitchResult,
+	level: subsample.analysis.LevelResult,
+	duration: float,
+) -> typing.Optional[subsample.loopfind.LoopPoints]:
+
+	"""Find the seamless loop for a sample, or None.
+
+	Cheap gate first (is_loopable, a compound over existing analysis fields),
+	then — only for candidates — the audio-level search (loopfind.find_loop,
+	which itself returns None when no clean junction exists, i.e. fail-musical).
+	Guarded so a finder failure on degenerate input yields None rather than
+	losing the whole analysis.
+
+	Called by every sidecar-writing path (library re-analysis, live capture, the
+	file watcher), so a freshly written sidecar already carries its loop: a sample
+	saved with loop=None would match on version + MD5 forever and thus never
+	re-analyse, leaving it permanently unloopable.
+
+	Args:
+		audio:       (n,) or (n, channels); the loop is found on the mono/mid mix
+		             and its frame indices apply to every channel (v1 does not do
+		             per-channel junctions).
+		sample_rate: Hz.
+		spectral:    feeds the is_loopable gate.
+		pitch:       supplies find_loop's optional pitch hint (dominant_pitch_hz).
+		level:       feeds the is_loopable gate (via noisiness).
+		duration:    feeds the is_loopable gate (minimum-length check).
+
+	Returns:
+		LoopPoints, or None when the sample is not a loop candidate or has no
+		clean junction.
+	"""
+
+	if not subsample.analysis.is_loopable(spectral, level, duration):
+		return None
+
+	pitch_hz = pitch.dominant_pitch_hz if pitch.dominant_pitch_hz > 0.0 else None
+
+	try:
+		return subsample.loopfind.find_loop(audio, sample_rate, pitch_hz=pitch_hz)
+	except Exception as exc:
+		# find_loop is DSP over arbitrary audio; a failure here must not lose the
+		# analysis that has already been computed — just mark the sample unloopable.
+		_log.warning(
+			"Loop search failed (%s: %s) — treating as unloopable",
+			type(exc).__name__, exc,
+		)
+		return None
+
+
 def save_cache (
 	audio_path: pathlib.Path,
 	audio_md5: str,
@@ -127,6 +194,7 @@ def save_cache (
 	captured_at: typing.Optional[str] = None,
 	channel_format: str = "pcm",
 	preview_data: typing.Optional[subsample.preview.PreviewData] = None,
+	loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
 ) -> None:
 
 	"""Write analysis results to a JSON sidecar file.
@@ -174,7 +242,7 @@ def save_cache (
 		audio_md5, params, spectral, rhythm, pitch, timbre, duration,
 		effective_level, effective_band_energy,
 		bit_depth=bit_depth, channels=channels, captured_at=captured_at,
-		channel_format=channel_format, preview_data=preview_data,
+		channel_format=channel_format, preview_data=preview_data, loop=loop,
 	)
 	json_str = json.dumps(payload, indent=2)
 
@@ -204,7 +272,7 @@ def save_cache (
 		raise
 
 
-def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
+def load_cache (audio_path: pathlib.Path) -> SampleAssets | None:
 
 	"""Load cached analysis results if the sidecar is valid.
 
@@ -222,8 +290,8 @@ def load_cache (audio_path: pathlib.Path) -> _LoadResult | None:
 		audio_path: Path to the audio file.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
-		channel_format) 9-tuple on success, else None.
+		The SampleAssets dataclass on success (spectral, rhythm, pitch, timbre,
+		params, duration, level, band_energy, channel_format, loop), else None.
 	"""
 
 	sidecar = cache_path(audio_path)
@@ -277,7 +345,7 @@ def _reanalyze_and_save (
 	silent: bool = False,
 	channel_format: str = "pcm",
 	with_preview: bool = False,
-) -> _LoadResult | None:
+) -> SampleAssets | None:
 
 	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
 
@@ -305,8 +373,8 @@ def _reanalyze_and_save (
 		                that don't manage PNGs.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
-		channel_format) on success, None on error.
+		The SampleAssets dataclass on success (spectral, rhythm, pitch, timbre,
+		params, duration, level, band_energy, channel_format, loop), None on error.
 	"""
 
 	if not silent:
@@ -348,6 +416,10 @@ def _reanalyze_and_save (
 			mono, params, subsample.config.AnalysisConfig(),
 		)
 
+		# Seamless loop for loopable samples (None otherwise) — found here, with
+		# the audio in hand, and stored in the sidecar so playback never re-searches.
+		loop = compute_loop(mono, file_info.sample_rate, spectral, pitch, level, duration)
+
 		# Compute the preview data once and embed it in the sidecar so the
 		# `preview` block stays coherent with the freshly-computed analysis.
 		# Without this, an MD5-mismatch regen would silently drop any prior
@@ -373,7 +445,7 @@ def _reanalyze_and_save (
 			duration, level, band_energy,
 			bit_depth=file_info.bit_depth, channels=file_info.channels,
 			channel_format=channel_format,
-			preview_data=preview_data,
+			preview_data=preview_data, loop=loop,
 		)
 	except OSError as exc:
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
@@ -397,14 +469,18 @@ def _reanalyze_and_save (
 		except OSError:
 			pass
 
-	return (spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format)
+	return SampleAssets(
+		spectral=spectral, rhythm=rhythm, pitch=pitch, timbre=timbre,
+		params=params, duration=duration, level=level, band_energy=band_energy,
+		channel_format=channel_format, loop=loop,
+	)
 
 
 def ensure_sample_assets (
 	audio_path: pathlib.Path,
 	*,
 	with_preview: bool,
-) -> _LoadResult | None:
+) -> SampleAssets | None:
 
 	"""Ensure both the JSON sidecar and (optionally) the PNG preview are present
 	and current for an audio file.
@@ -445,7 +521,7 @@ def ensure_sample_assets (
 		              the embedded preview block in the JSON sidecar.
 
 	Returns:
-		``_LoadResult`` tuple on success, ``None`` if the audio is unreadable
+		``SampleAssets`` on success, ``None`` if the audio is unreadable
 		or the sidecar payload is unrecoverably corrupt.
 	"""
 
@@ -538,7 +614,7 @@ def ensure_sample_assets (
 	return _deserialize_payload(payload, sidecar.name)
 
 
-def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
+def load_sidecar (sidecar_path: pathlib.Path) -> SampleAssets | None:
 
 	"""Load analysis results directly from a sidecar file without audio MD5 check.
 
@@ -553,8 +629,8 @@ def load_sidecar (sidecar_path: pathlib.Path) -> _LoadResult | None:
 		sidecar_path: Path to the .analysis.json sidecar file directly.
 
 	Returns:
-		(spectral, rhythm, pitch, timbre, params, duration, level, band_energy,
-		channel_format) 9-tuple on success, else None.
+		The SampleAssets dataclass on success (spectral, rhythm, pitch, timbre,
+		params, duration, level, band_energy, channel_format, loop), else None.
 	"""
 
 	# Unlike load_cache(), a missing sidecar is unexpected here — warn explicitly.
@@ -650,7 +726,7 @@ def _load_payload (
 def _deserialize_payload (
 	payload: dict[str, typing.Any],
 	label: str,
-) -> _LoadResult | None:
+) -> SampleAssets | None:
 
 	"""Deserialize all analysis result types from a parsed JSON payload dict.
 
@@ -674,12 +750,17 @@ def _deserialize_payload (
 		level       = _deserialize_level(payload.get("level", {}))
 		band_energy = _deserialize_band_energy(payload.get("band_energy", {}))
 		channel_format = str(payload.get("channel_format", "pcm"))
+		loop        = _deserialize_loop(payload.get("loop"))
 
 	except (KeyError, TypeError, ValueError) as exc:
 		_log.warning("Ignoring corrupt %s: %s", label, exc)
 		return None
 
-	return spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format
+	return SampleAssets(
+		spectral=spectral, rhythm=rhythm, pitch=pitch, timbre=timbre,
+		params=params, duration=duration, level=level, band_energy=band_energy,
+		channel_format=channel_format, loop=loop,
+	)
 
 
 def _serialize (
@@ -697,6 +778,7 @@ def _serialize (
 	captured_at: typing.Optional[str] = None,
 	channel_format: str = "pcm",
 	preview_data: typing.Optional[subsample.preview.PreviewData] = None,
+	loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
 ) -> dict[str, typing.Any]:
 
 	"""Build the JSON-serializable dict from analysis results."""
@@ -738,6 +820,9 @@ def _serialize (
 		"timbre":           timbre_dict,
 		"level":            dataclasses.asdict(level),
 		"band_energy":      dataclasses.asdict(band_energy),
+		# Seamless loop for a loopable sample, or null (not a candidate / no clean
+		# junction).  Frame indices in the sample's own timeline; see loopfind.
+		"loop":             dataclasses.asdict(loop) if loop is not None else None,
 	}
 
 	if preview_data is not None:
@@ -913,4 +998,27 @@ def _deserialize_band_energy (data: dict[str, typing.Any]) -> subsample.analysis
 	return subsample.analysis.BandEnergyResult(
 		energy_fractions = energy_fractions,
 		decay_rates      = decay_rates,
+	)
+
+
+def _deserialize_loop (
+	data: typing.Optional[dict[str, typing.Any]],
+) -> typing.Optional[subsample.loopfind.LoopPoints]:
+
+	"""Reconstruct LoopPoints from a sidecar "loop" block, or None.
+
+	None (not a loop candidate / no clean junction) is stored as JSON null, and
+	the key is absent altogether in sidecars written before loops existed — both
+	map back to None here.  Raises (caught upstream) on a present-but-malformed
+	block so the corruption is reported rather than silently dropped.
+	"""
+
+	if not data:
+		return None
+
+	return subsample.loopfind.LoopPoints(
+		start         = int(data["start"]),
+		end           = int(data["end"]),
+		crossfade     = int(data["crossfade"]),
+		junction_flux = float(data["junction_flux"]),
 	)

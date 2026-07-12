@@ -21,7 +21,7 @@ ProcessSpec
 
 Assignment
     A compiled MIDI map entry combining SelectSpec, ProcessSpec, playback
-    flags (one_shot, gain_db), and output routing (pan_weights).
+    settings (mode, gain_db), and output routing (pan_weights).
 
 Query evaluation
 ----------------
@@ -323,7 +323,7 @@ def _hpss_keep_for_legacy_name (name: str) -> typing.Optional[str]:
 # defined later in the file; _valid_where_keys() combines both into one
 # frozenset at call time.
 _NON_RANGE_WHERE_KEYS: frozenset[str] = frozenset(
-	{"pitched", "reference", "name", "path", "directory"}
+	{"pitched", "loopable", "reference", "name", "path", "directory"}
 )
 
 
@@ -359,6 +359,7 @@ class WherePredicate:
 	quantized_beats: Range = dataclasses.field(default_factory=Range)
 
 	pitched:    typing.Optional[bool]              = None
+	loopable:   typing.Optional[bool]              = None
 	reference:  typing.Optional[str]               = None
 	name:       typing.Optional[str]               = None
 	name_list:  typing.Optional[tuple[str, ...]]   = None
@@ -436,6 +437,13 @@ class WherePredicate:
 				record.spectral, record.pitch, record.duration,
 			)
 			if self.pitched != is_pitched:
+				return False
+
+		if self.loopable is not None:
+			is_loopable = subsample.analysis.is_loopable(
+				record.spectral, record.level, record.duration,
+			)
+			if self.loopable != is_loopable:
 				return False
 
 		if self.name is not None and record.name != self.name:
@@ -959,7 +967,7 @@ VALID_RELEASE_CURVES: frozenset[str] = frozenset({"cosine", "exponential"})
 @dataclasses.dataclass(frozen=True)
 class ReleaseSpec:
 
-	"""Note-off amplitude release for a sustained (``one_shot: false``) voice.
+	"""Note-off amplitude release for a sustained (``mode: gated`` or ``loop``) voice.
 
 	Controls how a held voice fades to silence after the key is lifted.  This is
 	applied live as per-voice gain in the audio callback — it is NOT baked into
@@ -972,15 +980,19 @@ class ReleaseSpec:
 	release longer than the audio left simply fades what is there — it cannot
 	synthesise a sustain tail (that awaits loop playback).
 
-	time:  Fade duration after note-off.  A float in milliseconds, a CcBinding
-	       (resolved once at note-on), or None for an adaptive tail derived from
-	       the sample's own release character (~30-200 ms).
-	curve: Fade shape — one of VALID_RELEASE_CURVES ("cosine" default, or
-	       "exponential").
+	time:   Fade duration after note-off.  A float in milliseconds, a CcBinding
+	        (resolved once at note-on), or None for an adaptive tail derived from
+	        the sample's own release character (~30-200 ms).
+	curve:  Fade shape — one of VALID_RELEASE_CURVES ("cosine" default, or
+	        "exponential").
+	to_end: When True (``release: full``), note-off applies NO fade — the voice
+	        plays the remaining audio to its natural end (a loop stops looping and
+	        rings out its real tail).  time/curve are then unused.
 	"""
 
-	time:  typing.Union[float, CcBinding, None] = None
-	curve: str                                  = "cosine"
+	time:   typing.Union[float, CcBinding, None] = None
+	curve:  str                                  = "cosine"
+	to_end: bool                                 = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1006,9 +1018,40 @@ class ProcessSpec:
 		"""True if any step is a pad_quantize processor."""
 		return any(s.name == "pad_quantize" for s in self.steps)
 
+	def has_reverse (self) -> bool:
+		"""True if any step is a reverse processor."""
+		return any(s.name == "reverse" for s in self.steps)
+
 	def has_vocoder (self) -> bool:
 		"""True if any step is a vocoder processor."""
 		return any(s.name == "vocoder" for s in self.steps)
+
+
+# ---------------------------------------------------------------------------
+# Playback mode + loop override
+# ---------------------------------------------------------------------------
+
+VALID_MODES: frozenset[str] = frozenset({"one_shot", "gated", "loop"})
+"""Assignment playback modes:
+one_shot — plays to the sample's natural end and ignores note-off (default).
+gated    — note-off releases the voice (the old ``one_shot: false``).
+loop     — holds a seamless loop while the key is down, then releases past it."""
+
+
+@dataclasses.dataclass(frozen=True)
+class LoopSpec:
+
+	"""A manual loop override declared on an assignment (``loop: {...}``).
+
+	Overrides the sample's auto-detected loop points.  Each field is optional —
+	an unset one falls back to the automatic value, so a bare ``loop: {}`` just
+	forces ``mode: loop`` with fully automatic points.  ``start``/``end`` are in
+	seconds; ``crossfade`` is in milliseconds.
+	"""
+
+	start:     typing.Optional[float] = None
+	end:       typing.Optional[float] = None
+	crossfade: typing.Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1030,7 +1073,11 @@ class Assignment:
 	name:      str
 	select:    tuple[SelectSpec, ...]
 	process:   ProcessSpec        = dataclasses.field(default_factory=ProcessSpec)
-	one_shot:  bool               = True
+	mode:      str                = "one_shot"
+	"""Playback mode — one of VALID_MODES (one_shot | gated | loop)."""
+	loop:      typing.Optional[LoopSpec] = None
+	"""Manual loop-point override (``loop: {...}``); None uses the sample's
+	auto-detected points.  Only consulted when ``mode`` is loop."""
 	release:   typing.Optional[ReleaseSpec] = None
 	gain_db:   float              = 0.0
 	pan_weights:    typing.Optional[numpy.ndarray]  = None
@@ -1486,6 +1533,14 @@ def _parse_where (
 					f"must be true or false (got {value!r})"
 				)
 			other_kwargs["pitched"] = value
+
+		elif key == "loopable":
+			if not isinstance(value, bool):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: 'loopable' "
+					f"must be true or false (got {value!r})"
+				)
+			other_kwargs["loopable"] = value
 
 		elif key == "reference":
 			ref = str(value)

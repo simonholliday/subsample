@@ -60,7 +60,7 @@
 #       order: [{ by: age, dir: asc }]
 #     process:
 #       - repitch: true
-#     one_shot: false
+#     mode: gated
 #
 #   # 4. Velocity layering - two sounds on the same MIDI key.  Soft hits
 #   #    (vel 0-63) play a soft sample; hard hits (vel 64-127) play a
@@ -103,7 +103,7 @@
 #     select:
 #       where:
 #         duration: { gte: 0.5 }        # optional additional filters
-#     one_shot: false                   # keyboard playing usually wants note-off
+#     mode: gated                   # keyboard playing usually wants note-off
 #
 #   #    b) Split keyboard — two zone-tuned templates on one channel with
 #   #       non-overlapping ranges:
@@ -116,7 +116,7 @@
 #       - repitch: true
 #     select:
 #       where: { name: { matches: "*bass*" } }
-#     one_shot: false
+#     mode: gated
 #   - name: Lead zone
 #     channel: 1
 #     notes:
@@ -126,7 +126,7 @@
 #       - repitch: true
 #     select:
 #       where: { name: { matches: "*lead*" } }
-#     one_shot: false
+#     mode: gated
 #
 #   # 6. Templates - define shared fields once, inherit per assignment.
 #   #    `templates:` is a TOP-LEVEL section (a sibling of `assignments:`).
@@ -229,7 +229,7 @@ assignments:
   #     pick: 1
   #   process:
   #     - repitch: true
-  #   one_shot: false
+  #   mode: gated
 
 
   # --- D. Highest-pitched sample ---
@@ -246,7 +246,7 @@ assignments:
   #     pick: 1
   #   process:
   #     - repitch: true
-  #   one_shot: false
+  #   mode: gated
 
 
   # --- E. Third-longest sample ---
@@ -305,7 +305,7 @@ assignments:
   #     pick: 1
   #   process:
   #     - stretch_quantize: { grid: 16 }
-  #   one_shot: false
+  #   mode: gated
 
 
   # --- G. Warm keys - filter + saturation + compression + repitch ---
@@ -324,7 +324,7 @@ assignments:
   #     - saturate: { drive: 4 }
   #     - compress: true
   #     - repitch: true
-  #   one_shot: false
+  #   mode: gated
 
 
   # --- H. Reversed pad ---
@@ -340,7 +340,7 @@ assignments:
   #   process:
   #     - reverse: true
   #     - repitch: true
-  #   one_shot: false
+  #   mode: gated
 
 
   # --- H2. Radio - broadcast and received ---
@@ -358,7 +358,7 @@ assignments:
   #     where: { pitched: true }
   #   process:
   #     - radio: { mode: ssb, tune: 150, signal: 0.3, static: 0.4 }
-  #   one_shot: false
+  #   mode: gated
 
 
   # --- I. Fallback chain ---
@@ -394,7 +394,7 @@ assignments:
   #       - { by: beat_match, pattern: [1, 0, 1, 0, 1, 0, 1, 0] }
   #   process:
   #     - stretch_quantize: { grid: 16 }
-  #   one_shot: false
+  #   mode: gated
 
 
   # --- K. Channel-pattern extraction at playback time ---
@@ -608,4 +608,4 @@ assignments:
       pick: 1
     process:
       - repitch: true
-    one_shot: false
+    mode: gated

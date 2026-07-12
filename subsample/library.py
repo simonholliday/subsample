@@ -38,6 +38,7 @@ import numpy
 import subsample.analysis
 import subsample.audio
 import subsample.cache
+import subsample.loopfind
 
 
 _log = logging.getLogger(__name__)
@@ -99,6 +100,9 @@ class SampleRecord:
 		           mix matrix.  "b_format_ambix" means first-order ambisonic
 		           B-format (channel order W, Y, Z, X; SN3D) — the player
 		           applies a decoder and rotation matrix before mix routing.
+		loop:      Seamless loop points found for a loopable sample (None when the
+		           sample is not a loop candidate or has no clean junction), used
+		           by loop-mode playback.  Frame indices in this sample's timeline.
 	"""
 
 	sample_id:   int
@@ -114,6 +118,7 @@ class SampleRecord:
 	audio:       typing.Optional[numpy.ndarray] = None
 	filepath:    typing.Optional[pathlib.Path]  = None
 	channel_format: str = "pcm"
+	loop:        typing.Optional[subsample.loopfind.LoopPoints] = None
 
 
 class ReferenceLibrary:
@@ -401,25 +406,24 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 		if result is None:
 			continue
 
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-
 		audio_name = sidecar_path.name[: -len(subsample.cache.SIDECAR_SUFFIX)]
 		name = pathlib.Path(audio_name).stem
 
 		records.append(SampleRecord(
 			sample_id      = allocate_id(),
 			name           = name,
-			spectral       = spectral,
-			rhythm         = rhythm,
-			pitch          = pitch,
-			timbre         = timbre,
-			level          = level,
-			band_energy    = band_energy,
-			params         = params,
-			duration       = duration,
+			spectral       = result.spectral,
+			rhythm         = result.rhythm,
+			pitch          = result.pitch,
+			timbre         = result.timbre,
+			level          = result.level,
+			band_energy    = result.band_energy,
+			params         = result.params,
+			duration       = result.duration,
 			audio          = None,
 			filepath       = None,
-			channel_format = channel_format,
+			channel_format = result.channel_format,
+			loop           = result.loop,
 		))
 
 	_log.info("Loaded %d reference sample(s) from %s", len(records), directory)
@@ -452,6 +456,7 @@ class _LoadedSample:
 	audio_path:  pathlib.Path
 	audio:       typing.Optional[numpy.ndarray]
 	channel_format: str = "pcm"
+	loop:        typing.Optional[subsample.loopfind.LoopPoints] = None
 
 
 def _sweep_orphans (directory: pathlib.Path) -> None:
@@ -526,8 +531,6 @@ def _load_one_sample (
 	if result is None:
 		return None
 
-	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-
 	name = audio_path.stem
 
 	if load_audio:
@@ -539,10 +542,10 @@ def _load_one_sample (
 		audio = None
 
 	return _LoadedSample(
-		spectral=spectral, rhythm=rhythm, pitch=pitch, timbre=timbre,
-		level=level, band_energy=band_energy, params=params, duration=duration,
+		spectral=result.spectral, rhythm=result.rhythm, pitch=result.pitch, timbre=result.timbre,
+		level=result.level, band_energy=result.band_energy, params=result.params, duration=result.duration,
 		name=name, audio_path=audio_path, audio=audio,
-		channel_format=channel_format,
+		channel_format=result.channel_format, loop=result.loop,
 	)
 
 
@@ -679,6 +682,7 @@ def load_instrument_library (
 			audio          = loaded_sample.audio,
 			filepath       = loaded_sample.audio_path,
 			channel_format = loaded_sample.channel_format,
+			loop           = loaded_sample.loop,
 		)
 
 		lib.add(record)

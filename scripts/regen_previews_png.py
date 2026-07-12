@@ -49,7 +49,13 @@ def _regen_one (audio_path: pathlib.Path) -> bool:
 		_log.warning("skip %s — no valid analysis sidecar", audio_path.name)
 		return False
 
-	spectral, rhythm, pitch, _timbre, _params, duration, level, band_energy, channel_format = cached
+	spectral       = cached.spectral
+	rhythm         = cached.rhythm
+	pitch          = cached.pitch
+	duration       = cached.duration
+	level          = cached.level
+	band_energy    = cached.band_energy
+	channel_format = cached.channel_format
 
 	try:
 		file_info = subsample.audio.read_audio_file(audio_path)

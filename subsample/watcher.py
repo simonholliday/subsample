@@ -272,8 +272,6 @@ class InstrumentWatcher:
 			self._schedule_retry(sidecar_path, attempt, reason="sidecar not readable")
 			return
 
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-
 		# Derive audio file path: strip .analysis.json suffix to get the WAV name.
 		audio_name = sidecar_path.name[: -len(subsample.cache.SIDECAR_SUFFIX)]
 		audio_path = sidecar_path.parent / audio_name
@@ -297,17 +295,18 @@ class InstrumentWatcher:
 		record = subsample.library.SampleRecord(
 			sample_id      = subsample.library.allocate_id(),
 			name           = pathlib.Path(audio_name).stem,
-			spectral       = spectral,
-			rhythm         = rhythm,
-			pitch          = pitch,
-			timbre         = timbre,
-			level          = level,
-			band_energy    = band_energy,
-			params         = params,
-			duration       = duration,
+			spectral       = result.spectral,
+			rhythm         = result.rhythm,
+			pitch          = result.pitch,
+			timbre         = result.timbre,
+			level          = result.level,
+			band_energy    = result.band_energy,
+			params         = result.params,
+			duration       = result.duration,
 			audio          = audio,
 			filepath       = audio_path,
-			channel_format = channel_format,
+			channel_format = result.channel_format,
+			loop           = result.loop,
 		)
 
 		# A stop() racing this callback joins the timer thread, so delivering
@@ -561,8 +560,6 @@ class InstrumentWatcher:
 
 			return
 
-		spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-
 		audio = subsample.library.load_wav_audio(audio_path, self._target_sample_rate)
 
 		if audio is None:
@@ -575,17 +572,18 @@ class InstrumentWatcher:
 		record = subsample.library.SampleRecord(
 			sample_id      = subsample.library.allocate_id(),
 			name           = audio_path.stem,
-			spectral       = spectral,
-			rhythm         = rhythm,
-			pitch          = pitch,
-			timbre         = timbre,
-			level          = level,
-			band_energy    = band_energy,
-			params         = params,
-			duration       = duration,
+			spectral       = result.spectral,
+			rhythm         = result.rhythm,
+			pitch          = result.pitch,
+			timbre         = result.timbre,
+			level          = result.level,
+			band_energy    = result.band_energy,
+			params         = result.params,
+			duration       = result.duration,
 			audio          = audio,
 			filepath       = audio_path,
-			channel_format = channel_format,
+			channel_format = result.channel_format,
+			loop           = result.loop,
 		)
 
 		# Skip delivery when stop() already ran — the sidecar is written, so the

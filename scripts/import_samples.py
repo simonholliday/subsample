@@ -202,6 +202,11 @@ def _import_file (
 
 	duration = faded.shape[0] / samplerate
 
+	# Compute the seamless loop on the same analysis mono, so a bulk-imported
+	# sidecar already carries its loop — a loop=None sidecar would match on
+	# version + MD5 forever and never re-analyse (permanently unloopable).
+	loop = subsample.cache.compute_loop(mono, samplerate, result, pitch, level, duration)
+
 	# Save sidecar
 
 	try:
@@ -218,6 +223,7 @@ def _import_file (
 			duration    = duration,
 			level       = level,
 			band_energy = band_energy,
+			loop        = loop,
 			# Record the actual on-disk format, not save_cache's 16/1 defaults
 			# (subtype is PCM_16/24/32; faded is shape (n_frames, channels)).
 			bit_depth   = int(subtype.rsplit("_", 1)[1]),

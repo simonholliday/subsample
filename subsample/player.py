@@ -144,7 +144,7 @@ class ZoneTemplate:
 		select:              User's select block — filters which samples
 		                     are candidates for zone derivation.
 		process:             User's process block — MUST contain repitch.
-		one_shot ... stack:  Inherited verbatim by each derived Assignment.
+		mode ... stack:      Inherited verbatim by each derived Assignment.
 	"""
 
 	name:                str
@@ -152,7 +152,8 @@ class ZoneTemplate:
 	keyboard_range:      tuple[int, int]
 	select:              tuple[subsample.query.SelectSpec, ...]
 	process:             subsample.query.ProcessSpec
-	one_shot:            bool
+	mode:                str
+	loop:                typing.Optional[subsample.query.LoopSpec]
 	gain_db:             float
 	pan_weights:         typing.Optional[numpy.ndarray]
 	output_routing:      typing.Optional[tuple[int, ...]]
@@ -566,18 +567,20 @@ def _parse_release (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 
 	"""Parse the ``release:`` field from a MIDI map assignment into a ReleaseSpec.
 
-	Sets how a sustained (``one_shot: false``) voice fades to silence after
+	Sets how a sustained (``mode: gated`` or ``loop``) voice fades to silence after
 	note-off.  Accepted forms:
 	  - ``None`` / ``false``  — no release declared; the player keeps its
 	    built-in fixed declick fade.
 	  - ``true``              — adaptive tail (shape derived from the sample).
+	  - ``full``              — NO fade; play the remaining audio to its natural
+	    end (a loop stops looping and rings out its real tail).
 	  - a number (ms)         — fade time, cosine shape.
 	  - ``{time: <ms|cc-map>, curve: cosine|exponential}`` — explicit; either
 	    inner key may be omitted (time → adaptive, curve → cosine).  ``time``
 	    may itself be a ``{cc: N, min:, max:, ...}`` mapping, resolved at note-on.
 
-	Syntactic + range validation only; the one_shot interaction (a release on a
-	one_shot voice is inert) is handled at the assignment level in load_midi_map.
+	Syntactic + range validation only; the mode interaction (a release on a
+	mode: one_shot voice is inert) is handled at the assignment level in load_midi_map.
 
 	Args:
 		raw:             Raw YAML value.
@@ -596,6 +599,9 @@ def _parse_release (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 
 	if raw is True:
 		return subsample.query.ReleaseSpec(time=None, curve="cosine")
+
+	if raw == "full":
+		return subsample.query.ReleaseSpec(to_end=True)
 
 	if isinstance(raw, (int, float)) and not isinstance(raw, bool):
 		return subsample.query.ReleaseSpec(time=_parse_release_time(raw, assignment_name), curve="cosine")
@@ -699,6 +705,147 @@ def _parse_release_time (
 		f"non-negative number of milliseconds or a {{cc: ...}} mapping — "
 		f"got {type(raw).__name__}"
 	)
+
+
+_LOOP_INNER_KEYS: typing.Final[frozenset[str]] = frozenset({"start", "end", "crossfade"})
+
+# Shortest loop the player will honour.  Auto-detected loops are far longer
+# (loopfind enforces its own minimum), so this only guards a deliberately tiny
+# manual loop: {} override, which would otherwise make the callback wrap dozens
+# of times per buffer.  Below this it is a buzz, not a loop — play gated instead.
+_MIN_LOOP_SECONDS: typing.Final[float] = 0.005
+
+
+def _parse_loop_float (
+	raw:             typing.Any,
+	assignment_name: str,
+	field:           str,
+) -> typing.Optional[float]:
+
+	"""Parse an optional, finite, non-negative loop scalar (seconds or ms), or None."""
+
+	if raw is None:
+		return None
+
+	if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw < 0.0:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: loop {field} must be a "
+			f"finite number >= 0 — got {raw!r}"
+		)
+
+	return float(raw)
+
+
+def _parse_loop_override (
+	raw:             typing.Any,
+	assignment_name: str,
+) -> typing.Optional[subsample.query.LoopSpec]:
+
+	"""Parse a ``loop: {start, end, crossfade}`` override block, or None.
+
+	start/end are seconds, crossfade is milliseconds; each optional (unset uses
+	the sample's auto value).  A present block implies ``mode: loop`` — the
+	caller enforces that against any explicit ``mode:``.
+	"""
+
+	if raw is None:
+		return None
+
+	if not isinstance(raw, dict):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'loop' must be a block with "
+			f"start/end/crossfade keys — got {type(raw).__name__}"
+		)
+
+	unknown = set(raw) - _LOOP_INNER_KEYS
+	if unknown:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unknown loop key(s) "
+			f"{sorted(unknown)} — expected start, end, crossfade"
+		)
+
+	start = _parse_loop_float(raw.get("start"),     assignment_name, "start")
+	end   = _parse_loop_float(raw.get("end"),       assignment_name, "end")
+	xfade = _parse_loop_float(raw.get("crossfade"), assignment_name, "crossfade")
+
+	if start is not None and end is not None and end <= start:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: loop end ({end}s) must be "
+			f"greater than start ({start}s)"
+		)
+
+	return subsample.query.LoopSpec(start=start, end=end, crossfade=xfade)
+
+
+def _parse_mode (
+	raw:             dict[str, typing.Any],
+	assignment_name: str,
+	process:         subsample.query.ProcessSpec,
+) -> tuple[str, typing.Optional[subsample.query.LoopSpec]]:
+
+	"""Resolve an assignment's playback mode and optional loop override.
+
+	- ``one_shot:`` is a removed alias — its presence is a hard load error
+	  (breaking change: migrate ``true`` → ``mode: one_shot``, ``false`` →
+	  ``mode: gated``).
+	- ``mode:`` must be one of query.VALID_MODES; default one_shot.
+	- a ``loop: {...}`` block implies ``mode: loop``; a contradicting explicit
+	  ``mode:`` is an error.
+	- ``mode: loop`` combined with a timeline-altering step (repitch, time/pad
+	  quantize, or reverse) is deferred in v1: warn and fall back to gated,
+	  dropping the loop — the stored points are in the sample's own frames and
+	  would not survive the transform.
+	"""
+
+	if "one_shot" in raw:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'one_shot' is no longer "
+			f"supported — use 'mode:'.  'one_shot: true' → 'mode: one_shot' "
+			f"(plays to the end, ignores note-off); 'one_shot: false' → "
+			f"'mode: gated' (note-off releases).  'mode: loop' holds a seamless "
+			f"loop while the key is held."
+		)
+
+	loop_override = _parse_loop_override(raw.get("loop"), assignment_name)
+
+	mode_raw = raw.get("mode")
+	if mode_raw is None:
+		mode = "loop" if loop_override is not None else "one_shot"
+	else:
+		if not isinstance(mode_raw, str) or mode_raw not in subsample.query.VALID_MODES:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: invalid mode {mode_raw!r} "
+				f"— expected one of {sorted(subsample.query.VALID_MODES)}"
+			)
+		mode = mode_raw
+		if loop_override is not None and mode != "loop":
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: a 'loop:' block implies "
+				f"'mode: loop', but 'mode: {mode}' was set — remove one of them"
+			)
+
+	# The stored loop points live in the sample's own (forward) timeline, so any
+	# step that re-times or re-orders that timeline invalidates them — defer such
+	# an assignment to gated at load.  This is the COMPLETE set of timeline-
+	# altering processors: repitch and time/pad-quantize re-time, reverse mirrors.
+	# Every other process step preserves the timeline and loops correctly on its
+	# variant, so any future timeline-altering processor MUST be added here.
+	if mode == "loop" and (
+		process.has_repitch()
+		or process.has_stretch_quantize()
+		or process.has_pad_quantize()
+		or process.has_reverse()
+	):
+		_log.warning(
+			"MIDI map assignment %r: 'mode: loop' with repitch, time/pad-quantize, or "
+			"reverse is not supported yet — playing gated (no loop).  The loop points "
+			"live in the sample's own timeline and would not survive the transform.",
+			assignment_name,
+		)
+		mode          = "gated"
+		loop_override = None
+
+	return mode, loop_override
 
 
 _VELOCITY_INNER_KEYS: typing.Final[frozenset[str]] = frozenset({"trigger", "rescale"})
@@ -1261,22 +1408,21 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 		)
 		return None
 
-	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-
 	return subsample.library.SampleRecord(
 		sample_id      = subsample.library.allocate_id(),
 		name           = str(path.resolve()),
-		spectral       = spectral,
-		rhythm         = rhythm,
-		pitch          = pitch,
-		timbre         = timbre,
-		level          = level,
-		band_energy    = band_energy,
-		params         = params,
-		duration       = duration,
+		spectral       = result.spectral,
+		rhythm         = result.rhythm,
+		pitch          = result.pitch,
+		timbre         = result.timbre,
+		level          = result.level,
+		band_energy    = result.band_energy,
+		params         = result.params,
+		duration       = result.duration,
 		audio          = None,
 		filepath       = path if path.exists() else None,
-		channel_format = channel_format,
+		channel_format = result.channel_format,
+		loop           = result.loop,
 	)
 
 
@@ -1325,8 +1471,6 @@ def _load_instrument_from_path (
 		)
 		return None
 
-	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-
 	# Load the audio data, resampling to the output rate if needed.
 	audio = subsample.library.load_wav_audio(path, target_sample_rate)
 	if audio is None:
@@ -1339,17 +1483,18 @@ def _load_instrument_from_path (
 	return subsample.library.SampleRecord(
 		sample_id      = subsample.library.allocate_id(),
 		name           = name,
-		spectral       = spectral,
-		rhythm         = rhythm,
-		pitch          = pitch,
-		timbre         = timbre,
-		level          = level,
-		band_energy    = band_energy,
-		params         = params,
-		duration       = duration,
+		spectral       = result.spectral,
+		rhythm         = result.rhythm,
+		pitch          = result.pitch,
+		timbre         = result.timbre,
+		level          = result.level,
+		band_energy    = result.band_energy,
+		params         = result.params,
+		duration       = result.duration,
 		audio          = audio,
 		filepath       = path,
-		channel_format = channel_format,
+		channel_format = result.channel_format,
+		loop           = result.loop,
 	)
 
 
@@ -1791,7 +1936,8 @@ def load_midi_map (
 	  select:   Which sample to play — filter predicates, ordering, pick position.
 	            Can be a single spec or a list (fallback chain, tried in order).
 	  process:  How to present it — ordered list of processors (repitch, stretch_quantize, etc.).
-	  one_shot: Playback behaviour — true (default) ignores note_off.
+	  mode:     Playback — one_shot (default, ignores note_off) | gated (note-off
+	            releases) | loop (holds a loop while held); loop: {...} overrides points.
 	  gain:     Level offset in dB (default 0.0).
 	  pan:      Channel weights defining a target layout (e.g. [50, 50] for stereo,
 	            [50, 50, 0, 0, 30, 30] for 5.1).  Omit for default routing.
@@ -1977,22 +2123,28 @@ def load_midi_map (
 		# Parse process block (optional — defaults to no processing).
 		process = subsample.query.parse_process(assignment_raw.get("process"), name)
 
-		one_shot = bool(assignment_raw.get("one_shot", True))
+		mode, loop_override = _parse_mode(assignment_raw, name, process)
 
 		# release: shapes the note-off fade, and only a voice that RECEIVES a
 		# note-off ever releases.  A one_shot voice plays to its natural end and
-		# ignores note-off, so a release declared alongside one_shot: true (the
-		# default) can never fire — warn and drop it rather than carry dead state.
+		# ignores note-off, so a release declared on mode: one_shot can never fire
+		# — warn and drop it rather than carry dead state.
 		release = _parse_release(assignment_raw.get("release"), name)
 
-		if release is not None and one_shot:
+		if release is not None and mode == "one_shot":
 			_log.warning(
-				"MIDI map assignment %r: 'release' is ignored because one_shot is "
-				"true — a play-to-end voice never receives note-off.  Set "
-				"one_shot: false to use release.",
+				"MIDI map assignment %r: 'release' is ignored because mode is "
+				"one_shot — a play-to-end voice never receives note-off.  Use "
+				"mode: gated or mode: loop to use release.",
 				name,
 			)
 			release = None
+
+		# A loop voice sustains for as long as the key is held, so on note-off it
+		# needs a release to fade past the loop; default it to the adaptive tail
+		# (shape derived from the sample) when the map does not set one.
+		if mode == "loop" and release is None:
+			release = subsample.query.ReleaseSpec(time=None, curve="cosine")
 
 		try:
 			gain_db = float(assignment_raw.get("gain", 0.0))
@@ -2060,7 +2212,8 @@ def load_midi_map (
 				keyboard_range=zone_range,
 				select=select_specs,
 				process=process,
-				one_shot=one_shot,
+				mode=mode,
+				loop=loop_override,
 				gain_db=gain_db,
 				pan_weights=pan_weights,
 				output_routing=output_routing,
@@ -2081,7 +2234,8 @@ def load_midi_map (
 			name=name,
 			select=select_specs,
 			process=process,
-			one_shot=one_shot,
+			mode=mode,
+			loop=loop_override,
 			release=release,
 			gain_db=gain_db,
 			pan_weights=pan_weights,
@@ -2198,6 +2352,32 @@ class _Voice:
 	voice releases (0 until then).  Capped to the audio remaining at note-off so
 	the ramp always reaches 0 before the buffer runs out — otherwise a long
 	release on a short remainder would retire the voice mid-ramp (a click)."""
+
+	release_to_end: bool = False
+	"""``release: full`` — on note-off, apply NO fade: the voice keeps playing
+	its remaining audio to the natural end (a looping voice also stops looping).
+	When True the note-off handler clears ``looping`` but does NOT set
+	``releasing``, so the normal play-to-end branch carries it out."""
+
+	looping:        bool = False
+	"""True while this voice should wrap [loop_start, loop_end) — a held
+	mode: loop note.  Cleared on note-off (the cursor then runs monotonically
+	past loop_end into the tail).  When True the callback fills the whole buffer
+	from the loop region instead of ending at len(audio)."""
+
+	loop_start:     int = 0
+	loop_end:       int = 0
+	"""Loop bounds in this voice's own (output-rate) frames; the wrap jumps from
+	loop_end back to loop_start.  Only meaningful while ``looping``."""
+
+	loop_crossfade: int = 0
+	"""Crossfade length in frames blended at the wrap (linear), replicating
+	loopfind.bake_loop_body so the seam is seamless without baking the body."""
+
+	loop_xfade_in:  typing.Optional[numpy.ndarray] = None
+	"""Pre-computed lead-in segment (the ``loop_crossfade`` frames just before
+	loop_start) that the wrap fades in against, so the callback does no slicing
+	arithmetic beyond an index.  None when not looping or crossfade is 0."""
 
 
 def list_midi_input_devices () -> list[str]:
@@ -2468,6 +2648,10 @@ class MidiPlayer:
 		self._voices:      list[_Voice]  = []
 		self._voices_lock: threading.Lock = threading.Lock()
 
+		# Assignment ids already warned that their sample has no usable loop
+		# (mode: loop fail-musical) — so the note-on path warns once, not per hit.
+		self._loop_unavailable_warned: set[int] = set()
+
 		# Number of output channels.  Determines the shape of the mix buffer
 		# and must match the pa.open(channels=...) call in run().  Defaults
 		# to 2 (stereo); set via player.audio.channels in config for
@@ -2711,8 +2895,8 @@ class MidiPlayer:
 			if asgn.process.has_pad_quantize():
 				line += " pad-quantized"
 
-			if asgn.one_shot:
-				line += "  one-shot"
+			if asgn.mode != "one_shot":
+				line += f"  {asgn.mode}"
 
 			if asgn.pan_weights is not None:
 				line += f"  pan=[{', '.join(f'{g:.0f}' for g in asgn.pan_weights)}]"
@@ -3104,6 +3288,52 @@ class MidiPlayer:
 					if voice.fade_pos < fade_total and voice.position < len(voice.audio):
 						active.append(voice)
 
+				elif voice.looping:
+					# Held mode: loop voice.  Play forward, wrapping loop_end→loop_start,
+					# and crossfade the last loop_crossfade frames of each lap into the
+					# lead-in before loop_start (replicating loopfind.bake_loop_body so
+					# the wrap is seamless).  The buffer is the ORIGINAL audio, so the
+					# attack plays on the first lap and — on note-off (looping cleared)
+					# — the normal/release branch plays straight past loop_end into the
+					# real tail with no baking.  (A note-off landing mid-crossfade steps
+					# from a blended sample to the raw tail; the release fade masks it,
+					# but release: full has no fade — a rare, faint edge.)  Fills the
+					# WHOLE buffer: a held loop never runs short.
+					xf       = voice.loop_crossfade
+					xf_start = voice.loop_end - xf     # first frame of the wrap crossfade
+					filled   = 0
+
+					while filled < frame_count:
+						n     = min(frame_count - filled, voice.loop_end - voice.position)
+						chunk = voice.audio[voice.position : voice.position + n]
+
+						if xf > 0 and voice.loop_xfade_in is not None and voice.position + n > xf_start:
+							# Split the chunk at the crossfade window: copy the part
+							# before it straight, blend the part inside it (outgoing
+							# approach-to-loop_end fading into the pre-loop_start lead-in).
+							head = max(0, xf_start - voice.position)
+							if head > 0:
+								output[filled : filled + head] += chunk[:head]
+							k    = (voice.position + head) - xf_start
+							m    = n - head
+							# k + m <= xf always (n <= loop_end - position bounds it), so
+							# loop_xfade_in[k : k + m] never overruns — not an off-by-one.
+							ramp = (numpy.arange(k, k + m, dtype=numpy.float32) / numpy.float32(xf))[:, numpy.newaxis]
+							output[filled + head : filled + n] += (
+								chunk[head:] * (1.0 - ramp)
+								+ voice.loop_xfade_in[k : k + m] * ramp
+							)
+						else:
+							output[filled : filled + n] += chunk
+
+						voice.position += n
+						filled         += n
+
+						if voice.position >= voice.loop_end:
+							voice.position = voice.loop_start
+
+					active.append(voice)   # a held loop is never retired here
+
 				else:
 					n = min(frame_count, remaining)
 					output[:n] += voice.audio[voice.position : voice.position + n]
@@ -3268,13 +3498,10 @@ class MidiPlayer:
 		"""
 
 		# note_off (and note_on with velocity=0, which mido normalises to note_off)
-		# marks matching active voices as releasing so the callback fades them out.
+		# ends every matching non-one_shot voice — see _release_held for the
+		# retirement semantics (stop looping, then fade unless release: full).
 		if msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-			with self._voices_lock:
-				for voice in self._voices:
-					if voice.note == msg.note and voice.channel == msg.channel:
-						if not voice.one_shot:
-							voice.releasing = True
+			self._release_held(msg.note, msg.channel)
 			return
 
 		# Program Change: switch the active instrument bank when a BankManager
@@ -3335,6 +3562,19 @@ class MidiPlayer:
 				self._cc_state[(msg.channel, msg.control)] = msg.value
 				self._cc_omni[msg.control] = msg.value
 			self.events.emit("cc", channel=msg.channel, cc_number=msg.control, value=msg.value)
+
+			# CC120 (All Sound Off) / CC123 (All Notes Off): a panic that ends every
+			# held voice — the safety net that stops a mode: loop voice looping
+			# forever if its note-off is ever lost.  Same effect as a note-off for
+			# each: stop looping, then fade (unless release: full rings it out).  A
+			# separate _voices_lock section (never nested under _state_lock).
+			if msg.control in (120, 123):
+				with self._voices_lock:
+					for voice in self._voices:
+						if not voice.one_shot:
+							voice.looping = False
+							if not voice.release_to_end:
+								voice.releasing = True
 
 			if msg.control in self._mapped_ccs:
 				_log.debug(
@@ -3400,6 +3640,16 @@ class MidiPlayer:
 				msg.channel + 1, msg.note, msg.velocity,
 			)
 			return
+
+		# Same-note steal: re-striking a note that is already sounding retires the
+		# held gated/loop instance first — an implied note-off, so it releases per
+		# its own configured release (a finite fade, or ``release: full`` ringing to
+		# its natural end) — and the new strike then plays over the top.  Fired once
+		# here, BEFORE this note-on's own layers are appended, so it only retires
+		# earlier presses, never the (possibly stacked) voices about to be created.
+		# Tied to the note-on gesture, not to sample-selection success; one_shot
+		# voices are excluded (see _release_held), so overlapping one-shots stack.
+		self._release_held(msg.note, msg.channel)
 
 		# Fire every covering layer.  A normal (non-stacked) note loops exactly
 		# once; stacked members sound together as one composite hit.  Each call
@@ -3474,14 +3724,16 @@ class MidiPlayer:
 		self,
 		release: typing.Optional[subsample.query.ReleaseSpec],
 		record:  subsample.library.SampleRecord,
-	) -> tuple[typing.Optional[int], int]:
+	) -> tuple[typing.Optional[int], int, bool]:
 
-		"""Resolve an assignment's ReleaseSpec to (frames, curve_code) for a voice.
+		"""Resolve an assignment's ReleaseSpec to (frames, curve_code, to_end) for a voice.
 
-		Returns ``(None, 0)`` when no release is configured — the callback then
-		uses the player's global default declick length, so behaviour is
-		unchanged.  Otherwise returns the fade length in output-rate frames and
-		the curve code (0=cosine, 1=exponential).
+		Returns ``(None, 0, False)`` when no release is configured — the callback
+		then uses the player's global default declick length, so behaviour is
+		unchanged.  ``release: full`` returns ``(None, 0, True)`` — the third
+		element tells the note-off handler to play to the natural end with no
+		fade.  Otherwise returns the fade length in output-rate frames and the
+		curve code (0=cosine, 1=exponential).
 
 		A CC-bound release time is frozen HERE, at note-on, from a CC snapshot —
 		so turning the knob shapes the notes you play next, not the one already
@@ -3492,7 +3744,11 @@ class MidiPlayer:
 		"""
 
 		if release is None:
-			return None, 0
+			return None, 0, False
+
+		if release.to_end:
+			# release: full — no fade; the note-off handler lets the voice play out.
+			return None, 0, True
 
 		curve_code = 1 if release.curve == "exponential" else 0
 
@@ -3515,7 +3771,137 @@ class MidiPlayer:
 			time_ms = 30.0 + 170.0 * record.spectral.release
 
 		frames = max(1, round(float(time_ms) / 1000.0 * self._output_sample_rate))
-		return frames, curve_code
+		return frames, curve_code, False
+
+	def _resolve_loop (
+		self,
+		assignment: subsample.query.Assignment,
+		record:     subsample.library.SampleRecord,
+	) -> typing.Optional[tuple[int, int, int]]:
+
+		"""Resolve a ``mode: loop`` assignment's loop to (start, end, crossfade) in
+		OUTPUT-rate frames, or None when it isn't loop mode or has no loop points.
+
+		A manual ``loop: {...}`` override (seconds / ms) wins per field; unset
+		fields fall back to the sample's auto-detected points (SampleRecord.loop,
+		stored in the sample's own native frames — rescaled here to the output
+		rate the voice buffer plays at).  None from a ``mode: loop`` assignment is
+		the fail-musical case: the caller plays gated.  Bounds are validated here;
+		clamping to the specific rendered buffer happens in _append_voice.
+		"""
+
+		if assignment.mode != "loop":
+			return None
+
+		sr_out = self._output_sample_rate
+		native = record.params.sample_rate
+		scale  = (sr_out / native) if native else 1.0
+
+		auto     = record.loop        # loopfind.LoopPoints in native frames, or None
+		override = assignment.loop     # query.LoopSpec in seconds/ms, or None
+
+		def resolve_frames (ov_seconds: typing.Optional[float], auto_frames: typing.Optional[int]) -> typing.Optional[int]:
+			if ov_seconds is not None:
+				return round(ov_seconds * sr_out)
+			if auto_frames is not None:
+				return round(auto_frames * scale)
+			return None
+
+		start = resolve_frames(override.start if override else None, auto.start if auto else None)
+		end   = resolve_frames(override.end   if override else None, auto.end   if auto else None)
+
+		if start is None or end is None or end <= start:
+			return None
+
+		if end - start < round(_MIN_LOOP_SECONDS * sr_out):
+			return None      # too short to be a loop (see _MIN_LOOP_SECONDS)
+
+		if override is not None and override.crossfade is not None:
+			crossfade = round(override.crossfade / 1000.0 * sr_out)
+		elif auto is not None:
+			crossfade = round(auto.crossfade * scale)
+		else:
+			crossfade = round(0.030 * sr_out)   # 30 ms default (matches loopfind)
+
+		return start, end, crossfade
+
+	def _append_voice (
+		self,
+		audio:          numpy.ndarray,
+		note:           int,
+		channel:        int,
+		one_shot:       bool,
+		release_frames: typing.Optional[int],
+		release_curve:  int,
+		release_to_end: bool,
+		loop_cfg:       typing.Optional[tuple[int, int, int]],
+	) -> None:
+
+		"""Build a _Voice for a trigger and enqueue it (under _voices_lock).
+
+		Central voice-construction point so the loop/release fields are threaded
+		once, not re-typed at every trigger branch.  loop_cfg is (start, end,
+		crossfade) in this buffer's own frames or None; bounds are clamped to the
+		rendered length and the crossfade to the available lead-in, and if that
+		leaves nothing loopable the voice falls back to a plain one.
+		"""
+
+		looping        = False
+		loop_start     = 0
+		loop_end       = 0
+		loop_crossfade = 0
+		loop_xfade_in: typing.Optional[numpy.ndarray] = None
+
+		if loop_cfg is not None:
+			ls, le, xf = loop_cfg
+			n  = len(audio)
+			le = min(le, n)
+			ls = max(0, min(ls, le - 1))
+			xf = max(0, min(xf, ls, le - ls))
+
+			if le - ls >= 1:
+				looping        = True
+				loop_start     = ls
+				loop_end       = le
+				loop_crossfade = xf
+				if xf > 0:
+					loop_xfade_in = audio[ls - xf : ls]
+
+		voice = _Voice(
+			audio=audio, note=note, channel=channel,
+			one_shot=one_shot, release_frames=release_frames,
+			release_curve=release_curve, release_to_end=release_to_end,
+			looping=looping, loop_start=loop_start, loop_end=loop_end,
+			loop_crossfade=loop_crossfade, loop_xfade_in=loop_xfade_in,
+		)
+
+		with self._voices_lock:
+			self._voices.append(voice)
+
+	def _release_held (self, note: int, channel: int) -> None:
+
+		"""Imply a note-off for every currently-sounding non-one_shot voice on
+		(note, channel).
+
+		Shared by the real note-off handler and the same-note steal on note-on.
+		A looping voice stops looping (its cursor turns monotonic and plays past
+		loop_end into the real tail); then, unless ``release: full`` asked to ring
+		out unfaded, the callback fades it over the release window.  Clearing
+		looping and setting releasing happen in ONE lock section so the callback
+		never observes a half-updated voice.  one_shot voices are left untouched.
+
+		Safe to call on a re-strike over voices that may already be retiring:
+		re-applying to a voice that is already releasing (or already ringing out
+		under ``release: full``) is a no-op, because the release progress lives in
+		fade_pos / release_total, which only the callback ever initialises.
+		"""
+
+		with self._voices_lock:
+			for voice in self._voices:
+				if voice.note == note and voice.channel == channel and not voice.one_shot:
+					voice.looping = False
+					if not voice.release_to_end:
+						voice.releasing = True
 
 	def _trigger_one (
 		self,
@@ -3534,14 +3920,15 @@ class MidiPlayer:
 
 		Resolves the sample, then walks the variant → previous-variant → base →
 		int-PCM fallback chain, appending a ``_Voice`` on the first that yields
-		audio.  All per-assignment settings (gain, pan, output routing, one_shot,
+		audio.  All per-assignment settings (gain, pan, output routing, mode,
 		process) come off ``assignment``, so stacked members keep independent
 		voices.
 		"""
 
 		pan_weights      = assignment.pan_weights
 		output_routing   = assignment.output_routing
-		one_shot         = assignment.one_shot
+		# Only one_shot ignores note-off; gated and (for now) loop both release.
+		one_shot         = (assignment.mode == "one_shot")
 
 		# State-dict key is keyed by the assignment's identity so every layer —
 		# including stacked members that share a velocity range — keeps its own
@@ -3579,7 +3966,23 @@ class MidiPlayer:
 		# the adaptive form and for the note-on CC snapshot).  Every voice this
 		# note-on spawns — variant, previous-variant, base, int-PCM fallback —
 		# carries the same resolved values.
-		release_frames, release_curve = self._resolve_release(assignment.release, record)
+		release_frames, release_curve, release_to_end = self._resolve_release(assignment.release, record)
+
+		# Resolve loop points for mode: loop (None otherwise, or fail-musical when
+		# no clean loop exists → play gated + warn once).  A loop assignment may
+		# carry a time-PRESERVING process (filter, saturate, …) and then loops on
+		# the variant buffer, which stays frame-aligned with the stored points;
+		# timeline-ALTERING steps (repitch, quantize, reverse) are deferred to
+		# gated at load (_parse_mode), so loop_cfg never meets a re-timed buffer.
+		loop_cfg = self._resolve_loop(assignment, record)
+
+		if assignment.mode == "loop" and loop_cfg is None and id(assignment) not in self._loop_unavailable_warned:
+			self._loop_unavailable_warned.add(id(assignment))
+			_log.warning(
+				"MIDI map assignment %r: sample %r has no usable loop — playing gated "
+				"(held then released) instead of looping.",
+				assignment.name, record.name,
+			)
 
 		# ── Variant lookup based on ProcessSpec ───────────────────────────
 		# eff_transform was captured at the top of the handler alongside
@@ -3606,8 +4009,7 @@ class MidiPlayer:
 						)
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
-						with self._voices_lock:
-							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot, release_frames=release_frames, release_curve=release_curve))
+						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
 						with self._state_lock:
 							self._last_played[state_key] = variant
 						_log.debug(
@@ -3632,8 +4034,7 @@ class MidiPlayer:
 						)
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
-						with self._voices_lock:
-							self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot, release_frames=release_frames, release_curve=release_curve))
+						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
 						_log.debug(
 							"note %d (vel %d → %d) → %r → %r (previous variant)  (%.2fs)",
 							msg.note, msg.velocity, effective_velocity, assignment.name, record.name, prev.duration,
@@ -3651,8 +4052,7 @@ class MidiPlayer:
 				)
 				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 				rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
-				with self._voices_lock:
-					self._voices.append(_Voice(audio=rendered, note=msg.note, channel=msg.channel, one_shot=one_shot, release_frames=release_frames, release_curve=release_curve))
+				self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
 				_log.debug(
 					"note %d (vel %d → %d) → %r → %r (base variant)  (%.2fs)",
 					msg.note, msg.velocity, effective_velocity, assignment.name, record.name, base.duration,
@@ -3666,8 +4066,7 @@ class MidiPlayer:
 		if original is None:
 			return
 
-		with self._voices_lock:
-			self._voices.append(_Voice(audio=original, note=msg.note, channel=msg.channel, one_shot=one_shot, release_frames=release_frames, release_curve=release_curve))
+		self._append_voice(original, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
 
 		_log.debug(
 			"note %d (vel %d → %d) → %r → %r  (%.2fs)",
@@ -3905,7 +4304,8 @@ class MidiPlayer:
 					name                = f"{template.name} → {record.name}",
 					select              = sample_select,
 					process             = template.process,
-					one_shot            = template.one_shot,
+					mode                = template.mode,
+					loop                = template.loop,
 					release             = template.release,
 					gain_db             = template.gain_db,
 					pan_weights         = template.pan_weights,
@@ -4480,6 +4880,13 @@ class MidiPlayer:
 			self._mix_matrix_cache.clear()
 		with self._state_lock:
 			self._segment_counters.clear()
+		# The old Assignment ids the fail-musical-loop warn-dedup keyed on are gone
+		# with the swap, so clear it — otherwise it grows unbounded across reloads
+		# and a reused id could suppress a genuine warning.  Lock-free: the set is
+		# only add/membership-tested on the handler thread and set ops are atomic,
+		# so a best-effort clear here can at worst re-emit or drop one cosmetic
+		# warning, never corrupt state.
+		self._loop_unavailable_warned.clear()
 
 	def reload_midi_map (self, new_result: MidiMapResult) -> None:
 

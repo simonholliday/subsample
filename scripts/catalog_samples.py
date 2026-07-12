@@ -3,7 +3,7 @@
 Walks a directory recursively (the same walk the instrument library performs at
 startup), reads each file's analysis sidecar — analysing any file that doesn't
 have one yet, exactly as startup would — and writes one CSV row per file with
-its detected properties.  Two capability columns show which musical behaviours
+its detected properties.  Three capability columns show which musical behaviours
 each sample is eligible for:
 
   pitched      — passes the stable-pitch test, so it matches `pitched: true`
@@ -11,14 +11,17 @@ each sample is eligible for:
   quantizable  — has enough detected hits (2+) for stretch_quantize /
                  pad_quantize to align them to a beat grid; below that,
                  quantize degrades to a plain stretch or a pass-through
+  loopable     — has a steady sustaining region (tonal or textural) worth
+                 looping while a key is held; a coarse candidate flag (the
+                 seamless loop point is found later from the audio itself)
 
-Both columns call the same functions the playback engine uses
-(subsample.analysis.has_stable_pitch / has_beat_map), so what the catalog
-reports is exactly what a MIDI map would select.  All seven inputs to the
-pitched test (pitch_hz, voiced_fraction, voiced_frame_count, pitch_confidence,
-pitch_stability_st, harmonic_ratio, duration_s) are included as columns, so a
-sample that unexpectedly fails can be diagnosed against the thresholds
-documented on has_stable_pitch.
+All three columns call the same functions the playback engine uses
+(subsample.analysis.has_stable_pitch / has_beat_map / is_loopable), so what the
+catalog reports is exactly what a MIDI map would select.  All seven inputs to
+the pitched test (pitch_hz, voiced_fraction, voiced_frame_count,
+pitch_confidence, pitch_stability_st, harmonic_ratio, duration_s) are included
+as columns, so a sample that unexpectedly fails can be diagnosed against the
+thresholds documented on has_stable_pitch.
 
 Curation aids for large, mic-captured directories:
 
@@ -37,12 +40,13 @@ Curation aids for large, mic-captured directories:
                       with no event; near-clipped captures) so it sorts to the
                       top of the bin pile.
 
-With --pitched and/or --quantizable the CSV is replaced by a plain list of
-matching file paths, one per line — pipeable into a player or file tool for
-auditioning and hand-curating sample sets:
+With --pitched, --quantizable and/or --loopable the CSV is replaced by a plain
+list of matching file paths, one per line (all requested capabilities must hold)
+— pipeable into a player or file tool for auditioning and hand-curating sets:
 
 	python scripts/catalog_samples.py --pitched | mpv --playlist=-
 	python scripts/catalog_samples.py ~/samples --quantizable | xargs -I{} cp {} ~/curated/
+	python scripts/catalog_samples.py ~/samples --loopable | mpv --playlist=-
 
 The first run over a directory without .analysis.json sidecars is slow (each
 file is fully analysed, same cost as a startup load); results are cached as
@@ -55,6 +59,7 @@ Usage:
 	python scripts/catalog_samples.py --full                   # every property incl. MFCC vectors
 	python scripts/catalog_samples.py --group                  # cluster near-duplicates
 	python scripts/catalog_samples.py --group --pitched        # one keeper path per pitched-sound group
+	python scripts/catalog_samples.py --loopable               # paths of loop-candidate samples only
 	python scripts/catalog_samples.py --order similarity       # rows ordered by sonic similarity
 	python scripts/catalog_samples.py --pitched                # paths of pitched samples only
 	python scripts/catalog_samples.py --pitched --quantizable  # paths matching both
@@ -97,7 +102,7 @@ _NEAR_SILENT_PEAK: typing.Final[float] = 0.004   # linear peak <  this (~-48 dBF
 # so are the three junk-triage fields (snr_db + the two flags).
 _BASE_COLUMNS: tuple[str, ...] = (
 	"name", "path", "duration_s", "channel_format",
-	"pitched", "quantizable", "attack_count",
+	"pitched", "quantizable", "loopable", "loop_ms", "attack_count",
 	"pitch_note", "pitch_hz", "pitch_confidence", "pitch_stability_st",
 	"voiced_fraction", "voiced_frame_count", "harmonic_ratio",
 	"tempo_bpm", "onset_count", "beat_count",
@@ -208,7 +213,7 @@ def _collect_audio_files (directory: pathlib.Path) -> list[pathlib.Path]:
 def _row (
 	path: pathlib.Path,
 	directory: pathlib.Path,
-	assets: tuple,
+	assets: subsample.cache.SampleAssets,
 ) -> dict[str, str]:
 
 	"""Build the full column→value mapping for one audio file.
@@ -216,13 +221,22 @@ def _row (
 	Args:
 		path:      The audio file (as walked — directory-joined).
 		directory: The scanned root; the "path" column is relative to it.
-		assets:    The 9-tuple from subsample.cache.ensure_sample_assets.
+		assets:    The SampleAssets dataclass from subsample.cache.ensure_sample_assets.
 
 	Returns:
 		Every known column (base + full); the writer selects the active set.
 	"""
 
-	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = assets
+	spectral       = assets.spectral
+	rhythm         = assets.rhythm
+	pitch          = assets.pitch
+	timbre         = assets.timbre
+	params         = assets.params
+	duration       = assets.duration
+	level          = assets.level
+	band_energy    = assets.band_energy
+	channel_format = assets.channel_format
+	loop           = assets.loop
 
 	attack_times = subsample.analysis.effective_attack_times(rhythm)
 
@@ -235,6 +249,11 @@ def _row (
 		# Capability indicators — the same tests the playback engine runs.
 		"pitched":            "yes" if subsample.analysis.has_stable_pitch(spectral, pitch, duration) else "no",
 		"quantizable":        "yes" if subsample.analysis.has_beat_map(rhythm) else "no",
+		"loopable":           "yes" if subsample.analysis.is_loopable(spectral, level, duration) else "no",
+		# Length of the stored seamless loop (blank when none was found); the
+		# loopable flag can be "yes" here yet loop_ms blank — a candidate whose
+		# audio search found no clean junction (fail-musical).
+		"loop_ms":            f"{(loop.end - loop.start) / params.sample_rate * 1000.0:.0f}" if loop is not None else "",
 		"attack_count":       str(len(attack_times)),
 
 		"pitch_note":         _pitch_note(pitch.dominant_pitch_hz),
@@ -321,7 +340,7 @@ def _row (
 def _record_from_assets (
 	index:  int,
 	path:   pathlib.Path,
-	assets: tuple,
+	assets: subsample.cache.SampleAssets,
 ) -> subsample.library.SampleRecord:
 
 	"""Wrap one ensure_sample_assets tuple in a SampleRecord for similarity work.
@@ -331,42 +350,41 @@ def _record_from_assets (
 	that feed the shared feature vector, never the waveform.
 	"""
 
-	spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = assets
-
 	return subsample.library.SampleRecord(
 		sample_id      = index,
 		name           = path.stem,
-		spectral       = spectral,
-		rhythm         = rhythm,
-		pitch          = pitch,
-		timbre         = timbre,
-		level          = level,
-		band_energy    = band_energy,
-		params         = params,
-		duration       = duration,
+		spectral       = assets.spectral,
+		rhythm         = assets.rhythm,
+		pitch          = assets.pitch,
+		timbre         = assets.timbre,
+		level          = assets.level,
+		band_energy    = assets.band_energy,
+		params         = assets.params,
+		duration       = assets.duration,
 		audio          = None,
 		filepath       = path,
-		channel_format = channel_format,
+		channel_format = assets.channel_format,
+		loop           = assets.loop,
 	)
 
 
 def _matches_capability_filter (
-	assets:           tuple,
+	assets:           subsample.cache.SampleAssets,
 	want_pitched:     bool,
 	want_quantizable: bool,
+	want_loopable:    bool,
 ) -> bool:
 
-	"""Return True if assets satisfies the requested --pitched/--quantizable AND.
+	"""Return True if assets satisfies the requested capability filters (AND).
 
-	An unrequested capability is not constrained; requesting both means both
+	An unrequested capability is not constrained; requesting several means all
 	must hold.  Uses the same engine tests as the catalog columns.
 	"""
 
-	spectral, rhythm, pitch, _timbre, _params, duration, _level, _band, _fmt_tag = assets
-
 	return (
-		(not want_pitched or subsample.analysis.has_stable_pitch(spectral, pitch, duration))
-		and (not want_quantizable or subsample.analysis.has_beat_map(rhythm))
+		(not want_pitched or subsample.analysis.has_stable_pitch(assets.spectral, assets.pitch, assets.duration))
+		and (not want_quantizable or subsample.analysis.has_beat_map(assets.rhythm))
+		and (not want_loopable or subsample.analysis.is_loopable(assets.spectral, assets.level, assets.duration))
 	)
 
 
@@ -513,6 +531,11 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 		help="Instead of a CSV, list the paths of samples with enough hits to quantize to a beat grid",
 	)
 	parser.add_argument(
+		"--loopable",
+		action="store_true",
+		help="Instead of a CSV, list the paths of samples that could sustain a held-note loop",
+	)
+	parser.add_argument(
 		"--group",
 		action="store_true",
 		help="Cluster near-duplicate samples (same sound recorded repeatedly) and add "
@@ -550,7 +573,7 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 
 	args = _parse_args(argv)
 
-	paths_mode = args.pitched or args.quantizable
+	paths_mode = args.pitched or args.quantizable or args.loopable
 
 	# --group and --order similarity both need every sample loaded before any
 	# output (clustering / nearest-neighbour ordering are whole-set operations),
@@ -611,7 +634,7 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 
 				path, assets = loaded[index]
 
-				if _matches_capability_filter(assets, args.pitched, args.quantizable):
+				if _matches_capability_filter(assets, args.pitched, args.quantizable, args.loopable):
 					print(path, file=out)
 
 		else:

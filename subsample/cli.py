@@ -1419,8 +1419,6 @@ def _main_impl () -> None:
 					_log.warning("OSC /sample/import: analysis failed: %s", file_path)
 					return
 
-				spectral, rhythm, pitch, timbre, params, duration, level, band_energy, channel_format = result
-
 				audio = subsample.library.load_wav_audio(file_path, output_sample_rate)
 
 				if audio is None:
@@ -1430,17 +1428,18 @@ def _main_impl () -> None:
 				record = subsample.library.SampleRecord(
 					sample_id      = subsample.library.allocate_id(),
 					name           = file_path.stem,
-					spectral       = spectral,
-					rhythm         = rhythm,
-					pitch          = pitch,
-					timbre         = timbre,
-					level          = level,
-					band_energy    = band_energy,
-					params         = params,
-					duration       = duration,
+					spectral       = result.spectral,
+					rhythm         = result.rhythm,
+					pitch          = result.pitch,
+					timbre         = result.timbre,
+					level          = result.level,
+					band_energy    = result.band_energy,
+					params         = result.params,
+					duration       = result.duration,
 					audio          = audio,
 					filepath       = file_path,
-					channel_format = channel_format,
+					channel_format = result.channel_format,
+					loop           = result.loop,
 				)
 
 				_integrate_sample(record, instrument_library, similarity_matrix,

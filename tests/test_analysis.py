@@ -1518,6 +1518,73 @@ class TestNoisiness:
 				assert 0.0 <= score <= 1.0
 
 
+class TestIsLoopable:
+
+	"""Tests for is_loopable() — the coarse loop-candidate gate.  Keys on
+	sustained harmonic energy (NOT confident/stable pitch, which wrongly rejects
+	detuned and modulated tones) or on textural stationarity; validated against a
+	labelled real corpus (flute + detuned synth pads harmonic; machine-rumble +
+	dynamic-bed textural; short percussive hits rejected)."""
+
+	def _spectral (
+		self, voiced_fraction: float = 0.9, harmonic_ratio: float = 0.9,
+	) -> subsample.analysis.AnalysisResult:
+		return subsample.analysis.AnalysisResult(
+			spectral_flatness=0.0, attack=0.0, release=0.0,
+			spectral_centroid=0.0, spectral_bandwidth=0.0,
+			zcr=0.0, harmonic_ratio=harmonic_ratio, spectral_contrast=0.0,
+			voiced_fraction=voiced_fraction, log_attack_time=0.0, spectral_flux=0.0,
+		)
+
+	def _level (self, rms: float = 0.3, noise_floor: float = 0.01) -> subsample.analysis.LevelResult:
+		return subsample.analysis.LevelResult(peak=0.9, rms=rms, noise_floor=noise_floor)
+
+	def test_harmonic_sustained_is_loopable (self) -> None:
+		"""A harmonic, voiced tone of adequate length passes."""
+		assert subsample.analysis.is_loopable(self._spectral(), self._level(), 2.0) is True
+
+	def test_too_short_rejected (self) -> None:
+		"""Below the minimum duration there is no room for a loop + tail."""
+		assert subsample.analysis.is_loopable(self._spectral(), self._level(), 0.3) is False
+
+	def test_detuned_modulated_pad_still_loops (self) -> None:
+		"""A fat detuned / LFO-modulated synth pad has ambiguous, wandering pitch
+		(low confidence, high instability) but strong harmonic + voiced energy, so
+		it must still qualify.  Regression: the earlier pitch-keyed gate silently
+		dropped exactly this material (real Matriarch pad: voiced 0.69, harm 0.65,
+		pitch_stability ~4.7 st — pitch fields are not even consulted now)."""
+		spectral = self._spectral(voiced_fraction=0.69, harmonic_ratio=0.65)
+		assert subsample.analysis.is_loopable(spectral, self._level(), 2.0) is True
+
+	def test_textural_stationary_unpitched_is_loopable (self) -> None:
+		"""No clean pitch, but a steady bed (noise_floor near rms → high
+		noisiness) qualifies via the textural branch."""
+		spectral = self._spectral(voiced_fraction=0.0, harmonic_ratio=0.3)
+		level    = self._level(rms=0.3, noise_floor=0.27)   # noisiness ≈ 0.9
+		assert subsample.analysis.is_loopable(spectral, level, 2.0) is True
+
+	def test_decaying_unpitched_rejected (self) -> None:
+		"""Unpitched AND non-stationary (gets quiet — low noisiness): a decaying
+		hit, not a sustaining bed. Fails both branches."""
+		spectral = self._spectral(voiced_fraction=0.0, harmonic_ratio=0.3)
+		level    = self._level(rms=0.3, noise_floor=0.001)  # noisiness ≈ 0.003
+		assert subsample.analysis.is_loopable(spectral, level, 2.0) is False
+
+	def test_weak_harmonic_non_stationary_rejected (self) -> None:
+		"""Some voiced content but percussive (harmonic_ratio at/below the floor)
+		and a quiet, non-stationary level: neither branch qualifies."""
+		spectral = self._spectral(voiced_fraction=0.6, harmonic_ratio=0.5)
+		level    = self._level(rms=0.3, noise_floor=0.001)
+		assert subsample.analysis.is_loopable(spectral, level, 2.0) is False
+
+	def test_harmonic_but_unvoiced_rejected (self) -> None:
+		"""Harmonic spectrum but low voiced fraction (not a sustained pitched
+		tone), and non-stationary: rejected — a bright transient, not a held note."""
+		spectral = self._spectral(voiced_fraction=0.3, harmonic_ratio=0.9)
+		level    = self._level(rms=0.3, noise_floor=0.001)
+		assert subsample.analysis.is_loopable(spectral, level, 2.0) is False
+
+
 # ---------------------------------------------------------------------------
 # TestAnalyzeBandEnergy
 # ---------------------------------------------------------------------------
