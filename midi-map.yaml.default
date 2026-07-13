@@ -128,7 +128,25 @@
 #       where: { name: { matches: "*lead*" } }
 #     mode: gated
 #
-#   # 6. Templates - define shared fields once, inherit per assignment.
+#   # 6. Choke - one sound silences another (a hi-hat choke).  Declared on the
+#   #    sound to be CUT, naming the note(s) that cut it with a fast ~10 ms damp
+#   #    (overriding release, so a one-shot that rings out still stops on cue).
+#   #    `self` makes a sound choke its own re-strikes (a single physical
+#   #    cymbal) and can sit in a list beside notes.  See README "Choke".
+#   - name: Open Hi-Hat
+#     channel: 10
+#     notes: drum.hi_hat_open
+#     silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_pedal]
+#     select:
+#       where: { reference: GM46_OpenHiHat }
+#   - name: Ride
+#     channel: 10
+#     notes: drum.ride
+#     silenced_by: self               # single ride - a new hit damps the last
+#     select:
+#       where: { reference: GM51_RideCymbal1 }
+#
+#   # 7. Templates - define shared fields once, inherit per assignment.
 #   #    `templates:` is a TOP-LEVEL section (a sibling of `assignments:`).
 #   #    Each assignment pulls one in with `template:`; its own fields win,
 #   #    and a `process:`/`select:` it sets replaces the template's wholesale
@@ -150,7 +168,7 @@
 #       notes: drum.snare
 #       select: { pick: any, where: { directory: Snare } }
 #
-#   # 7. Programs - switch instrument sets live via MIDI Program Change.
+#   # 8. Programs - switch instrument sets live via MIDI Program Change.
 #   #    `programs:` is a TOP-LEVEL section.  Each entry has a name, an
 #   #    optional `program` number (0-127, defaults to its position), and
 #   #    EXACTLY ONE of:

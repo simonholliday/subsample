@@ -236,6 +236,7 @@ assignments:
   - name: Closed Hi-Hat
     channel: 10
     notes: drum.hi_hat_closed
+    silenced_by: [self, drum.hi_hat_open, drum.hi_hat_pedal]
     select:
       where:
         reference: samples/reference/GM42_ClosedHiHat.wav
@@ -249,6 +250,7 @@ assignments:
   - name: Pedal Hi-Hat
     channel: 10
     notes: drum.hi_hat_pedal
+    silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_open]
     select:
       where:
         reference: samples/reference/GM44_PedalHiHat.wav
@@ -262,6 +264,7 @@ assignments:
   - name: Open Hi-Hat
     channel: 10
     notes: drum.hi_hat_open
+    silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_pedal]
     select:
       where:
         reference: samples/reference/GM46_OpenHiHat.wav
@@ -280,6 +283,7 @@ assignments:
   - name: Crash Cymbal 1
     channel: 10
     notes: drum.crash_1
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM49_CrashCymbal1.wav
@@ -292,6 +296,7 @@ assignments:
   - name: Splash Cymbal
     channel: 10
     notes: drum.splash_cymbal
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM55_SplashCymbal.wav
@@ -304,6 +309,7 @@ assignments:
   - name: Crash Cymbal 2
     channel: 10
     notes: drum.crash_2
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM57_CrashCymbal2.wav
@@ -316,6 +322,7 @@ assignments:
   - name: Chinese Cymbal
     channel: 10
     notes: drum.chinese_cymbal
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM52_ChineseCymbal.wav
@@ -333,6 +340,7 @@ assignments:
   - name: Ride Cymbal 1
     channel: 10
     notes: drum.ride_1
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM51_RideCymbal1.wav
@@ -345,6 +353,7 @@ assignments:
   - name: Ride Bell
     channel: 10
     notes: drum.ride_bell
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM53_RideBell.wav
@@ -357,6 +366,7 @@ assignments:
   - name: Ride Cymbal 2
     channel: 10
     notes: drum.ride_2
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM59_RideCymbal2.wav
@@ -400,6 +410,7 @@ assignments:
   - name: Vibraslap
     channel: 10
     notes: drum.vibraslap
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM58_Vibraslap.wav
@@ -734,6 +745,7 @@ assignments:
   - name: Mute Triangle
     channel: 10
     notes: drum.mute_triangle
+    silenced_by: self
     select:
       where:
         reference: samples/reference/GM80_MuteTriangle.wav
@@ -746,6 +758,7 @@ assignments:
   - name: Open Triangle
     channel: 10
     notes: drum.open_triangle
+    silenced_by: [self, drum.mute_triangle]
     select:
       where:
         reference: samples/reference/GM81_OpenTriangle.wav

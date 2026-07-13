@@ -848,6 +848,53 @@ def _parse_mode (
 	return mode, loop_override
 
 
+def _parse_silenced_by (
+	raw:             typing.Any,
+	assignment_name: str,
+) -> typing.Optional[subsample.query.ChokeSpec]:
+
+	"""Parse the ``silenced_by:`` field into a ChokeSpec (or None).
+
+	Accepts a single note, a list of notes, the token ``self``, and ``self``
+	freely mixed into a list.  Notes reuse the ``notes:`` resolver, so
+	``drum.hi_hat_closed`` / ``42`` / ``C3`` all resolve identically and an
+	unknown symbol or out-of-range note fails loudly at load.  ``self`` means
+	the assignment's own note(s) choke its own voices (single physical
+	instrument).  Absent / null / false → None (no choke).
+	"""
+
+	if raw is None or raw is False:
+		return None
+
+	items = raw if isinstance(raw, list) else [raw]
+
+	is_self = False
+	notes:   set[int] = set()
+
+	for item in items:
+		# ``self`` sentinel — the assignment's own note(s) choke its own voices.
+		if isinstance(item, str) and item.strip().lower() == "self":
+			is_self = True
+			continue
+		# Guard bool BEFORE _parse_single_note: bool is an int subclass, so
+		# ``silenced_by: true`` would otherwise resolve to note 1.
+		if isinstance(item, bool):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'silenced_by' entries "
+				f"must be a note (e.g. drum.hi_hat_closed, 42, C3) or 'self', "
+				f"got {item!r}"
+			)
+		notes.add(_parse_single_note(item, assignment_name))
+
+	if not is_self and not notes:
+		# An empty list (or a list of nothing but stripped-away tokens) means no
+		# choke rather than an error — harmless, and lets a templated default be
+		# blanked with ``silenced_by: []``.
+		return None
+
+	return subsample.query.ChokeSpec(is_self=is_self, notes=frozenset(notes))
+
+
 _VELOCITY_INNER_KEYS: typing.Final[frozenset[str]] = frozenset({"trigger", "rescale"})
 
 
@@ -1112,6 +1159,92 @@ def _validate_zone_assignments (
 					f"{b.name!r} [{lo_b}, {hi_b}] overlap — adjust ranges so "
 					f"each MIDI note belongs to exactly one zone-tuned template."
 				)
+
+
+def _build_choke_map (
+	note_map: "NoteMap",
+) -> dict[tuple[int, int], frozenset[tuple[int, int]]]:
+
+	"""Compile the ``silenced_by:`` declarations into a note-on choke table.
+
+	Returns ``{(channel, killer_note): frozenset of (channel, victim_note)}`` —
+	"when this note fires on this channel, fast-damp every sounding voice on
+	those victim keys".  Because choke is resolved to notes (never sample or
+	assignment identity), the whole table is a pure function of the finished
+	note map and survives zone re-minting / bank swaps unchanged.
+
+	Each assignment declaring ``silenced_by`` contributes: its victim keys are
+	the (channel, note) entries it occupies; its killer keys are those same
+	keys when ``self`` was listed, plus each explicit choker note on the
+	assignment's own channel.  Every killer key maps to the union of victim
+	keys it damps (so two assignments naming the same killer both get cut).
+	"""
+
+	# One victim-key set + spec per declaring assignment, keyed by identity so a
+	# multi-note assignment is gathered once across the (channel, note) entries
+	# it occupies.
+	victim_keys: dict[int, set[tuple[int, int]]]        = {}
+	specs:       dict[int, subsample.query.ChokeSpec]   = {}
+
+	for (ch, note), layers in note_map.items():
+		for assignment, _pick in layers:
+			spec = assignment.silenced_by
+			if spec is None:
+				continue
+			victim_keys.setdefault(id(assignment), set()).add((ch, note))
+			specs[id(assignment)] = spec
+
+	choke_map: dict[tuple[int, int], set[tuple[int, int]]] = {}
+
+	for aid, vkeys in victim_keys.items():
+		spec        = specs[aid]
+		channels    = {ch for ch, _ in vkeys}          # a single channel in practice
+		killer_keys: set[tuple[int, int]] = set()
+
+		if spec.is_self:
+			killer_keys |= vkeys                        # own note(s) choke own voices
+
+		for ch in channels:
+			for killer_note in spec.notes:
+				killer_keys.add((ch, killer_note))
+
+		for kk in killer_keys:
+			choke_map.setdefault(kk, set()).update(vkeys)
+
+	return {kk: frozenset(vk) for kk, vk in choke_map.items()}
+
+
+def _validate_choke_targets (note_map: "NoteMap") -> None:
+
+	"""Warn (never raise) when a declared ``silenced_by`` note has no assignment
+	on its channel — the likely-typo signal.
+
+	Not an error: a note that maps to no sound but still damps a ringing voice
+	is a legitimate "silent grab" (a dedicated choke key), so we surface the
+	suspicion without rejecting it.  De-duplicated per (assignment, channel,
+	note) so a multi-note assignment warns at most once per missing target.
+	"""
+
+	mapped = set(note_map.keys())
+	seen:   set[tuple[int, int, int]] = set()
+
+	for (ch, _note), layers in note_map.items():
+		for assignment, _pick in layers:
+			spec = assignment.silenced_by
+			if spec is None:
+				continue
+			for killer_note in spec.notes:
+				key = (id(assignment), ch, killer_note)
+				if key in seen:
+					continue
+				seen.add(key)
+				if (ch, killer_note) not in mapped:
+					_log.warning(
+						"MIDI map assignment %r: silenced_by note %d has no "
+						"assignment on channel %d — the choke will only fire if "
+						"that note is played anyway (typo?).",
+						assignment.name, killer_note, ch + 1,
+					)
 
 
 # Note name conversion — delegated to pymididefs.
@@ -2164,6 +2297,8 @@ def load_midi_map (
 
 		stack = bool(assignment_raw.get("stack", False))
 
+		silenced_by = _parse_silenced_by(assignment_raw.get("silenced_by"), name)
+
 		# Extract segment playback mode from quantize step parameters.
 		segment_mode: typing.Union[str, int] = ""
 
@@ -2206,6 +2341,18 @@ def load_midi_map (
 					f"``stack`` or use manual ``notes:`` assignments to stack."
 				)
 
+			# choke is a percussion feature (each note is one physical
+			# instrument); a zone-tuned channel is a melodic keyboard layout, so
+			# a choke would make the whole range monophonic.  Reject in v1 rather
+			# than thread choke identity through the zone-derived assignments.
+			if silenced_by is not None:
+				raise ValueError(
+					f"MIDI map assignment {name!r}: ``silenced_by`` (choke) is not "
+					f"supported on zone-tuned assignments — it would make the whole "
+					f"keyboard range monophonic.  Use manual ``notes:`` assignments "
+					f"for choke groups."
+				)
+
 			zone_templates.append(ZoneTemplate(
 				name=name,
 				channel=mido_channel,
@@ -2245,6 +2392,7 @@ def load_midi_map (
 			velocity_trigger=velocity_trigger,
 			velocity_rescale_to=velocity_rescale_to,
 			stack=stack,
+			silenced_by=silenced_by,
 		)
 
 		# Per-note pick distribution:
@@ -2288,6 +2436,7 @@ def load_midi_map (
 
 	_validate_velocity_layers(note_map)
 	_validate_zone_assignments(zone_templates, manual_channels)
+	_validate_choke_targets(note_map)
 
 	_log.info(
 		"MIDI map loaded from %s: %d note(s) across %d assignment(s)%s%s",
@@ -2672,6 +2821,14 @@ class MidiPlayer:
 		self._base_note_map:  NoteMap                       = midi_map
 		self._zone_templates: tuple[ZoneTemplate, ...]      = zone_templates
 		self._note_map:       NoteMap                       = dict(midi_map)
+
+		# Choke table: (channel, killer_note) → victim (channel, note) keys.
+		# Derived purely from the base (manual) note map — zone-tuned entries
+		# reject silenced_by — so it is rebuilt only when the base map changes
+		# (here and in _apply_rule_set_locked), never on zone re-materialisation.
+		self._choke_map: dict[tuple[int, int], frozenset[tuple[int, int]]] = (
+			_build_choke_map(self._base_note_map)
+		)
 
 		# Most recently played variant per layer.  Used as a fallback while a
 		# new variant is still processing: the old one plays instead of the
@@ -3622,6 +3779,16 @@ class MidiPlayer:
 			_log.debug("MIDI (ignored): %s", msg)
 			return
 
+		# Choke: a note-on damps every sounding voice that declared itself
+		# silenced_by this note (its mute group).  Fired on the raw note-on
+		# gesture — BEFORE the mapping lookup (so a silent "grab" note still
+		# damps), BEFORE the same-note steal, and BEFORE this hit's own layers
+		# are appended (so the fresh voice survives its own sweep).  A choke
+		# forces the ~10 ms declick, overriding release, so it must run ahead of
+		# the steal (which would otherwise flag a self-choking voice for its own
+		# slower release first).
+		self._choke_voices(msg.channel, msg.note)
+
 		entries = self._note_map.get((msg.channel, msg.note))
 
 		if not entries:
@@ -3902,6 +4069,45 @@ class MidiPlayer:
 					voice.looping = False
 					if not voice.release_to_end:
 						voice.releasing = True
+
+	def _choke_voices (self, channel: int, note: int) -> None:
+
+		"""Fast-damp every sounding voice choked by a note-on of ``note`` on
+		``channel`` (its ``silenced_by`` declarations).
+
+		Unlike _release_held (same-note steal / note-off), this:
+		  - cuts one_shot voices too — the whole point (a ringing open hi-hat is
+		    a one_shot, and one_shots ignore note-off AND the CC120/123 panic);
+		  - OVERRIDES the voice's own release / ``release: full`` / loop tail with
+		    the fixed ~10 ms declick — a choke is a physical damp, not a note-off.
+
+		Fires on the note-on GESTURE (before sample selection and before this
+		hit's own voices are appended), so a silent "grab" note still damps and
+		the new hit — appended afterward — is never caught by its own sweep.  One
+		``_voices_lock`` section, never nested under _state_lock, so the callback
+		never observes a half-updated voice.  Kills EVERY matching voice (one
+		physical instrument), not just the newest.
+		"""
+
+		victims = self._choke_map.get((channel, note))
+		if not victims:
+			return
+
+		with self._voices_lock:
+			for voice in self._voices:
+				if (voice.channel, voice.note) not in victims:
+					continue
+				voice.looping        = False
+				voice.release_to_end = False    # override release: full — must not ring out
+				if voice.fade_pos == 0:
+					# Force the fast declick, overriding any configured release.
+					# Only when not already fading: re-clamping a fade already in
+					# progress would jump the ramp and click, so a voice mid-release
+					# keeps its current fade (a rare, benign edge — a choke normally
+					# hits still-sounding voices, fade_pos == 0).
+					voice.release_frames = self._release_fade_frames
+					voice.release_curve  = 0
+				voice.releasing = True
 
 	def _trigger_one (
 		self,
@@ -4768,18 +4974,30 @@ class MidiPlayer:
 
 			return routing
 
+		# Memoise the replacement per SOURCE assignment (by identity): a multi-note
+		# assignment is ONE object shared across its (ch, note) entries, and
+		# identity-keyed logic downstream — e.g. _build_choke_map grouping a
+		# multi-note ``silenced_by: self`` by id(assignment) — collapses if the
+		# strip hands back a distinct object per note.  Memoising preserves that
+		# shared identity (and collapses per-note duplicate warnings to one).
 		fixed_base: NoteMap = {}
+		replaced:   dict[int, subsample.query.Assignment] = {}
 
 		for (ch, note), entries in base_note_map.items():
-			fixed_base[(ch, note)] = [
-				(
-					dataclasses.replace(asgn, output_routing=stripped)
-					if (stripped := _strip(asgn.output_routing, f"Assignment {asgn.name!r} (ch {ch}, note {note})")) is not asgn.output_routing
-					else asgn,
-					pick_spec,
-				)
-				for asgn, pick_spec in entries
-			]
+			fixed_entries: list[tuple[subsample.query.Assignment, subsample.query.PickSpec]] = []
+			for asgn, pick_spec in entries:
+				if id(asgn) not in replaced:
+					stripped = _strip(
+						asgn.output_routing,
+						f"Assignment {asgn.name!r} (ch {ch}, note {note})",
+					)
+					replaced[id(asgn)] = (
+						dataclasses.replace(asgn, output_routing=stripped)
+						if stripped is not asgn.output_routing
+						else asgn
+					)
+				fixed_entries.append((replaced[id(asgn)], pick_spec))
+			fixed_base[(ch, note)] = fixed_entries
 
 		fixed_zones = tuple(
 			dataclasses.replace(t, output_routing=stripped)
@@ -4887,6 +5105,11 @@ class MidiPlayer:
 		# so a best-effort clear here can at worst re-emit or drop one cosmetic
 		# warning, never corrupt state.
 		self._loop_unavailable_warned.clear()
+
+		# Rebuild the choke table from the newly-applied base map.  On the
+		# rollback path above we never reached here, and _choke_map was not
+		# touched during the try, so it still matches the restored old base map.
+		self._choke_map = _build_choke_map(self._base_note_map)
 
 	def reload_midi_map (self, new_result: MidiMapResult) -> None:
 

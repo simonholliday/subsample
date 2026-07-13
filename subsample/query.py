@@ -1055,6 +1055,35 @@ class LoopSpec:
 
 
 # ---------------------------------------------------------------------------
+# Choke / mute groups
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class ChokeSpec:
+
+	"""Which note(s) — and/or the assignment's own re-strike (``self``) — fast-
+	damp this assignment's sounding voices (the ``silenced_by:`` field).
+
+	Models a drum choke / mute group: when any listed note fires (on the
+	assignment's own channel), every currently-sounding voice of this
+	assignment is cut with the player's fixed ~10 ms declick fade, overriding
+	any configured ``release:`` — a choke is a physical damp (a hand on the
+	cymbal), not a note-off, so it must not honour the sample's own release or
+	``release: full``.  Resolved to plain MIDI notes at load, so it needs no
+	per-voice identity: the runtime already keys voices by (note, channel).
+
+	is_self: True when ``self`` was listed — the assignment's own note(s) choke
+	         its own voices (a single physical instrument; a re-strike damps the
+	         prior ring).
+	notes:   Explicit choker notes (0-127).  Firing any of them on this
+	         assignment's channel damps its voices.
+	"""
+
+	is_self: bool           = False
+	notes:   frozenset[int] = frozenset()
+
+
+# ---------------------------------------------------------------------------
 # Assignment
 # ---------------------------------------------------------------------------
 
@@ -1113,6 +1142,12 @@ class Assignment:
 	Set True on *every* overlapping member to instead sound them together:
 	at note-on the player fires all stacked layers that cover the incoming
 	velocity, so e.g. a kick and a sub-sine play as one composite hit."""
+
+	silenced_by: typing.Optional[ChokeSpec] = None
+	"""Choke / mute group (``silenced_by:``).  The note(s) and/or ``self`` whose
+	arrival fast-damps this assignment's sounding voices with the player's
+	~10 ms declick, overriding ``release:`` (a choke is a physical damp, not a
+	note-off).  None = no choke.  See ChokeSpec."""
 
 
 # ---------------------------------------------------------------------------

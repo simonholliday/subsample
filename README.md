@@ -457,6 +457,7 @@ when you want to try something the tutorial didn't show.
 | `mode` | no | Playback behaviour: `one_shot` (default) plays to the natural end and ignores note-off; `gated` fades out on note-off; `loop` holds a seamless loop while the key is held, then plays past it on release. Replaces the old `one_shot` flag - `one_shot: true` is now `mode: one_shot`, `one_shot: false` is `mode: gated`, and a leftover `one_shot:` key is a load error |
 | `loop` | no | Manual loop-point override, e.g. `{ start: 1.2, end: 3.4, crossfade: 40 }` (start/end in seconds, crossfade in ms; each optional). Implies `mode: loop`. Omit to use the sample's auto-detected loop |
 | `release` | no | Shape the note-off fade for a sustained voice (`mode: gated` or `loop`; ignored with a warning on `mode: one_shot`). A number of ms, `true` for an adaptive tail, `full` to play the remaining audio to its natural end with no fade (a loop rings out its real tail), or `{time, curve}` where `curve` is `cosine` (default) or `exponential`; `time` may be CC-bound. `mode: loop` defaults to the adaptive tail when unset. See Release below |
+| `silenced_by` | no | Choke: the note(s) whose arrival cuts this sound with a fast ~10 ms damp (a hi-hat choke). A note, a list of notes, or `self` (a re-strike stops the previous hit), and `self` may sit in a list. Overrides `release` and rings-out; not valid on `zone-tuned`. See Choke below |
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
@@ -566,6 +567,55 @@ of stacking loops that never stop. (`release: full` still rings its tail out as
 asked, so a released tail and the new note can overlap - your choice to let them.)
 `mode: one_shot` is unchanged: repeated hits layer, the way striking a drum twice
 should.
+
+### Choke - silence one sound when another plays
+
+A real hi-hat is one instrument: close it and the open ring stops dead. But an
+open-hat sample and a closed-hat sample are two files that know nothing about each
+other, so `silenced_by` lets you say "cut this sound the instant that other note
+plays". It is the classic drum choke - and it is what lets a one-shot ring out on
+its own yet still stop on cue.
+
+Declare it on the sound that should be *cut*, naming the note(s) that cut it:
+
+```yaml
+- name: Open Hi-Hat
+  channel: 10
+  notes: drum.hi_hat_open
+  silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_pedal]
+  select: [ where: { reference: GM46_OpenHiHat } ]
+
+- name: Ride
+  channel: 10
+  notes: drum.ride
+  silenced_by: self          # one physical cymbal - a new hit damps the last
+  select: [ where: { reference: GM51_RideCymbal1 } ]
+```
+
+- The value is a single note, a list of notes, or `self` - and `self` can sit in
+  a list beside notes. Notes use the same syntax as `notes:`: a `drum.*` name, a
+  MIDI number, or a note name.
+- `self` means the sound chokes itself - re-striking it stops the previous hit, so
+  a single ride, cowbell, or triangle never piles up overlapping copies of its own
+  ring.
+- The cut is a fast ~10 ms damp, not a note-off. It deliberately overrides the
+  sound's own `release` (even `release: full`) and any loop tail: a choke models a
+  hand stopping the cymbal, so the ring genuinely stops instead of fading over its
+  natural release.
+- Every sounding copy is cut, not just the newest - a fast open-hat roll all damps
+  together when the hat closes, the way one physical cymbal would.
+- Choke acts within a channel (a kit is one channel). Build a mutual group - like
+  the three hi-hat articulations above - by listing the others (and `self`) on each
+  member.
+- Choke works on the note, not the individual sound: if you deliberately `stack` an
+  unrelated sample on a choked note, it is damped along with the group. In a normal
+  kit - one instrument per note - this never arises.
+
+`silenced_by` is what finally stops a `mode: one_shot` sound early: a one-shot
+ignores note-off, so before choke the only way to end a ringing open hat was to let
+it decay. It is not supported on `zone-tuned` assignments (that would make a whole
+keyboard range monophonic). The shipped GM drums map uses it on the hi-hats,
+cymbals, vibraslap, and triangle.
 
 ### Templates - share fields across assignments
 
@@ -1701,6 +1751,7 @@ Every enum-string value the MIDI map accepts, in one place:
 | `radio` `stereo` | `mono` `stereo` |
 | Quantize `segment` | `round_robin` `random` or integer (1-indexed) |
 | `vocoder` `carrier` | `reference` (the note's reference sample) or a file path |
+| `silenced_by` value | `self`, or a note / list of notes (same syntax as `notes`) |
 | Legacy `order_by` tokens | `newest` `oldest` `duration_asc` `duration_desc` `pitch_asc` `pitch_desc` `onsets_asc` `onsets_desc` `tempo_asc` `tempo_desc` `loudest` `quietest` `similarity` `quantized_beats_asc` `quantized_beats_desc` |
 | Legacy numeric-predicate keys | `min_duration` `max_duration` `min_onsets` `max_onsets` `min_tempo` `max_tempo` `min_pitch` `max_pitch` `min_quantized_beats` `max_quantized_beats` |
 | Legacy processor names | `beat_quantize` (→ `stretch_quantize`) `hpss_harmonic` (→ `hpss: { keep: harmonic }`) `hpss_percussive` (→ `hpss: { keep: percussive }`) |
@@ -2571,8 +2622,6 @@ Reference: GM36_BassDrum1
 
 ### MIDI expressiveness
 
-- **Mute groups** - notes in a named group silence each other when triggered.
-  Classic use: closed hi-hat silences open hi-hat.
 - **Per-trigger sample variation** - cycle through alternative samples on
   repeated triggers to avoid the machine-gun effect on rapid notes. (Distinct
   from the existing per-hit segment round-robin, which cycles through detected
