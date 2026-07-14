@@ -148,20 +148,22 @@ def _process_chunk (
 	# The two uses are coordinated, not double-counted.
 	segment = buf.read_range(max(0, start_frame - pre), end_frame)
 
-	# The trim gate must use the same CLOSE threshold the detector ended on, or
-	# trim would re-cut a decayed tail back up to the louder start level and undo
-	# the point of decoupling the two.  The detector owns that number (built from
-	# release_threshold_db-or-snr and the same ambient) so the two gates cannot drift.
-	amplitude_threshold = detector.trim_amplitude_threshold
-
+	# Trim the two edges with DIFFERENT thresholds, both owned by the detector so
+	# they cannot drift from what it ended on:
+	#  - tail edge: the CLOSE threshold (release-or-snr) — kept low so a decayed
+	#    tail is not re-cut back up to the louder start level.
+	#  - attack edge: the snr (open) threshold — independent of release, so a low
+	#    release preserving a long tail does not drag low-level room tone into the
+	#    front of the sample.  The onset trims tight to the transient.
 	fade_out_samples = round(detection_cfg.fade_out_ms / 1000.0 * sample_rate)
 
 	trimmed = subsample.trim.trim_silence(
 		segment,
-		amplitude_threshold,
+		detector.tail_amplitude_threshold,
 		pre_samples=detection_cfg.trim_pre_samples,
 		post_samples=detection_cfg.trim_post_samples,
 		fade_out_samples=fade_out_samples,
+		lead_amplitude_threshold=detector.attack_amplitude_threshold,
 	)
 
 	if trimmed.size == 0:

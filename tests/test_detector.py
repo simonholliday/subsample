@@ -368,6 +368,66 @@ def _at_db_over (ambient_amp: int, db: float) -> int:
 	return int(round(ambient_amp * (10.0 ** (db / 20.0))))
 
 
+class TestOnsetRefinement:
+
+	"""The recording start is pulled forward from the chunk boundary (where the
+	level trigger quantises it) to the actual transient within the chunk, so a
+	strike landing late in its detection chunk does not leave a chunk of leading
+	near-silence in front of the sample."""
+
+	def test_start_pulled_to_the_strike (self) -> None:
+		sr, cs = 48000, 512
+		detector = _make_detector(
+			snr_threshold_db=10.0, hold_time=0.01, sample_rate=sr, chunk_size=cs,
+		)
+		# First chunk seeds ambient (warmup) to a quiet floor, then IDLE.
+		quiet = numpy.full((cs, 1), 10, dtype=numpy.int16)
+		detector.process_chunk(quiet, current_frame=cs)
+
+		# Triggering chunk: ~400 samples of near-silence, then the strike.
+		transient = numpy.full((cs, 1), 10, dtype=numpy.int16)
+		transient[400:] = 8000
+		detector.process_chunk(transient, current_frame=2 * cs)
+
+		# Close the recording (hold_time ~1 chunk) and read the boundary.
+		result = None
+		frame = 3 * cs
+		for _ in range(5):
+			r = detector.process_chunk(quiet, current_frame=frame)
+			frame += cs
+			if r is not None:
+				result = r
+				break
+
+		assert result is not None
+		start, _end = result
+		chunk_start = cs  # the triggering chunk begins at frame 512
+		# The strike is at offset 400 in the chunk; start lands just before it,
+		# NOT at the chunk boundary (which would leave ~400 samples of silence).
+		assert start > chunk_start + 300
+		assert start <= chunk_start + 400
+
+	def test_constant_chunk_leaves_boundary_unrefined (self) -> None:
+		# A flat chunk (peak from sample 0) has its onset at 0 — no shift, so the
+		# refinement never mis-fires on a signal that is loud from the first sample.
+		detector = _make_detector(
+			snr_threshold_db=6.0, hold_time=0.01, sample_rate=48000, chunk_size=512,
+		)
+		detector.process_chunk(numpy.full((512, 1), 100, dtype=numpy.int16), current_frame=512)
+		detector.process_chunk(numpy.full((512, 1), 8000, dtype=numpy.int16), current_frame=1024)
+		result = None
+		frame = 1536
+		for _ in range(5):
+			r = detector.process_chunk(numpy.full((512, 1), 100, dtype=numpy.int16), current_frame=frame)
+			frame += 512
+			if r is not None:
+				result = r
+				break
+		assert result is not None
+		start, _end = result
+		assert start == 1024 - 512  # exactly the chunk boundary, no shift
+
+
 class TestReleaseThreshold:
 
 	"""Decoupled CLOSE threshold (release_threshold_db): a recording opens on the
@@ -420,6 +480,30 @@ class TestReleaseThreshold:
 				break
 		assert result is not None
 		assert detector.state == subsample.detector.DetectorState.IDLE
+
+	def test_attack_and_tail_amplitude_thresholds (self) -> None:
+		# The trim edges use DIFFERENT gates: attack = snr (open), tail = release
+		# (close).  Attack > tail whenever release < snr, so a low release preserves
+		# a long tail without loosening the attack trim.
+		detector = _make_detector(
+			snr_threshold_db=20.0, release_threshold_db=6.0,
+			sample_rate=1000, chunk_size=100,
+		)
+		# First chunk seeds the ambient EMA (warmup) to 100, then IDLE.
+		detector.process_chunk(_loud_chunk(amplitude=100), current_frame=100)
+		assert abs(detector.ambient_rms - 100.0) < 1e-6
+
+		assert detector.attack_amplitude_threshold > detector.tail_amplitude_threshold
+		assert abs(detector.attack_amplitude_threshold - 100.0 * 10.0 ** (20.0 / 20.0)) < 0.01
+		assert abs(detector.tail_amplitude_threshold - 100.0 * 10.0 ** (6.0 / 20.0)) < 0.01
+
+	def test_attack_threshold_independent_of_release (self) -> None:
+		# The whole point: changing release must not change the attack gate.
+		high_release = _make_detector(snr_threshold_db=20.0, release_threshold_db=15.0, sample_rate=1000, chunk_size=100)
+		low_release = _make_detector(snr_threshold_db=20.0, release_threshold_db=1.0, sample_rate=1000, chunk_size=100)
+		for det in (high_release, low_release):
+			det.process_chunk(_loud_chunk(amplitude=100), current_frame=100)
+		assert high_release.attack_amplitude_threshold == low_release.attack_amplitude_threshold
 
 	def test_snr_only_ends_at_snr_level (self) -> None:
 		# Backward-compat: with no release set, the CLOSE reuses snr_threshold_db,

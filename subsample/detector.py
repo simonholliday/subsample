@@ -59,6 +59,17 @@ _TAIL_FOLLOWER_ALPHA: float = 0.3
 _MIN_RETRIGGER_GUARD_SECONDS: float = 0.1
 
 
+# Sub-chunk onset refinement.  The level trigger quantises a recording's start to
+# the beginning of the chunk that crossed the threshold, which can precede the
+# actual strike by up to a whole chunk.  When a recording opens (or re-triggers),
+# the start is pulled forward to where the transient rises WITHIN that chunk,
+# measured as a fraction of the chunk's OWN peak (robust to the noise floor and to
+# a decaying previous sound sharing the chunk).  A small backoff keeps the attack
+# foot; the sample-precise leading trim + fade run afterwards as usual.
+_ONSET_FRACTION: float = 0.1
+_ONSET_BACKOFF_SECONDS: float = 0.0003
+
+
 class DetectorState (enum.Enum):
 
 	WARMUP = "warmup"
@@ -121,6 +132,7 @@ class LevelDetector:
 			self._hold_chunks_total,
 			round(_MIN_RETRIGGER_GUARD_SECONDS * chunks_per_second),
 		)
+		self._onset_backoff_samples: int = round(_ONSET_BACKOFF_SECONDS * sample_rate)
 
 		self._state: DetectorState = DetectorState.WARMUP
 		self._ambient_rms: float = 0.0
@@ -146,19 +158,35 @@ class LevelDetector:
 		return self._ambient_rms
 
 	@property
-	def trim_amplitude_threshold (self) -> float:
+	def tail_amplitude_threshold (self) -> float:
 
-		"""Per-sample amplitude gate for trim_silence, matching the recording END.
+		"""Per-sample amplitude gate for the TRAILING (tail) edge of trim_silence.
 
 		Built from the SAME close threshold and (floored) ambient the detector used
 		to end the recording — release_threshold_db when set, else snr_threshold_db.
-		Exposed as the single source of truth so the trimmer cannot re-cut a decayed
-		tail back up to a louder level than the detector ended on (which would undo
-		the whole point of a decoupled release threshold).
+		The single source of truth for the tail so the trimmer cannot re-cut a
+		decayed tail back up to a louder level than the detector ended on (which
+		would undo the whole point of a decoupled release threshold).
 		"""
 
 		ambient = max(self._ambient_rms, _AMBIENT_FLOOR)
 		return float(ambient * (10.0 ** (self._close_threshold_db / 20.0)))
+
+	@property
+	def attack_amplitude_threshold (self) -> float:
+
+		"""Per-sample amplitude gate for the LEADING (attack) edge of trim_silence.
+
+		Built from snr_threshold_db (the START/open trigger level) and the floored
+		ambient — deliberately INDEPENDENT of release_threshold_db.  The attack edge
+		must trim tight to the transient regardless of how low the tail threshold is
+		set: a low release preserves a long decay, but it must not drag low-level
+		room tone into the front of the next sample.  Always >= tail_amplitude_
+		threshold (snr >= release), so the trimmed onset never precedes the tail end.
+		"""
+
+		ambient = max(self._ambient_rms, _AMBIENT_FLOOR)
+		return float(ambient * (10.0 ** (self._cfg.snr_threshold_db / 20.0)))
 
 	def process_chunk (
 		self,
@@ -191,10 +219,10 @@ class LevelDetector:
 			return self._handle_warmup()
 
 		if self._state == DetectorState.IDLE:
-			return self._handle_idle(chunk_rms, current_frame)
+			return self._handle_idle(chunk, chunk_rms, current_frame)
 
 		if self._state == DetectorState.RECORDING:
-			return self._handle_recording(chunk_rms, current_frame)
+			return self._handle_recording(chunk, chunk_rms, current_frame)
 
 		# Exhaustive over DetectorState today; raise (rather than silently
 		# returning None = "no recording") if a new state is ever added without
@@ -217,6 +245,7 @@ class LevelDetector:
 
 	def _handle_idle (
 		self,
+		chunk: numpy.ndarray,
 		chunk_rms: float,
 		current_frame: int,
 	) -> typing.Optional[tuple[int, int]]:
@@ -231,7 +260,8 @@ class LevelDetector:
 
 		if self._exceeds_threshold(chunk_rms):
 			self._state = DetectorState.RECORDING
-			self._recording_start_frame = max(0, current_frame - self._chunk_size)
+			chunk_start = current_frame - self._chunk_size
+			self._recording_start_frame = max(0, chunk_start + self._onset_offset(chunk))
 			self._hold_chunks_remaining = self._hold_chunks_total
 			# This triggering chunk is frame 1 of the new recording; seed the tail
 			# follower at the attack level so re-trigger measures rises above it.
@@ -244,6 +274,7 @@ class LevelDetector:
 
 	def _handle_recording (
 		self,
+		chunk: numpy.ndarray,
 		chunk_rms: float,
 		current_frame: int,
 	) -> typing.Optional[tuple[int, int]]:
@@ -280,7 +311,7 @@ class LevelDetector:
 			and self._recording_chunks > self._retrigger_guard_chunks
 			and self._exceeds_retrigger(chunk_rms)
 		):
-			boundary = max(0, current_frame - self._chunk_size)
+			boundary = max(0, current_frame - self._chunk_size + self._onset_offset(chunk))
 			start_frame = self._recording_start_frame
 			self._recording_start_frame = boundary
 			self._recording_chunks = 1
@@ -326,6 +357,35 @@ class LevelDetector:
 		else:
 			alpha = self._cfg.ema_alpha
 			self._ambient_rms = alpha * chunk_rms + (1.0 - alpha) * self._ambient_rms
+
+	def _onset_offset (self, chunk: numpy.ndarray) -> int:
+
+		"""Sample offset within a triggering chunk of the transient onset.
+
+		The level trigger quantises a recording's start to the chunk boundary, which
+		can precede the actual strike by up to a chunk.  This finds where the
+		transient rises within the chunk — as a fraction of the chunk's OWN peak, so
+		it is robust to the noise floor and to a decaying previous sound sharing the
+		chunk — then backs off a little to keep the attack foot.  Returns 0 for a
+		flat or degenerate chunk (e.g. a constant test signal), leaving the boundary
+		at the chunk start.
+		"""
+
+		samples = chunk.astype(numpy.float64)
+		magnitude = numpy.abs(samples) if samples.ndim == 1 else numpy.max(numpy.abs(samples), axis=-1)
+
+		if magnitude.size == 0:
+			return 0
+
+		peak = float(numpy.max(magnitude))
+		if peak <= 0.0:
+			return 0
+
+		above = numpy.where(magnitude >= peak * _ONSET_FRACTION)[0]
+		if above.size == 0:
+			return 0
+
+		return max(0, int(above[0]) - self._onset_backoff_samples)
 
 	def _snr_db_over_ambient (self, chunk_rms: float) -> float:
 

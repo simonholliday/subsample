@@ -307,3 +307,41 @@ class TestFadeOut:
 		assert tail[0] > tail[-1]
 		assert numpy.all(numpy.diff(tail) <= 0)
 		assert tail[-1] < 200
+
+
+class TestLeadThreshold:
+
+	"""lead_amplitude_threshold trims the ATTACK edge with a higher threshold than
+	the tail edge, so low-level content ahead of the transient (room tone, the
+	previous sound's decay) is cut while a long decay is still preserved at the
+	tail — the two edges no longer share the (low) release threshold."""
+
+	def test_lead_threshold_trims_attack_tighter (self) -> None:
+		# 30 frames of low-level lead-in (above the tail gate 100, below the attack
+		# gate 1000), then a loud transient, then a decaying tail above the tail gate.
+		low = [200] * 30
+		loud = [8000] * 10
+		tail = [150] * 20
+		audio = _make_audio(low + loud + tail)
+
+		one = subsample.trim.trim_silence(audio, 100.0)  # single threshold: keeps the lead-in
+		two = subsample.trim.trim_silence(audio, 100.0, lead_amplitude_threshold=1000.0)
+
+		assert one.shape[0] == 60                  # low + loud + tail, nothing trimmed off the front
+		assert two.shape[0] == 30                  # the 30-frame low-level lead-in is trimmed away
+		assert abs(int(two[0, 0])) == 8000         # starts on the transient, not the lead-in
+		assert abs(int(two[-1, 0])) == 150         # tail edge unchanged (still down to the tail gate)
+
+	def test_lead_threshold_none_matches_single (self) -> None:
+		# Passing lead=None must reproduce the single-threshold result exactly.
+		audio = _make_audio(_silent(10) + _loud(10) + _silent(10))
+		a = subsample.trim.trim_silence(audio, _THRESHOLD, pre_samples=3, post_samples=4)
+		b = subsample.trim.trim_silence(audio, _THRESHOLD, pre_samples=3, post_samples=4, lead_amplitude_threshold=None)
+		numpy.testing.assert_array_equal(a, b)
+
+	def test_lead_threshold_falls_back_when_no_attack (self) -> None:
+		# If nothing reaches the attack gate (a quiet hit), the onset falls back to
+		# the tail gate so the sample is not dropped or mis-anchored.
+		audio = _make_audio(_silent(10) + [200] * 20)  # all below a high lead gate
+		result = subsample.trim.trim_silence(audio, 100.0, lead_amplitude_threshold=100000.0)
+		assert result.shape[0] == 20                  # trimmed to the tail-gate onset, kept
