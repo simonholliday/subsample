@@ -141,7 +141,7 @@ class TestResolvePathReferences:
 
 		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
 		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
-		instrument_lib.find_by_name.return_value = None  # not already present
+		instrument_lib.find_by_path.return_value = None  # not already present
 
 		subsample.player._resolve_path_references(note_map, [matrix], instrument_lib, with_preview=False)
 

@@ -345,13 +345,13 @@ class TestIntegrateSample:
 		similarity.remove.assert_called_once_with([first.sample_id])
 		transform.on_parent_evicted.assert_called_once_with([first.sample_id])
 
-	def test_cross_file_stem_collision_skipped (self, tmp_path: pathlib.Path) -> None:
-		"""A hot-dropped file whose stem matches a DIFFERENT already-loaded
-		file is skipped with a warning — the silent replace would misroute
-		MIDI lookups now and crash the next startup (which hard-rejects the
-		duplicate pair)."""
+	def test_cross_file_same_stem_both_integrate (self, tmp_path: pathlib.Path) -> None:
+		"""A hot-dropped file whose stem matches a DIFFERENT already-loaded file
+		(another take-folder's "kick.wav") integrates as a distinct sample —
+		identity is the resolved filepath, not the stem.  Previously this was
+		silently skipped."""
 
-		library = subsample.library.InstrumentLibrary(max_memory_bytes=0)
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
 		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
 		similarity.get_scores.return_value = {}
 
@@ -366,10 +366,11 @@ class TestIntegrateSample:
 			clash, library, similarity, transform_manager=None, player_cell=None,
 		)
 
-		# The original record survives; the clashing one was never integrated.
+		# Both coexist; the same-stem take was integrated, not skipped.
 		assert library.get(first.sample_id) is first
-		assert library.get(clash.sample_id) is None
-		similarity.add.assert_not_called()
+		assert library.get(clash.sample_id) is clash
+		assert library.find_by_path(tmp_path / "b" / "kick.wav") == clash.sample_id
+		similarity.add.assert_called_once_with(clash)
 
 	def test_same_file_reintegration_replaces (self, tmp_path: pathlib.Path) -> None:
 		"""Re-integrating the SAME file (re-analysis after an edit) is the
@@ -390,6 +391,59 @@ class TestIntegrateSample:
 		)
 
 		assert library.get(again.sample_id) is again
+
+	def test_remove_sample_removes_and_cascades (self, tmp_path: pathlib.Path) -> None:
+		"""A deleted file's sample is dropped from the library and cascade-cleaned
+		from similarity + transforms, and the player is refreshed — kills the
+		re-encode ghost."""
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		transform = unittest.mock.MagicMock(spec=subsample.transform.TransformManager)
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+
+		rec = _make_record("01")
+		path = tmp_path / "A" / "01.wav"
+		object.__setattr__(rec, "filepath", path)
+		library.add(rec)
+
+		subsample.cli._remove_sample(path, library, similarity, transform, [player])
+
+		assert library.get(rec.sample_id) is None
+		similarity.remove.assert_called_once_with([rec.sample_id])
+		transform.on_parent_evicted.assert_called_once_with([rec.sample_id])
+		player._try_update_assignments.assert_called_once()
+
+	def test_remove_sample_missing_is_noop (self, tmp_path: pathlib.Path) -> None:
+		"""Removing a path with no loaded sample touches no subsystem."""
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		subsample.cli._remove_sample(
+			tmp_path / "nope.wav", library, similarity, None, None,
+		)
+
+		similarity.remove.assert_not_called()
+
+	def test_remove_sample_success_with_none_subsystems (self, tmp_path: pathlib.Path) -> None:
+		"""A successful removal with no similarity/transform and player_cell=[None]
+		(or None) must drop the record without raising on the missing subsystems."""
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+
+		rec = _make_record("01")
+		path = tmp_path / "01.wav"
+		object.__setattr__(rec, "filepath", path)
+		library.add(rec)
+
+		subsample.cli._remove_sample(path, library, None, None, [None])
+		assert library.get(rec.sample_id) is None
+
+		rec2 = _make_record("02")
+		path2 = tmp_path / "02.wav"
+		object.__setattr__(rec2, "filepath", path2)
+		library.add(rec2)
+
+		subsample.cli._remove_sample(path2, library, None, None, None)
+		assert library.get(rec2.sample_id) is None
 
 	def test_tolerates_all_optional_subsystems_none (self) -> None:
 		"""With no similarity/transform/player/events wired, the sample is still

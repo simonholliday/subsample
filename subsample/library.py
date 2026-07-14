@@ -44,14 +44,6 @@ import subsample.loopfind
 _log = logging.getLogger(__name__)
 
 
-class InstrumentLibraryError (Exception):
-
-	"""Raised when the on-disk instrument library is structurally invalid in a
-	way that the user must fix (e.g. two audio files with the same filename
-	stem in different subdirectories).  Distinct from "no samples found" or
-	"audio unreadable", which are recoverable conditions logged and skipped."""
-
-
 # Session-unique ID counter. itertools.count is thread-safe (C extension;
 # next() is atomic under the GIL), so callbacks on the writer thread and
 # startup loading on the main thread can both call allocate_id() safely.
@@ -69,6 +61,24 @@ def allocate_id () -> int:
 	return next(_id_counter)
 
 
+def _resolve_path (path: pathlib.Path) -> pathlib.Path:
+
+	"""Canonicalise a sample path for use as an identity key.
+
+	The library keys samples by resolved filepath (the filename stem is a
+	human label that may legitimately repeat across take-folders — e.g.
+	``01.wav`` in two technique subfolders).  ``resolve()`` collapses symlinks
+	and relative segments so the same file reached by two different path
+	strings maps to one key.  It does not raise for a path whose file has been
+	deleted (strict=False), so an evicted/ghost record still resolves to a
+	stable key.  This MUST match how ``query._resolved_sample_path`` canonicalises
+	the ``directory:`` / ``path:`` predicates (both call ``Path.resolve()``), or a
+	same-file record could slip past a predicate.
+	"""
+
+	return path.resolve()
+
+
 @dataclasses.dataclass(frozen=True)
 class SampleRecord:
 
@@ -80,7 +90,9 @@ class SampleRecord:
 	Fields:
 		sample_id: Session-unique numeric ID (allocated by allocate_id()).
 		name:      Stem of the audio filename (e.g. "BD0025", "kick").
-		           Preserves original casing from the filename.
+		           Preserves original casing.  A human label, NOT a unique key:
+		           it may repeat across take-folders (two "01.wav"), so identity
+		           is sample_id / filepath (see InstrumentLibrary.find_by_path).
 		spectral:    Thirteen normalised [0, 1] spectral metrics (the spectral fingerprint).
 		rhythm:      Tempo, beat grid, pulse curve, onset times.
 		pitch:       Fundamental frequency, chroma profile, pitch class.
@@ -198,8 +210,18 @@ class InstrumentLibrary:
 		self._index: dict[int, SampleRecord] = {}
 		# Deque maintains insertion order for O(1) popleft during FIFO eviction.
 		self._order: collections.deque[int] = collections.deque()
-		# Secondary index for O(1) lookup by name (filename stem without extension).
-		# Kept in sync with _index by add() and eviction.
+		# Primary identity index: resolved filepath → id.  A file's PATH is
+		# unique; its filename stem is not (take-folders reuse "01.wav"), so
+		# path is the dedup/identity key for every on-disk record.
+		self._path_index: dict[pathlib.Path, int] = {}
+		# Remembers each filepath-bearing record's resolved _path_index key so
+		# eviction / removal delete by the EXACT key stored at insert, never by
+		# re-resolving old_record.filepath (which could drift if the path's
+		# symlink topology changed mid-session, orphaning a _path_index entry).
+		self._id_to_key: dict[int, pathlib.Path] = {}
+		# Fallback secondary index for records with no filepath (in-memory /
+		# test records).  In production every InstrumentLibrary record carries a
+		# filepath, so this stays empty; kept for the filepath-less case.
 		self._name_index: dict[str, int] = {}
 		self._total_bytes: int = 0
 		self._max_bytes: int = max_memory_bytes
@@ -237,17 +259,25 @@ class InstrumentLibrary:
 		evicted: list[int] = []
 		with self._lock:
 
-			# De-dup by name first.  A same-name re-add is a normal flow (the
-			# recorder overwrites a filename, the watcher re-derives the stem),
-			# and each carries a fresh sample_id.  Drop the prior record so it
-			# doesn't linger in _order/_index as a stale duplicate (which would
-			# also let a later FIFO eviction delete the name key this record now
-			# owns).  Report it as evicted so callers cascade-clean its
-			# similarity / transform entries, keyed by the old id.
-			prior_id = self._name_index.get(record.name)
+			# De-dup by IDENTITY (resolved filepath).  A same-PATH re-add is a
+			# normal flow — the recorder re-writes a filename, a sample is
+			# re-analysed with a fresh sample_id — so drop the prior record;
+			# otherwise it lingers in _order/_index as a stale duplicate (which
+			# would also let a later FIFO eviction delete the index key this
+			# record now owns).  Report it as evicted so callers cascade-clean
+			# its similarity / transform entries, keyed by the old id.  Two
+			# distinct files sharing a stem (different folders) have different
+			# paths, hence different keys, so they COEXIST.  filepath-less
+			# records (in-memory / tests) fall back to the name index.
+			key_path = _resolve_path(record.filepath) if record.filepath is not None else None
+			prior_id = (
+				self._path_index.get(key_path) if key_path is not None
+				else self._name_index.get(record.name)
+			)
 
 			if prior_id is not None and prior_id != record.sample_id:
 				prior = self._index.pop(prior_id, None)
+				self._id_to_key.pop(prior_id, None)
 
 				if prior is not None:
 					self._total_bytes -= prior.audio.nbytes if prior.audio is not None else 0
@@ -266,35 +296,94 @@ class InstrumentLibrary:
 					old_bytes = old_record.audio.nbytes if old_record.audio is not None else 0
 					self._total_bytes -= old_bytes
 
-					# Only drop the name key if it still points at the evicted
-					# id — a same-name re-add may have repointed it.
-					if self._name_index.get(old_record.name) == oldest_id:
+					# Drop the evicted record's secondary-index key, but only if
+					# it still points at this id — a same-key re-add may have
+					# repointed it.  Delete by the key STORED at insert (never a
+					# re-resolve, which could drift); use whichever index the
+					# record lives in.
+					old_key = self._id_to_key.pop(oldest_id, None)
+					if old_key is not None:
+						if self._path_index.get(old_key) == oldest_id:
+							del self._path_index[old_key]
+					elif self._name_index.get(old_record.name) == oldest_id:
 						del self._name_index[old_record.name]
 
 					evicted.append(oldest_id)
 
 			self._index[record.sample_id] = record
-			self._name_index[record.name] = record.sample_id
+			if key_path is not None:
+				self._path_index[key_path] = record.sample_id
+				self._id_to_key[record.sample_id] = key_path
+			else:
+				self._name_index[record.name] = record.sample_id
 			self._order.append(record.sample_id)
 			self._total_bytes += sample_bytes
 
 		return evicted
 
-	def get (self, sample_id: int) -> SampleRecord | None:
+	def get (self, sample_id: int) -> typing.Optional[SampleRecord]:
 
 		"""Return the sample with the given ID, or None if not present."""
 
 		with self._lock:
 			return self._index.get(sample_id)
 
-	def find_by_name (self, name: str) -> int | None:
+	def find_by_path (self, path: pathlib.Path) -> typing.Optional[int]:
 
-		"""Return the sample_id for the sample with the given name, or None if not present.
+		"""Return the sample_id for the sample at ``path``, or None if not present.
 
-		Name is the filename stem without extension (e.g. "2026-03-23_10-04-07").
-		Lookup is O(1) via a secondary index kept in sync with the main index.
-		Returns None if the sample is not currently in the library (not yet loaded
-		or evicted).
+		Path is the library's true identity key — the filename stem may repeat
+		across take-folders, so a path is what uniquely identifies a sample.
+		The path is resolved (realpath) before lookup, so callers need not
+		pre-canonicalise.  O(1) via the path index.  Returns None if no sample
+		at that path is currently loaded (never loaded or evicted).
+		"""
+
+		with self._lock:
+			return self._path_index.get(_resolve_path(path))
+
+	def remove_by_path (self, path: pathlib.Path) -> typing.Optional[int]:
+
+		"""Remove the sample at ``path`` from the library; return its id, or None.
+
+		The library is otherwise FIFO-only; this is the explicit removal used
+		when a watched audio file is deleted or renamed away, so its record does
+		not linger as a selectable "ghost" that plays cached audio for a file
+		that is gone.  Keyed by resolved filepath.  Returns the removed sample_id
+		so the caller can cascade-clean similarity / transform state, exactly as
+		for an eviction; returns None if no sample at that path is loaded.
+		"""
+
+		key = _resolve_path(path)
+
+		with self._lock:
+			sample_id = self._path_index.pop(key, None)
+
+			if sample_id is None:
+				return None
+
+			self._id_to_key.pop(sample_id, None)
+			record = self._index.pop(sample_id, None)
+
+			if record is not None and record.audio is not None:
+				self._total_bytes -= record.audio.nbytes
+
+			try:
+				self._order.remove(sample_id)
+			except ValueError:
+				pass
+
+			return sample_id
+
+	def find_by_name (self, name: str) -> typing.Optional[int]:
+
+		"""Return the sample_id for a filepath-less sample with the given name.
+
+		Name is the filename stem without extension.  This is a FALLBACK lookup
+		for in-memory / test records that carry no filepath; on-disk samples are
+		keyed by path (see find_by_path), and stems are no longer required to be
+		unique, so use find_by_path to identify an on-disk sample.  Returns None
+		if no filepath-less sample with that name is loaded.
 		"""
 
 		with self._lock:
@@ -571,10 +660,11 @@ def load_instrument_library (
 	respected using FIFO eviction.  Each loaded record is assigned a
 	session-unique ID.
 
-	Two samples sharing the same filename stem in different subdirectories
-	is rejected with ``InstrumentLibraryError`` — the library is stem-keyed
-	internally and a silent overwrite would route MIDI lookups to the wrong
-	sample.
+	Samples are identified by resolved filepath, so two files that share a
+	filename stem in different subdirectories (e.g. per-technique take-folders
+	each containing ``01.wav``) load as distinct samples.  A ``name:`` predicate
+	then matches all of them; combine it with ``directory:`` (or ``pick``) to
+	select a specific one.
 
 	Args:
 		directory:          Root of the recursive sample search.
@@ -591,9 +681,6 @@ def load_instrument_library (
 	Returns:
 		InstrumentLibrary containing all successfully loaded samples.  If the
 		directory does not exist, returns an empty library.
-
-	Raises:
-		InstrumentLibraryError: when two audio files share a filename stem.
 	"""
 
 	lib = InstrumentLibrary(max_memory_bytes)
@@ -645,28 +732,14 @@ def load_instrument_library (
 	# Phase 2 — sequential: construct SampleRecords and add to the library in
 	# sorted path order. allocate_id() is called here (not in workers) so
 	# IDs are assigned in a deterministic order and FIFO eviction works correctly.
-	# Collision detection lives here too — against a LOAD-SCOPED seen-stem map,
-	# not the live library: FIFO eviction under a tight memory budget can
-	# remove the first duplicate mid-load, and querying the live library would
-	# then silently miss the collision.  The seen map makes detection
-	# unconditional, as the error message promises.
+	# Records are keyed by resolved filepath (unique per file), so two files
+	# that share a stem in different folders load as distinct samples — there is
+	# no collision to reject (rglob yields each path exactly once).
 	loaded = 0
-	seen_stems: dict[str, pathlib.Path] = {}
 
 	for loaded_sample in raw_results:
 		if loaded_sample is None:
 			continue
-
-		first_path = seen_stems.get(loaded_sample.name)
-		if first_path is not None:
-			raise InstrumentLibraryError(
-				f"Stem collision: '{loaded_sample.name}' appears at both "
-				f"{first_path} and {loaded_sample.audio_path}. "
-				f"The instrument library is keyed by filename stem; rename "
-				f"or move one file so each stem is unique across the library."
-			)
-
-		seen_stems[loaded_sample.name] = loaded_sample.audio_path
 
 		record = SampleRecord(
 			sample_id      = allocate_id(),
@@ -687,6 +760,25 @@ def load_instrument_library (
 
 		lib.add(record)
 		loaded += 1
+
+	# A colliding take-folder tree can hold many same-stem files; their combined
+	# audio may exceed the memory limit, and FIFO eviction then silently drops
+	# earliest-loaded samples during the walk.  Warn only when eviction ACTUALLY
+	# dropped a loaded sample (fewer resident than loaded) — a single sample that
+	# alone exceeds the budget is kept resident (add()'s "added anyway" path) and
+	# must not trigger this.  The per-sample over-budget notice in add() is separate.
+	if lib._max_bytes > 0 and len(lib) < loaded:
+		total_audio_bytes = sum(
+			s.audio.nbytes for s in raw_results
+			if s is not None and s.audio is not None
+		)
+		_log.warning(
+			"Instrument library: %d sample(s) totalling %.1f MB exceed the memory "
+			"limit of %.1f MB — %d were evicted (FIFO), so some are unavailable at "
+			"note-on.  Raise instrument.max_memory_mb to keep them all resident.",
+			loaded, total_audio_bytes / (1024 * 1024), lib._max_bytes / (1024 * 1024),
+			loaded - len(lib),
+		)
 
 	_log.info("Loaded %d instrument sample(s) from %s", loaded, directory)
 

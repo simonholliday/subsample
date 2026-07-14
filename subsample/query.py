@@ -376,10 +376,17 @@ class WherePredicate:
 	hashable; matches() resolves it to a memoised compiled Pattern via
 	_compiled_name_regex so the trigger path doesn't recompile per record."""
 	name_path: typing.Optional[str]  = None
-	"""Internal field — set by parse_select for path-based name references;
-	used by _resolve_path_references to load samples; never evaluated in
-	matches() and never exposed in YAML."""
+	"""Internal field — set by parse_select for a `path:` (or legacy
+	`name: <path>`) reference; the resolved absolute path string.  Used by
+	_resolve_path_references to load the file, AND evaluated in matches() as an
+	exact resolved-filepath match — the stem is not unique across take-folders,
+	so the filepath is the authoritative discriminator.  Never exposed in YAML."""
 	directory: typing.Optional[str]  = None
+	sample_id: typing.Optional[int]  = None
+	"""Internal field — an exact-identity pin (set by zone materialization, and
+	usable for any "this specific sample" match).  Never a YAML key; when set,
+	matches() requires record.sample_id to equal it.  This is how a specific
+	record is selected now that stems can repeat across take-folders."""
 
 	def __post_init__ (self) -> None:
 
@@ -408,6 +415,11 @@ class WherePredicate:
 	) -> bool:
 
 		"""Return True if the record passes all active filter predicates."""
+
+		# Exact-identity pin (zone materialization / any "this specific sample"
+		# match) — the authoritative discriminator now that stems can repeat.
+		if self.sample_id is not None and record.sample_id != self.sample_id:
+			return False
 
 		if not self.duration.contains(record.duration):
 			return False
@@ -458,6 +470,17 @@ class WherePredicate:
 
 		if self.name_regex is not None:
 			if _compiled_name_regex(self.name_regex).fullmatch(record.name) is None:
+				return False
+
+		# `path:` / legacy `name: <path>` — an EXACT file match.  parse_select
+		# also sets `name` (the stem) above, but a stem is not unique across
+		# take-folders, so the authoritative test is the resolved filepath.
+		# Canonicalised via the same memoised .resolve() as `directory:` so the
+		# two agree on symlinks / relative segments.
+		if self.name_path is not None:
+			if record.filepath is None:
+				return False
+			if str(_resolved_sample_path(record.filepath)) != self.name_path:
 				return False
 
 		if self.directory is not None:

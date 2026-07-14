@@ -14,6 +14,10 @@ import pathlib
 import threading
 import time
 import typing
+import unittest.mock
+
+import pytest
+import watchdog.events
 
 import subsample.analysis
 import subsample.cache
@@ -594,6 +598,134 @@ class TestInstrumentWatcherAudioPath:
 # ---------------------------------------------------------------------------
 # TestMidiMapWatcher
 # ---------------------------------------------------------------------------
+
+class TestInstrumentFileHandlerDeletion:
+
+	"""_InstrumentFileHandler routes deletions (and rename SOURCES) to the
+	deletion callback for audio files, and rename DESTINATIONS to the add
+	callback."""
+
+	@staticmethod
+	def _handler () -> typing.Any:
+		sidecar = unittest.mock.MagicMock()
+		audio   = unittest.mock.MagicMock()
+		deleted = unittest.mock.MagicMock()
+		handler = subsample.watcher._InstrumentFileHandler(
+			sidecar_callback=sidecar,
+			audio_callback=audio,
+			deleted_callback=deleted,
+		)
+		return handler, sidecar, audio, deleted
+
+	def test_deleted_audio_fires_removal (self) -> None:
+		handler, _sc, _au, deleted = self._handler()
+		handler.on_deleted(watchdog.events.FileDeletedEvent(str(pathlib.Path("/kit/01.wav"))))
+		deleted.assert_called_once_with(pathlib.Path("/kit/01.wav"))
+
+	def test_deleted_sidecar_ignored (self) -> None:
+		handler, _sc, _au, deleted = self._handler()
+		handler.on_deleted(watchdog.events.FileDeletedEvent("/kit/01.wav" + subsample.cache.SIDECAR_SUFFIX))
+		deleted.assert_not_called()
+
+	def test_deleted_directory_ignored (self) -> None:
+		handler, _sc, _au, deleted = self._handler()
+		handler.on_deleted(watchdog.events.DirDeletedEvent(str(pathlib.Path("/kit/sub"))))
+		deleted.assert_not_called()
+
+	def test_moved_removes_source_and_adds_destination (self) -> None:
+		# A genuine rename 01.wav -> 02.wav: drop the old record, add the new.
+		handler, _sc, audio, deleted = self._handler()
+		handler.on_moved(watchdog.events.FileMovedEvent(
+			str(pathlib.Path("/kit/01.wav")), str(pathlib.Path("/kit/02.wav")),
+		))
+		deleted.assert_called_once_with(pathlib.Path("/kit/01.wav"))
+		audio.assert_called_once_with(pathlib.Path("/kit/02.wav"))
+
+	def test_moved_temp_source_is_removal_noop (self) -> None:
+		# Atomic-save: a non-audio ".part" source must NOT fire a removal.
+		handler, _sc, audio, deleted = self._handler()
+		handler.on_moved(watchdog.events.FileMovedEvent(
+			str(pathlib.Path("/kit/clap.part")), str(pathlib.Path("/kit/clap.wav")),
+		))
+		deleted.assert_not_called()
+		audio.assert_called_once_with(pathlib.Path("/kit/clap.wav"))
+
+
+class TestInstrumentWatcherDeletion:
+
+	"""InstrumentWatcher._on_audio_file_deleted forwards to the removal callback
+	(gated), and is a no-op when no removal callback is wired."""
+
+	def test_forwards_to_removal_callback (self, tmp_path: pathlib.Path) -> None:
+		removed: list[pathlib.Path] = []
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=tmp_path,
+			known_sidecars=set(),
+			on_sample_loaded=lambda record: None,
+			on_sample_removed=removed.append,
+		)
+		watcher._on_audio_file_deleted(tmp_path / "01.wav")
+		assert removed == [tmp_path / "01.wav"]
+
+	def test_noop_without_removal_callback (self, tmp_path: pathlib.Path) -> None:
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=tmp_path,
+			known_sidecars=set(),
+			on_sample_loaded=lambda record: None,
+		)
+		watcher._on_audio_file_deleted(tmp_path / "01.wav")   # must not raise
+
+	def test_deletion_gated_after_stop (self, tmp_path: pathlib.Path) -> None:
+		"""Once stopped, a deletion event is skipped (the in-flight gate)."""
+		removed: list[pathlib.Path] = []
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=tmp_path,
+			known_sidecars=set(),
+			on_sample_loaded=lambda record: None,
+			on_sample_removed=removed.append,
+		)
+		watcher._stopped = True
+		watcher._on_audio_file_deleted(tmp_path / "01.wav")
+		assert removed == []
+
+	def test_deletion_callback_exception_swallowed (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A raising removal callback must not escape the watchdog thread."""
+		import logging
+
+		def boom (path: pathlib.Path) -> None:
+			raise RuntimeError("boom")
+
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=tmp_path,
+			known_sidecars=set(),
+			on_sample_loaded=lambda record: None,
+			on_sample_removed=boom,
+		)
+		with caplog.at_level(logging.ERROR, logger="subsample.watcher"):
+			watcher._on_audio_file_deleted(tmp_path / "01.wav")   # must not raise
+		assert any("removing deleted sample" in r.message for r in caplog.records)
+
+	def test_deletion_forgets_known_path (self, tmp_path: pathlib.Path) -> None:
+		"""After removal the deleted path is discarded from the known sets, so a
+		later re-create at the same path reloads instead of being suppressed."""
+		audio = tmp_path / "01.wav"
+		sidecar = (audio.parent / (audio.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=tmp_path,
+			known_sidecars={sidecar},
+			known_audio={audio.resolve()},
+			on_sample_loaded=lambda record: None,
+			on_sample_removed=lambda path: None,
+		)
+		assert audio.resolve() in watcher._known_audio
+
+		watcher._on_audio_file_deleted(audio)
+
+		assert audio.resolve() not in watcher._known_audio
+		assert sidecar not in watcher._known_sidecars
+
 
 class TestMidiMapWatcher:
 

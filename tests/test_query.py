@@ -31,6 +31,7 @@ def _make_record (
 	voiced_fraction: float = 0.0,
 	harmonic_ratio: float = 0.0,
 	rms: float = 0.1,
+	filepath: typing.Optional[pathlib.Path] = None,
 ) -> subsample.library.SampleRecord:
 
 	"""Build a SampleRecord with controllable fields for query testing."""
@@ -84,6 +85,7 @@ def _make_record (
 		params      = tests.helpers._make_params(),
 		duration    = duration,
 		audio       = None,
+		filepath    = filepath,
 	)
 
 
@@ -287,6 +289,44 @@ class TestWherePredicate:
 		assert not pred.matches(_make_record(duration=2.0, onset_count=2))
 		assert not pred.matches(_make_record(duration=0.5, onset_count=5))
 		assert pred.matches(_make_record(duration=2.0, onset_count=5))
+
+	def test_sample_id_pin_matches_only_that_id (self) -> None:
+		"""The internal sample_id pin selects by identity — the discriminator
+		now that stems can repeat (used by zone materialization)."""
+		pred = subsample.query.WherePredicate(sample_id=2)
+		# Two same-stem twins: the pin picks by id, never the name.
+		assert pred.matches(_make_record(sample_id=1, name="01")) is False
+		assert pred.matches(_make_record(sample_id=2, name="01")) is True
+
+	def test_name_path_matches_by_filepath_not_stem (self) -> None:
+		"""A `path:` reference sets name (stem) AND name_path (resolved path);
+		matches() must discriminate by the filepath, so it selects only the
+		named file and not a same-stem twin in another folder."""
+		a = pathlib.Path("/kit/A/01.wav").resolve()
+		b = pathlib.Path("/kit/B/01.wav").resolve()
+		pred = subsample.query.WherePredicate(name="01", name_path=str(a))
+
+		assert pred.matches(_make_record(name="01", filepath=a)) is True
+		assert pred.matches(_make_record(name="01", filepath=b)) is False   # same stem, wrong file
+
+	def test_name_path_excludes_filepathless_record (self) -> None:
+		pred = subsample.query.WherePredicate(
+			name_path=str(pathlib.Path("/kit/01.wav").resolve()),
+		)
+		assert pred.matches(_make_record(name="01", filepath=None)) is False
+
+	def test_name_path_matches_non_canonical_filepath (self, tmp_path: pathlib.Path) -> None:
+		"""matches() must CANONICALISE both sides — a record whose filepath is a
+		non-canonical spelling (via ``..``) still matches a name_path stored as the
+		resolved path.  This exercises the resolve() invariant the pin guards (the
+		other name_path tests pre-resolve both sides, so they never test it)."""
+		(tmp_path / "sub").mkdir()
+		target = tmp_path / "sub" / "01.wav"
+		target.write_bytes(b"\x00")
+		non_canonical = tmp_path / "sub" / ".." / "sub" / "01.wav"
+
+		pred = subsample.query.WherePredicate(name="01", name_path=str(target.resolve()))
+		assert pred.matches(_make_record(name="01", filepath=non_canonical)) is True
 
 
 # ---------------------------------------------------------------------------

@@ -867,21 +867,9 @@ def _start_player (
 
 def main () -> None:
 
-	"""Entry point — runs the ambient audio sampler with top-level error handling.
+	"""Entry point — runs the ambient audio sampler."""
 
-	The wrapped ``_main_impl`` does the actual work; this layer exists only to
-	turn an InstrumentLibraryError (raised when the on-disk sample library is
-	structurally invalid, e.g. two audio files with the same filename stem in
-	different subdirectories) into a clean, single-line error message and a
-	non-zero exit code, rather than a Python traceback the end user has to
-	parse.
-	"""
-
-	try:
-		_main_impl()
-	except subsample.library.InstrumentLibraryError as exc:
-		print(f"\nError: {exc}\n", file=sys.stderr)
-		sys.exit(2)
+	_main_impl()
 
 
 def _main_impl () -> None:
@@ -1238,6 +1226,14 @@ def _main_impl () -> None:
 
 					return cb
 
+				def _make_bank_removal_callback (b: subsample.bank.Bank) -> typing.Callable[[pathlib.Path], None]:
+					def rm (path: pathlib.Path) -> None:
+						_log.info("Watcher [%s]: sample removed — %s", b.name, path.name)
+						_remove_sample(path, b.instrument_library, b.similarity_matrix,
+						               b.transform_manager, _player_cell)
+
+					return rm
+
 				watcher = subsample.watcher.InstrumentWatcher(
 					directory=_bank.directory,
 					known_sidecars=known_sc,
@@ -1245,6 +1241,7 @@ def _main_impl () -> None:
 					target_sample_rate=output_sample_rate,
 					known_audio=known_au,
 					with_preview=cfg.recorder.previews,
+					on_sample_removed=_make_bank_removal_callback(_bank),
 				)
 				watcher.start()
 				instrument_watchers.append(watcher)
@@ -1269,6 +1266,11 @@ def _main_impl () -> None:
 				_integrate_sample(record, instrument_library, similarity_matrix,
 				                  transform_manager, _player_cell, app_events)
 
+			def _on_watched_sample_removed (path: pathlib.Path) -> None:
+				_log.info("Watcher: sample removed — %s", path.name)
+				_remove_sample(path, instrument_library, similarity_matrix,
+				               transform_manager, _player_cell)
+
 			watcher = subsample.watcher.InstrumentWatcher(
 				directory=pathlib.Path(cfg.instrument.directory),
 				known_sidecars=known_sidecars,
@@ -1276,6 +1278,7 @@ def _main_impl () -> None:
 				target_sample_rate=output_sample_rate,
 				known_audio=known_audio_paths,
 				with_preview=cfg.recorder.previews,
+				on_sample_removed=_on_watched_sample_removed,
 			)
 			watcher.start()
 			instrument_watchers.append(watcher)
@@ -1586,34 +1589,12 @@ def _integrate_sample (
 	similarity matrix). This is acceptable for the current use case.
 	"""
 
-	# Cross-file stem collision: startup load hard-rejects two audio files
-	# sharing a stem (the library is stem-keyed, so a silent replace would
-	# route MIDI lookups to the wrong sample — and BOTH files remaining on
-	# disk would crash the NEXT startup with that very error).  Apply the
-	# same policy to runtime integration, but warn-and-skip instead of
-	# raising: a hot-dropped duplicate must not kill the watcher/OSC thread.
-	# A re-integration of the SAME file (re-analysis after an edit) is the
-	# legitimate replace case and passes through.
-	if record.filepath is not None:
-		existing_id = instrument_library.find_by_name(record.name)
-
-		if existing_id is not None:
-			existing = instrument_library.get(existing_id)
-
-			if (
-				existing is not None
-				and existing.filepath is not None
-				and existing.filepath.resolve() != record.filepath.resolve()
-			):
-				_log.warning(
-					"Skipping %s: a different file with the same stem is "
-					"already loaded (%s) — the library is stem-keyed, so "
-					"loading both would misroute MIDI lookups.  Rename one "
-					"of the files.",
-					record.filepath, existing.filepath,
-				)
-				return
-
+	# Identity is the resolved filepath: re-integrating the SAME file (a
+	# re-analysis after an edit) replaces its prior record via add()'s path
+	# de-dup; a different file that happens to share a stem (e.g. "01.wav" in
+	# another take-folder) loads as a distinct sample.  No stem-collision guard
+	# is needed — the old warn-and-skip here silently dropped legitimate
+	# same-stem takes.
 	evicted = instrument_library.add(record)
 	_log.info(
 		"Instrument library: %d sample(s)  [%s]",
@@ -1650,6 +1631,49 @@ def _integrate_sample (
 
 	if app_events is not None:
 		app_events.emit("sample_loaded", record=record)
+
+
+def _remove_sample (
+	path: pathlib.Path,
+	instrument_library: subsample.library.InstrumentLibrary,
+	similarity_matrix: typing.Optional[subsample.similarity.SimilarityMatrix],
+	transform_manager: typing.Optional[subsample.transform.TransformManager],
+	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]],
+) -> None:
+
+	"""Remove a deleted sample from all live subsystems.
+
+	Called by the directory watcher when a watched audio file is deleted or
+	renamed away.  Drops the record from the instrument library — so a
+	re-encoded or removed file's record does not linger as a selectable "ghost"
+	that still plays its cached audio — then cascade-cleans the similarity and
+	transform state and refreshes the player's assignments, mirroring the
+	eviction cleanup in _integrate_sample.  A no-op if no sample at that path is
+	currently loaded.
+	"""
+
+	removed_id = instrument_library.remove_by_path(path)
+
+	if removed_id is None:
+		return
+
+	_log.info(
+		"Instrument library: removed %s  [%s]",
+		path.name, instrument_library.format_memory(),
+	)
+
+	if similarity_matrix is not None:
+		similarity_matrix.remove([removed_id])
+
+	if transform_manager is not None:
+		transform_manager.on_parent_evicted([removed_id])
+
+	if player_cell is not None and player_cell[0] is not None:
+		# Defensive, as in _integrate_sample: a runtime query failure must not
+		# kill the watcher thread — the sample is already gone from the library.
+		player_cell[0]._try_update_assignments(
+			f"sample removal {path.name!r}",
+		)
 
 
 def _make_on_complete (

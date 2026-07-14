@@ -2,6 +2,7 @@
 
 import dataclasses
 import pathlib
+import typing
 
 import numpy
 import pytest
@@ -9,6 +10,7 @@ import pytest
 import subsample.analysis
 import subsample.cache
 import subsample.library
+import subsample.query
 
 import tests.helpers
 
@@ -303,9 +305,15 @@ def _make_instrument_record (
 	name: str,
 	n_frames: int = 1000,
 	channels: int = 1,
+	filepath: typing.Optional[pathlib.Path] = None,
 ) -> subsample.library.SampleRecord:
 
-	"""Return a SampleRecord with audio data for instrument library tests."""
+	"""Return a SampleRecord with audio data for instrument library tests.
+
+	``filepath`` defaults to None (a filepath-less in-memory record, which the
+	library keys by name); pass one to exercise the resolved-filepath identity
+	path (the on-disk / take-folder case).
+	"""
 
 	audio = numpy.zeros((n_frames, channels), dtype=numpy.int16)
 	return subsample.library.SampleRecord(
@@ -320,6 +328,7 @@ def _make_instrument_record (
 		params      = tests.helpers._make_params(),
 		duration    = n_frames / 44100.0,
 		audio       = audio,
+		filepath    = filepath,
 	)
 
 
@@ -390,6 +399,116 @@ class TestInstrumentLibrary:
 		lib.add(_make_instrument_record("snare", n_frames=1000))   # may evict
 
 		assert lib.find_by_name("kick") == live.sample_id
+
+	def test_same_path_readd_replaces (self) -> None:
+		"""A same-PATH re-add (a re-analysed file, fresh id) replaces the prior
+		record and reports it evicted — the recorder/re-analysis overwrite flow,
+		now keyed by resolved filepath rather than stem."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		p = pathlib.Path("/kit/01.wav")
+		first  = _make_instrument_record("01", filepath=p)
+		second = _make_instrument_record("01", filepath=p)   # same path, new id
+
+		lib.add(first)
+		evicted = lib.add(second)
+
+		assert first.sample_id in evicted
+		assert lib.get(first.sample_id) is None
+		assert lib.find_by_path(p) == second.sample_id
+		assert len(lib) == 1
+
+	def test_same_stem_different_path_coexist (self) -> None:
+		"""Two records sharing a stem but at different paths COEXIST — identity is
+		the resolved filepath (the take-folder case, at unit level)."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		a = _make_instrument_record("01", filepath=pathlib.Path("/kit/mid/01.wav"))
+		b = _make_instrument_record("01", filepath=pathlib.Path("/kit/outer/01.wav"))
+
+		evicted = lib.add(a) + lib.add(b)
+
+		assert evicted == []                        # neither evicts the other
+		assert len(lib) == 2
+		assert a.sample_id != b.sample_id
+		assert lib.find_by_path(pathlib.Path("/kit/mid/01.wav")) == a.sample_id
+		assert lib.find_by_path(pathlib.Path("/kit/outer/01.wav")) == b.sample_id
+
+	def test_find_by_path_missing_returns_none (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		p = pathlib.Path("/kit/01.wav")
+		lib.add(_make_instrument_record("01", filepath=p))
+		assert lib.find_by_path(pathlib.Path("/kit/02.wav")) is None
+
+	def test_eviction_drops_path_index_key (self) -> None:
+		"""FIFO eviction of a filepath-bearing record removes its path-index key
+		so a later find_by_path returns None."""
+		# ~2000 bytes/record; budget fits two.
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=4000)
+		a = _make_instrument_record("01", n_frames=1000, filepath=pathlib.Path("/kit/a/01.wav"))
+		lib.add(a)
+		lib.add(_make_instrument_record("02", n_frames=1000, filepath=pathlib.Path("/kit/b/02.wav")))
+		lib.add(_make_instrument_record("03", n_frames=1000, filepath=pathlib.Path("/kit/c/03.wav")))
+
+		assert lib.get(a.sample_id) is None                          # 'a' FIFO-evicted
+		assert lib.find_by_path(pathlib.Path("/kit/a/01.wav")) is None
+
+	def test_remove_by_path_removes_and_returns_id (self) -> None:
+		"""remove_by_path drops the record, returns its id (for cascade-clean),
+		and frees its indexes — the deleted-file path that kills the ghost."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		p = pathlib.Path("/kit/01.wav")
+		r = _make_instrument_record("01", filepath=p)
+		lib.add(r)
+
+		assert lib.remove_by_path(p) == r.sample_id
+		assert lib.get(r.sample_id) is None
+		assert lib.find_by_path(p) is None
+		assert len(lib) == 0
+
+	def test_remove_by_path_missing_returns_none (self) -> None:
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		assert lib.remove_by_path(pathlib.Path("/kit/nope.wav")) is None
+
+	def test_remove_by_path_leaves_the_twin (self) -> None:
+		"""Removing one take-folder's "01" must not touch its same-stem twin in
+		another folder (the re-encode/rename case is path-scoped)."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		a = _make_instrument_record("01", filepath=pathlib.Path("/kit/mid/01.wav"))
+		b = _make_instrument_record("01", filepath=pathlib.Path("/kit/outer/01.wav"))
+		lib.add(a)
+		lib.add(b)
+
+		lib.remove_by_path(pathlib.Path("/kit/mid/01.wav"))
+
+		assert lib.get(a.sample_id) is None
+		assert lib.get(b.sample_id) is b            # the twin survives
+		assert lib.find_by_path(pathlib.Path("/kit/outer/01.wav")) == b.sample_id
+
+	def test_remove_by_path_frees_memory (self) -> None:
+		"""remove_by_path decrements the byte accounting so later eviction math
+		stays correct."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		r = _make_instrument_record("01", n_frames=1000, filepath=pathlib.Path("/kit/01.wav"))
+		before = lib.memory_used
+		lib.add(r)
+		assert lib.memory_used == before + r.audio.nbytes
+
+		lib.remove_by_path(pathlib.Path("/kit/01.wav"))
+		assert lib.memory_used == before
+		assert len(lib) == 0
+
+	def test_mixed_filepath_and_filepathless_same_name_coexist (self) -> None:
+		"""A filepath-bearing record and a filepath-less one sharing a name use
+		different indexes (path vs name), so they coexist and resolve distinctly."""
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
+		on_disk = _make_instrument_record("01", filepath=pathlib.Path("/kit/01.wav"))
+		in_mem  = _make_instrument_record("01", filepath=None)
+
+		lib.add(on_disk)
+		lib.add(in_mem)
+
+		assert len(lib) == 2
+		assert lib.find_by_path(pathlib.Path("/kit/01.wav")) == on_disk.sample_id
+		assert lib.find_by_name("01") == in_mem.sample_id
 
 	def test_memory_used_reflects_audio_bytes (self) -> None:
 		lib = subsample.library.InstrumentLibrary(max_memory_bytes=10 * 1024 * 1024)
@@ -565,34 +684,31 @@ class TestLoadInstrumentLibrary:
 		messages = [r.message for r in caplog.records]
 		assert any("orphaned" in m.lower() for m in messages)
 
-	def test_stem_collision_detected_despite_mid_load_eviction (
+	def test_same_stem_different_folders_coexist (
 		self, tmp_path: pathlib.Path,
 	) -> None:
-		"""The duplicate-stem check must be unconditional: under a tight
-		memory budget, FIFO eviction can remove the FIRST duplicate before
-		the second loads — querying the live library would silently miss
-		the collision (the load-scoped seen-stem map must not)."""
+		"""Two files sharing a filename stem in different folders load as
+		DISTINCT samples — identity is the resolved filepath, not the stem (the
+		per-technique take-folder layout where each folder holds "01.wav")."""
 
-		for sub in ("a_kicks", "m_fillers", "z_snares"):
+		for sub in ("a_kicks", "z_snares"):
 			(tmp_path / sub).mkdir()
 
 		_write_wav_and_sidecar(tmp_path / "a_kicks", "01", n_frames=4096)
-		for i in range(3):
-			_write_wav_and_sidecar(tmp_path / "m_fillers", f"f{i}", n_frames=4096)
 		_write_wav_and_sidecar(tmp_path / "z_snares", "01", n_frames=4096)
 
-		# Generous budget: collision detected while both copies coexist.
-		with pytest.raises(subsample.library.InstrumentLibraryError, match="Stem collision"):
-			subsample.library.load_instrument_library(
-				tmp_path, 10 * 1024 * 1024, with_preview=False,
-			)
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
 
-		# Tight budget: the first '01' is FIFO-evicted mid-load — the
-		# collision must STILL raise.
-		with pytest.raises(subsample.library.InstrumentLibraryError, match="Stem collision"):
-			subsample.library.load_instrument_library(
-				tmp_path, 16000, with_preview=False,
-			)
+		samples = lib.samples()
+		assert len(samples) == 2
+		assert {s.name for s in samples} == {"01"}                    # same label
+		assert len({s.sample_id for s in samples}) == 2               # distinct identity
+		assert {s.filepath.parent.name for s in samples} == {"a_kicks", "z_snares"}
+		# Each is addressable by its true key — path — and the two disambiguate.
+		for s in samples:
+			assert lib.find_by_path(s.filepath) == s.sample_id
 
 	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
 		_write_wav_and_sidecar(tmp_path, "KICK")
@@ -665,7 +781,8 @@ class TestLoadInstrumentLibraryRecursive:
 
 	"""Behaviour added by the recursive, audio-first library load:
 	subdirectory discovery, automatic sidecar/PNG regeneration on startup,
-	the orphan sweep, and stem-collision detection."""
+	the orphan sweep, and same-stem-in-different-subdirs coexistence (identity
+	is the resolved filepath, not the stem)."""
 
 	def _png_path (self, audio_path: pathlib.Path) -> pathlib.Path:
 
@@ -832,24 +949,86 @@ class TestLoadInstrumentLibraryRecursive:
 		assert tmp_path.exists()
 		assert list(tmp_path.iterdir()) == []
 
-	def test_stem_collision_raises (self, tmp_path: pathlib.Path) -> None:
-		# Two audio files with the same filename stem in different
-		# subdirectories would silently overwrite each other in the stem-
-		# keyed _name_index — fail loud instead so the user can fix it.
+	def test_same_stem_in_subdirs_loads_both (self, tmp_path: pathlib.Path) -> None:
+		# Two audio files sharing a filename stem in different subdirectories
+		# used to hard-fail (the library was stem-keyed); identity is now the
+		# resolved filepath, so both load and find_by_path disambiguates them.
 		(tmp_path / "kicks").mkdir()
 		(tmp_path / "snares").mkdir()
 		_write_wav_and_sidecar(tmp_path / "kicks", "01")
 		_write_wav_and_sidecar(tmp_path / "snares", "01")
 
-		with pytest.raises(subsample.library.InstrumentLibraryError) as excinfo:
-			subsample.library.load_instrument_library(
-				tmp_path, 10 * 1024 * 1024, with_preview=False,
-			)
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
 
-		msg = str(excinfo.value)
-		assert "01" in msg
-		assert "kicks" in msg
-		assert "snares" in msg
+		assert len(lib) == 2
+		by_folder = {s.filepath.parent.name: s.sample_id for s in lib.samples()}
+		assert set(by_folder) == {"kicks", "snares"}
+		assert lib.find_by_path(tmp_path / "kicks" / "01.wav") == by_folder["kicks"]
+		assert lib.find_by_path(tmp_path / "snares" / "01.wav") == by_folder["snares"]
+
+	def test_directory_predicate_disambiguates_twins (self, tmp_path: pathlib.Path) -> None:
+		"""End to end: a colliding two-folder tree loads both takes, and a
+		`directory:` + `name:` select resolves to the intended one (the user's
+		ride-take-folder workflow)."""
+		(tmp_path / "mid").mkdir()
+		(tmp_path / "outer").mkdir()
+		_write_wav_and_sidecar(tmp_path / "mid", "01")
+		_write_wav_and_sidecar(tmp_path / "outer", "01")
+
+		lib = subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False,
+		)
+
+		where = subsample.query.WherePredicate(
+			name="01", directory=str((tmp_path / "outer").resolve()),
+		)
+		ranked = subsample.query.query(
+			subsample.query.SelectSpec(where=where), lib.samples(), None,
+		)
+
+		assert [s.filepath.parent.name for s in ranked] == ["outer"]
+
+	def test_over_budget_multi_take_warns (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A tree whose combined audio exceeds the memory limit warns about the
+		aggregate FIFO eviction (a real risk once multi-take trees can load)."""
+		import logging
+		_write_wav_and_sidecar(tmp_path, "a", n_frames=8192)
+		_write_wav_and_sidecar(tmp_path, "b", n_frames=8192)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			subsample.library.load_instrument_library(tmp_path, 4000, with_preview=False)
+
+		assert any("exceed the memory limit" in r.message for r in caplog.records)
+
+	def test_in_budget_load_does_not_aggregate_warn (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A load that fits the memory limit must not fire the aggregate warning."""
+		import logging
+		_write_wav_and_sidecar(tmp_path, "a", n_frames=1000)
+		_write_wav_and_sidecar(tmp_path, "b", n_frames=1000)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024, with_preview=False)
+
+		assert not any("exceed the memory limit" in r.message for r in caplog.records)
+
+	def test_single_over_budget_sample_does_not_aggregate_warn (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""One sample that alone exceeds the budget is kept resident (nothing is
+		evicted), so the AGGREGATE eviction warning must NOT fire."""
+		import logging
+		_write_wav_and_sidecar(tmp_path, "big", n_frames=8192)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			subsample.library.load_instrument_library(tmp_path, 4000, with_preview=False)
+
+		assert not any("were evicted" in r.message for r in caplog.records)
 
 	def test_collision_across_banks_is_allowed (self, tmp_path: pathlib.Path) -> None:
 		# Banks are independent InstrumentLibrary instances, so the same

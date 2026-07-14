@@ -1744,12 +1744,13 @@ def _resolve_path_references (
 			continue
 
 		for audio_path in audio_paths:
-			name = audio_path.stem
 
-			# Skip if already in the library — typically because the main
-			# instrument loader already picked this audio up (the predicate
-			# may point at a subtree of cfg.instrument.directory).
-			if instrument_lib.find_by_name(name) is not None:
+			# Skip if this exact file is already loaded — typically because the
+			# main instrument loader already picked it up (the predicate may
+			# point at a subtree of cfg.instrument.directory).  Keyed by PATH,
+			# not stem: two take-folders may each hold "01.wav", and both must
+			# load as distinct samples.
+			if instrument_lib.find_by_path(audio_path) is not None:
 				continue
 
 			record = _load_instrument_from_path(
@@ -1780,14 +1781,14 @@ def _resolve_path_references (
 	# Load path-based instruments and add to library
 	for inst_path in inst_paths:
 		path = pathlib.Path(inst_path)
-		name = path.stem
 
-		# Skip if already in the library
-		existing_id = instrument_lib.find_by_name(name)
+		# Skip if this exact file is already loaded.  Keyed by PATH, not stem,
+		# so a same-stem file from a different folder still loads.
+		existing_id = instrument_lib.find_by_path(path)
 		if existing_id is not None:
 			_log.debug(
 				"Instrument sample %s already in library (id %d) — skipping load from %s",
-				name, existing_id, path,
+				path.stem, existing_id, path,
 			)
 			continue
 
@@ -4498,12 +4499,14 @@ class MidiPlayer:
 					)
 					continue
 
-				# Build the derived Assignment for this sample.  The
-				# select is replaced with an exact stem-name predicate so
-				# the query engine at note-on resolves to THIS sample
-				# regardless of how the template's filter would rank
-				# things this trigger.
-				sample_where  = subsample.query.WherePredicate(name=record.name)
+				# Build the derived Assignment for this sample.  The select is
+				# replaced with an exact-identity predicate (the sample_id) so
+				# the query engine at note-on resolves to THIS sample regardless
+				# of how the template's filter would rank things this trigger.
+				# Pinning by sample_id (not the stem) is essential: stems can
+				# repeat across take-folders, so a name pin would resolve to
+				# whichever twin the default order returns and misroute the zone.
+				sample_where  = subsample.query.WherePredicate(sample_id=record.sample_id)
 				sample_select = (subsample.query.SelectSpec(where=sample_where),)
 
 				derived = subsample.query.Assignment(

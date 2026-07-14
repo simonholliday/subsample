@@ -762,9 +762,11 @@ where:
 - The **regex** form (`regex:`) is `re.fullmatch` with `re.IGNORECASE`. Must
   match the entire stem. YAML tip: prefer double-quoted strings so `"\\d+"`
   is interpreted as `\d+`. Bad regex syntax is surfaced at map-load time.
-- All forms match the **stem only** (filename without extension or path).
-  Use `directory:` for directory-containment filtering and `path:` for
-  exact-file references.
+- All forms match the **stem only** (filename without extension or path). A
+  stem is a label, not a unique id - the same filename can appear in several
+  folders (e.g. per-technique take-folders each holding `01.wav`), so `name:`
+  may match **several** samples. Narrow to one with `directory:` (folder
+  containment), `path:` (an exact file), or `pick:` (choose among the matches).
 
 `name:` (any form) and `path:` are mutually exclusive within a single `where`
 block — use one, not both. Inside a `where` block, only one of the four `name:`
@@ -2166,10 +2168,12 @@ instrument:
 
 On startup, Subsample walks `./samples/captures` recursively, so samples can be
 organised into subdirectories - `kicks/`, `snares/`, `percussion/clangs/`, or
-whatever scheme suits the user. Each audio file is identified by its filename
-stem and treated as one instrument sample; stems must be unique across the
-entire library (subsample fails loudly at startup if two audio files in
-different subdirectories share a stem, since the in-memory index is stem-keyed).
+whatever scheme suits the user. Each audio file is one instrument sample,
+identified by its full file path. The filename stem is a convenient label, not a
+unique id - the same filename can appear in several folders (e.g. per-technique
+take-folders each holding `01.wav`), and those all load as distinct samples. A
+`name:` predicate then matches every sample sharing that stem; narrow to one with
+`directory:`, `path:`, or `pick:` (see the Select section).
 
 The library is self-healing across sessions: if the user renames, moves, or
 removes audio files between runs (for example in an external auditioning tool
@@ -2209,6 +2213,11 @@ The audio file path handles the common case where another application writes
 an audio file without any sidecar. The file-size stability check ensures that
 long recordings still being written are not loaded prematurely - the watcher
 waits until the file size stops changing before attempting to read it.
+
+Deleting or renaming a watched audio file away also takes effect live: its
+sample is removed from the running library, so a re-encoded or deleted file (for
+example `01.wav` re-exported as `01.flac`) no longer lingers as a stale,
+still-selectable sound.
 
 Supported audio formats: WAV, FLAC, AIFF, OGG, MP3/MPEG (anything supported
 by libsndfile).

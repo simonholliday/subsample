@@ -4038,12 +4038,16 @@ class TestZoneTunedRuntime:
 
 		player = self._make_player_with_zone([record])
 
-		# Entries on note 60 point at an Assignment whose select where.name
-		# matches "tonal" exactly.
+		# Entries on note 60 point at an Assignment pinned to THIS sample by
+		# identity (sample_id), not by stem — stems can repeat across take-
+		# folders, so a name pin would misroute the zone to a same-stem twin.
 		entries = player._note_map[(0, 60)]
 		assert len(entries) == 1
 		asgn, _ = entries[0]
-		assert asgn.select[0].where.name == "tonal"
+		assert asgn.select[0].where.sample_id == record.sample_id
+		assert asgn.select[0].where.name is None
+		# The identity pin resolves to exactly this record.
+		assert asgn.select[0].where.matches(record) is True
 		# And that Assignment's process inherits repitch from the template.
 		assert asgn.process.has_repitch()
 

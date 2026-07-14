@@ -81,11 +81,20 @@ class InstrumentWatcher:
 		target_sample_rate: typing.Optional[int] = None,
 		known_audio: typing.Optional[set[pathlib.Path]] = None,
 		with_preview: bool = False,
+		on_sample_removed: typing.Optional[typing.Callable[[pathlib.Path], None]] = None,
 	) -> None:
 
 		self._directory = directory
-		self._known_sidecars: frozenset[pathlib.Path] = frozenset(known_sidecars)
+		# Audio + sidecar paths already loaded, so a spurious create/modify event
+		# for one is ignored.  MUTABLE (guarded by _lock): a deletion discards the
+		# path so a later re-create at it reloads — else a re-encoded/re-synced
+		# startup file at the SAME path would be suppressed forever.
+		self._known_sidecars: set[pathlib.Path] = set(known_sidecars)
 		self._on_sample_loaded = on_sample_loaded
+		# Called with an audio path when its file is deleted or renamed away, so
+		# the removed sample leaves the live subsystems instead of lingering as a
+		# selectable ghost.  None disables deletion handling (add-only watcher).
+		self._on_sample_removed = on_sample_removed
 		self._target_sample_rate = target_sample_rate
 
 		# Whether a runtime-discovered audio file should also (re)generate its
@@ -97,12 +106,12 @@ class InstrumentWatcher:
 		# Derived from known_sidecars by stripping the sidecar suffix when
 		# no explicit set is provided.
 		if known_audio is not None:
-			self._known_audio: frozenset[pathlib.Path] = frozenset(known_audio)
+			self._known_audio: set[pathlib.Path] = set(known_audio)
 		else:
-			self._known_audio = frozenset(
+			self._known_audio = {
 				sc.parent / sc.name[: -len(subsample.cache.SIDECAR_SUFFIX)]
 				for sc in self._known_sidecars
-			)
+			}
 
 		# Active debounce timers keyed by resolved path.
 		# Protected by _lock — modified from the watchdog callback thread and
@@ -134,6 +143,7 @@ class InstrumentWatcher:
 		handler = _InstrumentFileHandler(
 			sidecar_callback=self._on_sidecar_event,
 			audio_callback=self._on_audio_file_event,
+			deleted_callback=self._on_audio_file_deleted,
 		)
 
 		# Type annotated as Any because watchdog has no type stubs;
@@ -355,6 +365,42 @@ class InstrumentWatcher:
 	# ------------------------------------------------------------------
 	# Audio file path — detects files from non-subsample sources
 	# ------------------------------------------------------------------
+
+	def _on_audio_file_deleted (self, audio_path: pathlib.Path) -> None:
+
+		"""Remove a deleted / renamed-away audio file's sample from the live
+		subsystems.
+
+		Runs synchronously on the watchdog dispatch thread — a deletion is final,
+		so it needs none of the debounce/grace/stability wait the add path uses.
+		Gated by the in-flight counter so stop() waits for it, and a no-op once
+		the watcher is stopped or when no removal callback was wired.
+		"""
+
+		if self._on_sample_removed is None:
+			return
+
+		if not self._enter_callback():
+			return
+
+		try:
+			self._on_sample_removed(audio_path)
+
+			# Forget this path so a later re-create at it reloads (the known
+			# sets suppress re-integration of already-loaded files; after a
+			# deletion this path is no longer loaded).  Same resolved forms the
+			# add path and cli seeding use.
+			resolved_audio = audio_path.resolve()
+			sidecar = (audio_path.parent / (audio_path.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
+			with self._lock:
+				self._known_audio.discard(resolved_audio)
+				self._known_sidecars.discard(sidecar)
+		except Exception:
+			_log.exception(
+				"Instrument watcher: error removing deleted sample %s", audio_path,
+			)
+		finally:
+			self._exit_callback()
 
 	def _on_audio_file_event (self, audio_path: pathlib.Path) -> None:
 
@@ -604,11 +650,13 @@ class _InstrumentFileHandler (watchdog.events.FileSystemEventHandler):
 		self,
 		sidecar_callback: typing.Callable[[pathlib.Path], None],
 		audio_callback: typing.Callable[[pathlib.Path], None],
+		deleted_callback: typing.Callable[[pathlib.Path], None],
 	) -> None:
 
 		super().__init__()
 		self._sidecar_callback = sidecar_callback
 		self._audio_callback = audio_callback
+		self._deleted_callback = deleted_callback
 
 	def on_created (self, event: watchdog.events.FileSystemEvent) -> None:
 
@@ -622,16 +670,37 @@ class _InstrumentFileHandler (watchdog.events.FileSystemEventHandler):
 
 		self._dispatch(event)
 
+	def on_deleted (self, event: watchdog.events.FileSystemEvent) -> None:
+
+		"""Forward audio-file deletions so the removed sample leaves the library.
+
+		A file re-encoded in place (``01.wav`` -> ``01.flac``, the old file
+		deleted) or simply removed mid-session would otherwise leave a stale
+		record that still plays its cached audio for a file that is gone.
+		"""
+
+		if event.is_directory:
+			return
+
+		self._dispatch_deletion(pathlib.Path(str(event.src_path)))
+
 	def on_moved (self, event: watchdog.events.FileSystemEvent) -> None:
 
-		"""Forward rename-into-place events using the DESTINATION path.
+		"""Handle rename events: DESTINATION is an add, SOURCE is a removal.
 
 		rsync, SFTP ``.part`` transfers, and atomic-save editors write a temp
 		file (whose suffix is not an audio extension, so no events fire) and
 		then rename it into place — the only event for the final filename is
-		this move.  Without handling it, externally-synced samples never
-		hot-load.  Mirrors _MidiMapFileHandler.on_moved.
+		this move; forward the DESTINATION so externally-synced samples hot-load.
+		The SOURCE is treated as a deletion so a genuine rename-away
+		(``01.wav`` -> ``02.wav``) drops the old record (a temp source is not an
+		audio file, so it is a harmless no-op).  Mirrors _MidiMapFileHandler.on_moved.
 		"""
+
+		if not event.is_directory:
+			src = getattr(event, "src_path", None)
+			if src:
+				self._dispatch_deletion(pathlib.Path(str(src)))
 
 		dest = getattr(event, "dest_path", None)
 
@@ -645,6 +714,18 @@ class _InstrumentFileHandler (watchdog.events.FileSystemEventHandler):
 		"""Route the event to the appropriate callback based on file type."""
 
 		self._dispatch_path(bool(event.is_directory), pathlib.Path(str(event.src_path)))
+
+	def _dispatch_deletion (self, path: pathlib.Path) -> None:
+
+		"""Route a deleted / renamed-away AUDIO path to the deletion callback.
+
+		Sidecar and preview-PNG deletions are ignored — they are managed
+		alongside their audio file; only the audio file's disappearance removes
+		a sample.
+		"""
+
+		if path.suffix.lower() in subsample.cache.AUDIO_EXTENSIONS:
+			self._deleted_callback(path)
 
 	def _dispatch_path (self, is_directory: bool, path: pathlib.Path) -> None:
 
