@@ -10,6 +10,8 @@ Keeps all audio I/O concerns isolated from the rest of the application.
 
 import contextlib
 import dataclasses
+import logging
+import math
 import os
 import pathlib
 import queue
@@ -22,6 +24,9 @@ import numpy
 import pyaudio
 
 import subsample.config
+
+
+_log = logging.getLogger(__name__)
 
 
 # Type returned by PyAudio for device info mappings
@@ -51,7 +56,10 @@ class AudioFileInfo:
 	channels: int
 
 
-def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
+def read_audio_file (
+	path: pathlib.Path,
+	float_ceiling_dbfs: typing.Optional[float] = None,
+) -> AudioFileInfo:
 
 	"""Read an audio file and return its data with format metadata.
 
@@ -63,8 +71,19 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 	returned int array matches the source resolution rather than always being
 	truncated to 16-bit.
 
+	``float_ceiling_dbfs`` guards the one format that can legitimately exceed
+	0 dBFS: 32-bit float / 64-bit double.  Those have no hard full-scale limit,
+	but the internal integer array does, so peaks above full scale would hard-
+	clip on conversion.  When set, a float/double source whose peak exceeds the
+	ceiling is scaled down as a whole (preserving relative dynamics) so its peak
+	lands at the ceiling — no clipping, no lost transients.  Integer-PCM sources
+	are never scaled (a full-scale int sample is the format ceiling and may
+	already be clipped at source).  None (default) keeps the historical hard-clip.
+
 	Args:
-		path: Path to the audio file.
+		path:               Path to the audio file.
+		float_ceiling_dbfs: Ceiling (dBFS, <= 0) for float/double imports, or None
+		                    to disable the scale-to-fit and hard-clip as before.
 
 	Returns:
 		AudioFileInfo with audio array, sample_rate, bit_depth, and channels.
@@ -138,6 +157,26 @@ def read_audio_file (path: pathlib.Path) -> AudioFileInfo:
 			# Either way the scale-and-clamp logic below is identical.
 			float_dtype = "float32" if subtype == "FLOAT" else "float64"
 			float_data, sample_rate = soundfile.read(str(path), dtype=float_dtype, always_2d=True)
+
+			# Clip-safe conversion: float/double have no hard 0 dBFS ceiling but the
+			# int32 array does.  When a ceiling is configured and this source exceeds
+			# it, scale the whole file down (one gain, so inter-hit dynamics survive)
+			# so its peak lands at the ceiling — losslessly, rather than hard-clipping
+			# the loudest transients on the cast below.  Playback re-normalises level
+			# per sample, so the attenuation is inaudible; it only prevents data loss.
+			if float_ceiling_dbfs is not None and float_data.size:
+				peak = float(numpy.max(numpy.abs(float_data)))
+				ceiling_lin = 10.0 ** (float_ceiling_dbfs / 20.0)
+				if peak > ceiling_lin:
+					gain = ceiling_lin / peak
+					float_data = float_data * gain
+					_log.info(
+						"%s: float source peaks at %+.1f dBFS; scaled down %.1f dB to a "
+						"%.1f dBFS ceiling so integer conversion does not clip",
+						path.name, 20.0 * math.log10(peak),
+						-20.0 * math.log10(gain), float_ceiling_dbfs,
+					)
+
 			# Scale [-1.0, 1.0] → int32 full scale.  Multiply in float64 and
 			# clip *after* multiplication so a stray sample > 1.0 (rare in
 			# headroom-mixed files) doesn't wrap on cast; the float32 mantissa

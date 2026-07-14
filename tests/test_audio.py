@@ -777,3 +777,84 @@ class TestNonPcmRead:
 		expected_peak = 0.6 * (2 ** 31 - 1)
 		assert info.audio.max() > expected_peak * 0.95
 		assert info.audio.min() < -expected_peak * 0.95
+
+
+class TestFloatImportCeiling:
+
+	"""read_audio_file's float_ceiling_dbfs scales a hot float/double source down
+	to fit the integer pipeline instead of hard-clipping peaks above 0 dBFS.
+	Integer-PCM sources are never touched."""
+
+	def test_hot_float_scaled_down_not_clipped (self, tmp_path: pathlib.Path) -> None:
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		# A source peaking at +6 dBFS (linear 2.0) — float has the headroom.
+		hot = numpy.array([[2.0, -2.0], [0.5, -0.5]], dtype=numpy.float32)
+		path = tmp_path / "hot.wav"
+		soundfile.write(str(path), hot, 44100, subtype="FLOAT")
+
+		info = subsample.audio.read_audio_file(path, float_ceiling_dbfs=-1.0)
+
+		# Peak now sits at -1 dBFS (0.891 × full scale), NOT clamped at int32 max.
+		expected_peak = (10.0 ** (-1.0 / 20.0)) * (2 ** 31)
+		assert info.audio.max() < numpy.iinfo(numpy.int32).max  # not clipped
+		assert abs(info.audio.max() - expected_peak) < expected_peak * 0.01
+		# The quieter frame is scaled by the same gain (dynamics preserved).
+		ratio = info.audio[0, 0] / info.audio[1, 0]
+		assert abs(ratio - 4.0) < 0.05  # 2.0/0.5 preserved
+
+	def test_float_below_ceiling_untouched (self, tmp_path: pathlib.Path) -> None:
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		# Peak 0.5 is already below the -1 dBFS ceiling — no scaling applied.
+		quiet = numpy.array([[0.5, -0.5], [0.25, -0.25]], dtype=numpy.float32)
+		path = tmp_path / "quiet.wav"
+		soundfile.write(str(path), quiet, 44100, subtype="FLOAT")
+
+		scaled = subsample.audio.read_audio_file(path, float_ceiling_dbfs=-1.0)
+		legacy = subsample.audio.read_audio_file(path, float_ceiling_dbfs=None)
+
+		numpy.testing.assert_array_equal(scaled.audio, legacy.audio)
+		assert abs(scaled.audio.max() - 0.5 * (2 ** 31)) < 0.5 * (2 ** 31) * 0.01
+
+	def test_ceiling_none_still_clips (self, tmp_path: pathlib.Path) -> None:
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		hot = numpy.array([[2.0, -2.0]], dtype=numpy.float32)
+		path = tmp_path / "hot.wav"
+		soundfile.write(str(path), hot, 44100, subtype="FLOAT")
+
+		info = subsample.audio.read_audio_file(path, float_ceiling_dbfs=None)
+
+		# Legacy behaviour: the +6 dBFS peak hard-clips to the int32 rail.
+		assert info.audio[0, 0] == numpy.iinfo(numpy.int32).max
+		assert info.audio[0, 1] == numpy.iinfo(numpy.int32).min
+
+	def test_integer_pcm_never_scaled (self, tmp_path: pathlib.Path) -> None:
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		# A 16-bit PCM source at a high level must be returned verbatim — the
+		# ceiling only guards the float/double conversion, never integer sources.
+		pcm = numpy.array([[30000, -30000], [1000, -1000]], dtype=numpy.int16)
+		path = tmp_path / "pcm16.wav"
+		soundfile.write(str(path), pcm, 44100, subtype="PCM_16")
+
+		info = subsample.audio.read_audio_file(path, float_ceiling_dbfs=-1.0)
+
+		assert info.bit_depth == 16
+		numpy.testing.assert_array_equal(info.audio, pcm)
+
+	def test_hot_double_scaled_down_not_clipped (self, tmp_path: pathlib.Path) -> None:
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		# The 64-bit DOUBLE path (float64) shares the scaling logic but a distinct
+		# read branch — exercise it with a hot source too.
+		hot = numpy.array([[2.0, -2.0], [0.5, -0.5]], dtype=numpy.float64)
+		path = tmp_path / "hot_double.wav"
+		soundfile.write(str(path), hot, 44100, subtype="DOUBLE")
+
+		info = subsample.audio.read_audio_file(path, float_ceiling_dbfs=-1.0)
+
+		expected_peak = (10.0 ** (-1.0 / 20.0)) * (2 ** 31)
+		assert info.audio.max() < numpy.iinfo(numpy.int32).max
+		assert abs(info.audio.max() - expected_peak) < expected_peak * 0.01

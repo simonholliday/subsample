@@ -113,6 +113,7 @@ def _process_chunk (
 	buf: subsample.buffer.CircularBuffer,
 	detector: subsample.detector.LevelDetector,
 	detection_cfg: subsample.config.DetectionConfig,
+	sample_rate: int,
 ) -> typing.Optional[numpy.ndarray]:
 
 	"""Feed one audio chunk through the detection pipeline.
@@ -125,6 +126,7 @@ def _process_chunk (
 		buf:           Circular buffer receiving the audio stream.
 		detector:      Level detector tracking ambient noise and recording state.
 		detection_cfg: Detection settings (SNR threshold, trim params, etc.).
+		sample_rate:   Stream sample rate, used to convert fade_out_ms to samples.
 
 	Returns:
 		Trimmed audio segment as a numpy array, or None if no recording completed.
@@ -146,15 +148,20 @@ def _process_chunk (
 	# The two uses are coordinated, not double-counted.
 	segment = buf.read_range(max(0, start_frame - pre), end_frame)
 
-	amplitude_threshold = detector.ambient_rms * (
-		10.0 ** (detection_cfg.snr_threshold_db / 20.0)
-	)
+	# The trim gate must use the same CLOSE threshold the detector ended on, or
+	# trim would re-cut a decayed tail back up to the louder start level and undo
+	# the point of decoupling the two.  The detector owns that number (built from
+	# release_threshold_db-or-snr and the same ambient) so the two gates cannot drift.
+	amplitude_threshold = detector.trim_amplitude_threshold
+
+	fade_out_samples = round(detection_cfg.fade_out_ms / 1000.0 * sample_rate)
 
 	trimmed = subsample.trim.trim_silence(
 		segment,
 		amplitude_threshold,
 		pre_samples=detection_cfg.trim_pre_samples,
 		post_samples=detection_cfg.trim_post_samples,
+		fade_out_samples=fade_out_samples,
 	)
 
 	if trimmed.size == 0:
@@ -188,7 +195,9 @@ def _process_input_files (
 		print(f"Processing {path.name}…")
 
 		try:
-			file_info = subsample.audio.read_audio_file(path)
+			file_info = subsample.audio.read_audio_file(
+				path, float_ceiling_dbfs=cfg.recorder.audio.float_import_ceiling_dbfs,
+			)
 		except (OSError, ValueError) as exc:
 			_log.warning("Could not read %s: %s — skipping", path.name, exc)
 			continue
@@ -239,7 +248,7 @@ def _process_input_files (
 			for offset in range(0, n_frames, chunk_size):
 				chunk = file_info.audio[offset : offset + chunk_size]
 
-				trimmed = _process_chunk(chunk, buf, detector, cfg.detection)
+				trimmed = _process_chunk(chunk, buf, detector, cfg.detection, file_info.sample_rate)
 
 				if trimmed is not None:
 					writer.enqueue(
@@ -439,7 +448,7 @@ def _run_recorder (
 				# Timeout — loop back to check shutdown_event.
 				continue
 
-			trimmed = _process_chunk(chunk, buf, detector, cfg.detection)
+			trimmed = _process_chunk(chunk, buf, detector, cfg.detection, audio_cfg.sample_rate)
 
 			if trimmed is not None:
 				writer.enqueue(trimmed, datetime.datetime.now())

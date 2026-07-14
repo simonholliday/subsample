@@ -1968,6 +1968,42 @@ for a few seconds before listening for events.
 **File input mode:** Each file is processed at its native sample rate, bit depth,
 and channel count. Detected segments are saved to the output directory.
 
+### Chopping long-decay takes
+
+By default a recording starts when the level rises above the ambient floor by
+`detection.snr_threshold_db` and ends when it falls back below that same
+threshold. That works for short, well-separated hits, but it cuts a long decay
+short - a ride cymbal or gong ringing down over many seconds is chopped off the
+moment it drops near (but not to) the noise floor, often 15 dB above silence.
+
+To capture the full tail, record one hit at a time - strike, let it ring down to
+silence, strike again - and give the recorder a separate, lower threshold for the
+*end* of each hit:
+
+```yaml
+detection:
+  snr_threshold_db: 10.5         # START: still fires only on the loud attack
+  release_threshold_db: 4.0      # END: let the tail ring out to ~4 dB over the floor
+  retrigger_threshold_db: 12.0   # or end the moment the next hit lands, whichever comes first
+  fade_out_ms: 30                # a smooth fade so the tail never clicks
+```
+
+`release_threshold_db` decouples the end from the start: the recording still
+begins on the loud attack, but only ends once the tail has decayed to the quieter
+release level, so the whole ring-down is preserved. `retrigger_threshold_db` is
+the safety net - if a tail is still audible over background noise when you play
+the next hit, the rising attack ends the current sample and opens the next one,
+so hits are never merged. Together they mean each sample ends on *silence or the
+next hit, whichever comes first*. Both default to off, preserving the original
+single-threshold behaviour.
+
+`retrigger_threshold_db` assumes each hit's attack lands quickly - within
+`max(hold_time, 0.1s)`. That fits drums, cymbals, and other fast-attack
+percussion. A sound with a slow or two-stage attack (a soft onset then a louder
+transient a moment later - breath before a flute note, mallet contact before a
+bowl) can read its own transient as a new hit and split one gesture into two; if
+that happens, raise `hold_time` so it spans the attack.
+
 ## Configuration
 
 Subsample always loads `config.yaml.default` as the base, then deep-merges
@@ -1995,6 +2031,7 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
 | `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, ~40-60% smaller, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
+| `recorder.audio.float_import_ceiling_dbfs` | `-1.0` | Ceiling (dBFS) for 32-bit float / 64-bit double files imported via CLI file-input (`subsample <file>`). Peaks above full scale (these formats have no hard 0 dBFS limit) are scaled down to fit instead of hard-clipping on import. Whole-file, so dynamics are preserved; inaudible, since playback re-normalises. Integer sources untouched. `null` clips as before (this was the behaviour in prior versions). Applies to CLI file-input only - `directory:`/OSC/watcher loads read hot floats as-is |
 | `recorder.previews` | `true` | Emit a `.preview.png` thumbnail sidecar (1024x256, ~15-25 KB) and embed a compact `preview` data block in `.analysis.json` so the Supervisor dashboard can render a scalable SVG on demand. See [Sample previews](#sample-previews) |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
@@ -2017,6 +2054,9 @@ weights - is optional and rarely needs changing.
 | `detection.ema_alpha` | `0.1` | Ambient noise adaptation speed (lower = slower) |
 | `detection.trim_pre_samples` | `10` | Samples to keep before signal onset (S-curve fade applied) |
 | `detection.trim_post_samples` | `90` | Samples to keep after signal end (S-curve fade applied) |
+| `detection.release_threshold_db` | `null` | Separate CLOSE threshold (dB above ambient) for ending a recording. Lower than `snr_threshold_db` so a long decay rings out toward silence instead of being cut short; the recording still starts on the louder attack. `null` reuses `snr_threshold_db`. See [Chopping long-decay takes](#chopping-long-decay-takes) |
+| `detection.retrigger_threshold_db` | `null` | While recording, a rise of this many dB over the decaying tail ends the current sample and starts the next - so spaced hits whose tails never fully fade are still separated. `null` disables. Pair with `release_threshold_db`. Assumes each attack lands within `max(hold_time, 0.1s)`; raise `hold_time` for slow/two-stage attacks or they over-split |
+| `detection.fade_out_ms` | `0.0` | Smooth fade (ms) on each sample's trailing edge, masking a cut taken mid-decay or at the next hit. `0.0` keeps the ~2 ms declick |
 | `output.directory` | `./samples/captures` | Where WAV files are saved |
 | `output.filename_format` | `%Y-%m-%d_%H-%M-%S-%3f` | strftime format for filenames (`%3f` = 3-digit milliseconds) |
 | `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |

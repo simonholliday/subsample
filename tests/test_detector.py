@@ -1,5 +1,7 @@
 """Tests for subsample.detector.LevelDetector."""
 
+import typing
+
 import numpy
 import pytest
 
@@ -13,6 +15,9 @@ def _make_detection_config (
 	hold_time: float = 0.5,
 	warmup_seconds: float = 0.0,  # 0 warmup for most tests — skip straight to IDLE
 	ema_alpha: float = 0.5,       # High alpha for fast ambient adjustment in tests
+	release_threshold_db: typing.Optional[float] = None,
+	retrigger_threshold_db: typing.Optional[float] = None,
+	fade_out_ms: float = 0.0,
 ) -> subsample.config.DetectionConfig:
 
 	"""Factory for test DetectionConfig with sensible defaults."""
@@ -24,6 +29,9 @@ def _make_detection_config (
 		ema_alpha=ema_alpha,
 		trim_pre_samples=0,
 		trim_post_samples=0,
+		release_threshold_db=release_threshold_db,
+		retrigger_threshold_db=retrigger_threshold_db,
+		fade_out_ms=fade_out_ms,
 	)
 
 
@@ -34,6 +42,8 @@ def _make_detector (
 	ema_alpha: float = 0.5,
 	sample_rate: int = 1000,
 	chunk_size: int = 100,
+	release_threshold_db: typing.Optional[float] = None,
+	retrigger_threshold_db: typing.Optional[float] = None,
 ) -> subsample.detector.LevelDetector:
 
 	"""Factory for test LevelDetector with sensible defaults."""
@@ -43,6 +53,8 @@ def _make_detector (
 		hold_time=hold_time,
 		warmup_seconds=warmup_seconds,
 		ema_alpha=ema_alpha,
+		release_threshold_db=release_threshold_db,
+		retrigger_threshold_db=retrigger_threshold_db,
 	)
 	return subsample.detector.LevelDetector(cfg, sample_rate, chunk_size)
 
@@ -347,3 +359,195 @@ class TestBufferOverflow:
 		segment = buf.read_range(start_frame, end_frame)
 		assert end_frame - start_frame <= max_frames
 		assert segment.shape[0] == end_frame - start_frame
+
+
+def _at_db_over (ambient_amp: int, db: float) -> int:
+
+	"""Amplitude of a constant chunk sitting `db` dB over an ambient amplitude."""
+
+	return int(round(ambient_amp * (10.0 ** (db / 20.0))))
+
+
+class TestReleaseThreshold:
+
+	"""Decoupled CLOSE threshold (release_threshold_db): a recording opens on the
+	loud snr_threshold_db attack but ends only once the tail falls below the lower
+	release level, so a long decay is preserved instead of cut at the start level."""
+
+	def _open_recording (
+		self, detector: subsample.detector.LevelDetector, ambient_amp: int,
+	) -> None:
+		# Seed ambient, then open with a chunk far above the open threshold.
+		detector.process_chunk(_loud_chunk(amplitude=ambient_amp), current_frame=100)
+		detector.process_chunk(_loud_chunk(amplitude=ambient_amp * 100), current_frame=200)
+		assert detector.state == subsample.detector.DetectorState.RECORDING
+
+	def test_tail_above_release_keeps_recording (self) -> None:
+		# snr=20 opens; release=6 keeps recording while the tail is above 6 dB.
+		# A tail at 12 dB over ambient is below the open threshold but above release,
+		# so with the single-threshold model it would have ended — here it does not.
+		detector = _make_detector(
+			snr_threshold_db=20.0, hold_time=0.5,
+			release_threshold_db=6.0, sample_rate=1000, chunk_size=100,
+		)
+		ambient = 100
+		self._open_recording(detector, ambient)
+
+		tail = _at_db_over(ambient, 12.0)  # above release (6), below open (20)
+		frame = 300
+		for _ in range(10):
+			result = detector.process_chunk(_loud_chunk(amplitude=tail), current_frame=frame)
+			frame += 100
+			assert result is None
+		assert detector.state == subsample.detector.DetectorState.RECORDING
+
+	def test_tail_below_release_ends_after_hold (self) -> None:
+		detector = _make_detector(
+			snr_threshold_db=20.0, hold_time=0.5,
+			release_threshold_db=6.0, sample_rate=1000, chunk_size=100,
+		)
+		ambient = 100
+		self._open_recording(detector, ambient)
+
+		# hold_time 0.5 s at 10 chunks/s = 5 hold chunks.
+		quiet = _at_db_over(ambient, 3.0)  # below release (6)
+		result = None
+		frame = 300
+		for _ in range(6):
+			result = detector.process_chunk(_loud_chunk(amplitude=quiet), current_frame=frame)
+			frame += 100
+			if result is not None:
+				break
+		assert result is not None
+		assert detector.state == subsample.detector.DetectorState.IDLE
+
+	def test_snr_only_ends_at_snr_level (self) -> None:
+		# Backward-compat: with no release set, the CLOSE reuses snr_threshold_db,
+		# so the same 12-dB tail that release=6 preserves ends the recording here.
+		detector = _make_detector(
+			snr_threshold_db=20.0, hold_time=0.3, sample_rate=1000, chunk_size=100,
+		)
+		ambient = 100
+		self._open_recording(detector, ambient)
+
+		tail = _at_db_over(ambient, 12.0)  # below snr (20) → counts as silence
+		result = None
+		frame = 300
+		for _ in range(4):  # 3 hold chunks + margin
+			result = detector.process_chunk(_loud_chunk(amplitude=tail), current_frame=frame)
+			frame += 100
+			if result is not None:
+				break
+		assert result is not None
+		assert detector.state == subsample.detector.DetectorState.IDLE
+
+
+class TestRetrigger:
+
+	"""retrigger_threshold_db: a sharp rise over the decaying tail ends the current
+	sample and immediately opens the next, so spaced hits whose tails never reach
+	silence are still separated (the 'next hit ends the current' guarantee)."""
+
+	def test_next_hit_splits_into_two_segments (self) -> None:
+		detector = _make_detector(
+			snr_threshold_db=20.0, hold_time=0.3,
+			release_threshold_db=6.0, retrigger_threshold_db=12.0,
+			sample_rate=1000, chunk_size=100,
+		)
+		ambient = 100
+		detector.process_chunk(_loud_chunk(amplitude=ambient), current_frame=100)
+
+		segments = []
+		frame = 200
+		# hit 1 attack, then a decay that stays above release (never reaches silence)
+		envelope = [8000, 4000, 2000, 1200, 900, 800, 750, 720]
+		for amp in envelope:
+			r = detector.process_chunk(_loud_chunk(amplitude=amp), current_frame=frame)
+			frame += 100
+			if r is not None:
+				segments.append(r)
+		# hit 2: a re-strike far above the decaying tail follower
+		r = detector.process_chunk(_loud_chunk(amplitude=10000), current_frame=frame)
+		frame += 100
+		if r is not None:
+			segments.append(r)
+
+		assert len(segments) == 1  # the first hit was closed at the second's onset
+		assert detector.state == subsample.detector.DetectorState.RECORDING  # hit 2 now open
+
+	def test_attack_peak_does_not_split_a_single_hit (self) -> None:
+		# The min-segment guard (and the climbing follower) must stop a hit's own
+		# attack peak — a large rise over the quieter onset chunk — from splitting
+		# the hit off from its tail.  One strike must yield exactly one segment.
+		detector = _make_detector(
+			snr_threshold_db=15.0, hold_time=0.3,
+			release_threshold_db=4.0, retrigger_threshold_db=10.0,
+			sample_rate=1000, chunk_size=100,
+		)
+		ambient = 100
+		detector.process_chunk(_loud_chunk(amplitude=ambient), current_frame=100)
+
+		segments = []
+		frame = 200
+		# a modest onset that opens, then a much louder attack peak, then decay
+		# to silence — the classic shape that would false-split without the guard.
+		envelope = [700, 8000, 9000, 6000, 3000, 1500, 800, 400, 200, 150, 120, 100, 100, 100]
+		for amp in envelope:
+			r = detector.process_chunk(_loud_chunk(amplitude=amp), current_frame=frame)
+			frame += 100
+			if r is not None:
+				segments.append(r)
+
+		assert len(segments) == 1
+		assert detector.state == subsample.detector.DetectorState.IDLE
+
+	def test_two_stage_attack_needs_a_hold_that_spans_it (self) -> None:
+		# The re-trigger guard = max(hold_time, 0.1 s).  A two-stage attack — a soft
+		# onset that opens the gate, then a louder transient arriving AFTER the guard
+		# (breath before a flute note, mallet contact before a bowl, a bow scratch) —
+		# reads the transient as a re-strike when hold_time is short, over-splitting
+		# one gesture into two.  The honest precondition: the whole attack must land
+		# within the guard, so slow/two-stage attacks need a longer hold_time.  A
+		# clean fast-attack ride cymbal (the documented target) is unaffected.
+		onset = [700, 700, 700]
+		transient_decay = [9000, 6000, 3000, 1500, 800, 400, 200, 150] + [100] * 10
+
+		def run (hold_time: float) -> int:
+			detector = _make_detector(
+				snr_threshold_db=10.0, hold_time=hold_time,
+				release_threshold_db=4.0, retrigger_threshold_db=12.0,
+				sample_rate=1000, chunk_size=100,
+			)
+			detector.process_chunk(_loud_chunk(amplitude=100), current_frame=100)
+			segments = []
+			frame = 200
+			for amp in onset + transient_decay:
+				r = detector.process_chunk(_loud_chunk(amplitude=amp), current_frame=frame)
+				frame += 100
+				if r is not None:
+					segments.append(r)
+			return len(segments)
+
+		assert run(0.05) >= 2   # short hold → guard too small → the transient false-splits
+		assert run(0.5) == 1    # hold spanning the attack → one gesture, one sample
+
+	def test_no_retrigger_when_disabled (self) -> None:
+		# With retrigger unset, a second hit before silence just resets the hold —
+		# the two hits merge into one recording (historical behaviour).
+		detector = _make_detector(
+			snr_threshold_db=20.0, hold_time=0.3,
+			release_threshold_db=6.0, sample_rate=1000, chunk_size=100,
+		)
+		ambient = 100
+		detector.process_chunk(_loud_chunk(amplitude=ambient), current_frame=100)
+
+		segments = []
+		frame = 200
+		envelope = [8000, 2000, 900, 750, 10000, 3000, 900, 750]  # two hits, no silence between
+		for amp in envelope:
+			r = detector.process_chunk(_loud_chunk(amplitude=amp), current_frame=frame)
+			frame += 100
+			if r is not None:
+				segments.append(r)
+		assert segments == []  # still one open recording, never split
+		assert detector.state == subsample.detector.DetectorState.RECORDING

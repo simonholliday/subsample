@@ -90,6 +90,21 @@ class AudioConfig:
 	(pre-encoded FuMA B-format, reordered/renormalised to AmbiX), "b_ambix"
 	(pre-encoded AmbiX B-format, stored as-is).  None disables ambisonic
 	processing entirely — the default."""
+	float_import_ceiling_dbfs: typing.Optional[float] = -1.0
+	"""Ceiling, in dBFS, for 32-bit float / 64-bit double files imported via the
+	CLI file-input mode (`subsample <file>`).  These formats have no hard 0 dBFS
+	limit, but subsample's internal integer pipeline does, so a float file whose
+	peaks exceed full scale would hard-clip on import.  When set, such a source is
+	scaled down as a whole (preserving relative dynamics between hits) so its peak
+	sits at this ceiling — losslessly, and inaudibly for loudness (playback
+	re-normalises per sample; note that `order: loudest`/`quietest` compare the
+	absolute stored level, so a scaled-down source can rank below an equally-loud
+	unscaled one).  Integer-PCM sources are never touched.  None restores the
+	historical hard-clip.  Default -1.0 leaves 1 dB of headroom.
+
+	Scope: this applies to CLI file-input only.  Files loaded straight into the
+	library (directory:/path:), imported over OSC, or hot-loaded by the watcher are
+	read as-is — chop or pre-normalise a hot float source before loading it that way."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -218,6 +233,37 @@ class DetectionConfig:
 	ema_alpha: float
 	trim_pre_samples: int
 	trim_post_samples: int
+
+	release_threshold_db: typing.Optional[float] = None
+	"""Separate CLOSE threshold, in dB over the pre-hit ambient floor, at which a
+	sounding tail is treated as returned to silence and the recording ends (after
+	the hold_time debounce).  This decouples the end from the start: snr_threshold_db
+	stays the loud OPEN threshold that catches the attack, while a lower
+	release_threshold_db lets a long decay (cymbal, ride, gong) ring out toward the
+	noise floor instead of being cut ~16 dB above it.  Must be below snr_threshold_db
+	(a Schmitt-trigger hysteresis pair: open high, close low).  None (default) makes
+	the end reuse snr_threshold_db - identical to the historical single-threshold
+	behaviour."""
+
+	retrigger_threshold_db: typing.Optional[float] = None
+	"""While already recording, a rise of this many dB over the decaying tail counts
+	as the NEXT hit: the current sample is finalised at the new onset and a fresh
+	recording begins immediately.  This is the "end on silence OR the next hit,
+	whichever comes first" guarantee - and the only thing that ends a tail that
+	background noise holds above release_threshold_db.  None (default) disables
+	re-triggering; a recording then ends only on silence or the buffer cap.
+
+	Assumes each hit's whole attack lands within max(hold_time, 0.1 s): a sound with
+	a slow or two-stage attack (a soft onset, then a louder transient a moment later -
+	breath before a flute note, mallet contact before a bowl) can otherwise read its
+	own late transient as a re-strike and over-split.  Fast-attack percussion (drums,
+	cymbals) is unaffected; for slower material, raise hold_time so it spans the
+	attack.  Typical: 10-15 dB, comfortably above any tail amplitude modulation."""
+
+	fade_out_ms: float = 0.0
+	"""Length of a half-cosine fade applied to each segment's trailing edge, in
+	milliseconds.  Masks a cut taken mid-tail or at the next hit so it never clicks.
+	0.0 (default) keeps the historical ~2 ms declick (trim_post_samples)."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -769,6 +815,11 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"Valid values: 'wav', 'flac'."
 		)
 
+	float_ceiling_raw = audio_raw.get("float_import_ceiling_dbfs", -1.0)
+	float_import_ceiling_dbfs = (
+		None if float_ceiling_raw is None else float(float_ceiling_raw)
+	)
+
 	audio = AudioConfig(
 		sample_rate=int(_require(audio_raw, "sample_rate", "recorder.audio")),
 		bit_depth=int(_require(audio_raw, "bit_depth", "recorder.audio")),
@@ -778,6 +829,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		device=device_raw,
 		audio_format=audio_format,
 		ambisonic_format=ambisonic_format,
+		float_import_ceiling_dbfs=float_import_ceiling_dbfs,
 	)
 
 	# Ambisonic capture requires exactly 4 channels.  Rejecting None (auto-
@@ -816,6 +868,11 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		raise ValueError(f"recorder.audio.channels must be > 0 (got {audio.channels})")
 	if audio.chunk_size <= 0:
 		raise ValueError(f"recorder.audio.chunk_size must be > 0 (got {audio.chunk_size})")
+	if audio.float_import_ceiling_dbfs is not None and audio.float_import_ceiling_dbfs > 0.0:
+		raise ValueError(
+			"recorder.audio.float_import_ceiling_dbfs must be <= 0 dBFS (a ceiling at or "
+			f"below full scale), or null to disable (got {audio.float_import_ceiling_dbfs})"
+		)
 
 	buffer = BufferConfig(
 		max_seconds=int(_require(buffer_raw, "max_seconds", "recorder.buffer")),
@@ -955,6 +1012,9 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	if player.audio.channels is not None and player.audio.channels <= 0:
 		raise ValueError(f"player.audio.channels must be > 0 (got {player.audio.channels})")
 
+	release_threshold_raw = detection_raw.get("release_threshold_db", None)
+	retrigger_threshold_raw = detection_raw.get("retrigger_threshold_db", None)
+
 	detection = DetectionConfig(
 		snr_threshold_db=float(_require(detection_raw, "snr_threshold_db", "detection")),
 		hold_time=float(_require(detection_raw, "hold_time", "detection")),
@@ -962,6 +1022,13 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		ema_alpha=float(_require(detection_raw, "ema_alpha", "detection")),
 		trim_pre_samples=int(detection_raw.get("trim_pre_samples", 10)),
 		trim_post_samples=int(detection_raw.get("trim_post_samples", 90)),
+		release_threshold_db=(
+			None if release_threshold_raw is None else float(release_threshold_raw)
+		),
+		retrigger_threshold_db=(
+			None if retrigger_threshold_raw is None else float(retrigger_threshold_raw)
+		),
+		fade_out_ms=float(detection_raw.get("fade_out_ms", 0.0)),
 	)
 
 	if not (0.0 < detection.ema_alpha <= 1.0):
@@ -970,6 +1037,22 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		)
 	if detection.hold_time <= 0:
 		raise ValueError(f"detection.hold_time must be > 0 (got {detection.hold_time})")
+	if detection.release_threshold_db is not None and not (
+		0.0 < detection.release_threshold_db < detection.snr_threshold_db
+	):
+		raise ValueError(
+			"detection.release_threshold_db must be > 0 and below snr_threshold_db "
+			f"(the CLOSE threshold sits under the OPEN threshold); got "
+			f"release_threshold_db={detection.release_threshold_db}, "
+			f"snr_threshold_db={detection.snr_threshold_db}"
+		)
+	if detection.retrigger_threshold_db is not None and detection.retrigger_threshold_db <= 0:
+		raise ValueError(
+			"detection.retrigger_threshold_db must be > 0 (a positive dB rise over the "
+			f"decaying tail); got {detection.retrigger_threshold_db}"
+		)
+	if detection.fade_out_ms < 0:
+		raise ValueError(f"detection.fade_out_ms must be >= 0 (got {detection.fade_out_ms})")
 
 	output = OutputConfig(
 		directory=str(_require(output_raw, "directory", "output")),

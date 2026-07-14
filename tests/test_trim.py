@@ -274,3 +274,36 @@ class TestTrimStereo:
 		result = subsample.trim.trim_silence(arr, _THRESHOLD)
 
 		assert result.shape[0] == 10
+
+
+class TestFadeOut:
+
+	"""fade_out_samples widens the trailing fade beyond the post_samples declick to
+	a musical length, reaching back into real signal to ring out a mid-decay cut."""
+
+	def test_zero_matches_post_only (self) -> None:
+		# fade_out_samples=0 must reproduce the post_samples-only behaviour exactly.
+		audio = _make_audio(_loud(200))
+		default = subsample.trim.trim_silence(audio, _THRESHOLD, post_samples=10)
+		explicit = subsample.trim.trim_silence(audio, _THRESHOLD, post_samples=10, fade_out_samples=0)
+		numpy.testing.assert_array_equal(default, explicit)
+
+	def test_widens_trailing_fade (self) -> None:
+		# A constant all-loud block: a 100-sample fade attenuates 100 samples of
+		# real signal, where the 10-sample declick leaves them at full amplitude.
+		audio = _make_audio([4000] * 500)
+
+		narrow = subsample.trim.trim_silence(audio, _THRESHOLD, post_samples=10)
+		wide = subsample.trim.trim_silence(audio, _THRESHOLD, post_samples=10, fade_out_samples=100)
+
+		# Same length (both keep the whole block; the fade only scales samples).
+		assert wide.shape[0] == narrow.shape[0]
+		# 50 samples from the end sits inside the wide fade but outside the declick.
+		assert abs(int(wide[-50, 0])) < abs(int(narrow[-50, 0]))
+		# Untouched region well before the fade is identical and at full amplitude.
+		assert int(wide[-200, 0]) == 4000
+		# The fade ramps monotonically down to near-zero at the very end.
+		tail = numpy.abs(wide[-100:, 0].astype(numpy.int64))
+		assert tail[0] > tail[-1]
+		assert numpy.all(numpy.diff(tail) <= 0)
+		assert tail[-1] < 200

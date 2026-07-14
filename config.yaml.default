@@ -201,6 +201,19 @@ recorder:
     #   b_ambix   : Pre-encoded B-format already in AmbiX order — stored as-is.
     #   null or "": Ambisonic processing disabled (default).
 
+    # float_import_ceiling_dbfs: -1.0
+    # Ceiling (dBFS) for 32-bit float / 64-bit double files imported via the CLI
+    # file-input mode (subsample <file>). These formats have no hard 0 dBFS limit,
+    # so their peaks can sit above full scale; subsample's internal integer pipeline
+    # cannot, so such peaks would hard-clip on import. When set, a float/double
+    # source that exceeds the ceiling is scaled down as a whole (relative dynamics
+    # preserved) so its peak lands here — losslessly. Playback re-normalises level
+    # per sample, so the attenuation is inaudible; it only prevents lost transients.
+    # Integer-PCM sources are never touched. Default -1.0 (1 dB of headroom); set
+    # null to hard-clip as before. (Changed default: prior versions always clipped.)
+    # Scope: CLI file-input only — files loaded via directory:/path:, OSC import, or
+    # the watcher are read as-is; chop or pre-normalise a hot float before loading.
+
   buffer:
     max_seconds: 60
     # Length of the circular recording buffer in seconds. Determines how much audio history
@@ -374,6 +387,35 @@ detection:
   # At 44100 Hz, 90 samples ≈ 2.04 ms. Range: 0–100 samples.
   # Smaller = abrupt cutoff. Larger = longer fade-out and post-signal tail.
   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
+
+  # release_threshold_db: null
+  # Separate CLOSE threshold (dB over the ambient floor) for ending a recording.
+  # By default the recording ends when the level falls back below snr_threshold_db
+  # — which cuts a long decay short, well above silence. Set a smaller value here
+  # to let the tail ring out: the recording still STARTS on the loud
+  # snr_threshold_db attack, but only ENDS once the tail has decayed to this
+  # quieter level. Ideal for cymbals, rides, gongs and other long-decay hits.
+  # Must be below snr_threshold_db. Typical: 2–6 dB (closer to 0 preserves more
+  # tail). null (default) reuses snr_threshold_db — unchanged behaviour.
+
+  # retrigger_threshold_db: null
+  # While a recording is open, a rise of this many dB over the decaying tail is
+  # treated as the NEXT hit: the current sample is finished and a new recording
+  # begins at that onset. This is the "end on silence OR the next hit, whichever
+  # comes first" guarantee, and the only thing that separates hits whose tails
+  # never fully fade (a tail sitting on background noise). Pair it with
+  # release_threshold_db when chopping a single take of spaced hits. Typical:
+  # 10–15 dB (well above any tail modulation). null (default) disables it.
+  # Assumes each attack lands within max(hold_time, 0.1s): a slow or two-stage
+  # attack (a soft onset then a louder transient a beat later) can otherwise read
+  # its own transient as a re-strike and over-split. Fast-attack percussion is
+  # fine; for slower material, raise hold_time so it spans the attack.
+
+  # fade_out_ms: 0.0
+  # Length (ms) of a smooth fade applied to each sample's trailing edge — masks a
+  # cut taken part-way down a decay (via release_threshold_db) or at the next hit
+  # (via retrigger_threshold_db) so it never clicks. 0.0 (default) keeps the tiny
+  # ~2 ms declick. Typical for long-decay material: 20–50 ms.
 
 # ---------------------------------------------------------------------------
 # output — WAV file writing

@@ -29,16 +29,48 @@ def _make_detection_cfg (
 	snr_threshold_db: float = 6.0,
 	trim_pre_samples: int = 8,
 	trim_post_samples: int = 8,
+	hold_time: float = 0.1,
+	release_threshold_db: typing.Optional[float] = None,
+	retrigger_threshold_db: typing.Optional[float] = None,
+	fade_out_ms: float = 0.0,
 ) -> subsample.config.DetectionConfig:
 	"""Return a DetectionConfig suitable for unit tests."""
 	return subsample.config.DetectionConfig(
 		snr_threshold_db = snr_threshold_db,
 		ema_alpha        = 0.1,
-		hold_time        = 0.1,
+		hold_time        = hold_time,
 		warmup_seconds   = 0.0,
 		trim_pre_samples = trim_pre_samples,
 		trim_post_samples = trim_post_samples,
+		release_threshold_db = release_threshold_db,
+		retrigger_threshold_db = retrigger_threshold_db,
+		fade_out_ms = fade_out_ms,
 	)
+
+
+def _stream_chunks (
+	detection_cfg: subsample.config.DetectionConfig,
+	blocks: list[tuple[int, int]],
+	sample_rate: int = 1000,
+	chunk_size: int = 100,
+) -> list[numpy.ndarray]:
+	"""Feed (amplitude, n_chunks) blocks through _process_chunk; collect segments.
+
+	Exercises the full cli path (buffer + detector + trim) so the close threshold
+	and fade wiring are covered end-to-end, not just the detector in isolation.
+	"""
+	buf, detector = _make_buffer_and_detector(
+		sample_rate=sample_rate, chunk_size=chunk_size, max_seconds=10,
+		detection_cfg=detection_cfg,
+	)
+	segments: list[numpy.ndarray] = []
+	for amplitude, n_chunks in blocks:
+		for _ in range(n_chunks):
+			chunk = numpy.full((chunk_size, 1), amplitude, dtype=numpy.int16)
+			result = subsample.cli._process_chunk(chunk, buf, detector, detection_cfg, sample_rate)
+			if result is not None:
+				segments.append(result)
+	return segments
 
 
 def _make_buffer_and_detector (
@@ -76,7 +108,7 @@ class TestProcessChunk:
 
 		# Feed many silent chunks — no recording should be detected
 		for _ in range(50):
-			result = subsample.cli._process_chunk(silent_chunk, buf, detector, cfg)
+			result = subsample.cli._process_chunk(silent_chunk, buf, detector, cfg, sample_rate)
 			assert result is None
 
 	def test_loud_burst_returns_segment (self) -> None:
@@ -96,19 +128,19 @@ class TestProcessChunk:
 		# Amplitude 100 gives ~38 dB headroom against the 8000-amplitude signal.
 		ambient = numpy.full((chunk_size, 1), 100, dtype=numpy.int16)
 		for _ in range(30):
-			subsample.cli._process_chunk(ambient, buf, detector, cfg)
+			subsample.cli._process_chunk(ambient, buf, detector, cfg, sample_rate)
 
 		# Feed loud chunks — well above the established ambient floor (~38 dB SNR)
 		loud = numpy.full((chunk_size, 1), 8000, dtype=numpy.int16)
 		for _ in range(10):
-			subsample.cli._process_chunk(loud, buf, detector, cfg)
+			subsample.cli._process_chunk(loud, buf, detector, cfg, sample_rate)
 
 		# Feed trailing silence to close the recording (hold_time expires)
 		# hold_time=0.1s at 44100 Hz / 512 frames ≈ 9 chunks
 		silent = numpy.zeros((chunk_size, 1), dtype=numpy.int16)
 		segments = []
 		for _ in range(30):
-			result = subsample.cli._process_chunk(silent, buf, detector, cfg)
+			result = subsample.cli._process_chunk(silent, buf, detector, cfg, sample_rate)
 			if result is not None:
 				segments.append(result)
 
@@ -132,19 +164,96 @@ class TestProcessChunk:
 		silent = numpy.zeros((chunk_size, 1), dtype=numpy.int16)
 
 		for _ in range(30):
-			subsample.cli._process_chunk(ambient, buf, detector, cfg)
+			subsample.cli._process_chunk(ambient, buf, detector, cfg, sample_rate)
 		for _ in range(10):
-			subsample.cli._process_chunk(loud, buf, detector, cfg)
+			subsample.cli._process_chunk(loud, buf, detector, cfg, sample_rate)
 
 		result = None
 		for _ in range(30):
-			r = subsample.cli._process_chunk(silent, buf, detector, cfg)
+			r = subsample.cli._process_chunk(silent, buf, detector, cfg, sample_rate)
 			if r is not None:
 				result = r
 				break
 
 		assert result is not None, "Expected a segment to be detected but got None"
 		assert isinstance(result, numpy.ndarray)
+
+
+class TestSegmentationIntegration:
+
+	"""End-to-end through _process_chunk: the close threshold and fade wiring, which
+	the detector- and trim-only tests cannot cover because cli re-derives the close
+	threshold independently and feeds BOTH the detector end and the trim gate."""
+
+	def test_release_threshold_preserves_tail_through_trim (self) -> None:
+		# snr=20 opens; a sustained tail at 12 dB over ambient sits below the open
+		# threshold but above release=6.  With release set, BOTH the detector end
+		# AND the trim gate use 6 dB, so the tail survives; with release unset both
+		# use 20 dB and the tail is cut at the start level.  A regression that
+		# reverted cli's trim gate to snr_threshold_db would fail only here.
+		blocks = [(100, 8), (8000, 1), (400, 12), (100, 8)]  # ambient, attack, 12 dB tail, silence
+
+		with_release = _stream_chunks(
+			_make_detection_cfg(
+				snr_threshold_db=20.0, release_threshold_db=6.0, hold_time=0.3,
+				trim_pre_samples=0, trim_post_samples=0,
+			),
+			blocks,
+		)
+		without = _stream_chunks(
+			_make_detection_cfg(
+				snr_threshold_db=20.0, hold_time=0.3,
+				trim_pre_samples=0, trim_post_samples=0,
+			),
+			blocks,
+		)
+
+		len_release = sum(s.shape[0] for s in with_release)
+		len_without = sum(s.shape[0] for s in without)
+		assert len_release > len_without * 3  # the 12 dB tail is retained, not trimmed off
+
+	def test_fade_out_ms_applies_trailing_fade (self) -> None:
+		# fade_out_ms is converted to samples in cli (round(ms/1000 * sample_rate))
+		# and only affects the trailing edge, not the segment length.  A dropped
+		# /1000 or a sample_rate mix-up would fail here.
+		blocks = [(100, 8), (4000, 6), (100, 8)]  # ambient, sustain, silence
+
+		faded = _stream_chunks(
+			_make_detection_cfg(
+				snr_threshold_db=10.0, hold_time=0.3, fade_out_ms=50.0,
+				trim_pre_samples=0, trim_post_samples=0,
+			),
+			blocks,
+		)
+		plain = _stream_chunks(
+			_make_detection_cfg(
+				snr_threshold_db=10.0, hold_time=0.3, fade_out_ms=0.0,
+				trim_pre_samples=0, trim_post_samples=0,
+			),
+			blocks,
+		)
+
+		assert len(faded) == 1 and len(plain) == 1
+		f = faded[0][:, 0]
+		p = plain[0][:, 0]
+		assert f.shape == p.shape                    # fade scales samples, not length
+		assert abs(int(f[-1])) < abs(int(p[-1]))     # faded end is attenuated
+		assert abs(int(f[-1])) < abs(int(p[-1])) // 4  # ramped well down toward zero
+
+	def test_retrigger_splits_through_process_chunk (self) -> None:
+		# The re-trigger split surfaces as two returned segments across successive
+		# _process_chunk calls (not just inside the detector).
+		blocks = [(100, 8), (8000, 1), (2000, 1), (900, 4), (10000, 1), (2000, 1), (900, 4), (100, 8)]
+
+		segments = _stream_chunks(
+			_make_detection_cfg(
+				snr_threshold_db=20.0, release_threshold_db=6.0,
+				retrigger_threshold_db=12.0, hold_time=0.3,
+				trim_pre_samples=0, trim_post_samples=0,
+			),
+			blocks,
+		)
+		assert len(segments) == 2  # the second hit closed the first, then closed on silence
 
 
 class TestParseArgs:

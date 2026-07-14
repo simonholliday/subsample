@@ -20,6 +20,7 @@ def trim_silence (
 	amplitude_threshold: float,
 	pre_samples: int = 0,
 	post_samples: int = 0,
+	fade_out_samples: int = 0,
 ) -> numpy.ndarray:
 
 	"""Trim leading and trailing silence from an audio segment.
@@ -36,6 +37,12 @@ def trim_silence (
 	to fade, so a fixed pre_samples window is ramped instead — gently
 	attenuating the leading samples of real signal to avoid a hard click.
 
+	fade_out_samples widens the trailing fade beyond the post_samples declick to
+	a musical length: the last max(post_samples, fade_out_samples) frames are
+	ramped down, so a cut taken part-way through a decay (a long tail ended at
+	the release level, or a recording ended by the next hit) rings out smoothly
+	instead of clicking.  It reaches back into real signal by design.
+
 	If no sample meets the threshold (which should not normally occur, since
 	the detector validated the segment), the original array is returned
 	unchanged to avoid silently discarding a complete recording.
@@ -45,6 +52,8 @@ def trim_silence (
 		amplitude_threshold: Minimum absolute sample value to be considered signal.
 		pre_samples:         Extra frames to keep before the first loud sample.
 		post_samples:        Extra frames to keep after the last loud sample.
+		fade_out_samples:    Minimum trailing fade length; 0 keeps the post_samples
+		                     declick.  The fade spans max(post_samples, this).
 
 	Returns:
 		Trimmed slice of audio, same dtype, same number of channels.
@@ -89,15 +98,17 @@ def trim_silence (
 		ramp = (1 - numpy.cos(numpy.linspace(0, numpy.pi, fade_in_len))) / 2
 		result[:fade_in_len] = (result[:fade_in_len] * ramp[:, numpy.newaxis]).astype(audio.dtype)
 
-	# Fade out: S-curve over the last post_samples frames of the output.
-	# Using a fixed window (not end_idx - above[-1]) prevents the fade from
-	# being silently skipped when individual sample peaks exceed the threshold
-	# during the detector's hold period — a peak-vs-RMS mismatch that causes
-	# above[-1] to land at the very last sample, giving fade_out_len = 0.
-	# Reserve the fade-in region: a very short all-loud buffer where
-	# fade_in_len + post_samples > len(result) would otherwise double-attenuate
-	# the overlapping samples (two ramps multiplied) and could zero them out.
-	fade_out_len = min(post_samples, max(0, len(result) - fade_in_len))
+	# Fade out: S-curve over the last max(post_samples, fade_out_samples) frames
+	# of the output.  Using a fixed window (not end_idx - above[-1]) prevents the
+	# fade from being silently skipped when individual sample peaks exceed the
+	# threshold during the detector's hold period — a peak-vs-RMS mismatch that
+	# causes above[-1] to land at the very last sample, giving fade_out_len = 0.
+	# fade_out_samples widens this to a musical fade that rings out a cut taken
+	# mid-decay.  Reserve the fade-in region: a very short all-loud buffer where
+	# fade_in_len + window > len(result) would otherwise double-attenuate the
+	# overlapping samples (two ramps multiplied) and could zero them out.
+	fade_out_window = max(post_samples, fade_out_samples)
+	fade_out_len = min(fade_out_window, max(0, len(result) - fade_in_len))
 	if fade_out_len > 1:
 		ramp = (1 + numpy.cos(numpy.linspace(0, numpy.pi, fade_out_len))) / 2
 		result[-fade_out_len:] = (result[-fade_out_len:] * ramp[:, numpy.newaxis]).astype(audio.dtype)

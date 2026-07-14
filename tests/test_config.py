@@ -8,11 +8,41 @@ import typing
 import unittest.mock
 
 import pytest
+import yaml
 
 import subsample.config
 
 
 _DEFAULT_CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+
+
+def _load_with (
+	tmp_path: pathlib.Path,
+	detection: typing.Optional[dict] = None,
+	audio: typing.Optional[dict] = None,
+) -> subsample.config.Config:
+
+	"""Write a complete config with optional detection/audio overrides and load it."""
+
+	cfg: dict = {
+		"recorder": {
+			"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1, "chunk_size": 512},
+			"buffer": {"max_seconds": 60},
+		},
+		"detection": {
+			"snr_threshold_db": 12.0, "hold_time": 0.5,
+			"warmup_seconds": 1.0, "ema_alpha": 0.1,
+		},
+		"output": {"directory": "./samples", "filename_format": "%Y-%m-%d_%H-%M-%S"},
+	}
+	if detection:
+		cfg["detection"].update(detection)
+	if audio:
+		cfg["recorder"]["audio"].update(audio)
+
+	path = tmp_path / "config.yaml"
+	path.write_text(yaml.safe_dump(cfg))
+	return subsample.config.load_config(path)
 
 
 class TestLoadDefault:
@@ -1360,3 +1390,53 @@ class TestBufferFrames:
 
 		assert "[32, 4096]" in str(exc.value)
 		assert "power of two" not in str(exc.value)
+
+
+class TestSegmentationConfig:
+
+	"""Decoupled recording end (release/retrigger/fade) + clip-safe float import."""
+
+	def test_defaults_are_no_ops (self) -> None:
+		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
+
+		# Segmentation extras default off so behaviour is unchanged for everyone.
+		assert cfg.detection.release_threshold_db is None
+		assert cfg.detection.retrigger_threshold_db is None
+		assert cfg.detection.fade_out_ms == 0.0
+		# Float import defaults ON (clip-safe) at -1 dBFS.
+		assert cfg.recorder.audio.float_import_ceiling_dbfs == -1.0
+
+	def test_parse_release_retrigger_fade (self, tmp_path: pathlib.Path) -> None:
+		cfg = _load_with(tmp_path, detection={
+			"snr_threshold_db": 10.5, "release_threshold_db": 4.0,
+			"retrigger_threshold_db": 12.0, "fade_out_ms": 30.0,
+		})
+		assert cfg.detection.release_threshold_db == 4.0
+		assert cfg.detection.retrigger_threshold_db == 12.0
+		assert cfg.detection.fade_out_ms == 30.0
+
+	def test_parse_float_ceiling_and_null (self, tmp_path: pathlib.Path) -> None:
+		assert _load_with(tmp_path, audio={"float_import_ceiling_dbfs": -3.0}) \
+			.recorder.audio.float_import_ceiling_dbfs == -3.0
+		assert _load_with(tmp_path, audio={"float_import_ceiling_dbfs": None}) \
+			.recorder.audio.float_import_ceiling_dbfs is None
+
+	def test_release_must_be_below_snr (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="release_threshold_db"):
+			_load_with(tmp_path, detection={"snr_threshold_db": 10.0, "release_threshold_db": 12.0})
+
+	def test_release_must_be_positive (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="release_threshold_db"):
+			_load_with(tmp_path, detection={"release_threshold_db": 0.0})
+
+	def test_retrigger_must_be_positive (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="retrigger_threshold_db"):
+			_load_with(tmp_path, detection={"retrigger_threshold_db": -1.0})
+
+	def test_fade_out_ms_must_be_non_negative (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="fade_out_ms"):
+			_load_with(tmp_path, detection={"fade_out_ms": -5.0})
+
+	def test_float_ceiling_must_be_non_positive (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="float_import_ceiling_dbfs"):
+			_load_with(tmp_path, audio={"float_import_ceiling_dbfs": 3.0})
