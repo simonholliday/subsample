@@ -1010,6 +1010,39 @@ class TestTransformConfig:
 		assert cfg.transform.auto_pitch          is True
 		assert cfg.transform.target_bpm          == 0.0
 		assert cfg.transform.quantize_resolution == 16
+		assert cfg.transform.tempo_source        == "config"
+
+	def test_tempo_source_parsed (self) -> None:
+
+		"""Both sources parse, and the value is normalised to lower case."""
+
+		import yaml
+		base_raw: dict[str, typing.Any] = yaml.safe_load(
+			self._DEFAULT_CONFIG_PATH.read_text()
+		) or {}
+
+		for value, expected in (("midi", "midi"), ("MIDI", "midi"), ("config", "config")):
+			raw = dict(base_raw)
+			raw["transform"] = {"tempo_source": value}
+
+			cfg = subsample.config._build_config(raw)
+			assert cfg.transform.tempo_source == expected
+
+	def test_invalid_tempo_source_raises (self) -> None:
+
+		"""An unknown or non-string source is rejected by the parser."""
+
+		import yaml
+		base_raw: dict[str, typing.Any] = yaml.safe_load(
+			self._DEFAULT_CONFIG_PATH.read_text()
+		) or {}
+
+		for bad_value in ("clock", "auto", "", 120, True):
+			raw = dict(base_raw)
+			raw["transform"] = {"tempo_source": bad_value}
+
+			with pytest.raises(ValueError, match="tempo_source"):
+				subsample.config._build_config(raw)
 
 	def test_valid_quantize_resolutions (self) -> None:
 

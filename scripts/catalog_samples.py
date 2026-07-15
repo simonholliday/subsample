@@ -77,6 +77,7 @@ import typing
 import pymididefs.notes
 
 import subsample.analysis
+import subsample.audio
 import subsample.cache
 import subsample.config
 import subsample.library
@@ -584,6 +585,16 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 
 	if args.directory is None or two_pass:
 		cfg = subsample.config.load_config(args.config)
+
+	if cfg is not None:
+		# Read hot float sources exactly as the player will.  This script writes
+		# sidecars the player later trusts, so analysing a differently-scaled
+		# signal here would leave it playing audio its own fingerprint doesn't
+		# describe.  Without a config, audio.py already defaults to the same
+		# ceiling AudioConfig declares.
+		subsample.audio.set_float_import_ceiling(
+			cfg.recorder.audio.float_import_ceiling_dbfs
+		)
 
 	if args.directory is not None:
 		directory = args.directory

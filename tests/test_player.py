@@ -1,7 +1,9 @@
 """Tests for subsample.player — MIDI device selection and MidiPlayer lifecycle."""
 
 import dataclasses
+import logging
 import pathlib
+import random
 import threading
 import typing
 import unittest.mock
@@ -19,6 +21,65 @@ import subsample.similarity
 import subsample.transform
 
 import tests.helpers
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers for the MIDI clock tempo follower
+# ---------------------------------------------------------------------------
+
+class _StubClockTracker:
+
+	"""Stands in for _MidiClockTracker so the player's clock branch can be
+	tested without driving real time — the real tracker reads time.monotonic().
+
+	Returns the supplied results in order, then None forever (a live clock that
+	has settled and reports no further change).
+	"""
+
+	def __init__ (self, results: list[typing.Optional[float]]) -> None:
+		self._results = list(results)
+
+	def pulse (self, now: float) -> typing.Optional[float]:
+		return self._results.pop(0) if self._results else None
+
+
+def _clock_pulses (
+	tracker: subsample.player._MidiClockTracker,
+	bpm: float,
+	beats: float,
+	t0: float = 0.0,
+	jitter: float = 0.0,
+	seed: int = 7,
+) -> tuple[float, list[float]]:
+
+	"""Feed `beats` worth of clock pulses at `bpm`; return (end_time, accepted).
+
+	Pulses land on their nominal grid position plus BOUNDED jitter: a real clock
+	wobbles around the true beat, it does not random-walk away from it (modelling
+	it as a random walk makes a rock-steady sequencer look like a drifting one).
+
+	Returns every BPM the tracker accepted, so a test can assert "exactly one"
+	— an extra acceptance is a spurious re-bake of every quantized variant.
+	"""
+
+	rng = random.Random(seed)
+	pulses_per_beat = subsample.player._CLOCK_PULSES_PER_BEAT
+	interval = 60.0 / bpm / pulses_per_beat
+	accepted: list[float] = []
+	count = int(beats * pulses_per_beat)
+
+	for i in range(count):
+		t = t0 + (i + 1) * interval
+
+		if jitter:
+			t += rng.uniform(-jitter, jitter)
+
+		result = tracker.pulse(t)
+
+		if result is not None:
+			accepted.append(result)
+
+	return t0 + count * interval, accepted
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +678,24 @@ class TestStateLock:
 		assert events.count("acquire") == events.count("release")
 		assert player._cc_state[(0, 7)] == 64
 		assert player._cc_omni[7] == 64
+
+	def test_clock_bpm_write_holds_state_lock (self) -> None:
+
+		"""_clock_bpm is written on the rtmidi callback thread and read by the
+		threads that run update_assignments, so the write must hold _state_lock
+		— the same contract as the CC state write, and the same single-writer
+		invariant."""
+
+		player = self._make_player()
+		lock, events = self._make_tracking_lock()
+		player._state_lock = lock
+		player._clock_tracker = _StubClockTracker([130.0])  # type: ignore[assignment]
+
+		player._handle_message(mido.Message("clock"))
+
+		assert player._clock_bpm == 130.0
+		assert events.count("acquire") >= 1
+		assert events.count("acquire") == events.count("release")
 
 	def test_segment_counter_increment_holds_state_lock (self) -> None:
 
@@ -6728,3 +6807,248 @@ class TestCandidateCache:
 		player.update_assignments()
 
 		assert set(player._candidate_cache[id(asgn)]) == {1}
+
+
+class TestMidiClockTracker:
+
+	"""The pure tempo state machine.  Driven entirely by supplied timestamps, so
+	these need no real clock and no time mocking."""
+
+	def test_steady_tempo_accepted_once (self) -> None:
+		tracker = subsample.player._MidiClockTracker()
+
+		_end, accepted = _clock_pulses(tracker, 125.0, beats=60)
+
+		assert accepted == [125.0]
+		assert tracker.accepted_bpm == 125.0
+
+	def test_jittery_clock_does_not_thrash (self) -> None:
+
+		"""A steady tempo delivered by a jittery clock must be accepted ONCE.
+
+		This is what the multi-beat measurement window is for: with a one-beat
+		window a rock-steady 125 measured through +/-1 ms of jitter straddles
+		124/125/126, and every extra acceptance re-bakes every quantized variant
+		for a tempo that never moved.
+		"""
+
+		for seed in (1, 7, 42, 99):
+			tracker = subsample.player._MidiClockTracker()
+
+			_end, accepted = _clock_pulses(tracker, 125.0, beats=60, jitter=0.002, seed=seed)
+
+			assert accepted == [125.0], f"seed {seed} thrashed: {accepted}"
+
+	def test_tempo_between_whole_values_does_not_thrash (self) -> None:
+
+		"""A sequencer sitting exactly between two whole BPM values must settle.
+
+		At a true 125.5 the rounding is decided by jitter, so it lands 125 or 126
+		at random and the dwell is satisfied by chance every few beats.  Without
+		the accepted-value deadband this oscillated forever, re-baking each time.
+		"""
+
+		tracker = subsample.player._MidiClockTracker()
+
+		_end, accepted = _clock_pulses(tracker, 125.5, beats=80, jitter=0.001)
+
+		assert len(accepted) == 1
+		assert tracker.accepted_bpm in (125.0, 126.0)
+
+	def test_real_change_is_adopted (self) -> None:
+		tracker = subsample.player._MidiClockTracker()
+
+		end, first = _clock_pulses(tracker, 125.0, beats=20, jitter=0.001)
+		_end, second = _clock_pulses(tracker, 130.0, beats=20, t0=end, jitter=0.001, seed=3)
+
+		assert first == [125.0]
+		assert second == [130.0]
+		assert tracker.accepted_bpm == 130.0
+
+	def test_smallest_real_change_still_adopted (self) -> None:
+
+		"""The deadband must not be so wide it swallows a genuine 1 BPM change."""
+
+		tracker = subsample.player._MidiClockTracker()
+
+		end, _first = _clock_pulses(tracker, 125.0, beats=20)
+		_end, second = _clock_pulses(tracker, 126.0, beats=20, t0=end)
+
+		assert second == [126.0]
+		assert tracker.accepted_bpm == 126.0
+
+	def test_cold_start_reports_nothing (self) -> None:
+
+		"""Less than a full measurement window — the caller keeps its fallback."""
+
+		tracker = subsample.player._MidiClockTracker()
+
+		_end, accepted = _clock_pulses(tracker, 125.0, beats=2)
+
+		assert accepted == []
+		assert tracker.accepted_bpm is None
+
+	def test_out_of_range_tempo_rejected (self) -> None:
+
+		"""A resuming transport can leave one huge gap between pulses; that is a
+		glitch, not a 5 BPM session."""
+
+		tracker = subsample.player._MidiClockTracker()
+
+		_end, accepted = _clock_pulses(tracker, 5.0, beats=30)
+
+		assert accepted == []
+		assert tracker.accepted_bpm is None
+
+
+class TestMidiClockHandling:
+
+	"""The player's clock branch: gating, state publication, re-bake arming, the
+	mismatch warning, and adoption into the effective tempo."""
+
+	def _make_player (
+		self,
+		tempo_source: str = "config",
+		target_bpm: float = 0.0,
+	) -> subsample.player.MidiPlayer:
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=44100,
+			bit_depth=16,
+			target_bpm=target_bpm,
+			tempo_source=tempo_source,
+		)
+
+	def test_clock_ignored_when_nothing_needs_a_tempo (self) -> None:
+
+		"""An empty map under the default source has no use for a tempo, so the
+		tracker is never built and each pulse costs one attribute test."""
+
+		player = self._make_player()
+
+		assert player._clock_tracker is None
+
+		player._handle_message(mido.Message("clock"))
+
+		assert player._clock_bpm is None
+
+	def test_tracker_armed_when_following_the_clock (self) -> None:
+		player = self._make_player(tempo_source="midi")
+
+		assert player._clock_tracker is not None
+
+	def test_accepted_tempo_is_published_and_arms_a_rebake (self) -> None:
+		player = self._make_player(tempo_source="midi", target_bpm=125.0)
+		player._clock_tracker = _StubClockTracker([None, 130.0])  # type: ignore[assignment]
+
+		try:
+			player._handle_message(mido.Message("clock"))
+
+			assert player._clock_bpm is None          # tracker reported no change
+			assert player._cc_debounce_timer is None  # so nothing was armed
+
+			player._handle_message(mido.Message("clock"))
+
+			assert player._clock_bpm == 130.0
+			# Re-bake is armed through the shared CC debounce timer.
+			assert player._cc_debounce_timer is not None
+		finally:
+			if player._cc_debounce_timer is not None:
+				player._cc_debounce_timer.cancel()
+
+	def test_mismatch_warns_once_and_never_rebakes (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""Under tempo_source: config a disagreeing clock is the papercut this
+		warning exists for — but it must not re-bake, and must not repeat."""
+
+		player = self._make_player(tempo_source="config", target_bpm=125.0)
+		player._map_quantizes = True
+		player._clock_tracker = _StubClockTracker([130.0, 130.0, 130.0])  # type: ignore[assignment]
+
+		with caplog.at_level(logging.WARNING):
+			for _ in range(3):
+				player._handle_message(mido.Message("clock"))
+
+		warnings = [
+			r for r in caplog.records
+			if "MIDI clock" in r.message and "target_bpm" in r.message
+		]
+		assert len(warnings) == 1
+		assert player._clock_bpm == 130.0
+		assert player._cc_debounce_timer is None
+
+	def test_no_mismatch_warning_when_map_does_not_quantize (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""Nothing reads the session tempo, so a disagreement is not a problem."""
+
+		player = self._make_player(tempo_source="config", target_bpm=125.0)
+		player._map_quantizes = False
+		player._clock_tracker = _StubClockTracker([130.0])  # type: ignore[assignment]
+
+		with caplog.at_level(logging.WARNING):
+			player._handle_message(mido.Message("clock"))
+
+		assert not [r for r in caplog.records if "MIDI clock" in r.message]
+
+	def test_no_mismatch_warning_when_quantize_disabled (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""target_bpm 0 means quantizing is off entirely; spec_from_process
+		already says so, and a 'mismatch' with 0 would be noise."""
+
+		player = self._make_player(tempo_source="config", target_bpm=0.0)
+		player._map_quantizes = True
+		player._clock_tracker = _StubClockTracker([130.0])  # type: ignore[assignment]
+
+		with caplog.at_level(logging.WARNING):
+			player._handle_message(mido.Message("clock"))
+
+		assert not [r for r in caplog.records if "MIDI clock" in r.message]
+
+	def test_update_assignments_adopts_the_clock_tempo (self) -> None:
+		player = self._make_player(tempo_source="midi", target_bpm=125.0)
+		player._clock_bpm = 130.0
+
+		player.update_assignments()
+
+		assert player._target_bpm == 130.0
+
+	def test_update_assignments_ignores_the_clock_when_not_following (self) -> None:
+		player = self._make_player(tempo_source="config", target_bpm=125.0)
+		player._clock_bpm = 130.0
+
+		player.update_assignments()
+
+		assert player._target_bpm == 125.0
+
+	def test_fallback_stands_until_a_clock_arrives (self) -> None:
+
+		"""Cold start under tempo_source: midi — target_bpm is the fallback, and
+		without it (0.0) nothing would quantize at all until the transport runs."""
+
+		player = self._make_player(tempo_source="midi", target_bpm=125.0)
+
+		player.update_assignments()
+
+		assert player._target_bpm == 125.0
+
+	def test_adopted_tempo_is_sticky_when_the_clock_stops (self) -> None:
+
+		"""A stopped transport stops the pulses but must not revert the tempo —
+		reverting would re-bake every variant on every transport stop."""
+
+		player = self._make_player(tempo_source="midi", target_bpm=125.0)
+		player._clock_bpm = 130.0
+		player.update_assignments()
+
+		assert player._target_bpm == 130.0
+
+		# Transport stopped: no further pulses, _clock_bpm keeps its last value.
+		player.update_assignments()
+
+		assert player._target_bpm == 130.0

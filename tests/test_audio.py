@@ -672,7 +672,10 @@ class TestNonPcmRead:
 		path = tmp_path / "hot.wav"
 		soundfile.write(str(path), hot, 44100, subtype="FLOAT")
 
-		info = subsample.audio.read_audio_file(path)
+		# Explicitly ceiling-free: the scale-to-fit path would pull this peak below
+		# full scale and the cast could never over-range, so the clamp being tested
+		# here is only reachable with the ceiling off.
+		info = subsample.audio.read_audio_file(path, float_ceiling_dbfs=None)
 
 		# Over-scale samples must clamp to int32's actual bounds, not wrap to
 		# the opposite sign (which would happen on a naked cast of a value
@@ -858,3 +861,101 @@ class TestFloatImportCeiling:
 		expected_peak = (10.0 ** (-1.0 / 20.0)) * (2 ** 31)
 		assert info.audio.max() < numpy.iinfo(numpy.int32).max
 		assert abs(info.audio.max() - expected_peak) < expected_peak * 0.01
+
+
+@pytest.fixture
+def restore_float_ceiling () -> typing.Iterator[None]:
+
+	"""Restore the process-wide float ceiling after a test changes it.
+
+	It is module state, so a leak would quietly alter every later test's audio
+	reads and surface as a failure far from its cause."""
+
+	previous = subsample.audio._FLOAT_IMPORT_CEILING_DBFS
+	try:
+		yield
+	finally:
+		subsample.audio.set_float_import_ceiling(previous)
+
+
+def _write_hot_float (path: pathlib.Path) -> pathlib.Path:
+
+	"""Write a 32-bit float source peaking at +6 dBFS (linear 2.0) — legal for
+	float, above what the integer pipeline can hold."""
+
+	import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+	hot = numpy.array([[2.0, -2.0], [0.5, -0.5]], dtype=numpy.float32)
+	soundfile.write(str(path), hot, 44100, subtype="FLOAT")
+	return path
+
+
+class TestConfiguredFloatImportCeiling:
+
+	"""set_float_import_ceiling() wires the ceiling process-wide so read paths
+	that hold no config — the library loader, the analysis cache, the watcher,
+	OSC import — treat a hot float source exactly as CLI file-input does."""
+
+	def test_configured_ceiling_applies_when_arg_omitted (
+		self, tmp_path: pathlib.Path, restore_float_ceiling: None,
+	) -> None:
+		path = _write_hot_float(tmp_path / "hot.wav")
+		subsample.audio.set_float_import_ceiling(-1.0)
+
+		info = subsample.audio.read_audio_file(path)   # no explicit ceiling
+
+		expected_peak = (10.0 ** (-1.0 / 20.0)) * (2 ** 31)
+		assert info.audio.max() < numpy.iinfo(numpy.int32).max
+		assert abs(info.audio.max() - expected_peak) < expected_peak * 0.01
+
+	def test_unwired_default_matches_config_default (self, tmp_path: pathlib.Path) -> None:
+		"""Nothing wired — a script, a test, direct library use — must still read
+		audio the way a default-config player does.  An unwired reader that
+		analysed a hot float sample differently would write a sidecar the wired
+		player later trusts, leaving it playing audio its fingerprint misdescribes."""
+		path = _write_hot_float(tmp_path / "hot.wav")
+
+		assert subsample.audio._FLOAT_IMPORT_CEILING_DBFS \
+			== subsample.config.AudioConfig.float_import_ceiling_dbfs
+
+		info = subsample.audio.read_audio_file(path)
+
+		expected_peak = (10.0 ** (-1.0 / 20.0)) * (2 ** 31)
+		assert info.audio.max() < numpy.iinfo(numpy.int32).max
+		assert abs(info.audio.max() - expected_peak) < expected_peak * 0.01
+
+	def test_explicit_none_overrides_configured (
+		self, tmp_path: pathlib.Path, restore_float_ceiling: None,
+	) -> None:
+		"""None is a caller forcing the historical clip — it must not be confused
+		with passing nothing, which follows the configured value."""
+		path = _write_hot_float(tmp_path / "hot.wav")
+		subsample.audio.set_float_import_ceiling(-1.0)
+
+		info = subsample.audio.read_audio_file(path, float_ceiling_dbfs=None)
+
+		assert info.audio.max() == numpy.iinfo(numpy.int32).max
+
+	def test_explicit_value_overrides_configured (
+		self, tmp_path: pathlib.Path, restore_float_ceiling: None,
+	) -> None:
+		path = _write_hot_float(tmp_path / "hot.wav")
+		subsample.audio.set_float_import_ceiling(-1.0)
+
+		info = subsample.audio.read_audio_file(path, float_ceiling_dbfs=-6.0)
+
+		expected_peak = (10.0 ** (-6.0 / 20.0)) * (2 ** 31)
+		assert abs(info.audio.max() - expected_peak) < expected_peak * 0.01
+
+	def test_configured_none_clips (
+		self, tmp_path: pathlib.Path, restore_float_ceiling: None,
+	) -> None:
+		"""float_import_ceiling_dbfs: null must reach the read paths as a real
+		opt-out, not be overridden by a stale earlier value."""
+		path = _write_hot_float(tmp_path / "hot.wav")
+		subsample.audio.set_float_import_ceiling(-1.0)
+		subsample.audio.set_float_import_ceiling(None)
+
+		info = subsample.audio.read_audio_file(path)
+
+		assert info.audio.max() == numpy.iinfo(numpy.int32).max

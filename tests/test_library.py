@@ -8,6 +8,7 @@ import numpy
 import pytest
 
 import subsample.analysis
+import subsample.audio
 import subsample.cache
 import subsample.library
 import subsample.query
@@ -1068,6 +1069,28 @@ class TestLoadWavAudio:
 		assert audio is not None
 		assert audio.dtype == numpy.int16
 		assert audio.shape == (512, 1)
+
+	def test_honours_configured_float_ceiling (self, tmp_path: pathlib.Path) -> None:
+		"""A hot 32-bit float sample loaded straight into the library scales to fit
+		instead of hard-clipping — the ceiling is not CLI-import-only."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		path = tmp_path / "hot.wav"
+		soundfile.write(
+			str(path), numpy.array([[2.0], [0.5]], dtype=numpy.float32), 44100, subtype="FLOAT",
+		)
+
+		previous = subsample.audio._FLOAT_IMPORT_CEILING_DBFS
+		subsample.audio.set_float_import_ceiling(-1.0)
+		try:
+			audio = subsample.library.load_wav_audio(path)
+		finally:
+			subsample.audio.set_float_import_ceiling(previous)
+
+		assert audio is not None
+		assert audio.max() < numpy.iinfo(numpy.int32).max               # not clipped
+		expected_peak = (10.0 ** (-1.0 / 20.0)) * (2 ** 31)
+		assert abs(audio.max() - expected_peak) < expected_peak * 0.01
 
 	def test_missing_file_returns_none (
 		self,

@@ -8,6 +8,7 @@ import numpy
 import pytest
 
 import subsample.analysis
+import subsample.audio
 import subsample.cache
 import subsample.library
 import subsample.loopfind
@@ -601,6 +602,31 @@ class TestEnsureSampleAssets:
 		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
 
 		assert result is None
+
+	def test_analysis_honours_configured_float_ceiling (self, tmp_path: pathlib.Path) -> None:
+		"""The analysis read scales a hot float source too, not just the playback
+		read.  These are two separate reads of the same file, and the sidecar's
+		stored level has to describe the audio that actually plays — loudness
+		normalisation divides by it."""
+		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+
+		wav_path = tmp_path / "hot.wav"
+		t = numpy.linspace(0, 0.25, 11025, endpoint=False)
+		soundfile.write(
+			str(wav_path), (numpy.sin(2 * numpy.pi * 440 * t) * 2.0).astype(numpy.float32),
+			44100, subtype="FLOAT",
+		)
+
+		previous = subsample.audio._FLOAT_IMPORT_CEILING_DBFS
+		subsample.audio.set_float_import_ceiling(-1.0)
+		try:
+			result = subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+		finally:
+			subsample.audio.set_float_import_ceiling(previous)
+
+		assert result is not None
+		# The analysed peak sits at the -1 dBFS ceiling, not clipped flat at full scale.
+		assert result.level.peak == pytest.approx(10.0 ** (-1.0 / 20.0), abs=0.01)
 
 
 class TestV11SidecarBackwardCompat:

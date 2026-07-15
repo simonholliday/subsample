@@ -202,17 +202,19 @@ recorder:
     #   null or "": Ambisonic processing disabled (default).
 
     # float_import_ceiling_dbfs: -1.0
-    # Ceiling (dBFS) for 32-bit float / 64-bit double files imported via the CLI
-    # file-input mode (subsample <file>). These formats have no hard 0 dBFS limit,
-    # so their peaks can sit above full scale; subsample's internal integer pipeline
-    # cannot, so such peaks would hard-clip on import. When set, a float/double
-    # source that exceeds the ceiling is scaled down as a whole (relative dynamics
-    # preserved) so its peak lands here — losslessly. Playback re-normalises level
-    # per sample, so the attenuation is inaudible; it only prevents lost transients.
+    # Ceiling (dBFS) for 32-bit float / 64-bit double audio, wherever it is read:
+    # CLI file-input (subsample <file>), library directory:/path: loads, OSC import,
+    # and the watcher. These formats have no hard 0 dBFS limit, so their peaks can
+    # sit above full scale; subsample's internal integer pipeline cannot, so such
+    # peaks would hard-clip on the way in. When set, a float/double source that
+    # exceeds the ceiling is scaled down as a whole (relative dynamics preserved)
+    # so its peak lands here — losslessly. Playback re-normalises level per sample,
+    # so the attenuation is inaudible; it only prevents lost transients.
     # Integer-PCM sources are never touched. Default -1.0 (1 dB of headroom); set
     # null to hard-clip as before. (Changed default: prior versions always clipped.)
-    # Scope: CLI file-input only — files loaded via directory:/path:, OSC import, or
-    # the watcher are read as-is; chop or pre-normalise a hot float before loading.
+    # A hot float sample analysed before this existed keeps its older fingerprint
+    # until re-analysed, so it can play a decibel or two quiet; delete its
+    # .analysis.json sidecar to force the refresh.
 
   buffer:
     max_seconds: 60
@@ -590,6 +592,23 @@ analysis:
 #   # specify an explicit tempo.  (Legacy name `beat_quantize` is also accepted.)
 #   # 0.0 = disabled.  When a MIDI map assignment uses stretch_quantize: { grid: 16 }
 #   # without an explicit tempo, this value is used.
+#   # Also the fallback under tempo_source: midi, until a clock is first seen —
+#   # leave it at 0.0 there and nothing quantizes until the sequencer starts.
+#
+#   tempo_source: config
+#   # Where the quantize processors get their tempo.
+#   #   config = use target_bpm above (a fixed session tempo).
+#   #   midi   = follow the tempo of a MIDI clock arriving on the player's MIDI
+#   #            input, rounded to whole BPM, falling back to target_bpm until a
+#   #            clock is seen.  Use this so changing tempo in your sequencer
+#   #            doesn't silently leave quantized samples snapped to the old grid.
+#   # The detected tempo is adopted only after it holds steady, because every
+#   # change re-bakes every quantized variant.  Once adopted it is sticky: a
+#   # stopped transport keeps the last tempo rather than reverting.  An
+#   # assignment's own `tempo:` still overrides both.  The clock must arrive on
+#   # the same MIDI input as your notes.
+#   # Under `config`, a clock that disagrees with target_bpm logs one warning.
+#   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
 #
 #   quantize_resolution: 16
 #   # Default grid subdivision for stretch_quantize / pad_quantize processors

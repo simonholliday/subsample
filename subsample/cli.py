@@ -796,6 +796,7 @@ def _start_player (
 			limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 			bank_manager=bank_manager,
 			target_bpm=cfg.transform.target_bpm,
+			tempo_source=cfg.transform.tempo_source,
 			output_channels=cfg.player.audio.channels,
 			ambisonic_config=cfg.ambisonic,
 			buffer_frames=cfg.player.audio.buffer_frames,
@@ -856,6 +857,7 @@ def _start_player (
 		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 		bank_manager=bank_manager,
 		target_bpm=cfg.transform.target_bpm,
+		tempo_source=cfg.transform.tempo_source,
 		output_channels=cfg.player.audio.channels,
 		ambisonic_config=cfg.ambisonic,
 		buffer_frames=cfg.player.audio.buffer_frames,
@@ -906,6 +908,12 @@ def _main_impl () -> None:
 	# Wire the carrier cache budget from the resolved config.
 	subsample.transform.set_carrier_cache_budget(
 		int(cfg.transform.carrier_memory_mb * 1024 * 1024)
+	)
+
+	# Wire the float import ceiling so every read path — library, cache, watcher,
+	# OSC import — treats a hot float source the same way, not just CLI import.
+	subsample.audio.set_float_import_ceiling(
+		cfg.recorder.audio.float_import_ceiling_dbfs
 	)
 
 	_log.info(

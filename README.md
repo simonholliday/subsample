@@ -2031,7 +2031,7 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
 | `recorder.audio.chunk_size` | `512` | Frames per buffer read |
 | `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, ~40-60% smaller, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
-| `recorder.audio.float_import_ceiling_dbfs` | `-1.0` | Ceiling (dBFS) for 32-bit float / 64-bit double files imported via CLI file-input (`subsample <file>`). Peaks above full scale (these formats have no hard 0 dBFS limit) are scaled down to fit instead of hard-clipping on import. Whole-file, so dynamics are preserved; inaudible, since playback re-normalises. Integer sources untouched. `null` clips as before (this was the behaviour in prior versions). Applies to CLI file-input only - `directory:`/OSC/watcher loads read hot floats as-is |
+| `recorder.audio.float_import_ceiling_dbfs` | `-1.0` | Ceiling (dBFS) for 32-bit float / 64-bit double audio, wherever it is read - CLI file-input (`subsample <file>`), `directory:`/`path:` loads, OSC import, and the watcher. Peaks above full scale (these formats have no hard 0 dBFS limit) are scaled down to fit instead of hard-clipping on the way in. Whole-file, so dynamics are preserved; inaudible, since playback re-normalises. Integer sources untouched. `null` clips as before (this was the behaviour in prior versions). A hot float sample analysed before this existed can play a decibel or two quiet until re-analysed - delete its `.analysis.json` sidecar to refresh it |
 | `recorder.previews` | `true` | Emit a `.preview.png` thumbnail sidecar (1024x256, ~15-25 KB) and embed a compact `preview` data block in `.analysis.json` so the Supervisor dashboard can render a scalable SVG on demand. See [Sample previews](#sample-previews) |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
@@ -2072,7 +2072,8 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
 | `transform.max_memory_mb` | auto | Memory budget (MB) for transform variants; overrides global split |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
-| `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantized to the target tempo |
+| `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantized to the target tempo. Also the fallback under `tempo_source: midi` until a clock is seen |
+| `transform.tempo_source` | `config` | Where quantize processors get their tempo. `config` uses `target_bpm`; `midi` follows an incoming MIDI clock so changing tempo in your sequencer doesn't leave samples snapped to the old grid. See [Following your sequencer's tempo](#following-your-sequencers-tempo) |
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
 | `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |
 | `transform.max_disk_mb` | auto | Max disk space (MB) for cached variant files; defaults to 3x memory budget. 0 disables |
@@ -2090,6 +2091,44 @@ weights - is optional and rarely needs changing.
 | `ambisonic.pitch_degrees` | `0.0` | Pitch rotation (degrees) applied to the B-format signal before decoding |
 | `ambisonic.roll_degrees` | `0.0` | Roll rotation (degrees) applied to the B-format signal before decoding |
 | `ambisonic.max_order` | `1` | Reserved for future higher-order support; currently must be 1 |
+
+### Following your sequencer's tempo
+
+`stretch_quantize` and `pad_quantize` snap a sample's onsets to a beat grid at
+`transform.target_bpm`. That's a fixed number in `config.yaml`, so if you change
+tempo in your sequencer and forget to change it here, every quantized sample
+keeps snapping to the old grid - it just quietly stops locking to your
+sequence.
+
+Set `tempo_source: midi` and subsample takes the tempo from the MIDI clock
+arriving on the player's MIDI input instead:
+
+```yaml
+transform:
+  target_bpm: 125.0      # fallback, used until a clock is seen
+  tempo_source: midi     # follow the sequencer
+```
+
+Worth knowing:
+
+- **Set `target_bpm` anyway.** It's the fallback before any clock arrives (and
+  if your sequencer never sends one). At `0.0` nothing quantizes until the
+  transport starts.
+- **The clock must reach the same MIDI input as your notes** (`player.midi_device`
+  or your virtual port). Notes on one port and clock on another and it sees
+  nothing.
+- **The tempo is rounded to whole BPM and only adopted once it holds steady.**
+  Every change re-bakes every quantized variant, so a change costs a burst of
+  rendering - one-off per tempo, and cached to disk, so going back to a tempo
+  you've used before is instant. Change tempo while stopped if you can.
+- **It's sticky.** Stopping the transport keeps the last tempo rather than
+  reverting, so stop/start doesn't re-bake anything.
+- **An assignment's own `tempo:` still wins**, as does a CC-bound one. Order is
+  step `tempo:` > MIDI clock > `target_bpm`.
+
+Leave `tempo_source` at `config` and nothing changes - except that if a clock
+*is* present and disagrees with `target_bpm`, you get one warning saying so
+rather than silently wrong timing.
 
 ## Output
 

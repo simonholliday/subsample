@@ -45,6 +45,7 @@ The map defines which MIDI notes (on which channels) trigger which samples.
 See midi-map.yaml.default for the format specification.
 """
 
+import collections
 import dataclasses
 import logging
 import math
@@ -272,6 +273,157 @@ def _quantize_params (
 		bpm = config_bpm
 
 	return (bpm if bpm > 0 else None, grid)
+
+
+# MIDI clock runs at 24 pulses per quarter note, so the span of 24 pulses is
+# exactly one beat.
+_CLOCK_PULSES_PER_BEAT: typing.Final[int] = 24
+
+# How many beats each tempo measurement spans.  This is the jitter defence, and
+# it has to be this wide: clock jitter lands on both ends of the window, so the
+# measurement error is roughly bpm^2 * 2*jitter / (60 * beats).  At 125 BPM with
+# +/-1 ms of per-pulse jitter a ONE-beat window errs by ~0.5 BPM — enough to
+# straddle two whole-BPM values and re-bake every variant on a clock that never
+# changed (measured: a steady 125 accepted 125, then 124, then 125).  Four beats
+# cuts that to ~0.13 BPM, which rounds stably.  The cost is latency: a tempo
+# change is adopted a few beats after it happens, which is the right trade when
+# the alternative is a spurious re-bake.
+_CLOCK_MEASURE_BEATS: typing.Final[int] = 4
+
+# Decimal places the measured tempo is rounded to before use.  0 = whole BPM.
+# This rounding is load-bearing, not cosmetic: the value lands in the variant
+# cache key (via TimeStretch/PadQuantize repr), so an unstable last digit would
+# re-bake every quantize variant for a clock that never actually changed.
+_CLOCK_BPM_DECIMALS: typing.Final[int] = 0
+
+# A measured tempo must repeat for this many consecutive beat measurements
+# before it is accepted.  Rejects a momentary glitch (one bad measurement) from
+# triggering a re-bake.
+_CLOCK_DWELL_BEATS: typing.Final[int] = 2
+
+# How far the measured tempo must move away from the one already in force
+# before a switch is even considered.  The dwell alone cannot save a sequencer
+# sitting exactly BETWEEN two whole-BPM values: at a true 125.5 the rounding is
+# decided by jitter, so it lands 125 or 126 at random and the dwell is satisfied
+# by chance every few beats — measured as an endless 125/126/125/126 re-bake
+# loop.  Requiring the measurement to move more than half a BPM away from the
+# accepted value collapses that to "pick one and stay".  Must stay under 1.0 so
+# a genuine one-BPM change is still adopted.
+_CLOCK_SWITCH_DEADBAND_BPM: typing.Final[float] = 0.75
+
+# Measurements outside these bounds are discarded as glitches (a resuming
+# transport, a dropped pulse) rather than accepted as a tempo.
+_CLOCK_MIN_BPM: typing.Final[float] = 20.0
+_CLOCK_MAX_BPM: typing.Final[float] = 300.0
+
+# How far an incoming clock must sit from transform.target_bpm before it is
+# worth telling the user their quantize grid does not match their sequence.
+_CLOCK_MISMATCH_WARN_BPM: typing.Final[float] = 1.0
+
+
+class _MidiClockTracker:
+
+	"""Derives a stable tempo from MIDI clock pulses.
+
+	A pure state machine — the caller supplies the timestamp, so this is driven
+	entirely by its inputs and is testable without a real clock or a player.
+
+	MIDI clock is 24 PPQN, so a window spanning _CLOCK_MEASURE_BEATS beats gives
+	the tempo as 60 * beats / window_seconds; measuring across several beats is
+	what averages out per-pulse jitter (see _CLOCK_MEASURE_BEATS — a one-beat
+	window is measurably not enough).  The window rolls forward and is measured
+	once per beat (not per pulse — it already spans several beats, so measuring
+	24x more often would only add work on the MIDI callback thread), rounded,
+	and accepted only after it has held for _CLOCK_DWELL_BEATS consecutive
+	measurements.  Every accepted change re-bakes every quantize variant, so
+	rarity matters far more than latency.
+	"""
+
+	def __init__ (self) -> None:
+
+		"""Start with no history and no accepted tempo."""
+
+		self._pulses: collections.deque[float] = collections.deque(
+			maxlen=_CLOCK_PULSES_PER_BEAT * _CLOCK_MEASURE_BEATS + 1,
+		)
+		self._pulse_count: int = 0
+		self._candidate: typing.Optional[float] = None
+		self._candidate_beats: int = 0
+		self._accepted: typing.Optional[float] = None
+
+	@property
+	def accepted_bpm (self) -> typing.Optional[float]:
+
+		"""The tempo currently in force, or None before the first acceptance."""
+
+		return self._accepted
+
+	def pulse (self, now: float) -> typing.Optional[float]:
+
+		"""Feed one clock pulse; return the newly accepted BPM, else None.
+
+		A value is returned ONLY on the pulse that accepts a *changed* tempo, so
+		the caller can treat a non-None return as "the tempo just changed" and
+		arm the expensive re-bake without making the comparison itself.
+
+		Args:
+			now: Monotonic timestamp of this pulse, in seconds.
+
+		Returns:
+			The newly accepted BPM, or None when nothing changed.
+		"""
+
+		self._pulses.append(now)
+		self._pulse_count += 1
+
+		# Need the full multi-beat window before a measurement means anything.
+		if len(self._pulses) <= _CLOCK_PULSES_PER_BEAT * _CLOCK_MEASURE_BEATS:
+			return None
+
+		# Roll the window forward a beat at a time, not a pulse at a time.
+		if self._pulse_count % _CLOCK_PULSES_PER_BEAT != 0:
+			return None
+
+		window_seconds = now - self._pulses[0]
+
+		if window_seconds <= 0.0:
+			return None
+
+		raw_bpm = 60.0 * _CLOCK_MEASURE_BEATS / window_seconds
+
+		if not (_CLOCK_MIN_BPM <= raw_bpm <= _CLOCK_MAX_BPM):
+			return None
+
+		# Hysteresis against the tempo already in force — see
+		# _CLOCK_SWITCH_DEADBAND_BPM.  Rounding a measurement that has not
+		# really moved is what lets a between-values clock re-bake forever.
+		if (
+			self._accepted is not None
+			and abs(raw_bpm - self._accepted) < _CLOCK_SWITCH_DEADBAND_BPM
+		):
+			self._candidate = None
+			self._candidate_beats = 0
+			return None
+
+		bpm = round(raw_bpm, _CLOCK_BPM_DECIMALS)
+
+		# Restart the dwell whenever the measurement moves.
+		if bpm != self._candidate:
+			self._candidate = bpm
+			self._candidate_beats = 1
+			return None
+
+		self._candidate_beats += 1
+
+		if self._candidate_beats < _CLOCK_DWELL_BEATS:
+			return None
+
+		# Held long enough — adopt it, but only report an actual change.
+		if bpm == self._accepted:
+			return None
+
+		self._accepted = bpm
+		return bpm
 
 
 def _build_variant_lookup (
@@ -2661,6 +2813,37 @@ def _collect_mapped_ccs (
 	return ccs
 
 
+def _uses_quantize (
+	note_map: NoteMap,
+	zone_templates: tuple["ZoneTemplate", ...] = (),
+) -> bool:
+
+	"""Return True if any assignment declares a quantize processor.
+
+	Mirrors _collect_mapped_ccs's walk — every velocity layer of every note plus
+	the zone templates, whose concrete entries do not exist until
+	_materialize_zones runs.
+
+	Gates the MIDI-clock tempo work: with no quantize step anywhere in the map
+	the session tempo changes nothing, so the clock is not worth tracking and a
+	clock/target_bpm mismatch is not worth warning about.
+	"""
+
+	def _quantizes (process: subsample.query.ProcessSpec) -> bool:
+		return process.has_stretch_quantize() or process.has_pad_quantize()
+
+	for entries in note_map.values():
+		for assignment, _ in entries:
+			if _quantizes(assignment.process):
+				return True
+
+	for template in zone_templates:
+		if _quantizes(template.process):
+			return True
+
+	return False
+
+
 class MidiPlayer:
 
 	"""Listens for MIDI messages and plays back instrument samples polyphonically.
@@ -2709,6 +2892,7 @@ class MidiPlayer:
 		limiter_ceiling_db: float = -0.1,
 		bank_manager: typing.Optional[subsample.bank.BankManager] = None,
 		target_bpm: float = 0.0,
+		tempo_source: str = "config",
 		output_channels: typing.Optional[int] = None,
 		ambisonic_config: typing.Optional[subsample.config.AmbisonicConfig] = None,
 		buffer_frames: typing.Optional[int] = None,
@@ -2720,6 +2904,7 @@ class MidiPlayer:
 		self._instrument_library = instrument_library
 		self._similarity_matrix  = similarity_matrix
 		self._target_bpm         = target_bpm
+		self._tempo_source       = tempo_source
 
 		# Bank manager: when provided, the player delegates library, similarity,
 		# and transform lookups to the active bank.  When None, the player uses
@@ -2874,6 +3059,27 @@ class MidiPlayer:
 		# Includes zone-tuned template process chains, whose concrete entries
 		# don't exist in midi_map yet.
 		self._mapped_ccs: set[int] = _collect_mapped_ccs(midi_map, self._zone_templates)
+
+		# MIDI clock tempo tracking.  Armed only when the map actually quantizes
+		# (nothing else consumes the session tempo) or when the user asked to
+		# follow the clock — otherwise every clock pulse is dropped on one
+		# attribute test.
+		#
+		# The tracker is driven from the rtmidi callback thread and publishes the
+		# OBSERVED tempo into _clock_bpm.  That is deliberately NOT the tempo
+		# specs are built from: _update_assignments_locked adopts it into
+		# _target_bpm, so the trigger path and the variant pre-compute always
+		# read one stable value.  A live-read BPM would let a tempo change land
+		# between pre-bake and note-on and turn every pre-baked variant into a
+		# cache miss (variant_cache_key hashes target_bpm via the step repr).
+		self._map_quantizes: bool = _uses_quantize(midi_map, self._zone_templates)
+		self._clock_tracker: typing.Optional[_MidiClockTracker] = (
+			_MidiClockTracker()
+			if self._map_quantizes or self._tempo_source == "midi"
+			else None
+		)
+		self._clock_bpm: typing.Optional[float] = None
+		self._clock_warned_bpm: typing.Optional[float] = None
 
 		# Immutable snapshot of the top-level (global) rules.  `directory:`
 		# programs reuse these; a `map:` preset switch overwrites the active
@@ -3569,6 +3775,128 @@ class MidiPlayer:
 		with self._state_lock:
 			return dict(self._cc_state), dict(self._cc_omni)
 
+	def _sync_clock_tracker (self) -> None:
+
+		"""Create or drop the MIDI clock tracker to match the current rules.
+
+		Called after every rule swap: a map that just gained a quantize step
+		needs the clock tracked, one that lost its last quantize step does not
+		(and should stop paying for it on the MIDI callback thread).
+
+		An existing tracker is kept as-is rather than rebuilt, so a rule swap
+		never discards a tempo already measured and force a re-measure.  The
+		observed _clock_bpm is left alone either way — it is sticky, so a map
+		that later regains a quantize step can adopt the last known tempo
+		immediately instead of waiting for the tracker to re-measure.
+		"""
+
+		needed = self._map_quantizes or self._tempo_source == "midi"
+
+		if needed:
+			if self._clock_tracker is None:
+				self._clock_tracker = _MidiClockTracker()
+		else:
+			self._clock_tracker = None
+
+	def _handle_clock (self) -> None:
+
+		"""Fold one MIDI clock pulse into the tempo tracker.
+
+		Runs on the rtmidi callback thread at 24 pulses per beat, so the common
+		path stays trivial: feed the tracker and return.  The tracker returns a
+		value only when a *changed* tempo has been measured and held (see
+		_MidiClockTracker) — a real tempo change, not a pulse.
+
+		Lock discipline: takes _state_lock alone, the same pattern as the CC
+		state write, and this thread is its single writer.  It must never take
+		_rules_lock — that is held across query and variant work, so blocking
+		the MIDI thread on it would stall dispatch for a whole reload.
+		"""
+
+		tracker = self._clock_tracker
+
+		if tracker is None:
+			return
+
+		accepted = tracker.pulse(time.monotonic())
+
+		if accepted is None:
+			return
+
+		with self._state_lock:
+			self._clock_bpm = accepted
+
+		if self._tempo_source == "midi":
+			self._arm_tempo_rebake(accepted)
+			return
+
+		self._warn_clock_mismatch(accepted)
+
+	def _arm_tempo_rebake (self, bpm: float) -> None:
+
+		"""Schedule the re-evaluation that adopts a newly detected tempo.
+
+		Reuses the CC debounce timer rather than adding a second one: both want
+		exactly the same update_assignments(), one timer keeps one teardown
+		path, and a tempo change landing next to a knob move coalesces into a
+		single re-bake instead of two.
+
+		Only ever reached on an accepted tempo CHANGE, never per pulse — each
+		rearm starts a Timer thread, which is fine at tempo-change rates and
+		would be pathological at 24 PPQN.
+		"""
+
+		_log.info(
+			"MIDI clock: tempo is now %g BPM — re-baking quantized variants",
+			bpm,
+		)
+
+		with self._cc_debounce_lock:
+			if self._cc_debounce_timer is not None:
+				self._cc_debounce_timer.cancel()
+
+			self._cc_debounce_timer = threading.Timer(
+				_CC_DEBOUNCE_SECONDS,
+				self._try_update_assignments,
+				args=(f"MIDI clock {bpm:g} BPM",),
+			)
+			self._cc_debounce_timer.start()
+
+	def _warn_clock_mismatch (self, bpm: float) -> None:
+
+		"""Warn when the incoming clock disagrees with the configured tempo.
+
+		The papercut this exists for: change the sequencer's tempo, forget to
+		change transform.target_bpm, and every quantized sample silently snaps
+		to a grid that no longer matches the sequence.
+
+		Only fires when the map actually quantizes (nothing else reads the
+		session tempo), and only once per distinct offending tempo so a stable
+		mismatch is said once.  Silent when target_bpm is 0 — quantizing is
+		disabled entirely there, and spec_from_process already reports that.
+
+		Reads and writes _clock_warned_bpm without a lock: only the rtmidi
+		callback thread touches it.
+		"""
+
+		if not self._map_quantizes or self._target_bpm <= 0.0:
+			return
+
+		if abs(bpm - self._target_bpm) < _CLOCK_MISMATCH_WARN_BPM:
+			return
+
+		if self._clock_warned_bpm == bpm:
+			return
+
+		self._clock_warned_bpm = bpm
+
+		_log.warning(
+			"MIDI clock is %g BPM but transform.target_bpm is %g — quantized "
+			"samples will not lock to your sequence.  Set transform.tempo_source: "
+			"midi to follow the clock, or update target_bpm.",
+			bpm, self._target_bpm,
+		)
+
 	def _safe_handle_message (self, msg: mido.Message) -> None:
 
 		"""Defensive wrapper around ``_handle_message`` for rtmidi callback dispatch.
@@ -3654,6 +3982,15 @@ class MidiPlayer:
 		msg.velocity), then runs the query/variant lookup against that layer's
 		Assignment.  Everything else is logged at DEBUG and ignored.
 		"""
+
+		# MIDI clock first: it is by far the highest-rate message (24 per beat,
+		# ~50/sec at 125 BPM), and mido's rtmidi backend does not filter timing
+		# messages, so they arrive whether or not anything wants them.  Handling
+		# them here costs the note path one string compare and saves every clock
+		# pulse from falling through to the DEBUG log at the bottom.
+		if msg.type == "clock":
+			self._handle_clock()
+			return
 
 		# note_off (and note_on with velocity=0, which mido normalises to note_off)
 		# ends every matching non-one_shot voice — see _release_held for the
@@ -4732,6 +5069,29 @@ class MidiPlayer:
 
 		"""Body of update_assignments — caller must hold _rules_lock."""
 
+		# Adopt a clock-detected tempo BEFORE anything reads _target_bpm — the
+		# candidate cache below resolves quantized_beats through
+		# _build_beats_resolver, and the variant pre-compute builds specs, both
+		# off this value.  Doing it here, under _rules_lock, is what keeps the
+		# trigger path and the pre-bake agreeing on one BPM: the clock publishes
+		# into _clock_bpm continuously, but the tempo that reaches a cache key
+		# only ever moves at a re-evaluation.
+		#
+		# Sticky by design: a stopped transport stops the pulses but leaves
+		# _clock_bpm at the last measured tempo, so nothing re-bakes and the
+		# grid stays where the sequencer left it.  target_bpm remains the
+		# fallback until a clock is ever seen.
+		if self._tempo_source == "midi":
+			with self._state_lock:
+				clock_bpm = self._clock_bpm
+
+			if clock_bpm is not None and clock_bpm != self._target_bpm:
+				_log.info(
+					"Session tempo %g → %g BPM (from MIDI clock)",
+					self._target_bpm, clock_bpm,
+				)
+				self._target_bpm = clock_bpm
+
 		# Re-derive zone-tuned entries against the current library before
 		# the candidate cache and variant pre-computation walk the NoteMap.
 		# Cheap when no templates are declared (early return inside).
@@ -5062,6 +5422,7 @@ class MidiPlayer:
 		old_note_map       = self._note_map
 		old_zone_templates = self._zone_templates
 		old_mapped_ccs     = self._mapped_ccs
+		old_map_quantizes  = self._map_quantizes
 
 		# Apply the new configuration first so update_assignments()
 		# validates against what the player would actually run with.  This
@@ -5071,6 +5432,12 @@ class MidiPlayer:
 		self._note_map       = dict(base_note_map)
 		self._zone_templates = zone_templates
 		self._mapped_ccs     = mapped_ccs
+
+		# Derived from the incoming rules rather than threaded through every
+		# caller, so a preset switch back to the top-level rules re-derives it
+		# from those rules automatically.
+		self._map_quantizes  = _uses_quantize(base_note_map, zone_templates)
+		self._sync_clock_tracker()
 
 		try:
 			# update_assignments() calls _materialize_zones() at its top,
@@ -5091,6 +5458,8 @@ class MidiPlayer:
 			self._note_map       = old_note_map
 			self._zone_templates = old_zone_templates
 			self._mapped_ccs     = old_mapped_ccs
+			self._map_quantizes  = old_map_quantizes
+			self._sync_clock_tracker()
 			raise
 
 		# Validation succeeded — clear caches whose entries reference the

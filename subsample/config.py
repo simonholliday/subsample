@@ -19,6 +19,13 @@ import yaml
 _log = logging.getLogger(__name__)
 
 
+SUPPORTED_TEMPO_SOURCES: frozenset[str] = frozenset({"config", "midi"})
+"""Valid values for transform.tempo_source — where the quantize processors get
+their target tempo.  "config" reads the fixed transform.target_bpm; "midi"
+follows an incoming MIDI clock on the player's input (falling back to
+target_bpm until a clock is seen)."""
+
+
 # ---------------------------------------------------------------------------
 # Memory auto-detection
 # ---------------------------------------------------------------------------
@@ -91,10 +98,11 @@ class AudioConfig:
 	(pre-encoded AmbiX B-format, stored as-is).  None disables ambisonic
 	processing entirely — the default."""
 	float_import_ceiling_dbfs: typing.Optional[float] = -1.0
-	"""Ceiling, in dBFS, for 32-bit float / 64-bit double files imported via the
-	CLI file-input mode (`subsample <file>`).  These formats have no hard 0 dBFS
-	limit, but subsample's internal integer pipeline does, so a float file whose
-	peaks exceed full scale would hard-clip on import.  When set, such a source is
+	"""Ceiling, in dBFS, for 32-bit float / 64-bit double audio wherever subsample
+	reads it — CLI file-input (`subsample <file>`), library `directory:`/`path:`
+	loads, OSC import, and the watcher.  These formats have no hard 0 dBFS limit,
+	but subsample's internal integer pipeline does, so a float file whose peaks
+	exceed full scale would hard-clip on the way in.  When set, such a source is
 	scaled down as a whole (preserving relative dynamics between hits) so its peak
 	sits at this ceiling — losslessly, and inaudibly for loudness (playback
 	re-normalises per sample; note that `order: loudest`/`quietest` compare the
@@ -102,9 +110,10 @@ class AudioConfig:
 	unscaled one).  Integer-PCM sources are never touched.  None restores the
 	historical hard-clip.  Default -1.0 leaves 1 dB of headroom.
 
-	Scope: this applies to CLI file-input only.  Files loaded straight into the
-	library (directory:/path:), imported over OSC, or hot-loaded by the watcher are
-	read as-is — chop or pre-normalise a hot float source before loading it that way."""
+	A hot float sample that was analysed before this setting existed keeps its
+	older fingerprint until something re-analyses it — the sidecar is keyed on the
+	file's bytes, and those don't change — so it can play a decibel or two quiet in
+	the meantime.  Deleting its .analysis.json sidecar forces the refresh."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -387,7 +396,23 @@ class TransformConfig:
 	processors when an assignment does not give its own ``tempo:``.  0.0 means
 	no default — those processors are then skipped unless they carry an explicit
 	tempo.  There is no auto-stretch-every-rhythmic-sample behaviour; quantizing
-	only happens for assignments that declare the processor."""
+	only happens for assignments that declare the processor.
+
+	Also the fallback when ``tempo_source: midi`` is set but no clock has been
+	seen yet (cold start, or the sequencer is not sending one).  Leaving it at
+	0.0 in that case means the quantize step is skipped until the first clock
+	arrives, so set a sensible session tempo even when following the clock."""
+
+	tempo_source: str = "config"
+	"""Where the quantize processors get their target tempo.
+
+	``config`` (default) uses ``target_bpm`` — a fixed session tempo.
+	``midi`` follows the tempo of an incoming MIDI clock on the player's MIDI
+	input, rounded to whole BPM, and falls back to ``target_bpm`` until a clock
+	is seen.  The detected tempo is adopted only when it changes (and only after
+	it holds steady), because each change re-bakes every quantize variant.  Once
+	adopted it is sticky: a stopped transport keeps the last detected tempo
+	rather than reverting.  An assignment's own ``tempo:`` still overrides both."""
 
 	quantize_resolution: int = 16
 	"""Grid subdivision for beat-quantized time-stretch.
@@ -1114,10 +1139,28 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"(got {quantize_resolution})"
 		)
 
+	tempo_source_raw = transform_raw.get("tempo_source", "config")
+
+	if not isinstance(tempo_source_raw, str):
+		raise ValueError(
+			f"transform.tempo_source must be a string "
+			f"(got {type(tempo_source_raw).__name__}: {tempo_source_raw!r})"
+		)
+
+	tempo_source = tempo_source_raw.lower()
+
+	if tempo_source not in SUPPORTED_TEMPO_SOURCES:
+		raise ValueError(
+			f"transform.tempo_source {tempo_source_raw!r} is not supported.  "
+			f"Valid values: {sorted(SUPPORTED_TEMPO_SOURCES)}.  "
+			f"'config' uses transform.target_bpm; 'midi' follows an incoming MIDI clock."
+		)
+
 	transform = TransformConfig(
 		max_memory_mb       = float(transform_raw.get("max_memory_mb", 50.0)),
 		auto_pitch          = bool(transform_raw.get("auto_pitch",     True)),
 		target_bpm          = float(transform_raw.get("target_bpm",    0.0)),
+		tempo_source        = tempo_source,
 		quantize_resolution = quantize_resolution,
 		variant_cache_dir   = str(transform_raw.get("variant_cache_dir", "samples/variant-cache") or ""),
 		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),

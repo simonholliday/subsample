@@ -56,9 +56,47 @@ class AudioFileInfo:
 	channels: int
 
 
+# Process-wide ceiling for float/double imports, applied by read_audio_file()
+# whenever a caller doesn't pass one of its own.  cli.py sets it from the resolved
+# config at startup; it seeds from AudioConfig's own declared default (rather than
+# a literal repeated here) so a caller that never wires it — a script, a test —
+# still reads audio the same way a default-config player does.  That consistency
+# is not cosmetic: an unwired reader that analyses a hot float sample writes a
+# sidecar the wired player will later trust, so a mismatch here poisons the cache.
+_FLOAT_IMPORT_CEILING_DBFS: typing.Optional[float] = subsample.config.AudioConfig.float_import_ceiling_dbfs
+
+
+class _Unset:
+
+	"""Sentinel type: the caller named no ceiling, so the configured one applies.
+
+	Distinct from None, which is a caller explicitly asking for the historical
+	hard-clip whatever happens to be configured."""
+
+
+_UNSET = _Unset()
+
+
+def set_float_import_ceiling (dbfs: typing.Optional[float]) -> None:
+
+	"""Set the process-wide float/double import ceiling.  Called from cli.py once
+	the config is loaded.
+
+	Every path that reads an audio file — the library loader, the analysis cache,
+	the watcher, OSC import — funnels through read_audio_file(), so wiring the
+	value here applies it to all of them consistently.  That consistency is the
+	point: a sample's analysis and its playback audio are two separate reads of
+	the same file, and they must agree, or the stored fingerprint (and the RMS
+	that drives loudness normalisation) would describe audio that isn't what
+	plays.  None restores the historical hard-clip."""
+
+	global _FLOAT_IMPORT_CEILING_DBFS
+	_FLOAT_IMPORT_CEILING_DBFS = dbfs
+
+
 def read_audio_file (
 	path: pathlib.Path,
-	float_ceiling_dbfs: typing.Optional[float] = None,
+	float_ceiling_dbfs: typing.Union[float, None, _Unset] = _UNSET,
 ) -> AudioFileInfo:
 
 	"""Read an audio file and return its data with format metadata.
@@ -78,12 +116,14 @@ def read_audio_file (
 	ceiling is scaled down as a whole (preserving relative dynamics) so its peak
 	lands at the ceiling — no clipping, no lost transients.  Integer-PCM sources
 	are never scaled (a full-scale int sample is the format ceiling and may
-	already be clipped at source).  None (default) keeps the historical hard-clip.
+	already be clipped at source).  Omitted, it follows the process-wide ceiling
+	set by set_float_import_ceiling(); None forces the historical hard-clip.
 
 	Args:
 		path:               Path to the audio file.
-		float_ceiling_dbfs: Ceiling (dBFS, <= 0) for float/double imports, or None
-		                    to disable the scale-to-fit and hard-clip as before.
+		float_ceiling_dbfs: Ceiling (dBFS, <= 0) for float/double imports.  Omit to
+		                    follow the configured process-wide ceiling; None disables
+		                    the scale-to-fit and hard-clips as before.
 
 	Returns:
 		AudioFileInfo with audio array, sample_rate, bit_depth, and channels.
@@ -92,6 +132,13 @@ def read_audio_file (
 		ValueError: If the file format is not supported by either reader.
 		OSError:    If the file cannot be opened or read.
 	"""
+
+	# An explicit argument always wins (including None, meaning "clip as before");
+	# only an absent one falls back to the configured process-wide ceiling.
+	ceiling_dbfs = (
+		_FLOAT_IMPORT_CEILING_DBFS if isinstance(float_ceiling_dbfs, _Unset)
+		else float_ceiling_dbfs
+	)
 
 	# Fast path: WAV via stdlib (avoids soundfile overhead and preserves
 	# the original bit depth for 16/24/32-bit WAV files).
@@ -164,9 +211,9 @@ def read_audio_file (
 			# so its peak lands at the ceiling — losslessly, rather than hard-clipping
 			# the loudest transients on the cast below.  Playback re-normalises level
 			# per sample, so the attenuation is inaudible; it only prevents data loss.
-			if float_ceiling_dbfs is not None and float_data.size:
+			if ceiling_dbfs is not None and float_data.size:
 				peak = float(numpy.max(numpy.abs(float_data)))
-				ceiling_lin = 10.0 ** (float_ceiling_dbfs / 20.0)
+				ceiling_lin = 10.0 ** (ceiling_dbfs / 20.0)
 				if peak > ceiling_lin:
 					gain = ceiling_lin / peak
 					float_data = float_data * gain
@@ -174,7 +221,7 @@ def read_audio_file (
 						"%s: float source peaks at %+.1f dBFS; scaled down %.1f dB to a "
 						"%.1f dBFS ceiling so integer conversion does not clip",
 						path.name, 20.0 * math.log10(peak),
-						-20.0 * math.log10(gain), float_ceiling_dbfs,
+						-20.0 * math.log10(gain), ceiling_dbfs,
 					)
 
 			# Scale [-1.0, 1.0] → int32 full scale.  Multiply in float64 and

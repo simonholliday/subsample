@@ -340,7 +340,18 @@ class TestCsvOutput:
 		_make_pitched_sample(tmp_path, "tone")
 
 		def fake_load_config (path: typing.Optional[pathlib.Path] = None) -> types.SimpleNamespace:
-			return types.SimpleNamespace(instrument=types.SimpleNamespace(directory=str(tmp_path)))
+			# Mirrors the real Config shape for every attribute main() reads — it
+			# also wires the float import ceiling so the catalog analyses hot float
+			# sources exactly as the player will.
+			return types.SimpleNamespace(
+				instrument=types.SimpleNamespace(directory=str(tmp_path)),
+				recorder=types.SimpleNamespace(
+					audio=types.SimpleNamespace(
+						float_import_ceiling_dbfs
+							= subsample.config.AudioConfig.float_import_ceiling_dbfs,
+					),
+				),
+			)
 
 		monkeypatch.setattr(subsample.config, "load_config", fake_load_config)
 
