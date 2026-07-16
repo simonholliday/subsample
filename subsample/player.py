@@ -204,7 +204,16 @@ def _ranks_for (pick_spec: subsample.query.PickSpec, ranked_len: int) -> range:
 	collapse onto the last rank (mirrors resolve_index's clamping).  An open
 	bound (None — from ``pick: any`` / ``[2, null]`` / ``{gte: 2}``) resolves
 	the same way resolve_index does: open lo → 1, open hi → ranked_len.
+
+	A velocity pick can land on any rank in the pool (velocity chooses the
+	index at trigger time), so every rank must be pre-baked — the same full
+	span as ``pick: any``.  This is already what the open-bound formula below
+	yields for its lo=hi=None, but state it so the intent survives if anyone
+	ever sets concrete bounds on a velocity pick.
 	"""
+
+	if pick_spec.mode == "velocity":
+		return range(1, ranked_len + 1)
 
 	hi = ranked_len if pick_spec.hi is None else min(pick_spec.hi, ranked_len)
 	lo = 1          if pick_spec.lo is None else pick_spec.lo
@@ -219,9 +228,17 @@ def _format_pick_suffix (pick_spec: subsample.query.PickSpec) -> str:
 
 	Returns an empty string for the default best-match pick so unannotated
 	notes stay terse; otherwise a leading-space suffix: `` pick 3`` (scalar),
-	`` pick 2-5`` (closed range), `` pick 2+`` (open upper), or `` pick any``
-	(both ends open).  An open lower bound reads as rank 1.
+	`` pick 2-5`` (closed range), `` pick 2+`` (open upper), `` pick any``
+	(both ends open), or `` pick velocity`` (velocity mode, with the curve and
+	± spread appended when non-default).  An open lower bound reads as rank 1.
 	"""
+
+	if pick_spec.mode == "velocity":
+		# A velocity pick carries lo=hi=None, which would otherwise read as
+		# "any"; name the mode instead, with curve/spread when they are set.
+		curve = "" if pick_spec.curve == "linear" else f"/{pick_spec.curve}"
+		vary  = f" ±{pick_spec.variation // 2}" if pick_spec.variation else ""
+		return f" pick velocity{curve}{vary}"
 
 	lo, hi = pick_spec.lo, pick_spec.hi
 
@@ -4491,7 +4508,7 @@ class MidiPlayer:
 		eff_library   = self._effective_instrument_library
 		eff_transform = self._effective_transform_manager
 
-		sample_id = self._resolve_sample_id(assignment, pick_spec, eff_library)
+		sample_id = self._resolve_sample_id(assignment, pick_spec, eff_library, msg.velocity)
 
 		if sample_id is None:
 			_log.debug(
@@ -4883,6 +4900,7 @@ class MidiPlayer:
 		assignment:  subsample.query.Assignment,
 		pick_spec:   subsample.query.PickSpec,
 		eff_library: subsample.library.InstrumentLibrary,
+		velocity:    int,
 	) -> typing.Optional[int]:
 
 		"""Resolve an assignment to one concrete sample id for a single trigger.
@@ -4898,7 +4916,15 @@ class MidiPlayer:
 		shifts as variants finish, so it is resolved live against the current
 		library here.  ``PickSpec.resolve_index`` draws a 0-indexed rank from
 		[lo, hi] (clamped to the list length); a range pick re-rolls per call.
+
+		``velocity`` is the RAW incoming MIDI velocity (not the post-rescale gain
+		velocity — the rescale compresses loudness, and using it here would make
+		the quiet end of the pool unreachable).  It is consulted only by a
+		velocity pick; the layer's own velocity_trigger window is forwarded so a
+		narrow velocity layer still spans its whole pool.
 		"""
+
+		vel_lo, vel_hi = assignment.velocity_trigger
 
 		candidates = self._candidate_cache.get(id(assignment))
 
@@ -4906,7 +4932,7 @@ class MidiPlayer:
 			if not candidates:
 				return None
 
-			return candidates[pick_spec.resolve_index(len(candidates))]
+			return candidates[pick_spec.resolve_index(len(candidates), velocity, vel_lo, vel_hi)]
 
 		# Variant-dependent select — resolve live (see _rebuild_candidate_cache).
 		eff_similarity = self._effective_similarity_matrix
@@ -4928,7 +4954,7 @@ class MidiPlayer:
 			)
 
 			if ranked:
-				return ranked[pick_spec.resolve_index(len(ranked))].sample_id
+				return ranked[pick_spec.resolve_index(len(ranked), velocity, vel_lo, vel_hi)].sample_id
 
 		return None
 

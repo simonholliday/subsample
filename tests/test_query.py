@@ -1600,6 +1600,160 @@ class TestPickSpecResolve:
 		assert spec.resolve_index(2) == 1   # idx 1 = rank 2 = last
 
 
+class TestVelocityPick:
+
+	"""pick: velocity — map incoming MIDI velocity onto a level-ordered pool."""
+
+	def _vel (
+		self,
+		variation: int = 0,
+		curve: str = "linear",
+		ascending: bool = True,
+	) -> subsample.query.PickSpec:
+		return subsample.query.PickSpec(None, None, "velocity", variation, curve, ascending)
+
+	# --- resolve_index velocity math ---
+
+	def test_sweep_monotonic_ascending (self) -> None:
+		"""Velocity rising 1..127 picks non-decreasing ranks, spanning the pool."""
+		spec = self._vel()
+		idxs = [spec.resolve_index(10, v, 0, 127) for v in range(1, 128)]
+		assert idxs == sorted(idxs)          # non-decreasing
+		assert idxs[0] == 0                  # gentlest → quietest
+		assert idxs[-1] == 9                 # hardest → loudest (last of 10)
+
+	def test_sweep_inverted_when_descending (self) -> None:
+		"""order: loudest (ascending False) maps hard notes to ranked[0] = loudest."""
+		spec = self._vel(ascending=False)
+		assert spec.resolve_index(10, 127, 0, 127) == 0
+		assert spec.resolve_index(10, 1, 0, 127) == 9
+
+	def test_single_sample_pool (self) -> None:
+		"""N=1 always returns index 0 and never divides by N-1."""
+		spec = self._vel()
+		for v in (1, 64, 127):
+			assert spec.resolve_index(1, v, 0, 127) == 0
+
+	def test_window_normalisation (self) -> None:
+		"""A narrow velocity_trigger window still spans the whole pool."""
+		spec = self._vel()
+		assert spec.resolve_index(10, 40, 40, 100) == 0     # window floor → quietest
+		assert spec.resolve_index(10, 100, 40, 100) == 9    # window ceiling → loudest
+		assert spec.resolve_index(10, 20, 40, 100) == 0     # below window clamps up
+		assert spec.resolve_index(10, 120, 40, 100) == 9    # above window clamps down
+
+	def test_curve_bends_distribution (self) -> None:
+		"""At a low velocity, log spreads across more ghost ranks than linear or exp."""
+		v, lo, hi, n = 25, 0, 100, 101       # frac = 0.25
+		lin = self._vel(curve="linear").resolve_index(n, v, lo, hi)
+		log = self._vel(curve="logarithmic").resolve_index(n, v, lo, hi)
+		exp = self._vel(curve="exponential").resolve_index(n, v, lo, hi)
+		assert log > lin > exp
+		# Endpoints identical for every curve — the pool extremes stay reachable.
+		for curve in ("linear", "logarithmic", "exponential"):
+			spec = self._vel(curve=curve)
+			assert spec.resolve_index(n, lo, lo, hi) == 0
+			assert spec.resolve_index(n, hi, lo, hi) == n - 1
+
+	# --- variation (stateless selection jitter) ---
+
+	def test_variation_offsets_selection (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""variation perturbs the selection velocity by the RNG draw over ±half."""
+		draws: list[tuple[int, int]] = []
+
+		def fake_randint (lo: int, hi: int) -> int:
+			draws.append((lo, hi))
+			return hi                        # always the +max offset
+
+		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+
+		spec = self._vel(variation=10)       # ±5
+		idx = spec.resolve_index(128, 60, 0, 127)   # velocity 60 + 5 → 65 → index 65
+		assert draws == [(-5, 5)]
+		assert idx == 65
+
+	def test_variation_zero_never_consults_rng (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""variation 0 is deterministic — the RNG is never touched."""
+		def boom (lo: int, hi: int) -> int:
+			raise AssertionError("randint called for variation=0")
+
+		monkeypatch.setattr(subsample.query.random, "randint", boom)
+		spec = self._vel(variation=0)
+		assert spec.resolve_index(10, 64, 0, 127) == spec.resolve_index(10, 64, 0, 127)
+
+	def test_variation_clamped_at_window_ceiling (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""Jitter overshooting the window top clamps to the loudest sample."""
+		monkeypatch.setattr(subsample.query.random, "randint", lambda lo, hi: hi)
+		spec = self._vel(variation=20)       # +10 → 127 + 10, clamped to 127
+		assert spec.resolve_index(10, 127, 0, 127) == 9
+
+	# --- _apply_pick_curve ---
+
+	def test_apply_pick_curve_endpoints_and_shape (self) -> None:
+		for curve in ("linear", "logarithmic", "exponential"):
+			assert subsample.query._apply_pick_curve(curve, 0.0) == pytest.approx(0.0)
+			assert subsample.query._apply_pick_curve(curve, 1.0) == pytest.approx(1.0)
+			ys = [subsample.query._apply_pick_curve(curve, i / 20) for i in range(21)]
+			assert ys == sorted(ys)          # monotonic non-decreasing
+		# log is concave (above the diagonal), exp convex (below).
+		assert subsample.query._apply_pick_curve("logarithmic", 0.5) > 0.5
+		assert subsample.query._apply_pick_curve("exponential", 0.5) < 0.5
+
+	# --- parse: shorthand + long form ---
+
+	def test_parse_shorthand (self) -> None:
+		p = subsample.query._parse_pick("velocity", "a")
+		assert (p.mode, p.lo, p.hi, p.variation, p.curve, p.ascending) \
+			== ("velocity", None, None, 0, "linear", True)
+
+	def test_parse_longform (self) -> None:
+		p = subsample.query._parse_pick(
+			{"mode": "velocity", "variation": 10, "curve": "logarithmic"}, "a",
+		)
+		assert (p.mode, p.variation, p.curve) == ("velocity", 10, "logarithmic")
+
+	def test_parse_invalid_raises (self) -> None:
+		bad: list[typing.Any] = [
+			{"mode": "velocity", "curve": "bogus"},
+			{"mode": "velocity", "variation": -1},
+			{"mode": "velocity", "variation": 200},
+			{"mode": "velocity", "variation": True},
+			{"mode": "bogus"},
+			{"mode": "velocity", "foo": 1},
+			"bogus",
+		]
+		for raw in bad:
+			with pytest.raises(ValueError):
+				subsample.query._parse_pick(raw, "a")
+
+	def test_parse_regressions_unchanged (self) -> None:
+		"""Non-velocity pick forms are byte-identical to before."""
+		assert subsample.query._parse_pick({"gte": 2}, "a") == subsample.query.PickSpec(2, None)
+		assert subsample.query._parse_pick("any", "a") == subsample.query.PickSpec(None, None)
+		assert subsample.query._parse_pick([1, 3], "a") == subsample.query.PickSpec(1, 3)
+		assert subsample.query._parse_pick(2, "a") == subsample.query.PickSpec(2, 2)
+
+	# --- cross-field: a level order is required and its direction is baked ---
+
+	def test_requires_level_order (self) -> None:
+		with pytest.raises(ValueError, match="requires a level-based order"):
+			subsample.query.parse_select({"directory": "x", "pick": "velocity"}, "a")
+		with pytest.raises(ValueError, match="requires a level-based order"):
+			subsample.query.parse_select(
+				{"directory": "x", "order": "duration_desc", "pick": "velocity"}, "a",
+			)
+
+	def test_order_direction_baked (self) -> None:
+		quiet = subsample.query.parse_select(
+			{"directory": "x", "order": "quietest", "pick": "velocity"}, "a",
+		)
+		loud = subsample.query.parse_select(
+			{"directory": "x", "order": "loudest", "pick": "velocity"}, "a",
+		)
+		assert quiet[0].pick.ascending is True
+		assert loud[0].pick.ascending is False
+
+
 class TestExtractSpec:
 
 	"""Tests for ExtractSpec — the channel-pattern extraction spec dataclass."""

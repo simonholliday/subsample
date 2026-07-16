@@ -4872,6 +4872,11 @@ class TestRanksFor:
 		"""When lo also exceeds ranked_len, collapse onto the last rank."""
 		assert list(subsample.player._ranks_for(subsample.query.PickSpec(8, 12), 3)) == [3]
 
+	def test_velocity_spans_full_pool (self) -> None:
+		"""A velocity pick can land on any rank, so every rank is pre-baked."""
+		vel = subsample.query.PickSpec(None, None, "velocity")
+		assert list(subsample.player._ranks_for(vel, 5)) == [1, 2, 3, 4, 5]
+
 
 # NOTE: TestResolvePitchedSelector, TestResolveLibraryPosition, and
 # TestResolveTarget were removed in the select/process redesign.
@@ -6722,7 +6727,7 @@ class TestCandidateCache:
 		player, lib = self._make_player(records, note_map)
 
 		with unittest.mock.patch("subsample.query.query") as mock_query:
-			result = player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib)
+			result = player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib, velocity=64)
 
 		assert result == 7
 		mock_query.assert_not_called()
@@ -6736,7 +6741,7 @@ class TestCandidateCache:
 		player, lib = self._make_player(records, note_map)
 
 		assert player._candidate_cache[id(asgn)] == []
-		assert player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib) is None
+		assert player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib, velocity=64) is None
 
 	def test_range_pick_re_rolls_across_cached_list (self) -> None:
 		"""A range pick draws varying ranks from the cached candidate list."""
@@ -6749,12 +6754,61 @@ class TestCandidateCache:
 		assert set(player._candidate_cache[id(asgn)]) == {1, 2, 3}
 
 		drawn = {
-			player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 3), lib)
+			player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 3), lib, velocity=64)
 			for _ in range(200)
 		}
 
 		assert drawn <= {1, 2, 3}
 		assert len(drawn) >= 2
+
+	def _leveled_records (self, rmss: list[float]) -> list[subsample.library.SampleRecord]:
+		"""Records named quiet→loud (hat_0..) with the given ascending rms values."""
+		records = []
+		for i, rms in enumerate(rmss):
+			rec = self._make_record(f"hat_{i}", i + 1)
+			records.append(dataclasses.replace(rec, level=dataclasses.replace(rec.level, rms=rms)))
+		return records
+
+	def _velocity_assignment (self) -> subsample.query.Assignment:
+		"""An assignment ranking hat* quietest-first with a velocity pick."""
+		return subsample.query.Assignment(
+			name="Snare",
+			select=(subsample.query.SelectSpec(
+				where=subsample.query.WherePredicate(name_glob="hat*"),
+				order=(subsample.query.OrderClause(by="level", dir="asc"),),
+				pick=subsample.query.PickSpec(None, None, "velocity", 0, "linear", True),
+			),),
+		)
+
+	def test_velocity_pick_maps_velocity_to_rank (self) -> None:
+		"""Gentle notes resolve to quiet samples, hard notes to loud ones."""
+		records = self._leveled_records([0.1, 0.2, 0.3, 0.4, 0.5])
+		asgn = self._velocity_assignment()
+		pick = asgn.select[0].pick
+		note_map = {(0, 38): [(asgn, pick)]}
+
+		player, lib = self._make_player(records, note_map)
+
+		# order: level asc → the cache is the quiet→loud id order.
+		assert player._candidate_cache[id(asgn)] == [1, 2, 3, 4, 5]
+		assert player._resolve_sample_id(asgn, pick, lib, velocity=1) == 1     # quietest
+		assert player._resolve_sample_id(asgn, pick, lib, velocity=127) == 5   # loudest
+
+	def test_velocity_sweep_is_monotonic_over_pool (self) -> None:
+		"""A velocity ramp 1..127 selects non-decreasing sample ids across the pool."""
+		records = self._leveled_records([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+		asgn = self._velocity_assignment()
+		pick = asgn.select[0].pick
+		note_map = {(0, 38): [(asgn, pick)]}
+
+		player, lib = self._make_player(records, note_map)
+
+		ids = [
+			player._resolve_sample_id(asgn, pick, lib, velocity=v)
+			for v in range(1, 128)
+		]
+		assert ids == sorted(ids, key=lambda x: x if x is not None else -1)   # non-decreasing
+		assert ids[0] == 1 and ids[-1] == 6                                   # spans the pool
 
 	def test_variant_dependent_select_not_cached (self) -> None:
 		"""A quantized_beats-ordered select is excluded from the cache and
@@ -6773,7 +6827,7 @@ class TestCandidateCache:
 		assert id(asgn) not in player._candidate_cache
 
 		with unittest.mock.patch("subsample.query.query", wraps=subsample.query.query) as spy:
-			result = player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib)
+			result = player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib, velocity=64)
 
 		assert result == 1
 		spy.assert_called()

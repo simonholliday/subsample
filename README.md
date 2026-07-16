@@ -873,6 +873,49 @@ list is in play (`pick: any`), the `order:` clause makes no difference: every
 match is equally likely. (`pick: {}` with no operators is rejected — write
 `pick: any` if that's what you mean.)
 
+**Map velocity to the right sample.** `pick: velocity` chooses the sample by
+how hard the note is played: a gentle note-on picks from the quiet end of the
+pool, a hard one from the loud end, and everything between maps across the
+ranks. Point it at a folder of one sound recorded at many strengths - ghost
+notes through full strikes - and each velocity plays the take that was performed
+at roughly that strength.
+
+```yaml
+- notes: drum.snare
+  select:
+    where: { directory: snare }
+    order: quietest       # required - ranks the pool quiet to loud
+    pick: velocity
+```
+
+The chosen sample sets the *timbre*; the note's velocity still sets the
+*loudness* the usual way, so the response stays smooth as you cross from one
+sample to the next rather than stepping. Ten samples covering the whole velocity
+range each cover about 13 velocity steps, and the gaps are filled by gain - you
+do not need one sample per velocity.
+
+Two refinements are available in the long form:
+
+```yaml
+pick: { mode: velocity, variation: 10, curve: logarithmic }
+```
+
+- `variation` (default `0`) spreads the *choice* by up to this many velocity
+  steps (here plus or minus 5), so repeated notes at one velocity vary in tone
+  without varying in level - the loudness always follows the velocity you
+  actually played, never the randomised value. It keeps a programmed part from
+  retriggering one identical sample.
+- `curve` (default `linear`) bends the velocity-to-sample mapping.
+  `logarithmic` spreads gentle notes across more of the quiet samples - more
+  distinct ghost-note tones at the bottom of the range; `exponential` favours
+  finer resolution among the loud samples instead.
+
+Unlike `pick: any`, the `order:` here is mandatory and load-bearing - it is what
+ranks the pool quiet-to-loud (`quietest` or `loudest`; either works). To lift or
+narrow the *loudness* range so ghosts are not too quiet, pair it with a velocity
+`rescale:` (below) - that shapes the output gain and is independent of which
+sample is picked.
+
 #### Beat-pattern matching
 
 `beat_match` is the shape-based companion to `similarity`: where `similarity`
