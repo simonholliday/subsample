@@ -53,6 +53,7 @@ import pathlib
 import threading
 import typing
 
+import subsample.definitions
 import subsample.library
 import subsample.similarity
 
@@ -90,7 +91,10 @@ class BankDefinition:
 	program:   int                  = 0
 
 
-def parse_banks (raw: typing.Any) -> list[BankDefinition]:
+def parse_banks (
+	raw: typing.Any,
+	definitions: typing.Optional[subsample.definitions.Definitions] = None,
+) -> list[BankDefinition]:
 
 	"""Parse the ``programs:`` key from MIDI map YAML into BankDefinition objects.
 
@@ -102,6 +106,9 @@ def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 	Args:
 		raw: The value of the ``programs:`` key from the parsed YAML dict.
 		     Expected to be a list of dicts.
+		definitions: The map's mounted definitions (threaded from
+		     load_midi_map) so ``program:`` may be a name from the file's
+		     ``programs:`` section, e.g. ``program: my.brushes``.
 
 	Returns:
 		Ordered list of BankDefinition.  Empty list if raw is None or empty.
@@ -116,7 +123,7 @@ def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 	if not isinstance(raw, list):
 		raise ValueError("MIDI map 'programs' must be a list")
 
-	definitions: list[BankDefinition] = []
+	banks: list[BankDefinition] = []
 	seen_programs: dict[int, str] = {}
 
 	for idx, entry in enumerate(raw):
@@ -142,7 +149,10 @@ def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 				f"are mutually exclusive"
 			)
 
-		program = int(entry.get("program", idx))
+		program = subsample.definitions.resolve_scalar(
+			definitions, "programs", entry.get("program", idx),
+			f"MIDI map programs[{idx}] ({name!r}) 'program'",
+		)
 
 		if not 0 <= program <= 127:
 			raise ValueError(
@@ -156,14 +166,14 @@ def parse_banks (raw: typing.Any) -> list[BankDefinition]:
 			)
 
 		seen_programs[program] = name
-		definitions.append(BankDefinition(
+		banks.append(BankDefinition(
 			name=name,
 			directory=str(directory) if directory is not None else None,
 			map_path=str(map_path) if map_path is not None else None,
 			program=program,
 		))
 
-	return definitions
+	return banks
 
 
 # ---------------------------------------------------------------------------

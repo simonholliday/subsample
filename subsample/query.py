@@ -50,6 +50,7 @@ import numpy
 import pymididefs.notes
 
 import subsample.analysis
+import subsample.definitions
 
 if typing.TYPE_CHECKING:
 	import subsample.library
@@ -2419,7 +2420,11 @@ def parse_select (
 # YAML parsing — process block
 # ---------------------------------------------------------------------------
 
-def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
+def parse_process (
+	raw: typing.Any,
+	assignment_name: str,
+	definitions: typing.Optional["subsample.definitions.Definitions"] = None,
+) -> ProcessSpec:
 
 	"""Parse the ``process:`` block into a ProcessSpec.
 
@@ -2434,6 +2439,9 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 	  - A dict {name: scalar} — shorthand for the processor's single
 	    defining parameter (only for names in _SCALAR_PROCESSOR_PARAMS,
 	    e.g. `bit_depth: 12`)
+
+	``definitions`` (threaded from load_midi_map) lets a CC binding name its
+	cc/channel via the map's mounted vocabulary, e.g. ``{cc: my.brightness}``.
 	"""
 
 	if raw is None:
@@ -2529,8 +2537,20 @@ def parse_process (raw: typing.Any, assignment_name: str) -> ProcessSpec:
 					seen_params.add(canonical_param)
 
 					if isinstance(v, dict) and "cc" in v:
-						cc_num = int(v["cc"])
-						cc_channel = int(v["channel"]) if "channel" in v else None
+						cc_context = (
+							f"MIDI map assignment {assignment_name!r}: "
+							f"processor {proc_name_str!r} parameter "
+							f"{canonical_param!r}"
+						)
+						cc_num = subsample.definitions.resolve_scalar(
+							definitions, "cc", v["cc"], cc_context,
+						)
+						cc_channel = (
+							subsample.definitions.resolve_scalar(
+								definitions, "channels", v["channel"], cc_context,
+							)
+							if "channel" in v else None
+						)
 
 						# Out-of-range cc/channel can never match an incoming
 						# message — the knob would be silently dead forever,

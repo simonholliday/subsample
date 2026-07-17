@@ -8,6 +8,7 @@ import numpy
 import pytest
 
 import subsample.analysis
+import subsample.definitions
 import subsample.library
 import subsample.query
 import subsample.similarity
@@ -1291,6 +1292,34 @@ class TestCcBinding:
 		step = spec.steps[0]
 		assert step.get("grid") == 16
 		assert step.get("tempo") == 120
+
+	def test_parse_cc_binding_symbolic_names (self) -> None:
+
+		"""cc and channel accept mounted definitions names — resolved to the
+		same numbers a literal binding would carry."""
+
+		defs = subsample.definitions.Definitions(tables={
+			"my": {"cc": {"sampler_release": 21}, "channels": {"kit": 10}},
+		})
+		raw = [{"pad_quantize": {"strength": {"cc": "my.sampler_release", "channel": "my.kit"}}}]
+		spec = subsample.query.parse_process(raw, "test", defs)
+		strength = spec.steps[0].get("strength")
+		assert isinstance(strength, subsample.query.CcBinding)
+		assert strength.cc == 21
+		assert strength.channel == 10
+
+	def test_parse_cc_binding_symbolic_without_mount_raises (self) -> None:
+		raw = [{"pad_quantize": {"strength": {"cc": "my.sampler_release"}}}]
+		with pytest.raises(ValueError, match="mounts no 'definitions:'"):
+			subsample.query.parse_process(raw, "test")
+
+	def test_parse_cc_binding_unknown_name_raises (self) -> None:
+		defs = subsample.definitions.Definitions(tables={
+			"my": {"cc": {"sampler_release": 21}},
+		})
+		raw = [{"pad_quantize": {"strength": {"cc": "my.nope"}}}]
+		with pytest.raises(ValueError, match="unknown 'cc' name 'nope'"):
+			subsample.query.parse_process(raw, "test", defs)
 
 
 class TestDirectoryPredicate:

@@ -578,7 +578,9 @@ other, so `silenced_by` lets you say "cut this sound the instant that other note
 plays". It is the classic drum choke - and it is what lets a one-shot ring out on
 its own yet still stop on cue.
 
-Declare it on the sound that should be *cut*, naming the note(s) that cut it:
+Declare it on the sound that should be *cut*, naming the note(s) that cut it -
+any note form works, including your own names from a mounted definitions file
+(see [Naming your own sounds](#naming-your-own-sounds---the-definitions-file)):
 
 ```yaml
 - name: Open Hi-Hat
@@ -692,6 +694,70 @@ also accept the **bare alias** `drum.kick`, `drum.snare`, `drum.crash`,
 `drum.kick_1` = Bass Drum 1 = 36). Reach for the bare name when you just want
 "the kick" rather than choosing between the two variants; use the numbered
 form when you specifically want `_2`.
+
+### Naming your own sounds - the definitions file
+
+GM names cover standard drums, but your own sample sets deserve their own
+vocabulary. A *definitions file* is a small YAML file, owned by your music
+project, that gives names to note, CC, channel, and program numbers - so your
+map reads `notes: my.dawn_chorus_pheasant` instead of `notes: 60`, and the
+same file can name the same sounds in your sequencer. Neither tool depends on
+the other; they just read the same trivial file.
+
+```yaml
+# project.yaml - or any filename you like
+notes:
+  ride_edge_soft: 53
+  dawn_chorus_pheasant: 60
+cc:
+  sampler_release: 21
+channels:
+  kit: 10
+  birds: 3
+programs:
+  brushes: 1
+```
+
+Mount it in the MIDI map under a prefix of your choosing (the path is
+relative to the map file, like `reference:` paths):
+
+```yaml
+definitions: { my: project.yaml }
+
+assignments:
+  - name: Pheasant
+    channel: my.birds                     # channels: section
+    notes: my.dawn_chorus_pheasant        # notes: section
+    silenced_by: my.ride_edge_soft        # notes: section (chokes too)
+    release: { cc: my.sampler_release }   # cc: section
+```
+
+The field decides which section a name is looked up in: note positions
+(`notes:`, `silenced_by:`, zone `range:`) read `notes:`; `channel:` and
+`program_channel:` read `channels:`; CC bindings read `cc:`; `program:` and
+`default_program:` read `programs:`.
+
+| Section | Names | Allowed values |
+|---------|-------|----------------|
+| `notes` | MIDI notes | 0-127 |
+| `cc` | controller numbers | 0-127 |
+| `channels` | MIDI channels | 1-16 |
+| `programs` | program-change numbers | 0-127 |
+
+Rules worth knowing:
+
+- Names are lowercase `a-z`, digits, and underscores in the file, used as
+  `prefix.name`, and matched case-insensitively at the point of use - exactly
+  like `drum.*`. The `drum` prefix itself is reserved.
+- Sections subsample does not use are ignored without comment, so the same
+  file can hold your sequencer's own vocabularies (`nrpn:`, whatever it
+  needs) alongside these four.
+- You can mount several files under different prefixes:
+  `definitions: { kit: kit.yaml, birds: birds.yaml }`.
+- The definitions file is re-read whenever the map reloads. Editing the
+  definitions file alone takes effect the next time the map file is saved
+  (or the player restarts) - the watcher follows the map, not the
+  definitions file.
 
 ### Select - which sample to play
 
@@ -1641,7 +1707,9 @@ ambisonic samples using Rubber Band's phase-coherent multichannel engine
 
 The MIDI map can optionally declare multiple **programs** (presets) that are all
 loaded at startup. Switch between them at runtime using MIDI Program Change
-messages - no restart, no disk I/O, instant switching:
+messages - no restart, no disk I/O, instant switching. A `program:` number may
+also be a name from a mounted definitions file (`program: my.brushes` - see
+[Naming your own sounds](#naming-your-own-sounds---the-definitions-file)):
 
 ```yaml
 programs:
@@ -1754,7 +1822,9 @@ but they solve different problems:
 ### CC mapping - real-time parameter control
 
 Any numeric processor parameter can be controlled by a MIDI CC message.
-Replace the scalar value with a CC binding:
+Replace the scalar value with a CC binding (`cc:` and `channel:` also accept
+names from a mounted definitions file, e.g. `cc: my.brightness` - see
+[Naming your own sounds](#naming-your-own-sounds---the-definitions-file)):
 
 ```yaml
 process:
@@ -1800,6 +1870,7 @@ Every enum-string value the MIDI map accepts, in one place:
 | Quantize `segment` | `round_robin` `random` or integer (1-indexed) |
 | `vocoder` `carrier` | `reference` (the note's reference sample) or a file path |
 | `silenced_by` value | `self`, or a note / list of notes (same syntax as `notes`) |
+| `definitions` file sections | `notes` (0-127) `cc` (0-127) `channels` (1-16) `programs` (0-127); other sections ignored |
 | Legacy `order_by` tokens | `newest` `oldest` `duration_asc` `duration_desc` `pitch_asc` `pitch_desc` `onsets_asc` `onsets_desc` `tempo_asc` `tempo_desc` `loudest` `quietest` `similarity` `quantized_beats_asc` `quantized_beats_desc` |
 | Legacy numeric-predicate keys | `min_duration` `max_duration` `min_onsets` `max_onsets` `min_tempo` `max_tempo` `min_pitch` `max_pitch` `min_quantized_beats` `max_quantized_beats` |
 | Legacy processor names | `beat_quantize` (→ `stretch_quantize`) `hpss_harmonic` (→ `hpss: { keep: harmonic }`) `hpss_percussive` (→ `hpss: { keep: percussive }`) |

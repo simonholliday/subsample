@@ -10,6 +10,7 @@ import typing
 import pytest
 
 import subsample.bank
+import subsample.definitions
 import subsample.library
 import subsample.player
 import subsample.similarity
@@ -94,6 +95,37 @@ class TestParseBanks:
 			{"name": "Kit B", "directory": "./b", "program": 5},
 		]
 		with pytest.raises(ValueError, match="duplicate program"):
+			subsample.bank.parse_banks(raw)
+
+	def test_symbolic_program_resolves (self) -> None:
+
+		"""program: may be a name from the mounted definitions' programs: section."""
+
+		defs = subsample.definitions.Definitions(tables={
+			"my": {"programs": {"brushes": 1}},
+		})
+		raw = [{"name": "Brushes", "directory": "./b", "program": "my.brushes"}]
+		result = subsample.bank.parse_banks(raw, defs)
+		assert result[0].program == 1
+
+	def test_symbolic_and_literal_collision_raises (self) -> None:
+
+		"""A name and a literal resolving to the same number hit the existing
+		duplicate check."""
+
+		defs = subsample.definitions.Definitions(tables={
+			"my": {"programs": {"brushes": 1}},
+		})
+		raw = [
+			{"name": "Brushes", "directory": "./b", "program": "my.brushes"},
+			{"name": "Sticks",  "directory": "./s", "program": 1},
+		]
+		with pytest.raises(ValueError, match="duplicate program"):
+			subsample.bank.parse_banks(raw, defs)
+
+	def test_symbolic_program_without_mount_raises (self) -> None:
+		raw = [{"name": "Brushes", "directory": "./b", "program": "my.brushes"}]
+		with pytest.raises(ValueError, match="mounts no 'definitions:'"):
 			subsample.bank.parse_banks(raw)
 
 	def test_missing_name_raises (self) -> None:

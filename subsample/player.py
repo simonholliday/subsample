@@ -69,6 +69,7 @@ import subsample.bank
 import subsample.channel
 import subsample.cache
 import subsample.config
+import subsample.definitions
 import subsample.events
 import subsample.library
 import subsample.query
@@ -795,7 +796,11 @@ _RELEASE_INNER_KEYS:        typing.Final[frozenset[str]] = frozenset({"time", "c
 _RELEASE_CC_SHORTHAND_KEYS: typing.Final[frozenset[str]] = frozenset({"cc", "channel", "min", "max", "default", "curve"})
 
 
-def _parse_release (raw: typing.Any, assignment_name: str) -> typing.Optional[subsample.query.ReleaseSpec]:
+def _parse_release (
+	raw: typing.Any,
+	assignment_name: str,
+	definitions: typing.Optional[subsample.definitions.Definitions] = None,
+) -> typing.Optional[subsample.query.ReleaseSpec]:
 
 	"""Parse the ``release:`` field from a MIDI map assignment into a ReleaseSpec.
 
@@ -836,7 +841,9 @@ def _parse_release (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 		return subsample.query.ReleaseSpec(to_end=True)
 
 	if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-		return subsample.query.ReleaseSpec(time=_parse_release_time(raw, assignment_name), curve="cosine")
+		return subsample.query.ReleaseSpec(
+			time=_parse_release_time(raw, assignment_name, definitions), curve="cosine",
+		)
 
 	if isinstance(raw, dict):
 		# curve is read for BOTH the explicit and the {cc: ...} shorthand forms,
@@ -862,7 +869,7 @@ def _parse_release (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 				f"{sorted(unknown)} — valid: {sorted(allowed)}"
 			)
 
-		time  = _parse_release_time(time_raw, assignment_name) if time_raw is not None else None
+		time  = _parse_release_time(time_raw, assignment_name, definitions) if time_raw is not None else None
 		curve = str(curve_raw).strip().lower()
 
 		if curve not in subsample.query.VALID_RELEASE_CURVES:
@@ -883,6 +890,7 @@ def _parse_release (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 def _parse_release_time (
 	raw:             typing.Any,
 	assignment_name: str,
+	definitions: typing.Optional[subsample.definitions.Definitions] = None,
 ) -> typing.Union[float, subsample.query.CcBinding]:
 
 	"""Parse a release ``time`` — a non-negative ms scalar or a ``{cc: ...}`` map."""
@@ -890,9 +898,17 @@ def _parse_release_time (
 	if isinstance(raw, dict) and "cc" in raw:
 		# Re-raise numeric-coercion errors with the assignment name and offending
 		# mapping, matching _parse_velocity_range / the sibling gain parse.
+		cc_context = f"MIDI map assignment {assignment_name!r}: release time"
 		try:
-			cc_num     = int(raw["cc"])
-			cc_channel = int(raw["channel"]) if "channel" in raw else None
+			cc_num     = subsample.definitions.resolve_scalar(
+				definitions, "cc", raw["cc"], cc_context,
+			)
+			cc_channel = (
+				subsample.definitions.resolve_scalar(
+					definitions, "channels", raw["channel"], cc_context,
+				)
+				if "channel" in raw else None
+			)
 			min_val    = float(raw.get("min", 0.0))
 			max_val    = float(raw.get("max", 1.0))
 			default    = float(raw["default"]) if "default" in raw else None
@@ -1083,6 +1099,7 @@ def _parse_mode (
 def _parse_silenced_by (
 	raw:             typing.Any,
 	assignment_name: str,
+	namespaces: typing.Optional[typing.Mapping[str, typing.Mapping[str, int]]] = None,
 ) -> typing.Optional[subsample.query.ChokeSpec]:
 
 	"""Parse the ``silenced_by:`` field into a ChokeSpec (or None).
@@ -1116,7 +1133,7 @@ def _parse_silenced_by (
 				f"must be a note (e.g. drum.hi_hat_closed, 42, C3) or 'self', "
 				f"got {item!r}"
 			)
-		notes.add(_parse_single_note(item, assignment_name))
+		notes.add(_parse_single_note(item, assignment_name, namespaces))
 
 	if not is_self and not notes:
 		# An empty list (or a list of nothing but stripped-away tokens) means no
@@ -1500,7 +1517,11 @@ _SYMBOL_NAMESPACES: typing.Final[dict[str, typing.Mapping[str, int]]] = {
 }
 
 
-def _parse_single_note (item: typing.Any, assignment_name: str) -> int:
+def _parse_single_note (
+	item: typing.Any,
+	assignment_name: str,
+	namespaces: typing.Optional[typing.Mapping[str, typing.Mapping[str, int]]] = None,
+) -> int:
 
 	"""Resolve one note value: int, numeric string, note-name string, or
 	symbolic form like ``drum.kick_1``.
@@ -1508,7 +1529,14 @@ def _parse_single_note (item: typing.Any, assignment_name: str) -> int:
 	Extracted from ``_parse_note_spec`` so other parsers (e.g. the
 	``range:`` field of ``notes: { mode: zone-tuned, range: [C4, G9] }``)
 	can reuse the same accept-anything-then-validate dispatch.
+
+	``namespaces`` is the symbolic-name table view — the module-global
+	``_SYMBOL_NAMESPACES`` when None, or that merged with the map's mounted
+	``definitions:`` prefixes (load_midi_map threads the merged view here).
 	"""
+
+	if namespaces is None:
+		namespaces = _SYMBOL_NAMESPACES
 
 	if isinstance(item, int):
 		if not 0 <= item <= 127:
@@ -1520,12 +1548,12 @@ def _parse_single_note (item: typing.Any, assignment_name: str) -> int:
 	if isinstance(item, str):
 
 		# Symbolic form ("drum.kick_1") — single dot, no range separator.
-		# Looked up case-insensitively in _SYMBOL_NAMESPACES.  Unknown
+		# Looked up case-insensitively in the namespace tables.  Unknown
 		# namespaces fall through to the int / note-name path so a typo
 		# like "C.4" still gets the existing note-name error.
 		if "." in item and ".." not in item:
 			prefix, _, sym = item.partition(".")
-			table = _SYMBOL_NAMESPACES.get(prefix.lower())
+			table = namespaces.get(prefix.lower())
 
 			if table is not None:
 				try:
@@ -1569,6 +1597,7 @@ _VALID_NOTES_INNER_KEYS: typing.Final[frozenset[str]] = frozenset({"mode", "rang
 def _parse_zone_notes (
 	notes_raw:       typing.Any,
 	assignment_name: str,
+	namespaces: typing.Optional[typing.Mapping[str, typing.Mapping[str, int]]] = None,
 ) -> typing.Optional[tuple[int, int]]:
 
 	"""Detect the ``zone-tuned`` form on the ``notes:`` field.
@@ -1617,8 +1646,8 @@ def _parse_zone_notes (
 			f"2-element list [lo, hi], got {range_raw!r}"
 		)
 
-	lo = _parse_single_note(range_raw[0], assignment_name)
-	hi = _parse_single_note(range_raw[1], assignment_name)
+	lo = _parse_single_note(range_raw[0], assignment_name, namespaces)
+	hi = _parse_single_note(range_raw[1], assignment_name, namespaces)
 
 	if lo > hi:
 		raise ValueError(
@@ -1629,7 +1658,11 @@ def _parse_zone_notes (
 	return (lo, hi)
 
 
-def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
+def _parse_note_spec (
+	notes_raw: typing.Any,
+	assignment_name: str,
+	namespaces: typing.Optional[typing.Mapping[str, typing.Mapping[str, int]]] = None,
+) -> list[int]:
 
 	"""Parse the 'notes' field from a MIDI map assignment into MIDI note numbers.
 
@@ -1676,8 +1709,8 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 				f"range syntax (a..b) is not supported for symbolic notes — "
 				f"use a list instead, e.g. [drum.kick_1, drum.snare_1]"
 			)
-		lo = _parse_single_note(lo_str.strip(), assignment_name)
-		hi = _parse_single_note(hi_str.strip(), assignment_name)
+		lo = _parse_single_note(lo_str.strip(), assignment_name, namespaces)
+		hi = _parse_single_note(hi_str.strip(), assignment_name, namespaces)
 
 		if lo > hi:
 			raise ValueError(
@@ -1689,7 +1722,7 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 
 	# Single value (int or string).
 	if isinstance(notes_raw, (int, str)):
-		return [_parse_single_note(notes_raw, assignment_name)]
+		return [_parse_single_note(notes_raw, assignment_name, namespaces)]
 
 	# List of mixed values.  An empty list would silently map nothing while
 	# still claiming its channel against zone-tuned templates — reject it.
@@ -1699,7 +1732,7 @@ def _parse_note_spec (notes_raw: typing.Any, assignment_name: str) -> list[int]:
 			f"contain at least one note"
 		)
 
-	return [_parse_single_note(item, assignment_name) for item in notes_raw]
+	return [_parse_single_note(item, assignment_name, namespaces) for item in notes_raw]
 
 
 def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.library.SampleRecord]:
@@ -2264,7 +2297,8 @@ def _resolve_assignment_inheritance (
 # MIDI-correct `programs:`/`program_channel:`/`default_program:` (each entry
 # is selected by a Program Change, not by MIDI Bank Select).
 _VALID_MAP_KEYS: typing.Final[frozenset[str]] = frozenset({
-	"programs", "program_channel", "default_program", "assignments", "templates",
+	"definitions", "programs", "program_channel", "default_program", "assignments",
+	"templates",
 })
 
 # Every key a single assignment mapping may carry.  A typo (`mdoe:`, `realease:`,
@@ -2370,20 +2404,44 @@ def load_midi_map (
 			f"(valid: {sorted(_VALID_MAP_KEYS)!r})"
 		)
 
+	# Mount the per-project definitions file(s) — name→number vocabularies
+	# shared with other tools (e.g. a sequencer).  Everything below (banks,
+	# program_channel, and the per-assignment parsers) may reference the
+	# mounted names, so this parses first.
+	definitions = subsample.definitions.load_definitions(
+		raw.get("definitions"), midi_map_dir,
+		reserved_prefixes=frozenset(_SYMBOL_NAMESPACES),
+		map_label=f"MIDI map {path}",
+	)
+	note_namespaces: dict[str, typing.Mapping[str, int]] = {
+		**_SYMBOL_NAMESPACES, **definitions.note_namespaces(),
+	}
+
 	# Parse optional program definitions — switchable sample libraries, each
 	# selected live by a MIDI Program Change on `program_channel`.
-	bank_definitions = subsample.bank.parse_banks(raw.get("programs"))
-	bank_channel = int(raw.get("program_channel", subsample.bank.DEFAULT_BANK_CHANNEL))
+	bank_definitions = subsample.bank.parse_banks(raw.get("programs"), definitions)
+	bank_channel = subsample.definitions.resolve_scalar(
+		definitions, "channels",
+		raw.get("program_channel", subsample.bank.DEFAULT_BANK_CHANNEL),
+		f"MIDI map {path} 'program_channel'",
+	)
 
 	# 0 = respond on any channel; 17+ (or negatives) would silently never
-	# match a Program Change message, so reject at load.
+	# match a Program Change message, so reject at load.  (Definitions names
+	# are 1-16 by construction; 0 stays literal-only.)
 	if not (0 <= bank_channel <= 16):
 		raise ValueError(
 			f"MIDI map {path}: program_channel must be 1-16, or 0 for any "
 			f"channel (got {bank_channel})"
 		)
 	raw_default_bank = raw.get("default_program")
-	default_bank: typing.Optional[int] = int(raw_default_bank) if raw_default_bank is not None else None
+	default_bank: typing.Optional[int] = (
+		subsample.definitions.resolve_scalar(
+			definitions, "programs", raw_default_bank,
+			f"MIDI map {path} 'default_program'",
+		)
+		if raw_default_bank is not None else None
+	)
 
 	# Top-level `assignments:` is required for the no-programs case and
 	# whenever any program uses the `directory:` shorthand (those programs
@@ -2444,7 +2502,9 @@ def load_midi_map (
 			raise ValueError(f"MIDI map assignment {name!r}: missing 'channel'")
 
 		try:
-			mido_channel = int(channel_raw) - 1
+			mido_channel = subsample.definitions.resolve_scalar(
+				definitions, "channels", channel_raw, "'channel'",
+			) - 1
 		except (TypeError, ValueError) as exc:
 			raise ValueError(
 				f"MIDI map assignment {name!r} (#{assignment_index}): "
@@ -2460,7 +2520,7 @@ def load_midi_map (
 		# the assignment is routed to the ZoneTemplate path instead of producing
 		# concrete NoteMap entries; materialisation happens at runtime against
 		# the active library.
-		zone_range = _parse_zone_notes(notes_raw, name)
+		zone_range = _parse_zone_notes(notes_raw, name, note_namespaces)
 
 		# Parse select block (required).
 		select_raw = assignment_raw.get("select")
@@ -2492,7 +2552,7 @@ def load_midi_map (
 			continue
 
 		# Parse process block (optional — defaults to no processing).
-		process = subsample.query.parse_process(assignment_raw.get("process"), name)
+		process = subsample.query.parse_process(assignment_raw.get("process"), name, definitions)
 
 		mode, loop_override = _parse_mode(assignment_raw, name, process)
 
@@ -2500,7 +2560,7 @@ def load_midi_map (
 		# note-off ever releases.  A one_shot voice plays to its natural end and
 		# ignores note-off, so a release declared on mode: one_shot can never fire
 		# — warn and drop it rather than carry dead state.
-		release = _parse_release(assignment_raw.get("release"), name)
+		release = _parse_release(assignment_raw.get("release"), name, definitions)
 
 		if release is not None and mode == "one_shot":
 			_log.warning(
@@ -2535,7 +2595,7 @@ def load_midi_map (
 
 		stack = bool(assignment_raw.get("stack", False))
 
-		silenced_by = _parse_silenced_by(assignment_raw.get("silenced_by"), name)
+		silenced_by = _parse_silenced_by(assignment_raw.get("silenced_by"), name, note_namespaces)
 
 		# Extract segment playback mode from quantize step parameters.
 		segment_mode: typing.Union[str, int] = ""
@@ -2612,7 +2672,7 @@ def load_midi_map (
 			continue
 
 		# Regular path: parse notes and emit one or more NoteMap entries.
-		notes = _parse_note_spec(notes_raw, name)
+		notes = _parse_note_spec(notes_raw, name, note_namespaces)
 		manual_channels.add(mido_channel)
 
 		assignment = subsample.query.Assignment(

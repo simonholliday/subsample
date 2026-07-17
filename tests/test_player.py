@@ -1032,6 +1032,37 @@ class TestParseRelease:
 		with pytest.raises(ValueError, match="0-127"):
 			subsample.player._parse_release({"cc": 200}, "a")
 
+	def test_cc_symbolic_name_resolves (self) -> None:
+
+		"""A mounted definitions name works in the {cc: ...} shorthand."""
+
+		defs = subsample.definitions.Definitions(tables={
+			"my": {"cc": {"sampler_release": 21}, "channels": {"kit": 10}},
+		})
+		spec = subsample.player._parse_release(
+			{"cc": "my.sampler_release", "channel": "my.kit"}, "a", defs,
+		)
+		assert spec is not None
+		assert isinstance(spec.time, subsample.query.CcBinding)
+		assert spec.time.cc == 21
+		assert spec.time.channel == 10
+
+	def test_cc_symbolic_nested_under_time (self) -> None:
+		defs = subsample.definitions.Definitions(tables={
+			"my": {"cc": {"sampler_release": 21}},
+		})
+		spec = subsample.player._parse_release(
+			{"time": {"cc": "my.sampler_release"}, "curve": "exponential"}, "a", defs,
+		)
+		assert spec is not None
+		assert isinstance(spec.time, subsample.query.CcBinding)
+		assert spec.time.cc == 21
+		assert spec.curve == "exponential"
+
+	def test_cc_symbolic_without_mount_raises (self) -> None:
+		with pytest.raises(ValueError, match="mounts no 'definitions:'"):
+			subsample.player._parse_release({"cc": "my.sampler_release"}, "a")
+
 	def test_bool_not_treated_as_number (self) -> None:
 		# True/False must hit the adaptive/None branches, never the ms-scalar path.
 		assert subsample.player._parse_release(True, "a").time is None
@@ -4343,6 +4374,46 @@ class TestParseNoteSpec:
 			subsample.player._parse_note_spec("drum.kick_1..drum.snare_1", "test")
 
 
+class TestParseNoteSpecNamespaces:
+
+	"""The namespaces param — a per-map view merging mounted definitions over
+	the built-in drum table.  None keeps the module-global behaviour."""
+
+	_SPACES: dict[str, dict[str, int]] = {
+		**subsample.player._SYMBOL_NAMESPACES,
+		"my": {"dawn_chorus_pheasant": 60},
+	}
+
+	def test_custom_symbol_resolves (self) -> None:
+		assert subsample.player._parse_note_spec(
+			"my.dawn_chorus_pheasant", "test", self._SPACES,
+		) == [60]
+
+	def test_drum_still_resolves_with_custom_view (self) -> None:
+		assert subsample.player._parse_note_spec("drum.kick_1", "test", self._SPACES) == [36]
+
+	def test_default_none_still_resolves_drum (self) -> None:
+		assert subsample.player._parse_note_spec("drum.kick_1", "test", None) == [36]
+
+	def test_mounted_prefix_miss_targeted_error (self) -> None:
+
+		"""A miss on a MOUNTED prefix takes the unknown-symbol error, not the
+		note-name fall-through."""
+
+		with pytest.raises(ValueError, match="'my' symbol 'typo'"):
+			subsample.player._parse_note_spec("my.typo", "test", self._SPACES)
+
+	def test_unmounted_prefix_still_falls_through (self) -> None:
+		with pytest.raises(ValueError):
+			subsample.player._parse_note_spec("foo.bar", "test", self._SPACES)
+
+	def test_custom_symbol_range_rejected (self) -> None:
+		with pytest.raises(ValueError, match="list"):
+			subsample.player._parse_note_spec(
+				"my.dawn_chorus_pheasant..my.dawn_chorus_pheasant", "test", self._SPACES,
+			)
+
+
 # ---------------------------------------------------------------------------
 # Symbolic notes — end-to-end through load_midi_map
 # ---------------------------------------------------------------------------
@@ -4372,6 +4443,226 @@ assignments:
 		# mido channel 9 = MIDI channel 10 (user-facing 1-indexed → 0-indexed)
 		assert (9, 36) in note_map
 		assert note_map[(9, 36)][0][0].name == "Kick"
+
+
+class TestLoadMidiMapDefinitions:
+
+	"""The `definitions:` mount end-to-end — the map's own vocabulary flows
+	through load_midi_map into notes, chokes, channels, zone ranges, CC
+	bindings, and programs."""
+
+	def _write (self, tmp_path: pathlib.Path, name: str, content: str) -> pathlib.Path:
+		p = tmp_path / name
+		p.write_text(content, encoding="utf-8")
+		return p
+
+	def _write_defs (self, tmp_path: pathlib.Path) -> None:
+		self._write(tmp_path, "project.yaml", """
+notes:    { dawn_chorus_pheasant: 60, ride_edge_soft: 53, zone_lo: 48, zone_hi: 72 }
+cc:       { sampler_release: 21 }
+channels: { birds: 3, kit: 10 }
+programs: { brushes: 1 }
+""")
+
+	def test_named_note_and_channel (self, tmp_path: pathlib.Path) -> None:
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: project.yaml }
+assignments:
+  - name: Pheasant
+    channel: my.birds
+    notes: my.dawn_chorus_pheasant
+    select:
+      where:
+        pitched: false
+""")
+		note_map = subsample.player.load_midi_map(path, []).note_map
+		assert (2, 60) in note_map          # channel 3 → mido 2; named note 60
+		assert note_map[(2, 60)][0][0].name == "Pheasant"
+
+	def test_named_choke (self, tmp_path: pathlib.Path) -> None:
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: project.yaml }
+assignments:
+  - name: Pheasant
+    channel: my.birds
+    notes: my.dawn_chorus_pheasant
+    silenced_by: [self, my.ride_edge_soft]
+    select:
+      where:
+        pitched: false
+""")
+		note_map = subsample.player.load_midi_map(path, []).note_map
+		assignment = note_map[(2, 60)][0][0]
+		assert assignment.silenced_by is not None
+		assert assignment.silenced_by.is_self
+		assert assignment.silenced_by.notes == frozenset({53})
+
+	def test_named_zone_range (self, tmp_path: pathlib.Path) -> None:
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: project.yaml }
+assignments:
+  - name: Pads
+    channel: my.kit
+    notes: { mode: zone-tuned, range: [my.zone_lo, my.zone_hi] }
+    process:
+      - repitch: true
+    select:
+      where:
+        pitched: true
+""")
+		result = subsample.player.load_midi_map(path, [])
+		assert len(result.zone_templates) == 1
+		assert result.zone_templates[0].keyboard_range == (48, 72)
+
+	def test_named_program_channel (self, tmp_path: pathlib.Path) -> None:
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: project.yaml }
+program_channel: my.kit
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        pitched: false
+""")
+		assert subsample.player.load_midi_map(path, []).bank_channel == 10
+
+	def test_named_cc_in_process_and_release (self, tmp_path: pathlib.Path) -> None:
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: project.yaml }
+assignments:
+  - name: Pad
+    channel: my.kit
+    notes: 60
+    mode: gated
+    process:
+      - pad_quantize: { strength: { cc: my.sampler_release, channel: my.kit } }
+    release: { cc: my.sampler_release, min: 20, max: 3000 }
+    select:
+      where:
+        pitched: false
+""")
+		note_map = subsample.player.load_midi_map(path, []).note_map
+		assignment = note_map[(9, 60)][0][0]
+
+		strength = assignment.process.steps[0].get("strength")
+		assert isinstance(strength, subsample.query.CcBinding)
+		assert strength.cc == 21
+		assert strength.channel == 10
+
+		assert assignment.release is not None
+		assert isinstance(assignment.release.time, subsample.query.CcBinding)
+		assert assignment.release.time.cc == 21
+
+	def test_named_program_and_default_program (self, tmp_path: pathlib.Path) -> None:
+
+		"""programs: entries and default_program: share the programs vocabulary
+		(a name working in one but not the other would be a trap)."""
+
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: project.yaml }
+default_program: my.brushes
+programs:
+  - { name: Sticks,  directory: ./s }
+  - { name: Brushes, directory: ./b, program: my.brushes }
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        pitched: false
+""")
+		result = subsample.player.load_midi_map(path, [])
+		assert result.bank_definitions[0].program == 0   # defaults to list index
+		assert result.bank_definitions[1].program == 1   # my.brushes
+		assert result.default_bank == 1
+
+	def test_missing_definitions_file_raises (self, tmp_path: pathlib.Path) -> None:
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: nope.yaml }
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        pitched: false
+""")
+		with pytest.raises(ValueError, match="not found.*nope.yaml"):
+			subsample.player.load_midi_map(path, [])
+
+	def test_drum_mount_rejected (self, tmp_path: pathlib.Path) -> None:
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { drum: project.yaml }
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        pitched: false
+""")
+		with pytest.raises(ValueError, match="reserved"):
+			subsample.player.load_midi_map(path, [])
+
+	def test_unknown_name_raises_at_load (self, tmp_path: pathlib.Path) -> None:
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: project.yaml }
+assignments:
+  - name: Pheasant
+    channel: 10
+    notes: my.nonexistent_bird
+    select:
+      where:
+        pitched: false
+""")
+		with pytest.raises(ValueError, match="'my' symbol 'nonexistent_bird'"):
+			subsample.player.load_midi_map(path, [])
+
+	def test_template_carried_name_resolves (self, tmp_path: pathlib.Path) -> None:
+
+		"""Templates merge as raw dicts before parsing, so a template-carried
+		symbolic note resolves through the same mounted vocabulary."""
+
+		self._write_defs(tmp_path)
+		path = self._write(tmp_path, "map.yaml", """
+definitions: { my: project.yaml }
+templates:
+  bird:
+    channel: my.birds
+    notes: my.dawn_chorus_pheasant
+    select:
+      where:
+        pitched: false
+assignments:
+  - name: Pheasant
+    template: bird
+""")
+		note_map = subsample.player.load_midi_map(path, []).note_map
+		assert (2, 60) in note_map
+
+	def test_map_without_definitions_unchanged (self, tmp_path: pathlib.Path) -> None:
+		path = self._write(tmp_path, "map.yaml", """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: drum.kick_1
+    select:
+      where:
+        pitched: false
+""")
+		note_map = subsample.player.load_midi_map(path, []).note_map
+		assert (9, 36) in note_map
 
 
 # ---------------------------------------------------------------------------

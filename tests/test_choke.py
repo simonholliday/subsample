@@ -97,6 +97,20 @@ class TestParseSilencedBy:
 		spec = subsample.player._parse_silenced_by(["self"], "t")
 		assert spec == subsample.query.ChokeSpec(is_self=True, notes=frozenset())
 
+	def test_custom_namespace_symbol_resolves (self) -> None:
+
+		"""A mounted definitions name chokes like any note — threaded in via
+		the namespaces param (load_midi_map passes the merged per-map view)."""
+
+		spaces = {
+			**subsample.player._SYMBOL_NAMESPACES,
+			"my": {"ride_edge_soft": 53},
+		}
+		spec = subsample.player._parse_silenced_by(
+			["self", "my.ride_edge_soft"], "t", spaces,
+		)
+		assert spec == subsample.query.ChokeSpec(is_self=True, notes=frozenset({53}))
+
 	def test_note_name_resolves (self) -> None:
 		spec = subsample.player._parse_silenced_by("C3", "t")
 		assert spec is not None and not spec.is_self and len(spec.notes) == 1
