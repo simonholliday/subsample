@@ -1736,22 +1736,46 @@ class TestVelocityPick:
 	# --- cross-field: a level order is required and its direction is baked ---
 
 	def test_requires_level_order (self) -> None:
-		with pytest.raises(ValueError, match="requires a level-based order"):
-			subsample.query.parse_select({"directory": "x", "pick": "velocity"}, "a")
-		with pytest.raises(ValueError, match="requires a level-based order"):
+		with pytest.raises(ValueError, match="level-based"):
+			subsample.query.parse_select({"where": {"directory": "x"}, "pick": "velocity"}, "a")
+		with pytest.raises(ValueError, match="level-based"):
 			subsample.query.parse_select(
-				{"directory": "x", "order": "duration_desc", "pick": "velocity"}, "a",
+				{"where": {"directory": "x"}, "order": "duration_desc", "pick": "velocity"}, "a",
+			)
+
+	def test_primary_order_must_be_level (self) -> None:
+		"""A non-primary level clause is rejected: the pool is ranked by the
+		primary (duration), so velocity would map onto duration, not loudness."""
+		with pytest.raises(ValueError, match="level-based PRIMARY"):
+			subsample.query.parse_select(
+				{"where": {"directory": "x"}, "order": ["duration_desc", "quietest"],
+				 "pick": "velocity"}, "a",
+			)
+
+	def test_velocity_chain_requires_level_on_every_spec (self) -> None:
+		"""The pick governs the whole fallback chain, so a fallback spec without a
+		level primary order is rejected."""
+		with pytest.raises(ValueError, match="fallback chain requires"):
+			subsample.query.parse_select(
+				[{"where": {"directory": "a"}, "order": "quietest", "pick": "velocity"},
+				 {"where": {"directory": "b"}, "order": "newest"}], "kit",
 			)
 
 	def test_order_direction_baked (self) -> None:
 		quiet = subsample.query.parse_select(
-			{"directory": "x", "order": "quietest", "pick": "velocity"}, "a",
+			{"where": {"directory": "x"}, "order": "quietest", "pick": "velocity"}, "a",
 		)
 		loud = subsample.query.parse_select(
-			{"directory": "x", "order": "loudest", "pick": "velocity"}, "a",
+			{"where": {"directory": "x"}, "order": "loudest", "pick": "velocity"}, "a",
 		)
 		assert quiet[0].pick.ascending is True
 		assert loud[0].pick.ascending is False
+
+	def test_select_unknown_key_rejected (self) -> None:
+		"""A mis-nested filter at the select level (should be under where:) is
+		rejected in strict mode rather than silently matching the whole library."""
+		with pytest.raises(ValueError, match="unknown 'select' key"):
+			subsample.query.parse_select({"directory": "snare", "order": "loudest"}, "a")
 
 
 class TestExtractSpec:

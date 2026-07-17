@@ -115,6 +115,13 @@ class SampleRecord:
 		loop:      Seamless loop points found for a loopable sample (None when the
 		           sample is not a loop candidate or has no clean junction), used
 		           by loop-mode playback.  Frame indices in this sample's timeline.
+		audio_sample_rate: Sample rate of the ``audio`` array in Hz.  This can
+		           differ from ``params.sample_rate`` (the rate the sidecar was
+		           analysed at): disk-loaded audio is resampled to the player
+		           output rate on load, while live-captured audio stays at the
+		           recorder rate.  The transform engine needs the true audio rate
+		           to run DSP and resample correctly.  None (no audio, or an older
+		           construction site) means "assume the processor's own rate".
 	"""
 
 	sample_id:   int
@@ -131,6 +138,7 @@ class SampleRecord:
 	filepath:    typing.Optional[pathlib.Path]  = None
 	channel_format: str = "pcm"
 	loop:        typing.Optional[subsample.loopfind.LoopPoints] = None
+	audio_sample_rate: typing.Optional[int] = None
 
 
 class ReferenceLibrary:
@@ -756,6 +764,9 @@ def load_instrument_library (
 			filepath       = loaded_sample.audio_path,
 			channel_format = loaded_sample.channel_format,
 			loop           = loaded_sample.loop,
+			# Audio was resampled to target_sample_rate on load (or kept at its
+			# native analysis rate when no target was requested).
+			audio_sample_rate = target_sample_rate or loaded_sample.params.sample_rate,
 		)
 
 		lib.add(record)

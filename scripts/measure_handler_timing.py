@@ -45,6 +45,7 @@ import typing
 
 import mido
 
+import subsample.audio
 import subsample.config
 import subsample.library
 import subsample.player
@@ -171,6 +172,11 @@ def main () -> int:
 	logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
 	cfg = subsample.config.load_config()
+
+	# Loading the library heals sidecars via ensure_sample_assets (read through
+	# read_audio_file) — wire the float ceiling so hot floats are read as the
+	# player reads them.
+	subsample.audio.set_float_import_ceiling(cfg.recorder.audio.float_import_ceiling_dbfs)
 
 	if cfg.player.midi_map is None:
 		print("config.player.midi_map is not set", file=sys.stderr)

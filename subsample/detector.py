@@ -150,6 +150,28 @@ class LevelDetector:
 
 		return self._state
 
+	def finalize (self, current_frame: int) -> typing.Optional[tuple[int, int]]:
+
+		"""Close a recording still open at end-of-stream, returning its bounds.
+
+		File-input mode streams a whole file through the detector; a recording
+		only closes on hold_time of quiet, a retrigger, or the buffer cap, so a
+		file that ends while a recording is still open (its last sound running to
+		within hold_time of the end) would drop that final segment.  Call this
+		after the last chunk to emit the open recording as (start, current_frame).
+
+		Returns None when no recording is open.  Resets the detector to IDLE.
+		"""
+
+		if self._state != DetectorState.RECORDING:
+			return None
+
+		start = self._recording_start_frame
+		self._state = DetectorState.IDLE
+		self._hold_chunks_remaining = 0
+
+		return (start, current_frame)
+
 	@property
 	def ambient_rms (self) -> float:
 
@@ -286,10 +308,15 @@ class LevelDetector:
 		prevent the circular buffer from overwriting the beginning of the recording.
 		"""
 
-		# Force-end check takes priority — buffer integrity over hold time
+		# Force-end check takes priority — buffer integrity over hold time.
+		# End one chunk EARLY (reserve the next write): the caller writes each
+		# chunk into the circular buffer BEFORE this runs, so waiting until
+		# recording_length >= capacity lets the following write overwrite the
+		# recording's start (losing up to chunk_size-1 attack frames when the
+		# refined onset is not chunk-aligned).
 		if self._max_recording_frames > 0:
 			recording_length = current_frame - self._recording_start_frame
-			if recording_length >= self._max_recording_frames:
+			if recording_length + self._chunk_size > self._max_recording_frames:
 				end_frame = current_frame
 				start_frame = self._recording_start_frame
 				self._state = DetectorState.IDLE

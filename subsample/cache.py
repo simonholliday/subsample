@@ -58,6 +58,28 @@ AUDIO_EXTENSIONS:   typing.Final[frozenset[str]] = frozenset({
 
 _MD5_CHUNK_BYTES: int = 65536
 
+
+# Process-wide AnalysisConfig used by the re-analysis (heal) path so that
+# file-loaded and hot-loaded samples honour the user's analysis.start_bpm /
+# tempo_min / tempo_max just as live capture does.  Set once from cli.py after
+# the config resolves (mirrors subsample.audio.set_float_import_ceiling); the
+# default matches AnalysisConfig()'s own defaults so an unwired caller — a
+# script, a test — behaves exactly as before.
+_ANALYSIS_CONFIG: subsample.config.AnalysisConfig = subsample.config.AnalysisConfig()
+
+
+def set_analysis_config (cfg: subsample.config.AnalysisConfig) -> None:
+
+	"""Set the process-wide AnalysisConfig used by re-analysis / sidecar heal.
+
+	Called from cli.main() once the config is loaded.  Every file/library/watcher
+	load path funnels through _reanalyze_and_save, so wiring the resolved config
+	here makes the documented analysis.* tempo priors take effect for them —
+	previously they were honoured only by the live recorder."""
+
+	global _ANALYSIS_CONFIG
+	_ANALYSIS_CONFIG = cfg
+
 # Return type shared by load_cache(), load_sidecar(), and ensure_sample_assets().
 @dataclasses.dataclass(frozen=True)
 class SampleAssets:
@@ -122,6 +144,38 @@ def compute_audio_md5 (audio_path: pathlib.Path) -> str:
 			hasher.update(chunk)
 
 	return hasher.hexdigest()
+
+
+def sidecar_matches_audio (audio_path: pathlib.Path) -> bool:
+
+	"""True when a sidecar exists for ``audio_path`` and was analysed from the
+	file's CURRENT bytes (its stored audio_md5 matches the file now).
+
+	A missing, unreadable, or md5-mismatched sidecar returns False.  Used by the
+	watcher to tell an authoritative sidecar (skip local analysis) from a stale
+	one left behind when the audio was replaced/updated in place — in the latter
+	case the file must be re-analysed rather than silently skipped.
+	"""
+
+	sidecar = cache_path(audio_path)
+
+	if not sidecar.exists():
+		return False
+
+	payload = _load_payload(sidecar, "sidecar")
+
+	if payload is None:
+		return False
+
+	stored_md5 = payload.get("audio_md5")
+
+	if not stored_md5:
+		return False
+
+	try:
+		return bool(stored_md5 == compute_audio_md5(audio_path))
+	except OSError:
+		return False
 
 
 def compute_loop (
@@ -413,7 +467,7 @@ def _reanalyze_and_save (
 		duration = len(mono) / file_info.sample_rate
 
 		spectral, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
-			mono, params, subsample.config.AnalysisConfig(),
+			mono, params, _ANALYSIS_CONFIG,
 		)
 
 		# Seamless loop for loopable samples (None otherwise) — found here, with

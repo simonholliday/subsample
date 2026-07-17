@@ -92,8 +92,9 @@ class AudioConfig:
 	ambisonic_format: typing.Optional[str] = None
 	"""When set, the four input channels are processed as ambisonic content
 	and stored as first-order AmbiX B-format.  Supported values: "a_generic"
-	(generic tetrahedral A-format, capsule order FLU/FRD/BLD/BRU), "a_nt_sf1"
-	(Rode NT-SF1 A-format with capsule matching EQ and HF shelf), "b_fuma"
+	(generic tetrahedral A-format, capsule order FLU/FRD/BLD/BRU, with a
+	post-matrix HF shelf), "a_nt_sf1" (Rode NT-SF1 A-format, as a_generic
+	plus a per-capsule matching EQ), "b_fuma"
 	(pre-encoded FuMA B-format, reordered/renormalised to AmbiX), "b_ambix"
 	(pre-encoded AmbiX B-format, stored as-is).  None disables ambisonic
 	processing entirely — the default."""

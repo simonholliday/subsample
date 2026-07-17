@@ -898,6 +898,48 @@ class TestSpectralContrast:
 		assert sine.spectral_contrast > noise.spectral_contrast
 
 
+class TestLowRateAnalysis:
+
+	"""analyze_all must not crash on low sample rates — spectral_contrast and
+	chroma_cqt both need their sub-bands / octaves kept below Nyquist (M1)."""
+
+	def _tone (self, sr: int) -> numpy.ndarray:
+		t = numpy.arange(int(0.5 * sr)) / sr
+		return (0.3 * numpy.sin(2 * numpy.pi * 300 * t)).astype(numpy.float32)
+
+	def test_analyze_all_survives_low_rates (self) -> None:
+		"""8 kHz / 11025 Hz sources previously raised ParameterError (from
+		spectral_contrast at <=12800 Hz and chroma_cqt at 8000 Hz) and were
+		silently dropped at every load path."""
+		cfg = subsample.config.AnalysisConfig()
+		for sr in (8000, 11025, 16000):
+			params = subsample.analysis.compute_params(sr)
+			result = subsample.analysis.analyze_all(self._tone(sr), params, cfg)
+			assert 0.0 <= result[0].spectral_contrast <= 1.0
+
+
+class TestSpectralFlatnessDiscrimination:
+
+	"""spectral_flatness must span the tonal→noise axis: it was computed on the
+	squared power spectrogram (|D|^4), collapsing every value toward 0 (M2)."""
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(44100)
+
+	def test_flatness_orders_tonal_below_noise (self) -> None:
+		t = numpy.arange(44100) / 44100
+		sine = (0.3 * numpy.sin(2 * numpy.pi * 440 * t)).astype(numpy.float32)
+		noise = (numpy.random.default_rng(3).standard_normal(44100) * 0.3).astype(numpy.float32)
+
+		sine_flat = subsample.analysis.analyze_mono(sine, self._params()).spectral_flatness
+		noise_flat = subsample.analysis.analyze_mono(noise, self._params()).spectral_flatness
+
+		# The bug drove both to ~0 (indistinguishable).  A pure tone floors near
+		# 0; white noise saturates near 1.
+		assert sine_flat < 0.05
+		assert noise_flat > 0.8
+
+
 class TestVoicedFraction:
 
 	"""Tests for the voiced_fraction metric in AnalysisResult."""

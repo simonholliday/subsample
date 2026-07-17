@@ -58,7 +58,6 @@ import typing
 import mido
 import numpy
 import pyaudio
-import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 import yaml
 
 import pymididefs.drums
@@ -256,6 +255,27 @@ def _format_pick_suffix (pick_spec: subsample.query.PickSpec) -> str:
 	return f" pick {lo_eff}-{hi}"
 
 
+# Default grid subdivision for a stretch_quantize / pad_quantize step that
+# declares no explicit `grid:`.  Seeded from transform.quantize_resolution via
+# set_default_quantize_grid() in cli.main() (mirrors the other set-once-from-
+# config wirings); 16 (sixteenth notes) matches the historical hard-coded default
+# so an unwired caller — a test — behaves exactly as before.
+_DEFAULT_QUANTIZE_GRID: int = 16
+
+
+def set_default_quantize_grid (grid: int) -> None:
+
+	"""Set the process-wide default quantize grid, from transform.quantize_resolution.
+
+	Called once from cli.main().  Previously this config key was parsed and
+	documented but never read; the runtime grid always fell back to a hard-coded
+	16.  Wiring it here makes the documented default take effect for every
+	stretch_quantize / pad_quantize step that omits an explicit `grid:`."""
+
+	global _DEFAULT_QUANTIZE_GRID
+	_DEFAULT_QUANTIZE_GRID = grid
+
+
 def _quantize_params (
 	process: subsample.query.ProcessSpec,
 	step_name: str,
@@ -266,25 +286,27 @@ def _quantize_params (
 
 	Returns (target_bpm, grid). When no explicit BPM is declared in the
 	step, falls back to config_bpm (from transform.target_bpm in config).
-	CcBinding values are treated as "provided" so the quantize path activates;
-	the actual value is resolved later in spec_from_process().
+	The grid falls back to the configured _DEFAULT_QUANTIZE_GRID
+	(transform.quantize_resolution).  CcBinding values are treated as "provided"
+	so the quantize path activates; the actual value is resolved later in
+	spec_from_process().
 	"""
 
 	# The parser canonicalises the YAML tempo param (legacy `bpm:` included)
 	# to "tempo" — that is the ONLY key parser-built steps ever carry.
 	step = next(s for s in process.steps if s.name == step_name)
 	bpm_raw = step.get("tempo", 0)
-	grid_raw = step.get("grid", 16)
+	grid_raw = step.get("grid", _DEFAULT_QUANTIZE_GRID)
 
 	# CcBinding means BPM will be resolved at note-on time — treat as "provided".
 	if isinstance(bpm_raw, subsample.query.CcBinding):
 		default = bpm_raw.default_value
 		bpm = default if default is not None and default > 0 else (config_bpm if config_bpm > 0 else 120.0)
-		grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16
+		grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else _DEFAULT_QUANTIZE_GRID
 		return (bpm, grid)
 
 	bpm = float(bpm_raw)
-	grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else 16
+	grid = int(grid_raw) if not isinstance(grid_raw, subsample.query.CcBinding) else _DEFAULT_QUANTIZE_GRID
 
 	if bpm <= 0:
 		bpm = config_bpm
@@ -332,6 +354,13 @@ _CLOCK_SWITCH_DEADBAND_BPM: typing.Final[float] = 0.75
 # transport, a dropped pulse) rather than accepted as a tempo.
 _CLOCK_MIN_BPM: typing.Final[float] = 20.0
 _CLOCK_MAX_BPM: typing.Final[float] = 300.0
+
+# A pulse arriving more than this multiple of the expected spacing after the
+# previous one is treated as a clock interruption: the measurement window is
+# discarded so a dropped/late pulse cannot inflate it into a phantom tempo.  1.5
+# catches a single dropped pulse (a 2x gap) while clearing per-pulse jitter
+# (~1.1x) — must stay below 2.0.
+_CLOCK_GAP_RESET_FACTOR: typing.Final[float] = 1.5
 
 # How far an incoming clock must sit from transform.target_bpm before it is
 # worth telling the user their quantize grid does not match their sequence.
@@ -389,6 +418,20 @@ class _MidiClockTracker:
 		Returns:
 			The newly accepted BPM, or None when nothing changed.
 		"""
+
+		# A gap much larger than the expected pulse spacing means the clock was
+		# interrupted — a dropped/late pulse, or a brief transport stop/start.
+		# The stale timestamps left in the window would otherwise inflate
+		# window_seconds for the next ~4 beats and, because the inflated value is
+		# roughly constant across them, satisfy the dwell on a PHANTOM tempo (a
+		# spurious re-bake, then a re-bake back).  Discard the window and rebuild
+		# it; the accepted tempo stays sticky (transport stop keeps the last BPM).
+		if self._pulses:
+			expected = 60.0 / (self._accepted or 120.0) / _CLOCK_PULSES_PER_BEAT
+			if now - self._pulses[-1] > _CLOCK_GAP_RESET_FACTOR * expected:
+				self._pulses.clear()
+				self._candidate = None
+				self._candidate_beats = 0
 
 		self._pulses.append(now)
 		self._pulse_count += 1
@@ -477,7 +520,7 @@ def _build_variant_lookup (
 		step = subsample.transform.PadQuantize(target_bpm=float(bpm), resolution=int(grid))
 	elif session_bpm > 0:
 		# Fall back to session-level stretch_quantize.
-		step = subsample.transform.TimeStretch(target_bpm=float(session_bpm), resolution=16)
+		step = subsample.transform.TimeStretch(target_bpm=float(session_bpm), resolution=_DEFAULT_QUANTIZE_GRID)
 	else:
 		return None
 
@@ -582,9 +625,29 @@ def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing
 	weights = list(weights_raw)
 	weight_arr = numpy.array(weights, dtype=numpy.float32)
 
+	# `< 0` is False for NaN, so check finiteness explicitly — a NaN/inf weight
+	# would otherwise poison the constant-power normalisation silently.
+	if not bool(numpy.all(numpy.isfinite(weight_arr))):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan weights must be finite numbers"
+		)
+
 	if numpy.any(weight_arr < 0):
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: pan weights must be >= 0"
+		)
+
+	# The pan length defines the target channel layout, which build_mix_matrix
+	# only supports at standard sizes.  Validate at LOAD so a 3/5/7-element pan
+	# fails here with a clear message instead of raising a ValueError on EVERY
+	# note-on (which _safe_handle_message swallows to an ERROR log, silently
+	# dropping every note of the assignment).
+	if int(weight_arr.shape[0]) not in subsample.channel.STANDARD_LAYOUTS:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan must have a standard "
+			f"layout length "
+			f"({', '.join(str(k) for k in sorted(subsample.channel.STANDARD_LAYOUTS))}); "
+			f"got {int(weight_arr.shape[0])}"
 		)
 
 	if float(numpy.sum(weight_arr)) == 0.0:
@@ -1660,39 +1723,20 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 	path = pathlib.Path(path).resolve()
 	sidecar_path = subsample.cache.cache_path(path)
 
-	# Auto-generate sidecar if missing but the audio file exists.
+	# Auto-generate the sidecar if missing but the audio file exists.  Route
+	# through ensure_sample_assets (the same heal path the library loader uses)
+	# rather than hand-rolling the write — so the reference sidecar upholds every
+	# writer contract: hash-before-decode, read through read_audio_file (float
+	# ceiling honoured), the configured AnalysisConfig, compute_loop (no
+	# permanently-unloopable trap), and channel-format-aware analysis.
 	if not sidecar_path.exists() and path.exists():
 		_log.info("Generating analysis sidecar for reference %s", path.name)
 
-		try:
-			data, samplerate = soundfile.read(str(path), always_2d=True, dtype="float32")
-			mono: numpy.ndarray = numpy.asarray(numpy.mean(data, axis=1, dtype=numpy.float32))
-
-			params = subsample.analysis.compute_params(samplerate)
-			rhythm_cfg = subsample.config.AnalysisConfig()
-			spectral, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
-				mono, params, rhythm_cfg,
+		if subsample.cache.ensure_sample_assets(path, with_preview=False) is None:
+			_log.warning(
+				"Could not generate sidecar for %s — this reference will be skipped",
+				path.name,
 			)
-			duration = len(data) / samplerate
-
-			audio_md5 = subsample.cache.compute_audio_md5(path)
-			subsample.cache.save_cache(
-				audio_path  = path,
-				audio_md5   = audio_md5,
-				params      = params,
-				spectral    = spectral,
-				rhythm      = rhythm,
-				pitch       = pitch,
-				timbre      = timbre,
-				duration    = duration,
-				level       = level,
-				band_energy = band_energy,
-			)
-		except Exception as exc:
-			# Broad catch: soundfile.read() can raise LibsndfileError (not an
-			# OSError subclass), analysis can raise numpy/librosa errors.
-			# All are non-fatal — the reference is simply skipped.
-			_log.warning("Could not generate sidecar for %s: %s", path.name, exc)
 			return None
 
 	if not sidecar_path.exists():
@@ -1797,6 +1841,7 @@ def _load_instrument_from_path (
 		filepath       = path,
 		channel_format = result.channel_format,
 		loop           = result.loop,
+		audio_sample_rate = target_sample_rate or result.params.sample_rate,
 	)
 
 
@@ -2222,6 +2267,17 @@ _VALID_MAP_KEYS: typing.Final[frozenset[str]] = frozenset({
 	"programs", "program_channel", "default_program", "assignments", "templates",
 })
 
+# Every key a single assignment mapping may carry.  A typo (`mdoe:`, `realease:`,
+# `gain_db:`) would otherwise be silently ignored and the assignment revert to
+# defaults; this whitelist fails such mistakes loudly, matching the top-level and
+# inner-block key guards.  `template` is consumed by inheritance resolution
+# before the per-assignment loop but is listed so a stray one still validates.
+_VALID_ASSIGNMENT_KEYS: typing.Final[frozenset[str]] = frozenset({
+	"name", "channel", "notes", "select", "process", "mode", "loop", "release",
+	"gain", "pan", "output", "extract", "velocity", "stack", "silenced_by",
+	"template",
+})
+
 
 def load_midi_map (
 	path: pathlib.Path,
@@ -2368,6 +2424,18 @@ def load_midi_map (
 
 	for assignment_index, assignment_raw in enumerate(raw["assignments"], start=1):
 		name = assignment_raw.get("name", "<unnamed>")
+
+		if isinstance(assignment_raw, dict):
+			# `one_shot` is a removed alias with its own migration error in
+			# _parse_mode — exclude it here so that clearer message fires instead
+			# of the generic unknown-key one.
+			unknown_keys = set(assignment_raw) - _VALID_ASSIGNMENT_KEYS - {"one_shot"}
+			if unknown_keys:
+				raise ValueError(
+					f"MIDI map assignment {name!r}: unknown key(s) "
+					f"{sorted(unknown_keys)}.  Valid keys: "
+					f"{sorted(_VALID_ASSIGNMENT_KEYS)}."
+				)
 
 		# Channel: user-facing 1-16 → mido 0-indexed.
 		channel_raw = assignment_raw.get("channel")
@@ -3401,28 +3469,36 @@ class MidiPlayer:
 			# after the first capture / knob / program switch.  Each source is
 			# stripped exactly once (single warning), then the active base is
 			# re-pointed at the stripped source for the currently active program.
-			self._top_level_note_map, self._top_level_zone_templates = self._strip_oob_routing_rules(
-				self._top_level_note_map, self._top_level_zone_templates,
-			)
+			# Hold the rule lock across the whole strip → re-point → rematerialise
+			# → rebuild sequence: the instrument/midi-map watchers and capture
+			# integration are already running by now and can call
+			# update_assignments() under _rules_lock, so an unlocked mutation here
+			# could interleave and install a torn rule set.  _rules_lock is
+			# reentrant, so the _materialize_zones/_rebuild_candidate_cache calls
+			# (which may take it again) are fine.
+			with self._rules_lock:
+				self._top_level_note_map, self._top_level_zone_templates = self._strip_oob_routing_rules(
+					self._top_level_note_map, self._top_level_zone_templates,
+				)
 
-			if self._bank_manager is not None:
-				for _bank in self._bank_manager.all_banks():
-					if _bank.note_map is not None:
-						_bank.note_map, _bank.zone_templates = self._strip_oob_routing_rules(
-							_bank.note_map, _bank.zone_templates or (),
-						)
+				if self._bank_manager is not None:
+					for _bank in self._bank_manager.all_banks():
+						if _bank.note_map is not None:
+							_bank.note_map, _bank.zone_templates = self._strip_oob_routing_rules(
+								_bank.note_map, _bank.zone_templates or (),
+							)
 
-			active_bank = self._bank_manager.active_bank if self._bank_manager is not None else None
-			if active_bank is not None and active_bank.note_map is not None:
-				self._base_note_map  = active_bank.note_map
-				self._zone_templates = active_bank.zone_templates or ()
-			else:
-				self._base_note_map  = self._top_level_note_map
-				self._zone_templates = self._top_level_zone_templates
+				active_bank = self._bank_manager.active_bank if self._bank_manager is not None else None
+				if active_bank is not None and active_bank.note_map is not None:
+					self._base_note_map  = active_bank.note_map
+					self._zone_templates = active_bank.zone_templates or ()
+				else:
+					self._base_note_map  = self._top_level_note_map
+					self._zone_templates = self._top_level_zone_templates
 
-			# Rebuild the working map and selection cache from the fixed sources.
-			self._materialize_zones()
-			self._rebuild_candidate_cache()
+				# Rebuild the working map and selection cache from the fixed sources.
+				self._materialize_zones()
+				self._rebuild_candidate_cache()
 
 			# Callback mode: PortAudio pulls audio from _audio_callback on its
 			# own high-priority thread.  The rtmidi callback thread runs
@@ -4021,6 +4097,16 @@ class MidiPlayer:
 		if msg.type == "program_change" and self._bank_manager is not None:
 			bm = self._bank_manager
 			if bm.bank_channel_mido == -1 or msg.channel == bm.bank_channel_mido:
+				# A redundant Program Change (re-selecting the already-active
+				# program — sequencers often re-send it) must not run the full
+				# rule swap on the rtmidi dispatch thread: switch_to() returns
+				# True even when unchanged, and the swap below clears round-robin
+				# / last-played state and re-queries the whole library for nothing
+				# (audibly resetting segment round-robin).  Skip when unchanged.
+				active = bm.active_bank
+				if active is not None and active.program == msg.program:
+					return
+
 				if bm.switch_to(msg.program):
 					# Both dicts are guarded by _state_lock — clear them
 					# together so any concurrent reader (e.g. _select_segment
@@ -4381,7 +4467,14 @@ class MidiPlayer:
 			ls = max(0, min(ls, le - 1))
 			xf = max(0, min(xf, ls, le - ls))
 
-			if le - ls >= 1:
+			# Re-apply _resolve_loop's minimum-length floor AFTER clamping to the
+			# rendered buffer: when the selected sample renders shorter than the
+			# resolved loop start, the clamp above can collapse the loop to a few
+			# frames — a DC buzz that also makes the callback wrap dozens of times
+			# per buffer.  Fall back to a plain (non-looping) voice instead.
+			min_loop_frames = max(1, round(_MIN_LOOP_SECONDS * self._output_sample_rate))
+
+			if le - ls >= min_loop_frames:
 				looping        = True
 				loop_start     = ls
 				loop_end       = le
@@ -5691,8 +5784,11 @@ class MidiPlayer:
 				logical_out = len(output_routing) if output_routing is not None else self._output_channels
 				effective_pan = pan_weights
 
-				if effective_pan is None:
+				if effective_pan is None and logical_out in subsample.channel.STANDARD_LAYOUTS:
 					effective_pan = numpy.ones(logical_out, dtype=numpy.float32)
+				# For a non-standard output count (3/5/7) leave effective_pan None:
+				# build_mix_matrix's default routing spreads a mono extract to the
+				# centre front pair rather than raising on every note-on.
 
 				if output_routing is not None:
 					pan_matrix = subsample.channel.build_mix_matrix(
@@ -5788,19 +5884,24 @@ class MidiPlayer:
 		gain_linear = 10.0 ** (gain_db / 20.0) if gain_db != 0.0 else 1.0
 		raw_gain = norm_gain * vel_scale * gain_linear
 
-		# Anti-clip ceiling: account for the worst-case row sum of the mix
-		# matrix (e.g. a 5.1→stereo downmix sums FL + 0.707*FC + 0.707*BL).
+		# Anti-clip ceiling from the TRUE peak of the buffer being rendered, not
+		# the mono-mean level.peak: an anti-phase mic pair or a heavily widened
+		# stereo stem can peak well above its mono downmix, so level.peak would
+		# under-protect and let the voice render far past full scale into the
+		# limiter (audible distortion).  Also accounts for the worst-case row sum
+		# of the mix matrix (e.g. a 5.1→stereo downmix sums FL + 0.707*FC + …).
+		buffer_peak = float(numpy.max(numpy.abs(audio))) if audio.size else 0.0
 		max_row_sum = float(numpy.max(numpy.sum(numpy.abs(mix_matrix), axis=1)))
 
-		if level.peak > 0.0 and max_row_sum > 0.0:
-			final_gain = min(raw_gain, 1.0 / (level.peak * max_row_sum))
+		if buffer_peak > 0.0 and max_row_sum > 0.0:
+			final_gain = min(raw_gain, 1.0 / (buffer_peak * max_row_sum))
 		else:
 			final_gain = raw_gain
 
 		_log.debug(
-			"gain: norm=%.3f  vel_scale=%.3f  gain_db=%.1f  raw=%.3f  final=%.3f  (rms=%.4f peak=%.4f)",
+			"gain: norm=%.3f  vel_scale=%.3f  gain_db=%.1f  raw=%.3f  final=%.3f  (rms=%.4f buf_peak=%.4f)",
 			norm_gain, vel_scale, gain_db, raw_gain, final_gain,
-			level.rms, level.peak,
+			level.rms, buffer_peak,
 		)
 
 		gained = audio * final_gain

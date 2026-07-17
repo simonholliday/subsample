@@ -142,7 +142,7 @@ you focus on playing.
 | **Live capture** | Adaptive noise floor, zero-gap back-to-back detection, S-curve fades |
 | **Analysis** | 58 dimensions across 5 feature groups; cached `.analysis.json` sidecars |
 | **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
-| **DSP processors** | 20 (filter, comp, gate, distort, bit-depth, radio, freqshift, wobble, saturate, reshape, transient, HPSS, vocoder, repitch, beat-quantize, pad-quantize, ...) |
+| **DSP processors** | 20 (filter, comp, gate, distort, bit-depth, radio, freqshift, wobble, saturate, reshape, transient, HPSS, vocoder, repitch, stretch-quantize, pad-quantize, ...) |
 | **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
 | **Pitch shifting** | Rubber Band offline finer (highest available quality), pre-rendered |
 | **Time stretch** | Beat-quantized with onset-aligned timemaps, partial-quantize amount, pad-quantize alternative for speech |
@@ -473,24 +473,26 @@ when you lift the key - just enough to avoid a click. `release` lets you set
 how long that fade is, and its shape:
 
 ```yaml
-Warm pad:
+- name: Warm pad
   channel: 1
   notes: 48
   mode: gated
   release: 800                       # fade over 800 ms after key-up
-  select: [ where: { name: "*pad*" } ]
+  select: { where: { name: { matches: "*pad*" } } }
 
-Stab:
+- name: Stab
   channel: 1
   notes: 60
   mode: gated
   release: { time: 120, curve: exponential }   # fast drop, long tail
+  select: { where: { name: { matches: "*stab*" } } }
 
-Expressive pad:
+- name: Expressive pad
   channel: 1
   notes: 64
   mode: gated
   release: { time: { cc: 72, min: 20, max: 3000 } }   # a pedal sets the length
+  select: { where: { name: { matches: "*pad*" } } }
 ```
 
 - A bare number is the fade time in milliseconds.
@@ -583,13 +585,13 @@ Declare it on the sound that should be *cut*, naming the note(s) that cut it:
   channel: 10
   notes: drum.hi_hat_open
   silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_pedal]
-  select: [ where: { reference: GM46_OpenHiHat } ]
+  select: [ where: { reference: samples/reference/GM46_OpenHiHat.wav } ]
 
 - name: Ride
   channel: 10
   notes: drum.ride
   silenced_by: self          # one physical cymbal - a new hit damps the last
-  select: [ where: { reference: GM51_RideCymbal1 } ]
+  select: [ where: { reference: samples/reference/GM51_RideCymbal1.wav } ]
 ```
 
 - The value is a single note, a list of notes, or `self` - and `self` can sit in
@@ -2009,7 +2011,11 @@ choose one (or auto-selects if only one is present). It calibrates ambient noise
 for a few seconds before listening for events.
 
 **File input mode:** Each file is processed at its native sample rate, bit depth,
-and channel count. Detected segments are saved to the output directory.
+and channel count. Detected segments are saved to the output directory. The
+detector spends the first `detection.warmup_seconds` (default 1.0s) calibrating
+the ambient floor, so a hit inside that opening window is not captured - leave
+about a second of room tone at the start of an imported file, or set
+`detection.warmup_seconds: 0` if the file begins on a hit.
 
 ### Chopping long-decay takes
 
@@ -2115,7 +2121,7 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
 | `transform.max_memory_mb` | auto | Memory budget (MB) for transform variants; overrides global split |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
-| `transform.target_bpm` | `0.0` | Target BPM for automatic time-stretch variants; 0.0 disables. When > 0, qualifying samples (detected tempo + enough onsets) are beat-quantized to the target tempo. Also the fallback under `tempo_source: midi` until a clock is seen |
+| `transform.target_bpm` | `0.0` | Default tempo (BPM) for `stretch_quantize` / `pad_quantize` steps that carry no explicit `tempo:`. Only assignments that declare one of those processors are quantized - there is no automatic stretch-every-rhythmic-sample behaviour. `0.0` means no default, so such a step with no explicit tempo is skipped. Also the fallback under `tempo_source: midi` until a MIDI clock arrives |
 | `transform.tempo_source` | `config` | Where quantize processors get their tempo. `config` uses `target_bpm`; `midi` follows an incoming MIDI clock so changing tempo in your sequencer doesn't leave samples snapped to the old grid. See [Following your sequencer's tempo](#following-your-sequencers-tempo) |
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
 | `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |

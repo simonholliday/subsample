@@ -336,8 +336,9 @@ class TestProcessCapture:
 		assert ambix[0, subsample.ambisonic.ACN_Y] == pytest.approx(3.0)
 		assert ambix[0, subsample.ambisonic.ACN_Z] == pytest.approx(4.0)
 
-	def test_a_generic_applies_matrix_only (self) -> None:
-		"""Generic A-format has no EQ — impulse on FLU produces (0.5, 0.5, 0.5, 0.5)."""
+	def test_a_generic_no_capsule_eq (self) -> None:
+		"""Generic A-format has no capsule EQ, but the post-matrix HF shelf
+		still acts on Y/Z/X — only W stays at the raw matrix output 0.5."""
 		# Very short signal so filter warm-up cannot confound — but for
 		# 'a_generic' there is no EQ.
 		audio = numpy.zeros((1, 4), dtype=numpy.float32)

@@ -155,6 +155,12 @@ class OscReceiver:
 		self._server = pythonosc.osc_server.ThreadingOSCUDPServer(
 			(host, port), dispatcher,
 		)
+		# Run per-datagram handler threads as daemons so stop()'s bounded
+		# join(timeout) is not defeated by server_close(), which otherwise joins
+		# every in-flight /sample/import handler with NO timeout (ThreadingMixIn
+		# block_on_close=True) — a first-time analysis can take seconds, hanging
+		# shutdown well past the intended bound.
+		self._server.daemon_threads = True
 		self._thread: typing.Optional[threading.Thread] = None
 
 	def start (self) -> None:

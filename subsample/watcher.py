@@ -317,6 +317,7 @@ class InstrumentWatcher:
 			filepath       = audio_path,
 			channel_format = result.channel_format,
 			loop           = result.loop,
+			audio_sample_rate = self._target_sample_rate or result.params.sample_rate,
 		)
 
 		# A stop() racing this callback joins the timer thread, so delivering
@@ -459,15 +460,19 @@ class InstrumentWatcher:
 
 		sidecar = subsample.cache.cache_path(audio_path)
 
-		if sidecar.exists():
+		# Only a FRESH sidecar (analysed from the current bytes) is authoritative.
+		# A stale one — left behind when the audio was replaced/updated in place —
+		# must not short-circuit the load, or the new audio never enters the
+		# library.  The grace/load path below re-analyses it via ensure_sample_assets.
+		if sidecar.exists() and subsample.cache.sidecar_matches_audio(audio_path):
 			_log.debug(
-				"Watcher: sidecar already exists for %s — skipping audio path",
+				"Watcher: fresh sidecar already exists for %s — skipping audio path",
 				audio_path.name,
 			)
 			return
 
 		_log.debug(
-			"Watcher: no sidecar for %s — waiting %.1fs grace period",
+			"Watcher: no fresh sidecar for %s — waiting %.1fs grace period",
 			audio_path.name, _SIDECAR_GRACE_SECONDS,
 		)
 
@@ -525,12 +530,14 @@ class InstrumentWatcher:
 		with self._lock:
 			self._timers.pop(audio_path, None)
 
-		# 1. Sidecar appeared — another path is handling this file.
+		# 1. A FRESH sidecar appeared (e.g. a remote instance delivered one for
+		#    this audio) — another path is handling it, skip.  A stale sidecar for
+		#    replaced-in-place audio must NOT skip; fall through and re-analyse.
 		sidecar = subsample.cache.cache_path(audio_path)
 
-		if sidecar.exists():
+		if sidecar.exists() and subsample.cache.sidecar_matches_audio(audio_path):
 			_log.debug(
-				"Watcher: sidecar appeared for %s during grace — skipping",
+				"Watcher: fresh sidecar appeared for %s during grace — skipping",
 				audio_path.name,
 			)
 			return
@@ -630,6 +637,7 @@ class InstrumentWatcher:
 			filepath       = audio_path,
 			channel_format = result.channel_format,
 			loop           = result.loop,
+			audio_sample_rate = self._target_sample_rate or result.params.sample_rate,
 		)
 
 		# Skip delivery when stop() already ran — the sidecar is written, so the

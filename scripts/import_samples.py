@@ -21,11 +21,13 @@ import logging
 import math
 import pathlib
 import sys
+import typing
 
 import numpy
 import soundfile
 
 import subsample.analysis
+import subsample.audio
 import subsample.cache
 import subsample.config
 
@@ -139,9 +141,14 @@ def _import_file (
 	filepath: pathlib.Path,
 	target_dir: pathlib.Path,
 	force: bool,
+	float_ceiling_dbfs: typing.Optional[float],
 ) -> bool:
 
 	"""Import a single audio file into the target directory.
+
+	``float_ceiling_dbfs`` scales a hot float/double source down before writing
+	and analysing it, so the written PCM does not clip and its sidecar describes
+	the same signal (None disables, matching the config default of -1 dBFS).
 
 	Returns True if the file was imported, False if skipped or failed.
 	"""
@@ -169,6 +176,12 @@ def _import_file (
 	if data.shape[0] == 0:
 		print(f"  {filepath.name}  (skipped, empty file)")
 		return False
+
+	# Scale a hot float/double source down to the ceiling BEFORE trim/fade/write/
+	# analyse, so the 16-bit write does not hard-clip peaks above full scale and
+	# the sidecar's level metrics describe the audio that was actually written.
+	if info.subtype in ("FLOAT", "DOUBLE"):
+		data = subsample.audio.scale_float_to_ceiling(data, float_ceiling_dbfs)
 
 	# Trim silence and apply safety fades
 
@@ -279,10 +292,15 @@ def main () -> None:
 
 	# Resolve target directory
 
+	# Resolve the float import ceiling from config so a hot 32-bit-float source
+	# is scaled to fit rather than hard-clipped on the 16-bit write — the same
+	# guard the live/CLI import path applies (config's default is -1 dBFS).
+	cfg = subsample.config.load_config()
+	float_ceiling = cfg.recorder.audio.float_import_ceiling_dbfs
+
 	if args.to is not None:
 		target_dir = pathlib.Path(args.to)
 	else:
-		cfg = subsample.config.load_config()
 		target_dir = pathlib.Path(cfg.output.directory)
 
 	target_dir.mkdir(parents=True, exist_ok=True)
@@ -320,7 +338,7 @@ def main () -> None:
 			skipped += 1
 			continue
 
-		if _import_file(filepath, target_dir, args.force):
+		if _import_file(filepath, target_dir, args.force, float_ceiling):
 			imported += 1
 		else:
 			skipped += 1

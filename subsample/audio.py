@@ -94,6 +94,34 @@ def set_float_import_ceiling (dbfs: typing.Optional[float]) -> None:
 	_FLOAT_IMPORT_CEILING_DBFS = dbfs
 
 
+def scale_float_to_ceiling (
+	data: numpy.ndarray,
+	ceiling_dbfs: typing.Optional[float],
+) -> numpy.ndarray:
+
+	"""Scale a float array down so its peak sits at ``ceiling_dbfs``, if it exceeds it.
+
+	Mirrors the scale-to-fit ``read_audio_file`` applies to hot float/double
+	sources, exposed for the sidecar-writing scripts (import_samples,
+	analyze_file) that read float PCM directly rather than through
+	``read_audio_file`` — so the audio they write and the sidecar they analyse
+	both describe the same, un-clipped signal.  Returns the array unchanged when
+	``ceiling_dbfs`` is None, the array is empty, or the peak already fits.
+	"""
+
+	if ceiling_dbfs is None or data.size == 0:
+		return data
+
+	peak = float(numpy.max(numpy.abs(data)))
+	ceiling_lin = 10.0 ** (ceiling_dbfs / 20.0)
+
+	if peak > ceiling_lin:
+		scaled: numpy.ndarray = data * (ceiling_lin / peak)
+		return scaled
+
+	return data
+
+
 def read_audio_file (
 	path: pathlib.Path,
 	float_ceiling_dbfs: typing.Union[float, None, _Unset] = _UNSET,
@@ -161,6 +189,14 @@ def read_audio_file (
 
 	except wave.Error:
 		pass  # Not a WAV file — fall through to soundfile.
+
+	except EOFError:
+		# A zero-byte or header-truncated WAV: wave.open/readframes raises
+		# EOFError (not wave.Error).  Fall through to soundfile, which raises a
+		# clean LibsndfileError→ValueError the callers already catch — so one
+		# malformed file in a scanned directory becomes a skip, not an
+		# EOFError that escapes read_audio_file and aborts the whole load.
+		pass
 
 	except ValueError:
 		# A real WAV, but at a width unpack_audio doesn't handle (e.g. 8-bit

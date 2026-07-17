@@ -138,13 +138,13 @@
 #     notes: drum.hi_hat_open
 #     silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_pedal]
 #     select:
-#       where: { reference: GM46_OpenHiHat }
+#       where: { reference: samples/reference/GM46_OpenHiHat.wav }
 #   - name: Ride
 #     channel: 10
 #     notes: drum.ride
 #     silenced_by: self               # single ride - a new hit damps the last
 #     select:
-#       where: { reference: GM51_RideCymbal1 }
+#       where: { reference: samples/reference/GM51_RideCymbal1.wav }
 #
 #   # 7. Templates - define shared fields once, inherit per assignment.
 #   #    `templates:` is a TOP-LEVEL section (a sibling of `assignments:`).

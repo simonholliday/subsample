@@ -108,6 +108,43 @@ def _parse_args () -> argparse.Namespace:
 	return parser.parse_args()
 
 
+def _build_trimmed_segment (
+	buf: subsample.buffer.CircularBuffer,
+	detector: subsample.detector.LevelDetector,
+	detection_cfg: subsample.config.DetectionConfig,
+	sample_rate: int,
+	start_frame: int,
+	end_frame: int,
+) -> typing.Optional[numpy.ndarray]:
+
+	"""Read [start_frame, end_frame] from the buffer and trim both edges.
+
+	Shared by the per-chunk completion path and the end-of-file flush so both
+	produce identically-trimmed segments.
+	"""
+
+	pre = detection_cfg.trim_pre_samples
+	# Read back `pre` extra frames before the detector's start boundary so
+	# trim_silence has raw audio available for its fade-in window.
+	segment = buf.read_range(max(0, start_frame - pre), end_frame)
+
+	# Tail edge uses the CLOSE threshold (keeps a decayed tail); attack edge uses
+	# the snr (open) threshold (trims tight to the transient) — both owned by the
+	# detector so they cannot drift from what it ended on.
+	fade_out_samples = round(detection_cfg.fade_out_ms / 1000.0 * sample_rate)
+
+	trimmed = subsample.trim.trim_silence(
+		segment,
+		detector.tail_amplitude_threshold,
+		pre_samples=detection_cfg.trim_pre_samples,
+		post_samples=detection_cfg.trim_post_samples,
+		fade_out_samples=fade_out_samples,
+		lead_amplitude_threshold=detector.attack_amplitude_threshold,
+	)
+
+	return trimmed if trimmed.size > 0 else None
+
+
 def _process_chunk (
 	chunk: numpy.ndarray,
 	buf: subsample.buffer.CircularBuffer,
@@ -140,36 +177,7 @@ def _process_chunk (
 		return None
 
 	start_frame, end_frame = result
-	pre = detection_cfg.trim_pre_samples
-	# Read back `pre` extra frames before the detector's start boundary so
-	# trim_silence has raw audio available for its fade-in window.
-	# trim_silence then uses the same `pre_samples` value to decide how many
-	# of those frames to keep and how wide the S-curve fade should be.
-	# The two uses are coordinated, not double-counted.
-	segment = buf.read_range(max(0, start_frame - pre), end_frame)
-
-	# Trim the two edges with DIFFERENT thresholds, both owned by the detector so
-	# they cannot drift from what it ended on:
-	#  - tail edge: the CLOSE threshold (release-or-snr) — kept low so a decayed
-	#    tail is not re-cut back up to the louder start level.
-	#  - attack edge: the snr (open) threshold — independent of release, so a low
-	#    release preserving a long tail does not drag low-level room tone into the
-	#    front of the sample.  The onset trims tight to the transient.
-	fade_out_samples = round(detection_cfg.fade_out_ms / 1000.0 * sample_rate)
-
-	trimmed = subsample.trim.trim_silence(
-		segment,
-		detector.tail_amplitude_threshold,
-		pre_samples=detection_cfg.trim_pre_samples,
-		post_samples=detection_cfg.trim_post_samples,
-		fade_out_samples=fade_out_samples,
-		lead_amplitude_threshold=detector.attack_amplitude_threshold,
-	)
-
-	if trimmed.size == 0:
-		return None
-
-	return trimmed
+	return _build_trimmed_segment(buf, detector, detection_cfg, sample_rate, start_frame, end_frame)
 
 
 def _process_input_files (
@@ -277,6 +285,23 @@ def _process_input_files (
 						pct, _format_mmss(wall_elapsed), _format_mmss(eta_wall),
 					)
 					last_progress_time = now
+
+			# End of file: flush a recording still open (its last sound ran to
+			# within hold_time of EOF) so the final segment is not silently lost.
+			flush = detector.finalize(buf.frames_written)
+			if flush is not None:
+				trimmed = _build_trimmed_segment(
+					buf, detector, cfg.detection, file_info.sample_rate, flush[0], flush[1],
+				)
+				if trimmed is not None:
+					writer.enqueue(
+						trimmed,
+						datetime.datetime.now(),
+						filename_base=f"{path.stem}_{segment_index}",
+						sample_rate=file_info.sample_rate,
+						bit_depth=file_info.bit_depth,
+					)
+					segment_index += 1
 
 			# Phase 2 — drain: wait for the worker pool to finish analysing and
 			# writing every enqueued segment.  For long files this is where most
@@ -813,9 +838,11 @@ def _start_player (
 			player.run()
 		except (ValueError, OSError) as exc:
 			# OSError covers PortAudio rejecting the device/format and mido
-			# failing to bind the port — without it a device-open failure would
-			# escape this thread target as a raw traceback while the main loop
-			# blocks on shutdown_event, hanging the app.
+			# failing to bind the port — catch it so a device-open failure prints
+			# a clean message instead of escaping this thread target as a raw
+			# traceback.  Returning ends the thread; the main loop notices all
+			# subsystem threads have stopped and exits (see the wait loop) rather
+			# than parking on shutdown_event forever.
 			print(f"\nError starting player: {exc}", file=sys.stderr)
 
 		return
@@ -915,6 +942,14 @@ def _main_impl () -> None:
 	subsample.audio.set_float_import_ceiling(
 		cfg.recorder.audio.float_import_ceiling_dbfs
 	)
+
+	# Wire the analysis tempo priors so the file/library/watcher heal path honours
+	# analysis.start_bpm / tempo_min / tempo_max, not just live capture.
+	subsample.cache.set_analysis_config(cfg.analysis)
+
+	# Wire the default quantize grid so transform.quantize_resolution actually
+	# takes effect (it was documented but previously never read).
+	subsample.player.set_default_quantize_grid(cfg.transform.quantize_resolution)
 
 	_log.info(
 		"Memory budget: instrument %.0f MB, transform %.0f MB, carrier %.0f MB, disk %.0f MB",
@@ -1462,6 +1497,7 @@ def _main_impl () -> None:
 					filepath       = file_path,
 					channel_format = result.channel_format,
 					loop           = result.loop,
+					audio_sample_rate = output_sample_rate or result.params.sample_rate,
 				)
 
 				_integrate_sample(record, instrument_library, similarity_matrix,
@@ -1491,6 +1527,18 @@ def _main_impl () -> None:
 		# and responds to KeyboardInterrupt between intervals.
 		while not shutdown_event.is_set():
 			shutdown_event.wait(timeout=1.0)
+
+			# If every subsystem thread has exited on its own — e.g. the only
+			# enabled subsystem failed to start (bad map, missing device) and
+			# returned without ever entering its run loop — there is nothing left
+			# to keep the process alive, so stop waiting instead of parking
+			# forever.  A still-alive sibling (both enabled, one failed) keeps the
+			# app running.  `threads` holds only the recorder/player subsystems;
+			# an empty list (watcher/OSC-only mode) never triggers this.
+			if threads and not any(t.is_alive() for t in threads):
+				if not shutdown_event.is_set():
+					_log.error("All subsystems have stopped — exiting.")
+				break
 
 	except KeyboardInterrupt:
 		print("\nStopping…")
@@ -1780,6 +1828,9 @@ def _make_on_complete (
 			duration    = duration,
 			audio       = audio,
 			filepath    = filepath,
+			# Freshly-captured audio is at the recorder rate (== analysis rate),
+			# not resampled to the output rate.
+			audio_sample_rate = analysis_params.sample_rate,
 		)
 
 		_integrate_sample(record, instrument_library, similarity_matrix,

@@ -2,8 +2,12 @@
 
 Produces *derivative* versions of existing samples (pitch-shifted, filtered,
 reversed, saturated, time-stretched, etc.) without modifying the originals.
-Derivatives are purely in-memory and regenerated on demand — they are never
-written to disk.
+Derivatives are cached in two tiers: an in-memory LRU (TransformCache) and,
+when enabled (transform.variant_cache_dir, on by default), a persistent
+on-disk cache (VariantDiskCache) keyed by variant_cache_key.  That key folds in
+TRANSFORM_VERSION, which MUST be bumped whenever a handler's audio output
+changes for the same input — otherwise the disk cache serves stale pre-change
+renders across sessions.
 
 Architecture overview
 ---------------------
@@ -1011,6 +1015,14 @@ _VARIANT_HEADER_FORMAT = "<4sHIIff10x"
 _VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
 
 
+# Bump this whenever a transform HANDLER's audio output changes for the same
+# input — a new or edited _apply_* kernel, a fix to the rate/resample handling,
+# a changed default — so the on-disk variant cache (keyed by this) invalidates
+# stale pre-change renders instead of serving them.  ANALYSIS_VERSION covers the
+# analysis fingerprint; this covers the DSP.
+TRANSFORM_VERSION: str = "1"
+
+
 def variant_cache_key (
 	audio_md5:          str,
 	spec:               "TransformSpec",
@@ -1020,18 +1032,32 @@ def variant_cache_key (
 	"""Compute a deterministic SHA-256 hex digest for a transform variant.
 
 	Includes everything that affects the variant's audio: the parent sample
-	content (MD5), the ordered transform chain (spec), the output device
-	sample rate, and the analysis algorithm version.  Any change to any of
-	these produces a different key — no stale hits.
+	content (MD5), the ordered transform chain (spec), the output device sample
+	rate, the analysis algorithm version, the transform-DSP version, and the
+	content identity of any external carrier file a step references.  Any change
+	to any of these produces a different key — no stale hits.
 	"""
 
 	h = hashlib.sha256()
 	h.update(audio_md5.encode())
 	h.update(subsample.analysis.ANALYSIS_VERSION.encode())
+	h.update(TRANSFORM_VERSION.encode())
 	h.update(str(output_sample_rate).encode())
 
 	for step in spec.steps:
 		h.update(repr(step).encode())
+
+		# repr(step) carries only a carrier file's PATH, but its audio content
+		# shapes the render (vocoder).  Fold in the file's identity (mtime+size)
+		# so replacing the carrier at the same path invalidates the cached render
+		# instead of serving the stale one.
+		carrier_path = getattr(step, "carrier_path", None)
+		if carrier_path:
+			try:
+				st = os.stat(carrier_path)
+				h.update(f"{st.st_mtime_ns}:{st.st_size}".encode())
+			except OSError:
+				pass
 
 	return h.hexdigest()
 
@@ -1339,6 +1365,11 @@ _ApplyFn = typing.Callable[
 # Callback invoked on the worker thread when a transform completes.
 _OnTransformComplete = typing.Callable[["TransformResult"], None]
 
+# Cap on the remembered-failure set (see TransformProcessor._failed_keys).  Well
+# above any realistic count of distinct doomed specs in a session; on overflow
+# the set is cleared wholesale (a re-fail then re-adds one entry).
+_MAX_FAILED_KEYS: int = 4096
+
 
 class TransformProcessor:
 
@@ -1397,6 +1428,15 @@ class TransformProcessor:
 		self._in_flight:      set[TransformKey]  = set()
 		self._in_flight_lock: threading.Lock     = threading.Lock()
 
+		# Deterministic worker failures (a spec whose handler always raises for
+		# this sample — e.g. a fixed-note repitch on an unpitched sample) are
+		# remembered so the identical doomed job is not re-enqueued and its
+		# traceback re-logged on every trigger.  Keys embed the sample_id, so a
+		# re-added sample gets a fresh id and retries naturally; the set is
+		# cleared wholesale if it ever overflows _MAX_FAILED_KEYS.  Guarded by
+		# _in_flight_lock.
+		self._failed_keys:    set[TransformKey]  = set()
+
 		# Counters for idle/active boundary logging.
 		self._batch_enqueued:  int = 0   # jobs submitted since last idle
 		self._batch_completed: int = 0   # jobs finished since last idle
@@ -1428,7 +1468,7 @@ class TransformProcessor:
 		key = TransformKey(sample_id=record.sample_id, spec=spec)
 
 		with self._in_flight_lock:
-			if key in self._in_flight:
+			if key in self._in_flight or key in self._failed_keys:
 				return
 			was_idle = len(self._in_flight) == 0
 			self._in_flight.add(key)
@@ -1491,6 +1531,19 @@ class TransformProcessor:
 						self._on_complete(disk_hit)
 					return
 
+			# The audio's true sample rate: disk-loaded PCM was resampled to the
+			# player output rate on load, while freshly-captured audio is still at
+			# the recorder rate.  Run DSP and the final resample from THIS rate,
+			# not the processor's configured self._sample_rate — otherwise a
+			# player.audio.sample_rate that differs from recorder.audio.sample_rate
+			# mis-pitches and mis-times every disk-loaded variant.  None (older
+			# records / no audio-rate recorded) falls back to the old assumption.
+			source_rate = (
+				record.audio_sample_rate
+				if record.audio_sample_rate is not None
+				else self._sample_rate
+			)
+
 			# Convert integer PCM to float32 preserving all channels.
 			audio = _pcm_to_float32(record.audio, self._bit_depth)
 
@@ -1508,8 +1561,8 @@ class TransformProcessor:
 				audio = audio * (0.9 / actual_peak)
 
 			# Apply each step in declaration order, dispatching via _HANDLERS.
-			# Handlers receive the original capture sample rate so all DSP
-			# operates at full resolution before the final downsample.
+			# Handlers receive the audio's true sample rate so all DSP operates at
+			# full resolution before the final downsample.
 			for step in spec.steps:
 				handler = self._HANDLERS.get(type(step))
 
@@ -1520,7 +1573,7 @@ class TransformProcessor:
 						"'How to add a new transform type' guide in transform.py."
 					)
 
-				audio = handler(audio, self._sample_rate, record, step)
+				audio = handler(audio, source_rate, record, step)
 
 			# Capture segment bounds set by quantize handlers (thread-local).
 			segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = getattr(
@@ -1535,17 +1588,17 @@ class TransformProcessor:
 			# alias back into the audible range.
 			# librosa.resample expects time as the last axis: transpose to
 			# (channels, n_frames), resample, transpose back.
-			if self._output_sample_rate != self._sample_rate:
+			if self._output_sample_rate != source_rate:
 				audio = librosa.resample(
 					audio.T,
-					orig_sr=self._sample_rate,
+					orig_sr=source_rate,
 					target_sr=self._output_sample_rate,
 					res_type="soxr_vhq",
 				).T.astype(numpy.float32)
 
 				# Scale segment bounds to match the resampled frame count.
 				if segment_bounds is not None:
-					ratio = self._output_sample_rate / self._sample_rate
+					ratio = self._output_sample_rate / source_rate
 					segment_bounds = tuple(
 						(int(s * ratio), int(e * ratio)) for s, e in segment_bounds
 					)
@@ -1599,6 +1652,13 @@ class TransformProcessor:
 				"Transform failed for sample %d  spec=%s",
 				key.sample_id, key.spec,
 			)
+
+			# Remember this deterministic failure so the identical doomed job is
+			# not re-enqueued and its traceback re-logged on every trigger.
+			with self._in_flight_lock:
+				if len(self._failed_keys) >= _MAX_FAILED_KEYS:
+					self._failed_keys.clear()
+				self._failed_keys.add(key)
 
 		finally:
 			with self._in_flight_lock:
@@ -1935,10 +1995,18 @@ def _apply_pitch (
 	"""
 
 	if not numpy.isfinite(record.pitch.dominant_pitch_hz) or record.pitch.dominant_pitch_hz <= 0.0:
-		raise ValueError(
-			f"Cannot pitch-shift sample {record.sample_id} ({record.name!r}): "
-			f"dominant_pitch_hz is {record.pitch.dominant_pitch_hz!r} — no stable pitch detected"
+		# No source pitch to shift from — reachable via a FIXED-note repitch
+		# (`repitch: {note: C4}`) landing on an unpitched sample, which the
+		# dynamic-note path's has_stable_pitch gate does not cover.  Passing the
+		# audio through (rather than raising) keeps the rest of the process chain
+		# alive — downstream filters/saturation still apply — instead of the whole
+		# variant falling back to raw playback.
+		_warn_once(
+			f"repitch_unpitched:{record.sample_id}",
+			f"repitch: sample {record.name!r} has no stable pitch to shift from — "
+			f"playing it at its native pitch (the rest of the process chain still applies)",
 		)
+		return audio
 
 	source_midi = float(librosa.hz_to_midi(record.pitch.dominant_pitch_hz))
 	n_steps     = float(step.target_midi_note) - source_midi
@@ -3101,19 +3169,21 @@ def _apply_reshape (
 	if is_noop:
 		return audio
 
-	# Find the onset point (where the sound begins).
-	if record.rhythm.attack_times:
-		onset_sample = int(record.rhythm.attack_times[0] * sample_rate)
-	else:
-		# Fallback: first sample exceeding 10% of peak.
-		peak_val = float(numpy.max(numpy.abs(audio)))
+	# Find the onset point on the ACTUAL (possibly already-transformed) buffer —
+	# the first sample exceeding 10% of peak.  Deriving it from
+	# record.rhythm.attack_times (the ORIGINAL-capture timeline) would be wrong
+	# after a prior time-altering step in the same chain (pad_quantize /
+	# stretch_quantize / reverse) remapped or mirrored the hit positions, and
+	# `attack_ms` would then zero out real content.  Reading the buffer in hand
+	# is correct whether or not an earlier step moved things.
+	peak_val = float(numpy.max(numpy.abs(audio)))
 
-		if peak_val < 1e-10:
-			return audio
+	if peak_val < 1e-10:
+		return audio
 
-		threshold = 0.1 * peak_val
-		above = numpy.where(numpy.max(numpy.abs(audio), axis=1) > threshold)[0]
-		onset_sample = int(above[0]) if len(above) > 0 else 0
+	threshold = 0.1 * peak_val
+	above = numpy.where(numpy.max(numpy.abs(audio), axis=1) > threshold)[0]
+	onset_sample = int(above[0]) if len(above) > 0 else 0
 
 	onset_sample = max(0, min(onset_sample, n_frames - 1))
 
@@ -3835,6 +3905,7 @@ def spec_from_process (
 		elif proc.name == "stretch_quantize":
 			tempo = float(_resolve_cc(proc.get("tempo"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
 			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution, cc_omni=cc_omni))
+			grid = max(1, grid)   # a 0 or negative grid divides by zero in _build_quantize_grid
 			strength = max(0.0, min(1.0, float(_resolve_cc(proc.get("strength"), cc_state, 1.0, cc_omni=cc_omni))))
 
 			if tempo > 0.0:
@@ -4018,6 +4089,7 @@ def spec_from_process (
 		elif proc.name == "pad_quantize":
 			tempo = float(_resolve_cc(proc.get("tempo"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
 			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution, cc_omni=cc_omni))
+			grid = max(1, grid)   # a 0 or negative grid divides by zero in _build_quantize_grid
 			strength = max(0.0, min(1.0, float(_resolve_cc(proc.get("strength"), cc_state, 1.0, cc_omni=cc_omni))))
 
 			if tempo > 0.0:

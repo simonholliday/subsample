@@ -16,6 +16,7 @@ import logging
 import pathlib
 import sys
 
+import subsample.audio
 import subsample.config
 import subsample.library
 import subsample.similarity
@@ -67,6 +68,11 @@ def main () -> None:
 	args = _parse_args()
 
 	cfg = subsample.config.load_config(args.config)
+
+	# Loading libraries writes/heals sidecars via ensure_sample_assets, which
+	# reads through read_audio_file — wire the float ceiling so hot float sources
+	# are analysed at the same scale the player will read them.
+	subsample.audio.set_float_import_ceiling(cfg.recorder.audio.float_import_ceiling_dbfs)
 
 	# --- Load libraries ---
 

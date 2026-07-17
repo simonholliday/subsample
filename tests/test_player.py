@@ -850,6 +850,68 @@ class TestNoteOff:
 
 
 # ---------------------------------------------------------------------------
+# CC120 / CC123 panic (All Sound Off / All Notes Off)
+# ---------------------------------------------------------------------------
+
+class TestCcPanic:
+
+	"""CC120 (All Sound Off) and CC123 (All Notes Off) end every held voice —
+	the safety net that stops a mode: loop voice looping forever if its note-off
+	is lost (review M24: this branch had no test coverage)."""
+
+	def _voice (self, *, one_shot: bool = False, looping: bool = False,
+	            release_to_end: bool = False) -> subsample.player._Voice:
+		import numpy
+		v = subsample.player._Voice(
+			audio=numpy.zeros((4410, 2), dtype=numpy.float32), note=36, channel=0,
+		)
+		v.one_shot       = one_shot
+		v.looping        = looping
+		v.release_to_end = release_to_end
+		return v
+
+	def _drive (self, control: int, voices: list) -> None:
+		import unittest.mock
+		import mido
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices       = voices
+		player._voices_lock  = threading.Lock()
+		player._state_lock   = threading.Lock()
+		player._cc_state     = {}
+		player._cc_omni      = {}
+		player._mapped_ccs   = set()
+		player.events        = unittest.mock.MagicMock()
+		subsample.player.MidiPlayer._handle_message(
+			player, mido.Message("control_change", channel=0, control=control, value=127),
+		)
+
+	def test_cc120_ends_held_loop_voice (self) -> None:
+		loop_voice = self._voice(looping=True)
+		self._drive(120, [loop_voice])
+		assert loop_voice.looping is False
+		assert loop_voice.releasing is True
+
+	def test_cc123_ends_held_loop_voice (self) -> None:
+		loop_voice = self._voice(looping=True)
+		self._drive(123, [loop_voice])
+		assert loop_voice.looping is False
+		assert loop_voice.releasing is True
+
+	def test_panic_leaves_one_shot_untouched (self) -> None:
+		"""one_shot voices play to their end regardless of a panic."""
+		one_shot = self._voice(one_shot=True)
+		self._drive(120, [one_shot])
+		assert one_shot.releasing is False
+
+	def test_panic_does_not_fade_release_to_end_voice (self) -> None:
+		"""A release: full voice stops looping but rings out (no fade)."""
+		full = self._voice(looping=True, release_to_end=True)
+		self._drive(123, [full])
+		assert full.looping is False
+		assert full.releasing is False   # release_to_end → not faded
+
+
+# ---------------------------------------------------------------------------
 # One-shot mode
 # ---------------------------------------------------------------------------
 
@@ -2576,6 +2638,22 @@ assignments:
     pan: [50, -10]
 """)
 		with pytest.raises(ValueError, match="pan"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_pan_nonstandard_layout_raises (self, tmp_path: pathlib.Path) -> None:
+		"""A pan whose channel count is not a supported layout (1, 2, 4, 6, 8)
+		must be rejected at LOAD, not raise a ValueError on every note-on."""
+		path = self._write_map(tmp_path, """
+assignments:
+  - name: Kick
+    channel: 10
+    notes: 36
+    select:
+      where:
+        reference: BD0025
+    pan: [40, 40, 40]
+""")
+		with pytest.raises(ValueError, match="standard layout"):
 			subsample.player.load_midi_map(path, ["BD0025"])
 
 	def test_pick_on_fallback_spec_governs_chain (self, tmp_path: pathlib.Path) -> None:
@@ -5457,6 +5535,28 @@ class TestProgramPresetSwitch:
 		assert player._note_map == top_map
 		assert any("failed to apply" in r.message for r in caplog.records)
 
+	def test_redundant_program_change_skips_the_rule_swap (self) -> None:
+
+		"""Re-selecting the already-active program must short-circuit before
+		switch_to — the full rule swap clears round-robin / last-played state
+		and re-queries the library, audibly resetting for nothing."""
+
+		import mido
+
+		player, _lib_dir, lib_preset, _top_map, preset_map = self._make_player(threading.Event())
+
+		with unittest.mock.patch.object(player, "update_assignments"):
+			player._handle_message(mido.Message("program_change", channel=9, program=1))
+			assert player._effective_instrument_library is lib_preset
+
+		# The SAME program again: the pre-check returns before switch_to runs.
+		with unittest.mock.patch.object(player._bank_manager, "switch_to") as mock_switch:
+			player._handle_message(mido.Message("program_change", channel=9, program=1))
+			mock_switch.assert_not_called()
+
+		assert player._effective_instrument_library is lib_preset
+		assert player._note_map == preset_map
+
 	def test_apply_rule_set_success_swaps_fields (self) -> None:
 
 		"""_apply_rule_set installs the new base/zones/CCs on success."""
@@ -6953,6 +7053,30 @@ class TestMidiClockTracker:
 
 		assert accepted == []
 		assert tracker.accepted_bpm is None
+
+	def test_dropped_pulse_gap_resets_the_window (self) -> None:
+
+		"""A gap far larger than the pulse spacing (a dropped pulse or a brief
+		transport stall) must discard the stale window instead of averaging it
+		into a phantom tempo.  The accepted tempo stays sticky across the gap."""
+
+		tracker = subsample.player._MidiClockTracker()
+
+		end, accepted = _clock_pulses(tracker, 125.0, beats=20)
+		assert accepted == [125.0]
+
+		interval = 60.0 / 125.0 / subsample.player._CLOCK_PULSES_PER_BEAT
+
+		# One pulse arrives far later than the expected spacing.  The window is
+		# rebuilt from this pulse alone; nothing is accepted mid-rebuild.
+		gap_time = end + 5.0 * interval
+		assert tracker.pulse(gap_time) is None
+		assert len(tracker._pulses) == 1
+
+		# Resuming the same steady 125 must not re-accept (still 125, no phantom).
+		_resume_end, resumed = _clock_pulses(tracker, 125.0, beats=20, t0=gap_time)
+		assert resumed == []
+		assert tracker.accepted_bpm == 125.0
 
 
 class TestMidiClockHandling:

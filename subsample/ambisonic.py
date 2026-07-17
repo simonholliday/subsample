@@ -175,8 +175,9 @@ def a_to_b_matrix (mic: str) -> numpy.ndarray:
 	- "nt_sf1": same matrix as generic (Rode's capsule order matches this
 	  convention when the mic is wired per the datasheet).  The NT-SF1
 	  preset differs from "generic_tetrahedral" only in that the recorder
-	  also applies ``capsule_matching_eq`` pre-matrix and
-	  ``hf_shelf_correction`` post-matrix; the matrix itself is identical.
+	  also applies a ``capsule_matching_eq`` pre-matrix; the
+	  ``hf_shelf_correction`` post-matrix is applied to both presets, and
+	  the matrix itself is identical.
 
 	Raises ValueError for any other preset.
 	"""
@@ -527,8 +528,8 @@ def process_capture (
 
 	Dispatches on ``ambisonic_format``:
 
-	- "a_generic":  A-format → B-format via the generic matrix.
-	- "a_nt_sf1":   apply capsule matching EQ → A-to-B matrix →
+	- "a_generic":  A-to-B matrix → post-matrix HF shelf on X/Y/Z.
+	- "a_nt_sf1":   capsule matching EQ → A-to-B matrix →
 	                post-matrix HF shelf on X/Y/Z.
 	- "b_fuma":     reorder + renormalise from FuMA to AmbiX.
 	- "b_ambix":    pass-through (ensure float32).

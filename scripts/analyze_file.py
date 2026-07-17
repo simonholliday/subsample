@@ -24,6 +24,7 @@ import numpy
 import soundfile
 
 import subsample.analysis
+import subsample.audio
 import subsample.cache
 import subsample.config
 
@@ -56,18 +57,20 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 		loop        = cached.loop
 
 	else:
+		# Read through read_audio_file (not a raw soundfile.read) so this matches
+		# the cache/player pipeline exactly: hot float/double sources are scaled
+		# to the import ceiling, and the sidecar we write describes the audio the
+		# player will actually read and play (a raw float read would poison the
+		# cache with metrics 1+ dB louder than playback).
 		try:
-			# soundfile.read with dtype='float32' reads directly as float32, avoiding
-			# the default float64 intermediate; always_2d ensures shape is
-			# (n_frames, channels) regardless of mono/stereo.
-			data, samplerate = soundfile.read(str(filepath), always_2d=True, dtype='float32')
+			file_info = subsample.audio.read_audio_file(filepath)
 
-		except (OSError, soundfile.SoundFileError) as exc:
+		except (OSError, ValueError) as exc:
 			print(f"Error reading {filepath}: {exc}", file=sys.stderr)
 			return
 
-		# Mix down to mono — analysis functions expect shape (n_frames,)
-		mono = numpy.mean(data, axis=1, dtype=numpy.float32)  # type: ignore[call-overload]
+		mono = subsample.analysis.to_mono_float(file_info.audio, file_info.bit_depth)
+		samplerate = file_info.sample_rate
 
 		params = subsample.analysis.compute_params(samplerate)
 
@@ -78,7 +81,7 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 		# between spectral and pitch, avoiding ~200-300 ms of redundant work.
 		result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(mono, params, rhythm_cfg)
 
-		duration = len(data) / samplerate
+		duration = len(mono) / samplerate
 
 		loop = subsample.cache.compute_loop(mono, samplerate, result, pitch, level, duration)
 

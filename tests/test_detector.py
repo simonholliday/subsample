@@ -635,3 +635,40 @@ class TestRetrigger:
 				segments.append(r)
 		assert segments == []  # still one open recording, never split
 		assert detector.state == subsample.detector.DetectorState.RECORDING
+
+
+class TestFinalize:
+
+	"""finalize() flushes a recording still open at end-of-stream (file input)."""
+
+	def test_finalize_emits_open_recording_and_resets (self) -> None:
+
+		"""A recording still open when the input ends is emitted as
+		(start, current_frame), and the detector returns to IDLE — without this,
+		file input would drop a final sound running to within hold_time of EOF."""
+
+		detector = _make_detector(
+			snr_threshold_db=20.0, hold_time=0.5, sample_rate=1000, chunk_size=100,
+		)
+		# Seed ambient, then open with a chunk far above the open threshold.
+		detector.process_chunk(_loud_chunk(amplitude=100), current_frame=100)
+		detector.process_chunk(_loud_chunk(amplitude=100 * 100), current_frame=200)
+		assert detector.state == subsample.detector.DetectorState.RECORDING
+
+		bounds = detector.finalize(current_frame=1234)
+
+		assert bounds is not None
+		start, end = bounds
+		assert end == 1234
+		assert start < end
+		assert detector.state == subsample.detector.DetectorState.IDLE
+
+	def test_finalize_returns_none_when_not_recording (self) -> None:
+
+		"""With no recording open, finalize is a no-op returning None."""
+
+		detector = _make_detector(
+			snr_threshold_db=20.0, hold_time=0.5, sample_rate=1000, chunk_size=100,
+		)
+
+		assert detector.finalize(current_frame=500) is None

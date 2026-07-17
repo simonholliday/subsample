@@ -2250,6 +2250,19 @@ def _parse_select_spec (
 			f"MIDI map assignment {assignment_name!r}: 'select' entry must be a mapping"
 		)
 
+	# Reject unknown select keys in strict mode.  The common mistake is nesting a
+	# filter directly under `select:` (e.g. `directory:`) instead of under
+	# `where:` — which parses to an EMPTY predicate that matches the whole
+	# library.  Every other tier has this guard; the select block must too.
+	unknown = set(raw) - {"where", "order", "order_by", "pick"}
+
+	if unknown and _STRICT_MODE:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unknown 'select' key(s) "
+			f"{sorted(unknown)}.  Valid keys: order, order_by, pick, where "
+			f"(filters like directory:/name:/duration: nest under 'where:')."
+		)
+
 	where = _parse_where(raw.get("where"), assignment_name, midi_map_dir)
 
 	has_order    = "order"    in raw
@@ -2294,6 +2307,19 @@ def _parse_select_spec (
 				f"{', '.join(sorted(valid_names))}"
 			)
 
+	# A `where.reference` only influences selection through query()'s similarity
+	# fast path, so an explicit non-similarity primary order makes it inert for
+	# ranking.  Warn (don't raise — the reference may still be used as a vocoder
+	# `carrier: reference`) so a "why isn't my reference doing anything?" mistake
+	# is visible.
+	if where.reference is not None and order and order[0].by != "similarity":
+		_log.warning(
+			"MIDI map assignment %r: 'where.reference' is set but the primary "
+			"order is %r, not 'similarity' — the reference does not affect "
+			"selection ranking (it still works as a vocoder 'carrier: reference').",
+			assignment_name, order[0].by,
+		)
+
 	pick = _parse_pick(raw.get("pick"), assignment_name)
 
 	# A velocity pick maps velocity onto a level-ordered pool, so it requires a
@@ -2301,15 +2327,18 @@ def _parse_select_spec (
 	# that direction in here — resolve_index sees only the list length, not which
 	# way it runs, and this is the one site where both order and pick are visible.
 	if pick.mode == "velocity":
-		level_clauses = [clause for clause in order if clause.by == "level"]
-
-		if not level_clauses:
+		# The PRIMARY order clause must be level: velocity maps onto the pool's
+		# rank, so if the pool is primarily ordered by anything else (duration,
+		# age, similarity) the velocity→loudness mapping is meaningless.  Checking
+		# only "some clause is level" would accept `order: [duration, quietest]`,
+		# which ranks by duration first.
+		if not order or order[0].by != "level":
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: 'pick: velocity' "
-				f"requires a level-based order (order: quietest or loudest)"
+				f"requires a level-based PRIMARY order (order: quietest or loudest)"
 			)
 
-		pick = dataclasses.replace(pick, ascending=(level_clauses[0].dir == "asc"))
+		pick = dataclasses.replace(pick, ascending=(order[0].dir == "asc"))
 
 	return SelectSpec(where=where, order=order, pick=pick)
 
@@ -2344,7 +2373,23 @@ def parse_select (
 				f"contain at least one spec"
 			)
 
-		return tuple(_parse_select_spec(entry, assignment_name, midi_map_dir) for entry in raw)
+		specs = tuple(_parse_select_spec(entry, assignment_name, midi_map_dir) for entry in raw)
+
+		# A velocity pick governs the WHOLE fallback chain (the player applies the
+		# first explicit pick to every spec), so each spec's pool must be
+		# level-ordered — otherwise a fallback that wins ranks by age/duration and
+		# the velocity→timbre mapping breaks.  Require a level primary order on
+		# every spec when any spec is a velocity pick.
+		if any(spec.pick.mode == "velocity" for spec in specs):
+			for spec in specs:
+				if not spec.order or spec.order[0].by != "level":
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: a 'pick: velocity' "
+						f"fallback chain requires every spec to declare a level-based "
+						f"primary order (order: quietest or loudest)"
+					)
+
+		return specs
 
 	raise ValueError(
 		f"MIDI map assignment {assignment_name!r}: 'select' must be a mapping or a list of mappings"

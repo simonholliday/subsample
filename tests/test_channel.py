@@ -89,12 +89,12 @@ class TestBuildMixMatrix:
 		assert mat[5, 0] == pytest.approx(0.0)  # BR silent
 
 	def test_mono_to_stereo_no_pan (self) -> None:
-		"""Mono to stereo without pan: maps to FL only (conservative upmix)."""
+		"""Mono to stereo without pan defaults to CENTRE — equal-power L/R,
+		matching `pan: [50, 50]` — not hard-left."""
 		mat = subsample.channel.build_mix_matrix(1, 2)
 		assert mat.shape == (2, 1)
-		# Conservative: mono maps to first output channel only.
-		assert mat[0, 0] == pytest.approx(1.0)
-		assert mat[1, 0] == pytest.approx(0.0)
+		assert mat[0, 0] == pytest.approx(numpy.sqrt(0.5))
+		assert mat[1, 0] == pytest.approx(numpy.sqrt(0.5))
 
 	# -- Pan weights --
 

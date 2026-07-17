@@ -413,6 +413,57 @@ class TestTransformCache:
 
 
 # ---------------------------------------------------------------------------
+# TestSourceSampleRate
+# ---------------------------------------------------------------------------
+
+class TestSourceSampleRate:
+
+	"""_execute must run DSP and the final resample at the RECORD's audio rate
+	(SampleRecord.audio_sample_rate), not the processor's configured recorder
+	rate — otherwise a player.audio.sample_rate that differs from
+	recorder.audio.sample_rate mis-pitches and mis-times every disk-loaded
+	variant (H3)."""
+
+	def _render_frames (self, audio_sample_rate: typing.Optional[int]) -> typing.Optional[int]:
+		out_sr = 48000
+		t = numpy.linspace(0, 1, out_sr, endpoint=False)
+		pcm = (numpy.sin(2 * numpy.pi * 440 * t) * 0.3 * 32767).astype(numpy.int16).reshape(-1, 1)
+		record = dataclasses.replace(_make_record(audio=pcm), audio_sample_rate=audio_sample_rate)
+
+		spec = subsample.transform.spec_from_process(
+			subsample.query.parse_process([{"saturate": {"drive": 3}}], "a"),
+			cc_state={}, cc_omni={}, target_bpm=0.0,
+		)
+
+		captured: list[typing.Any] = []
+		# Processor configured for a 44100 recorder feeding a 48000 output — the
+		# exact mismatch that mis-rendered disk-loaded (48000) audio.
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100, output_sample_rate=out_sr, bit_depth=16,
+		)
+		processor._on_complete = lambda r: captured.append(r)
+		processor._disk_cache = None
+		processor._execute(record, spec, key="k")
+
+		return captured[0].audio.shape[0] if captured else None
+
+	def test_output_rate_audio_not_restretched (self) -> None:
+		"""Audio already at the 48 kHz output rate: a length-preserving step
+		returns ~1.0 s (48000 frames), NOT a spurious 44100->48000 stretch."""
+		frames = self._render_frames(48000)
+		assert frames is not None
+		assert abs(frames - 48000) < 100
+
+	def test_none_falls_back_to_processor_rate (self) -> None:
+		"""Without a recorded audio rate the old assumption stands (proc rate),
+		so the 44100->48000 resample stretches the buffer — confirms the fix is
+		what changed, and that legacy records are unaffected."""
+		frames = self._render_frames(None)
+		assert frames is not None
+		assert frames > int(48000 * 1.05)
+
+
+# ---------------------------------------------------------------------------
 # TestTransformProcessor
 # ---------------------------------------------------------------------------
 
@@ -991,6 +1042,18 @@ class TestApplyPitch:
 		# ±60 Hz cleanly separates 880 (correct) from 440 (no-op) and
 		# 220 (sign-flipped shift).
 		assert abs(_dominant_hz(result) - 880.0) < 60.0
+
+	def test_unpitched_sample_passes_through_unchanged (self) -> None:
+		"""A fixed-note repitch landing on an unpitched sample (which the
+		dynamic-note has_stable_pitch gate does not cover) must pass the audio
+		through untouched, not raise and abort the rest of the process chain."""
+		audio  = numpy.random.default_rng(2).standard_normal((4410, 1)).astype(numpy.float32) * 0.1
+		record = _make_record_unpitched(sample_id=1)
+		step   = subsample.transform.PitchShift(target_midi_note=72)
+
+		result = subsample.transform._apply_pitch(audio, 44100, record, step)
+
+		numpy.testing.assert_array_equal(result, audio)
 
 
 # ---------------------------------------------------------------------------

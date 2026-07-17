@@ -115,7 +115,7 @@ warnings.filterwarnings("ignore", message="Empty filters detected in mel frequen
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "14"
+ANALYSIS_VERSION: str = "15"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -128,12 +128,12 @@ ANALYSIS_VERSION: str = "14"
 _ATTACK_RELEASE_MIN_S: float = 0.001   # 1 ms
 _ATTACK_RELEASE_MAX_S: float = 2.0     # 2 s
 
-# Spectral flatness (Wiener entropy) log-normalization range.
-# Raw Wiener entropy from librosa clusters near 0 for all real-world audio —
-# even "noisy" sounds. Log scale spreads the useful range.
-# Values at or below _FLATNESS_MIN map to 0.0 (very tonal); values at or
-# above _FLATNESS_MAX map to 1.0 (noise-like). Calibrate against your source
-# material if values still cluster — log the pre-normalization mean.
+# Spectral flatness (Wiener entropy) log-normalization range, calibrated for the
+# MAGNITUDE-spectrogram flatness computed in analyze_mono (see the S_magnitude
+# note there).  Measured on representative material these bounds spread the axis
+# well: a pure sine → 0.0, a tonal+noise mix → ~0.4, a snare → ~0.8, a hi-hat /
+# white noise → ~1.0.  Values at or below _FLATNESS_MIN map to 0.0 (very tonal);
+# values at or above _FLATNESS_MAX map to 1.0 (noise-like).
 _FLATNESS_MIN: float = 1e-5    # below the floor of real tonal sounds; maps to 0.0
 _FLATNESS_MAX: float = 0.9     # near-white noise
 
@@ -157,6 +157,10 @@ _ZCR_MAX: float = 0.5
 # difference between spectral peaks and valleys). A linear map against a dB
 # ceiling works because contrast is already expressed on a log (dB) scale.
 _CONTRAST_MAX_DB: float = 40.0
+
+# librosa.spectral_contrast's lowest sub-band edge (its own default fmin).  Used
+# to derive a safe n_bands for low sample rates — see _compute_spectral_contrast.
+_CONTRAST_FMIN: float = 200.0
 
 # pyin (probabilistic YIN) pitch detection frequency search range.
 # C2 (65 Hz) covers the lowest notes on a standard guitar and bass.
@@ -680,12 +684,17 @@ def analyze_mono (
 	# independently, causing 5+ redundant FFT passes per recording.
 	# - D: complex STFT, needed for HPSS (to reconstruct harmonic time-domain)
 	# - S_magnitude: |D|, needed for centroid, bandwidth, contrast, flatness
-	# - S_power: |D|^2, needed for spectral_flatness (expects power spectrogram)
+	# - S_power: |D|^2, needed for spectral_rolloff (power-weighted)
 	D = librosa.stft(mono, n_fft=params.n_fft, hop_length=params.hop_length)
 	S_magnitude = numpy.abs(D)
 	S_power = S_magnitude ** 2
 
-	flatness = librosa.feature.spectral_flatness(S=S_power)
+	# librosa.feature.spectral_flatness raises its input to `power` (default 2.0)
+	# internally, so it expects a MAGNITUDE spectrogram.  Passing S_power (|D|^2)
+	# would compute the flatness of |D|^4, collapsing the metric toward 0.0 for
+	# all but the noisiest material — pass S_magnitude so the Wiener entropy is
+	# the documented [0, 1] tonal→noise measure.
+	flatness = librosa.feature.spectral_flatness(S=S_magnitude)
 
 	attack, release = _compute_attack_release(mono, params)
 	centroid = _compute_spectral_centroid(params, S_magnitude)
@@ -1631,10 +1640,21 @@ def analyze_pitch (
 	# an internal n_fft=1024, which triggers an "n_fft too large" UserWarning for
 	# short signals. This is expected and harmless — suppressed by the module-level
 	# warnings.filterwarnings("ignore", message="n_fft=") at the top of this file.
+	# chroma_cqt's default 7 octaves start at C1 (~32.7 Hz); at low sample rates
+	# the top octave exceeds Nyquist and librosa raises ParameterError, dropping
+	# the sample.  Reduce n_octaves to the largest that stays below Nyquist so a
+	# low-rate source still yields a chroma profile (folded into 12 pitch classes
+	# either way).
+	cqt_fmin = librosa.note_to_hz("C1")
+	n_octaves = 7
+	while n_octaves > 1 and cqt_fmin * (2 ** n_octaves) >= params.sample_rate / 2.0:
+		n_octaves -= 1
+
 	chroma_raw = librosa.feature.chroma_cqt(
 		y=mono,
 		sr=params.sample_rate,
 		hop_length=params.hop_length,
+		n_octaves=n_octaves,
 	)
 
 	# Mean over time frames; result is shape (12,)
@@ -2299,9 +2319,26 @@ def _compute_spectral_contrast (
 	if params.n_fft < 64:
 		return 0.0
 
+	# librosa.spectral_contrast needs every sub-band below Nyquist:
+	# fmin * 2^(n_bands - 1) < sr/2.  Its default n_bands=6 (fmin=200) exceeds
+	# Nyquist for any sr <= 12800 Hz (200 * 2^5 = 6400 >= sr/2), raising
+	# ParameterError and dropping the whole sample.  Reduce n_bands to the
+	# largest value that still fits so low-rate sources (8 kHz / 11025 Hz packs,
+	# telephone-band, SDR captures) analyse rather than being silently skipped.
+	nyquist = params.sample_rate / 2.0
+	n_bands = 6
+	while n_bands > 1 and _CONTRAST_FMIN * (2 ** (n_bands - 1)) >= nyquist:
+		n_bands -= 1
+
+	if _CONTRAST_FMIN * (2 ** (n_bands - 1)) >= nyquist:
+		# Even the first sub-band is above Nyquist (sr <= ~400 Hz) — nothing to
+		# measure; report a flat spectrum rather than crash.
+		return 0.0
+
 	contrast = librosa.feature.spectral_contrast(
 		S=S_magnitude,
 		sr=params.sample_rate,
+		n_bands=n_bands,
 	)
 
 	# contrast has shape (n_bands, n_frames); mean across both axes

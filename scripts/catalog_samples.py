@@ -581,20 +581,15 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 	# and both need the similarity weights from config.
 	two_pass = args.group or args.order == "similarity"
 
-	cfg: typing.Optional[subsample.config.Config] = None
-
-	if args.directory is None or two_pass:
-		cfg = subsample.config.load_config(args.config)
-
-	if cfg is not None:
-		# Read hot float sources exactly as the player will.  This script writes
-		# sidecars the player later trusts, so analysing a differently-scaled
-		# signal here would leave it playing audio its own fingerprint doesn't
-		# describe.  Without a config, audio.py already defaults to the same
-		# ceiling AudioConfig declares.
-		subsample.audio.set_float_import_ceiling(
-			cfg.recorder.audio.float_import_ceiling_dbfs
-		)
+	# Always load config: this script writes sidecars the player later trusts, so
+	# it must read hot float sources at the same ceiling the player will (a
+	# differently-scaled analysis would leave the player playing audio its own
+	# fingerprint doesn't describe).  A missing config falls back to the packaged
+	# default, whose ceiling matches audio.py's own default.
+	cfg = subsample.config.load_config(args.config)
+	subsample.audio.set_float_import_ceiling(
+		cfg.recorder.audio.float_import_ceiling_dbfs
+	)
 
 	if args.directory is not None:
 		directory = args.directory

@@ -152,7 +152,8 @@ def _build_default_matrix (in_ch: int, out_ch: int) -> numpy.ndarray:
 
 	- in == out: identity (each channel maps 1:1)
 	- in > out: ITU downmix if available, else truncate to first out_ch channels
-	- in < out: map input to first in_ch output channels, extras silent
+	- mono in, multi out: centre (equal-power front L/R), matching `pan: [50, 50]`
+	- other in < out: map input to first in_ch output channels, extras silent
 	"""
 
 	if in_ch == out_ch:
@@ -168,7 +169,18 @@ def _build_default_matrix (in_ch: int, out_ch: int) -> numpy.ndarray:
 		# Fallback: take the first out_ch input channels.
 		return numpy.eye(out_ch, in_ch, dtype=numpy.float32)
 
-	# Upmix (in < out): map input to corresponding front positions, rest silent.
+	# Upmix (in < out).
+	if in_ch == 1 and out_ch >= 2:
+		# A mono source with no pan defaults to CENTRE — spread equal-power to the
+		# front L/R pair rather than hard-left, matching the documented
+		# `pan: [50, 50]` centre (whose constant-power gains are sqrt(0.5) each).
+		mat = numpy.zeros((out_ch, 1), dtype=numpy.float32)
+		centre_gain = numpy.float32(numpy.sqrt(0.5))
+		mat[0, 0] = centre_gain
+		mat[1, 0] = centre_gain
+		return mat
+
+	# Other upmixes: map input to corresponding front positions, rest silent.
 	return numpy.eye(out_ch, in_ch, dtype=numpy.float32)
 
 
