@@ -285,7 +285,7 @@ def _quantize_params (
 	"""Extract BPM and grid from a stretch_quantize or pad_quantize step.
 
 	Returns (target_bpm, grid). When no explicit BPM is declared in the
-	step, falls back to config_bpm (from transform.target_bpm in config).
+	step, falls back to config_bpm (from tempo.bpm in config).
 	The grid falls back to the configured _DEFAULT_QUANTIZE_GRID
 	(transform.quantize_resolution).  CcBinding values are treated as "provided"
 	so the quantize path activates; the actual value is resolved later in
@@ -362,7 +362,7 @@ _CLOCK_MAX_BPM: typing.Final[float] = 300.0
 # (~1.1x) — must stay below 2.0.
 _CLOCK_GAP_RESET_FACTOR: typing.Final[float] = 1.5
 
-# How far an incoming clock must sit from transform.target_bpm before it is
+# How far an incoming clock must sit from tempo.bpm before it is
 # worth telling the user their quantize grid does not match their sequence.
 _CLOCK_MISMATCH_WARN_BPM: typing.Final[float] = 1.0
 
@@ -2067,10 +2067,10 @@ def _validate_assignment_extracts (
 
 			# Gather the unique (channel_format, in_channels) combinations that
 			# any select spec could pick.  We deliberately don't supply a
-			# beats_resolver — quantized_beats predicates are skipped (matches()
-			# returns False), so they appear as if no sample matched.  This is
-			# conservative: validation may miss a few samples in unusual maps,
-			# but won't reject correct ones.
+			# beats_resolver or bpm — quantized_beats and duration_beats
+			# predicates are skipped (matches() returns False), so they appear as
+			# if no sample matched.  This is conservative: validation may miss a
+			# few samples in unusual maps, but won't reject correct ones.
 			candidates: set[tuple[str, int]] = set()
 
 			for select_spec in assignment.select:
@@ -2929,6 +2929,60 @@ def _uses_quantize (
 	return False
 
 
+def _uses_beat_filter (
+	note_map: NoteMap,
+	zone_templates: tuple["ZoneTemplate", ...] = (),
+) -> bool:
+
+	"""Return True if any assignment's selection filters by ``duration_beats``.
+
+	Mirrors _uses_quantize's walk — every velocity layer of every note plus the
+	zone templates.  duration_beats measures a sample's length in beats at the
+	session tempo, so like the quantize processors it makes the tempo
+	load-bearing: the clock is worth tracking, a clock/tempo mismatch is worth
+	warning about, and a map that uses it needs a tempo to load at all.
+	"""
+
+	def _filters_by_beats (select: tuple["subsample.query.SelectSpec", ...]) -> bool:
+		return any(not spec.where.duration_beats.is_empty() for spec in select)
+
+	for entries in note_map.values():
+		for assignment, _ in entries:
+			if _filters_by_beats(assignment.select):
+				return True
+
+	for template in zone_templates:
+		if _filters_by_beats(template.select):
+			return True
+
+	return False
+
+
+_BEAT_FILTER_NO_TEMPO_MESSAGE = (
+	"A MIDI map assignment filters by duration_beats, but no session tempo is "
+	"set.  Set tempo.bpm in config.yaml — it is the fallback even under "
+	"tempo.source: midi, which still needs a tempo before the first clock arrives."
+)
+
+
+def _validate_beat_filter_tempo (
+	note_map: NoteMap,
+	zone_templates: tuple["ZoneTemplate", ...],
+	bpm: float,
+) -> None:
+
+	"""Raise if the map filters by ``duration_beats`` but no tempo is set.
+
+	duration_beats measures sample length in beats, so it cannot resolve without
+	a session tempo — fail loudly rather than silently emptying every
+	beat-filtered pool.  Called at startup (in cli, before the player is built,
+	so the ValueError surfaces cleanly alongside the other map checks).
+	"""
+
+	if bpm <= 0.0 and _uses_beat_filter(note_map, zone_templates):
+		raise ValueError(_BEAT_FILTER_NO_TEMPO_MESSAGE)
+
+
 class MidiPlayer:
 
 	"""Listens for MIDI messages and plays back instrument samples polyphonically.
@@ -3158,9 +3212,10 @@ class MidiPlayer:
 		# between pre-bake and note-on and turn every pre-baked variant into a
 		# cache miss (variant_cache_key hashes target_bpm via the step repr).
 		self._map_quantizes: bool = _uses_quantize(midi_map, self._zone_templates)
+		self._map_beat_filters: bool = _uses_beat_filter(midi_map, self._zone_templates)
 		self._clock_tracker: typing.Optional[_MidiClockTracker] = (
 			_MidiClockTracker()
-			if self._map_quantizes or self._tempo_source == "midi"
+			if self._map_quantizes or self._map_beat_filters or self._tempo_source == "midi"
 			else None
 		)
 		self._clock_bpm: typing.Optional[float] = None
@@ -3883,7 +3938,7 @@ class MidiPlayer:
 		immediately instead of waiting for the tracker to re-measure.
 		"""
 
-		needed = self._map_quantizes or self._tempo_source == "midi"
+		needed = self._map_quantizes or self._map_beat_filters or self._tempo_source == "midi"
 
 		if needed:
 			if self._clock_tracker is None:
@@ -3960,7 +4015,7 @@ class MidiPlayer:
 		"""Warn when the incoming clock disagrees with the configured tempo.
 
 		The papercut this exists for: change the sequencer's tempo, forget to
-		change transform.target_bpm, and every quantized sample silently snaps
+		change tempo.bpm, and every quantized sample silently snaps
 		to a grid that no longer matches the sequence.
 
 		Only fires when the map actually quantizes (nothing else reads the
@@ -3972,7 +4027,7 @@ class MidiPlayer:
 		callback thread touches it.
 		"""
 
-		if not self._map_quantizes or self._target_bpm <= 0.0:
+		if not (self._map_quantizes or self._map_beat_filters) or self._target_bpm <= 0.0:
 			return
 
 		if abs(bpm - self._target_bpm) < _CLOCK_MISMATCH_WARN_BPM:
@@ -3984,9 +4039,9 @@ class MidiPlayer:
 		self._clock_warned_bpm = bpm
 
 		_log.warning(
-			"MIDI clock is %g BPM but transform.target_bpm is %g — quantized "
-			"samples will not lock to your sequence.  Set transform.tempo_source: "
-			"midi to follow the clock, or update target_bpm.",
+			"MIDI clock is %g BPM but tempo.bpm is %g — quantized samples "
+			"and beat-based selection will not track your sequence.  Set "
+			"tempo.source: midi to follow the clock, or update tempo.bpm.",
 			bpm, self._target_bpm,
 		)
 
@@ -4871,6 +4926,7 @@ class MidiPlayer:
 				template.select[0],
 				eff_library.samples(),
 				eff_similarity,
+				bpm=self._target_bpm,
 			)
 
 			# Filter to pitched candidates.  The 7-criterion gate is the
@@ -5044,6 +5100,7 @@ class MidiPlayer:
 			ranked = subsample.query.query(
 				select_spec, all_samples, eff_similarity, beats_resolver,
 				energy_profile_resolver=energy_profile_resolver,
+				bpm=self._target_bpm,
 			)
 
 			if ranked:
@@ -5109,6 +5166,7 @@ class MidiPlayer:
 					ranked = subsample.query.query(
 						select_spec, all_samples, eff_similarity, beats_resolver,
 						energy_profile_resolver=energy_profile_resolver,
+						bpm=self._target_bpm,
 					)
 
 					if ranked:
@@ -5210,6 +5268,14 @@ class MidiPlayer:
 					self._target_bpm, clock_bpm,
 				)
 				self._target_bpm = clock_bpm
+
+		# A duration_beats filter measures sample length in beats, so it cannot
+		# resolve without a tempo.  The effective tempo is now settled (clock
+		# adopted just above, or the configured fallback).  On a hot reload this
+		# raises inside _apply_rule_set_locked's try and rolls back to the live
+		# rules; startup is validated earlier, in cli, before construction.
+		if self._map_beat_filters and self._target_bpm <= 0.0:
+			raise ValueError(_BEAT_FILTER_NO_TEMPO_MESSAGE)
 
 		# Re-derive zone-tuned entries against the current library before
 		# the candidate cache and variant pre-computation walk the NoteMap.
@@ -5542,6 +5608,7 @@ class MidiPlayer:
 		old_zone_templates = self._zone_templates
 		old_mapped_ccs     = self._mapped_ccs
 		old_map_quantizes  = self._map_quantizes
+		old_map_beat_filters = self._map_beat_filters
 
 		# Apply the new configuration first so update_assignments()
 		# validates against what the player would actually run with.  This
@@ -5556,6 +5623,7 @@ class MidiPlayer:
 		# caller, so a preset switch back to the top-level rules re-derives it
 		# from those rules automatically.
 		self._map_quantizes  = _uses_quantize(base_note_map, zone_templates)
+		self._map_beat_filters = _uses_beat_filter(base_note_map, zone_templates)
 		self._sync_clock_tracker()
 
 		try:
@@ -5578,6 +5646,7 @@ class MidiPlayer:
 			self._zone_templates = old_zone_templates
 			self._mapped_ccs     = old_mapped_ccs
 			self._map_quantizes  = old_map_quantizes
+			self._map_beat_filters = old_map_beat_filters
 			self._sync_clock_tracker()
 			raise
 

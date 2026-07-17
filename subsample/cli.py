@@ -799,6 +799,13 @@ def _start_player (
 	# its matching samples is rejected here, before audio playback begins.
 	subsample.player._validate_assignment_extracts(midi_map, instrument_library)
 
+	# duration_beats measures sample length in beats, so a map that uses it
+	# needs a session tempo to resolve — reject at startup (like the extract
+	# check above) rather than silently emptying the pool at the first note.
+	subsample.player._validate_beat_filter_tempo(
+		midi_map, midi_map_result.zone_templates, cfg.tempo.bpm,
+	)
+
 	# Virtual port mode: bypass hardware device selection entirely.
 	# MidiPlayer.run() will open the named virtual port with virtual=True.
 	if cfg.player.virtual_midi_port is not None:
@@ -820,8 +827,8 @@ def _start_player (
 			limiter_threshold_db=cfg.player.limiter_threshold_db,
 			limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 			bank_manager=bank_manager,
-			target_bpm=cfg.transform.target_bpm,
-			tempo_source=cfg.transform.tempo_source,
+			target_bpm=cfg.tempo.bpm,
+			tempo_source=cfg.tempo.source,
 			output_channels=cfg.player.audio.channels,
 			ambisonic_config=cfg.ambisonic,
 			buffer_frames=cfg.player.audio.buffer_frames,
@@ -883,8 +890,8 @@ def _start_player (
 		limiter_threshold_db=cfg.player.limiter_threshold_db,
 		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
 		bank_manager=bank_manager,
-		target_bpm=cfg.transform.target_bpm,
-		tempo_source=cfg.transform.tempo_source,
+		target_bpm=cfg.tempo.bpm,
+		tempo_source=cfg.tempo.source,
 		output_channels=cfg.player.audio.channels,
 		ambisonic_config=cfg.ambisonic,
 		buffer_frames=cfg.player.audio.buffer_frames,

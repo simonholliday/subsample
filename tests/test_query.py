@@ -604,6 +604,69 @@ class TestQuantizedBeats:
 		assert [r.sample_id for r in result] == [1, 3]   # 3.75 and 4.25
 
 
+class TestDurationBeats:
+
+	"""Filter samples by length in beats at the session tempo.
+
+	beats = record.duration (seconds) * bpm / 60.  Unlike quantized_beats this
+	reads no async variant state — just the sample's own length and the tempo
+	threaded into query() as ``bpm``.
+	"""
+
+	def test_matches_converts_seconds_to_beats (self) -> None:
+		# At 120 BPM a beat is 0.5 s, so a 0.25 s sample is 0.5 beats.
+		pred = subsample.query.WherePredicate(duration_beats=subsample.query.Range(lt=1.0))
+		assert pred.matches(_make_record(duration=0.25), bpm=120.0)      # 0.5 beats < 1
+		assert not pred.matches(_make_record(duration=0.5), bpm=120.0)   # 1.0 beats, not < 1
+
+	def test_same_sample_flips_with_tempo (self) -> None:
+
+		"""The same recording crosses the threshold as the tempo changes — the
+		point of measuring in beats rather than seconds."""
+
+		pred = subsample.query.WherePredicate(duration_beats=subsample.query.Range(lte=1.0))
+		rec = _make_record(duration=0.5)
+		assert pred.matches(rec, bpm=120.0)       # exactly 1 beat
+		assert not pred.matches(rec, bpm=240.0)   # 2 beats at the faster tempo
+
+	def test_no_tempo_excludes (self) -> None:
+
+		"""An active filter with no usable tempo fails closed (mirrors the
+		quantized_beats missing-resolver posture)."""
+
+		pred = subsample.query.WherePredicate(duration_beats=subsample.query.Range(lt=1.0))
+		rec = _make_record(duration=0.1)
+		assert not pred.matches(rec, bpm=None)
+		assert not pred.matches(rec, bpm=0.0)
+
+	def test_empty_filter_ignores_missing_tempo (self) -> None:
+
+		"""No duration_beats constraint → the tempo is never consulted, so a
+		long sample with no tempo still matches."""
+
+		pred = subsample.query.WherePredicate()
+		assert pred.matches(_make_record(duration=10.0), bpm=None)
+
+	def test_query_filters_pool_by_beats (self) -> None:
+		samples = [
+			_make_record(sample_id=1, name="16th",    duration=0.125),  # 0.25 beats @120
+			_make_record(sample_id=2, name="8th",     duration=0.25),   # 0.5 beats
+			_make_record(sample_id=3, name="quarter", duration=0.5),    # 1.0 beats
+		]
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(duration_beats=subsample.query.Range(lt=0.5)),
+		)
+		result = subsample.query.query(spec, samples, bpm=120.0)
+		assert {r.sample_id for r in result} == {1}   # only the 16th (< 0.5 beats)
+
+	def test_query_without_tempo_excludes_all (self) -> None:
+		samples = [_make_record(sample_id=1, duration=0.1)]
+		spec = subsample.query.SelectSpec(
+			where=subsample.query.WherePredicate(duration_beats=subsample.query.Range(lt=1.0)),
+		)
+		assert subsample.query.query(spec, samples, bpm=None) == []
+
+
 # ---------------------------------------------------------------------------
 # parse_select
 # ---------------------------------------------------------------------------
@@ -646,6 +709,17 @@ class TestParseSelect:
 		assert specs[0].where.quantized_beats.gte == 2.0
 		assert specs[0].where.quantized_beats.lte == 4.5
 		assert specs[0].order == (subsample.query.OrderClause(by="quantized_beats", dir="desc"),)
+
+	def test_duration_beats_yaml_parsed (self) -> None:
+
+		"""duration_beats parses via the operator dict and the bare-scalar (eq)
+		shorthand, exactly like the other numeric predicates."""
+
+		specs = subsample.query.parse_select({"where": {"duration_beats": {"lt": 0.25}}}, "test")
+		assert specs[0].where.duration_beats.lt == 0.25
+
+		scalar = subsample.query.parse_select({"where": {"duration_beats": 0.5}}, "test")
+		assert scalar[0].where.duration_beats.eq == 0.5
 
 	def test_defaults (self) -> None:
 
@@ -1339,6 +1413,17 @@ class TestSelectUsesVariantState:
 	def test_beat_match_order_is_live (self) -> None:
 		specs = (self._spec(order=(subsample.query.OrderClause(by="beat_match", dir="desc"),)),)
 		assert subsample.query.select_uses_variant_state(specs)
+
+	def test_duration_beats_filter_is_cacheable (self) -> None:
+
+		"""duration_beats reads the sample's own length + the session tempo, not
+		async variant state, so its selects stay on the cached fast path (the
+		candidate cache is rebuilt when the tempo is adopted)."""
+
+		specs = (self._spec(where=subsample.query.WherePredicate(
+			duration_beats=subsample.query.Range(lt=0.25),
+		)),)
+		assert not subsample.query.select_uses_variant_state(specs)
 
 	def test_any_variant_dependent_spec_in_chain_is_live (self) -> None:
 		specs = (

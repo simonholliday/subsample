@@ -97,6 +97,7 @@ def _make_assignment (
 	one_shot: bool = True,
 	pan_weights: typing.Optional[numpy.ndarray] = None,
 	gain_db: float = 0.0,
+	duration_beats_lt: typing.Optional[float] = None,
 ) -> subsample.query.Assignment:
 
 	"""Build an Assignment with common defaults for tests."""
@@ -111,6 +112,9 @@ def _make_assignment (
 
 	if pitched_filter is not None:
 		where_kwargs["pitched"] = pitched_filter
+
+	if duration_beats_lt is not None:
+		where_kwargs["duration_beats"] = subsample.query.Range(lt=duration_beats_lt)
 
 	where = subsample.query.WherePredicate(**where_kwargs)
 
@@ -6963,6 +6967,122 @@ class TestCandidateCache:
 		assert set(player._candidate_cache[id(asgn)]) == {1}
 
 
+class TestDurationBeatsPool:
+
+	"""End-to-end: a duration_beats filter builds a candidate pool of samples
+	short enough in beats at the session tempo, and that pool re-filters when a
+	new tempo is adopted from the clock."""
+
+	def _record (
+		self, sample_id: int, name: str, duration: float,
+	) -> subsample.library.SampleRecord:
+		return subsample.library.SampleRecord(
+			sample_id   = sample_id,
+			name        = name,
+			spectral    = tests.helpers._make_spectral(),
+			rhythm      = tests.helpers._make_rhythm(),
+			pitch       = tests.helpers._make_pitch(),
+			timbre      = tests.helpers._make_timbre(),
+			level       = tests.helpers._make_level(),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = tests.helpers._make_params(),
+			duration    = duration,
+			audio       = numpy.zeros((100, 2), dtype=numpy.int32),
+		)
+
+	def _make_player (
+		self,
+		records:      list[subsample.library.SampleRecord],
+		note_map:     subsample.player.NoteMap,
+		target_bpm:   float,
+		tempo_source: str = "config",
+	) -> subsample.player.MidiPlayer:
+		lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		lib.samples.return_value = records
+		similarity = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		return subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=lib,
+			similarity_matrix=similarity,
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+			target_bpm=target_bpm,
+			tempo_source=tempo_source,
+		)
+
+	def test_pool_holds_only_samples_short_enough_in_beats (self) -> None:
+		# Shorter than a 16th note (0.25 beats).  At 120 BPM a beat is 0.5 s.
+		records = [
+			self._record(1, "tight", 0.10),   # 0.20 beats @120 — in
+			self._record(2, "loose", 0.30),   # 0.60 beats @120 — out
+		]
+		asgn = _make_assignment(name="hats", duration_beats_lt=0.25)
+		note_map = _make_note_map(asgn, channel=9, notes=[42])
+
+		player = self._make_player(records, note_map, target_bpm=120.0)
+
+		assert set(player._candidate_cache[id(asgn)]) == {1}
+
+	def test_pool_refilters_when_tempo_is_adopted (self) -> None:
+		# A 0.30 s sample is 0.30 beats at 60 BPM but 0.60 beats at 120 BPM, so a
+		# "< 0.5 beats" filter includes it at 60 and excludes it at 120.
+		records = [self._record(1, "mid", 0.30)]
+		asgn = _make_assignment(name="hats", duration_beats_lt=0.5)
+		note_map = _make_note_map(asgn, channel=9, notes=[42])
+
+		player = self._make_player(records, note_map, target_bpm=60.0, tempo_source="midi")
+		assert set(player._candidate_cache[id(asgn)]) == {1}
+
+		# Adopt a faster tempo from the clock: the same sample now runs longer
+		# than the threshold in beats and drops out of the pool.
+		with player._state_lock:
+			player._clock_bpm = 120.0
+		player.update_assignments()
+
+		assert not player._candidate_cache.get(id(asgn))
+
+
+class TestUsesBeatFilter:
+
+	"""_uses_beat_filter detects a duration_beats predicate anywhere in the map,
+	so the tempo machinery (clock tracking, mismatch warning, load-time tempo
+	requirement) engages for beat-filtered maps, not only quantized ones."""
+
+	def test_true_when_assignment_filters_by_beats (self) -> None:
+		asgn = _make_assignment(name="hats", duration_beats_lt=0.25)
+		note_map = _make_note_map(asgn, channel=9, notes=[42])
+		assert subsample.player._uses_beat_filter(note_map)
+
+	def test_false_for_plain_map (self) -> None:
+		note_map = _make_note_map(_make_assignment(reference="BD0025"), channel=9, notes=[36])
+		assert not subsample.player._uses_beat_filter(note_map)
+
+
+class TestValidateBeatFilterTempo:
+
+	"""A map filtering by duration_beats needs a session tempo to resolve — it is
+	rejected at load rather than silently emptying the pool at the first note.
+	tempo.bpm is required even under tempo.source: midi (the pre-clock fallback)."""
+
+	def _beat_filter_map (self) -> subsample.player.NoteMap:
+		return _make_note_map(
+			_make_assignment(name="hats", duration_beats_lt=0.25), channel=9, notes=[42],
+		)
+
+	def test_raises_without_tempo (self) -> None:
+		with pytest.raises(ValueError, match="duration_beats"):
+			subsample.player._validate_beat_filter_tempo(self._beat_filter_map(), (), 0.0)
+
+	def test_ok_with_tempo (self) -> None:
+		subsample.player._validate_beat_filter_tempo(self._beat_filter_map(), (), 120.0)
+
+	def test_ok_without_beat_filter_at_zero_tempo (self) -> None:
+		note_map = _make_note_map(_make_assignment(reference="BD0025"), channel=9, notes=[36])
+		subsample.player._validate_beat_filter_tempo(note_map, (), 0.0)
+
+
 class TestMidiClockTracker:
 
 	"""The pure tempo state machine.  Driven entirely by supplied timestamps, so
@@ -7155,7 +7275,7 @@ class TestMidiClockHandling:
 
 		warnings = [
 			r for r in caplog.records
-			if "MIDI clock" in r.message and "target_bpm" in r.message
+			if "MIDI clock" in r.message and "tempo.bpm" in r.message
 		]
 		assert len(warnings) == 1
 		assert player._clock_bpm == 130.0
@@ -7173,6 +7293,25 @@ class TestMidiClockHandling:
 			player._handle_message(mido.Message("clock"))
 
 		assert not [r for r in caplog.records if "MIDI clock" in r.message]
+
+	def test_beat_filter_map_warns_on_clock_mismatch (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A duration_beats map is tempo-dependent even with no quantize step, so
+		a disagreeing clock still earns the mismatch warning (the beat thresholds
+		would be computed against the wrong tempo)."""
+
+		player = self._make_player(tempo_source="config", target_bpm=125.0)
+		player._map_quantizes = False
+		player._map_beat_filters = True
+		player._clock_tracker = _StubClockTracker([130.0])  # type: ignore[assignment]
+
+		with caplog.at_level(logging.WARNING):
+			player._handle_message(mido.Message("clock"))
+
+		assert [r for r in caplog.records if "MIDI clock" in r.message]
 
 	def test_no_mismatch_warning_when_quantize_disabled (self, caplog: pytest.LogCaptureFixture) -> None:
 

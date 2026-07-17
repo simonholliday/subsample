@@ -310,7 +310,7 @@ assignments:
 
   # --- F. Rhythmic loops, beat-matched ---
   # Filter by duration and onset count, then snap the chosen sample
-  # to the session's target_bpm grid.
+  # to the session tempo grid.
 
   # - name: Loop pad
   #   channel: 3

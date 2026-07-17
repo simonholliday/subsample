@@ -20,10 +20,9 @@ _log = logging.getLogger(__name__)
 
 
 SUPPORTED_TEMPO_SOURCES: frozenset[str] = frozenset({"config", "midi"})
-"""Valid values for transform.tempo_source — where the quantize processors get
-their target tempo.  "config" reads the fixed transform.target_bpm; "midi"
-follows an incoming MIDI clock on the player's input (falling back to
-target_bpm until a clock is seen)."""
+"""Valid values for tempo.source — where the session tempo comes from.  "config"
+reads the fixed tempo.bpm; "midi" follows an incoming MIDI clock on the player's
+input (falling back to tempo.bpm until a clock is seen)."""
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +374,38 @@ class InstrumentConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class TempoConfig:
+
+	"""The session tempo — used both by the quantize processors and by the
+	``duration_beats`` selection filter, which is why it is a top-level section
+	rather than a transform detail."""
+
+	bpm: float = 0.0
+	"""Session tempo in BPM.  Used by the ``stretch_quantize`` / ``pad_quantize``
+	processors when an assignment does not give its own ``tempo:``, and by the
+	``duration_beats`` selection filter (which measures sample length in beats at
+	this tempo).  0.0 means unset — those processors are skipped, and a map that
+	filters by ``duration_beats`` fails to load until a tempo is provided.  There
+	is no auto-stretch-every-rhythmic-sample behaviour.
+
+	Also the fallback when ``source: midi`` is set but no clock has been seen yet
+	(cold start, or the sequencer is not sending one).  Leaving it at 0.0 in that
+	case means beat-based behaviour waits for the first clock, so set a sensible
+	session tempo even when following the clock."""
+
+	source: str = "config"
+	"""Where the session tempo comes from.
+
+	``config`` (default) uses ``bpm`` — a fixed session tempo.  ``midi`` follows
+	the tempo of an incoming MIDI clock on the player's MIDI input, rounded to
+	whole BPM, and falls back to ``bpm`` until a clock is seen.  The detected
+	tempo is adopted only when it changes (and only after it holds steady),
+	because each change re-bakes every quantize variant.  Once adopted it is
+	sticky: a stopped transport keeps the last detected tempo rather than
+	reverting.  An assignment's own ``tempo:`` still overrides both."""
+
+
+@dataclasses.dataclass(frozen=True)
 class TransformConfig:
 
 	max_memory_mb: float = 50.0
@@ -391,29 +422,6 @@ class TransformConfig:
 	(those that pass the has_stable_pitch() test) across the full note range
 	defined by the MIDI map assignment (e.g. all notes in C-1..G9).
 	Set to False to disable all pitch variant production."""
-
-	target_bpm: float = 0.0
-	"""Default target BPM for the ``stretch_quantize`` / ``pad_quantize``
-	processors when an assignment does not give its own ``tempo:``.  0.0 means
-	no default — those processors are then skipped unless they carry an explicit
-	tempo.  There is no auto-stretch-every-rhythmic-sample behaviour; quantizing
-	only happens for assignments that declare the processor.
-
-	Also the fallback when ``tempo_source: midi`` is set but no clock has been
-	seen yet (cold start, or the sequencer is not sending one).  Leaving it at
-	0.0 in that case means the quantize step is skipped until the first clock
-	arrives, so set a sensible session tempo even when following the clock."""
-
-	tempo_source: str = "config"
-	"""Where the quantize processors get their target tempo.
-
-	``config`` (default) uses ``target_bpm`` — a fixed session tempo.
-	``midi`` follows the tempo of an incoming MIDI clock on the player's MIDI
-	input, rounded to whole BPM, and falls back to ``target_bpm`` until a clock
-	is seen.  The detected tempo is adopted only when it changes (and only after
-	it holds steady), because each change re-bakes every quantize variant.  Once
-	adopted it is sticky: a stopped transport keeps the last detected tempo
-	rather than reverting.  An assignment's own ``tempo:`` still overrides both."""
 
 	quantize_resolution: int = 16
 	"""Grid subdivision for beat-quantized time-stretch.
@@ -550,6 +558,7 @@ class Config:
 	similarity: SimilarityConfig = dataclasses.field(default_factory=SimilarityConfig)
 	player: PlayerConfig = dataclasses.field(default_factory=PlayerConfig)
 	transform: TransformConfig = dataclasses.field(default_factory=TransformConfig)
+	tempo: TempoConfig = dataclasses.field(default_factory=TempoConfig)
 	osc: OscConfig = dataclasses.field(default_factory=OscConfig)
 	supervisor: SupervisorConfig = dataclasses.field(default_factory=SupervisorConfig)
 	ambisonic: AmbisonicConfig = dataclasses.field(default_factory=AmbisonicConfig)
@@ -1140,11 +1149,39 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"(got {quantize_resolution})"
 		)
 
-	tempo_source_raw = transform_raw.get("tempo_source", "config")
+	# The session tempo moved out of the transform section: it now drives sample
+	# selection (the duration_beats filter) as well as the quantize processors,
+	# so it lives in a top-level `tempo:` section.  The unknown-key sweep only
+	# WARNS, so fail loudly here instead of silently ignoring a stale key.
+	if "target_bpm" in transform_raw:
+		raise ValueError(
+			"transform.target_bpm has moved to the top-level 'tempo' section as "
+			"tempo.bpm.  Replace `transform:\n  target_bpm: N` in config.yaml "
+			"with a top-level `tempo:\n  bpm: N`."
+		)
+
+	if "tempo_source" in transform_raw:
+		raise ValueError(
+			"transform.tempo_source has moved to the top-level 'tempo' section "
+			"as tempo.source.  Replace `transform:\n  tempo_source: X` in "
+			"config.yaml with a top-level `tempo:\n  source: X`."
+		)
+
+	transform = TransformConfig(
+		max_memory_mb       = float(transform_raw.get("max_memory_mb", 50.0)),
+		auto_pitch          = bool(transform_raw.get("auto_pitch",     True)),
+		quantize_resolution = quantize_resolution,
+		variant_cache_dir   = str(transform_raw.get("variant_cache_dir", "samples/variant-cache") or ""),
+		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),
+	)
+
+	tempo_raw = _section(raw, "tempo", trackers)
+
+	tempo_source_raw = tempo_raw.get("source", "config")
 
 	if not isinstance(tempo_source_raw, str):
 		raise ValueError(
-			f"transform.tempo_source must be a string "
+			f"tempo.source must be a string "
 			f"(got {type(tempo_source_raw).__name__}: {tempo_source_raw!r})"
 		)
 
@@ -1152,19 +1189,14 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	if tempo_source not in SUPPORTED_TEMPO_SOURCES:
 		raise ValueError(
-			f"transform.tempo_source {tempo_source_raw!r} is not supported.  "
+			f"tempo.source {tempo_source_raw!r} is not supported.  "
 			f"Valid values: {sorted(SUPPORTED_TEMPO_SOURCES)}.  "
-			f"'config' uses transform.target_bpm; 'midi' follows an incoming MIDI clock."
+			f"'config' uses tempo.bpm; 'midi' follows an incoming MIDI clock."
 		)
 
-	transform = TransformConfig(
-		max_memory_mb       = float(transform_raw.get("max_memory_mb", 50.0)),
-		auto_pitch          = bool(transform_raw.get("auto_pitch",     True)),
-		target_bpm          = float(transform_raw.get("target_bpm",    0.0)),
-		tempo_source        = tempo_source,
-		quantize_resolution = quantize_resolution,
-		variant_cache_dir   = str(transform_raw.get("variant_cache_dir", "samples/variant-cache") or ""),
-		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),
+	tempo = TempoConfig(
+		bpm    = float(tempo_raw.get("bpm", 0.0)),
+		source = tempo_source,
 	)
 
 	# Resolve the memory budget.  Per-cache overrides take precedence for the
@@ -1272,6 +1304,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		similarity=similarity,
 		player=player,
 		transform=transform,
+		tempo=tempo,
 		osc=osc,
 		supervisor=supervisor,
 		ambisonic=ambisonic,

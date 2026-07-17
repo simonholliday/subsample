@@ -587,29 +587,6 @@ analysis:
 #   # rendering (slower, higher CPU at trigger time). Set to false if rubberband-cli
 #   # is not installed or you prefer lazy rendering over background pre-computation.
 #
-#   target_bpm: 0.0
-#   # Default tempo for stretch_quantize / pad_quantize processors that don't
-#   # specify an explicit tempo.  (Legacy name `beat_quantize` is also accepted.)
-#   # 0.0 = disabled.  When a MIDI map assignment uses stretch_quantize: { grid: 16 }
-#   # without an explicit tempo, this value is used.
-#   # Also the fallback under tempo_source: midi, until a clock is first seen —
-#   # leave it at 0.0 there and nothing quantizes until the sequencer starts.
-#
-#   tempo_source: config
-#   # Where the quantize processors get their tempo.
-#   #   config = use target_bpm above (a fixed session tempo).
-#   #   midi   = follow the tempo of a MIDI clock arriving on the player's MIDI
-#   #            input, rounded to whole BPM, falling back to target_bpm until a
-#   #            clock is seen.  Use this so changing tempo in your sequencer
-#   #            doesn't silently leave quantized samples snapped to the old grid.
-#   # The detected tempo is adopted only after it holds steady, because every
-#   # change re-bakes every quantized variant.  Once adopted it is sticky: a
-#   # stopped transport keeps the last tempo rather than reverting.  An
-#   # assignment's own `tempo:` still overrides both.  The clock must arrive on
-#   # the same MIDI input as your notes.
-#   # Under `config`, a clock that disagrees with target_bpm logs one warning.
-#   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
-#
 #   quantize_resolution: 16
 #   # Default grid subdivision for stretch_quantize / pad_quantize processors
 #   # that don't specify an explicit grid.
@@ -630,3 +607,36 @@ analysis:
 #   # with small or slow storage.  Least-recently-used files are evicted
 #   # when the budget is exceeded.  At 44100 Hz float32 stereo, 500 MB ≈
 #   # 1500 seconds.
+
+
+# ---------------------------------------------------------------------------
+# tempo — the session tempo (BPM) and where it comes from
+# ---------------------------------------------------------------------------
+# The session tempo drives two things: the stretch_quantize / pad_quantize
+# processors (which snap onsets to a beat grid) and the duration_beats
+# selection filter (which picks samples by their length in beats — e.g. only
+# hi-hats shorter than a 16th note). Because it is used beyond the transform
+# pipeline it is a top-level section.
+
+# tempo:
+#   bpm: 0.0
+#   # Session tempo in BPM. 0.0 = unset: the quantize processors are skipped, and
+#   # any MIDI map that filters by duration_beats fails to load until a tempo is
+#   # set.  Also the fallback under source: midi, until a clock is first seen —
+#   # set a sensible tempo here even when following the clock, so beat-based
+#   # behaviour works from the very first note.
+#   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
+#
+#   source: config
+#   # Where the session tempo comes from.
+#   #   config = use bpm above (a fixed session tempo).
+#   #   midi   = follow the tempo of a MIDI clock arriving on the player's MIDI
+#   #            input, rounded to whole BPM, falling back to bpm until a clock
+#   #            is seen.  Use this so changing tempo in your sequencer doesn't
+#   #            silently leave quantized samples or beat filters on the old grid.
+#   # The detected tempo is adopted only after it holds steady, because every
+#   # change re-bakes every quantized variant.  Once adopted it is sticky: a
+#   # stopped transport keeps the last tempo rather than reverting.  An
+#   # assignment's own `tempo:` still overrides both.  The clock must arrive on
+#   # the same MIDI input as your notes.
+#   # Under `config`, a clock that disagrees with bpm logs one warning.

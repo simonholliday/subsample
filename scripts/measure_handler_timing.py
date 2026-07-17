@@ -278,7 +278,7 @@ def main () -> int:
 		max_polyphony=cfg.player.max_polyphony,
 		limiter_threshold_db=cfg.player.limiter_threshold_db,
 		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
-		target_bpm=cfg.transform.target_bpm,
+		target_bpm=cfg.tempo.bpm,
 		output_channels=cfg.player.audio.channels,
 		ambisonic_config=cfg.ambisonic,
 		buffer_frames=cfg.player.audio.buffer_frames,

@@ -717,7 +717,7 @@ next. See [Fallback chains](#fallback-chains) below.
 
 All `where` predicates must pass (AND logic).
 
-Numeric predicates (`duration`, `onsets`, `tempo`, `pitch`, `quantized_beats`)
+Numeric predicates (`duration`, `duration_beats`, `onsets`, `tempo`, `pitch`, `quantized_beats`)
 use a per-field operator dict. Operators:
 
 | Operator | Meaning |
@@ -735,6 +735,7 @@ is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
 | Predicate | Type | Description |
 |-----------|------|-------------|
 | `duration` | float (seconds) | Filter by sample length. Example: `{ gte: 1.0, lt: 5.0 }` |
+| `duration_beats` | float (beats) | Filter by sample length in *beats at the session tempo* rather than seconds, so the pool stays musically tight as the tempo changes. A beat is a quarter note: a 16th note is `0.25`, an 8th `0.5`, a quarter `1`, a bar of 4/4 `4`. Example: `{ lt: 0.25 }` keeps only samples shorter than a 16th note. Needs a session tempo (`tempo.bpm`, or a followed MIDI clock) - a map that uses it will not load without one. Distinct from `quantized_beats`, which measures a quantize processor's *output*; this measures the sample's own recorded length. |
 | `onsets` | int | Filter by detected transient count. Example: `{ gte: 4 }` |
 | `tempo` | float (BPM) | Filter by detected tempo. Example: `{ gte: 100, lte: 140 }` |
 | `pitch` | Hz or note name | Filter by detected frequency. Each operator value is either a Hz float (`{ gte: 130.8 }`) or a note name (`{ gte: C3, lt: C6 }`). The two forms are interchangeable - note names are converted to Hz at parse time. Sharps: `C#4`; flats: `Db4`. |
@@ -824,7 +825,7 @@ common case concise, but it helps to know which ones are on:
 | `where` | Empty (all samples match) | `where` block omitted |
 | `process` | Empty (unprocessed playback) | `process` block omitted |
 | `grid` | `16` (sixteenth-note) | `stretch_quantize` / `pad_quantize` without explicit grid |
-| `tempo` | Session `target_bpm` from `config.yaml` | `stretch_quantize` / `pad_quantize` without explicit tempo |
+| `tempo` | Session `tempo.bpm` from `config.yaml` | `stretch_quantize` / `pad_quantize` without explicit tempo |
 | `mode` | `one_shot` | Omitted from assignment |
 | `gain` | `0.0` dB | Omitted from assignment |
 | `pan` | Identity routing | Omitted from assignment |
@@ -1064,11 +1065,11 @@ Available processors:
 |-----------|-----------|-------------|
 | `repitch: true` | none | Pitch-shift to match the triggering MIDI note |
 | `repitch: { note: C4 }` | target note | Pitch-shift to a fixed note |
-| `stretch_quantize: true` | grid (default 16), tempo (config target_bpm), strength (default 1.0) | Time-stretch to session `target_bpm` with all defaults |
-| `stretch_quantize: { grid: 16 }` | as above, grid overridden | Time-stretch to session `target_bpm` |
+| `stretch_quantize: true` | grid (default 16), tempo (config `tempo.bpm`), strength (default 1.0) | Time-stretch to session `tempo.bpm` with all defaults |
+| `stretch_quantize: { grid: 16 }` | as above, grid overridden | Time-stretch to session `tempo.bpm` |
 | `stretch_quantize: { tempo: 120, grid: 8 }` | explicit tempo + grid | Time-stretch to a specific tempo |
 | `stretch_quantize: { strength: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantize - onsets move partway to the grid for a looser feel |
-| `pad_quantize: true` | grid (default 16), tempo (config target_bpm), strength (default 1.0) | Silence-pad onsets with all defaults |
+| `pad_quantize: true` | grid (default 16), tempo (config `tempo.bpm`), strength (default 1.0) | Silence-pad onsets with all defaults |
 | `pad_quantize: { grid: 16 }` | as above, grid overridden | Onset-aligned silence padding - snaps onsets to the beat grid by inserting silence between segments rather than time-stretching. No pitch/speed change. Ideal for speech. |
 | `pad_quantize: { strength: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantize - same as stretch_quantize strength but for silence-pad mode |
 | `filter_low: true` | freq (Hz, default 16000), resonance (dB, default 0) | Low-pass filter (console-style default) |
@@ -2121,8 +2122,8 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
 | `transform.max_memory_mb` | auto | Memory budget (MB) for transform variants; overrides global split |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
-| `transform.target_bpm` | `0.0` | Default tempo (BPM) for `stretch_quantize` / `pad_quantize` steps that carry no explicit `tempo:`. Only assignments that declare one of those processors are quantized - there is no automatic stretch-every-rhythmic-sample behaviour. `0.0` means no default, so such a step with no explicit tempo is skipped. Also the fallback under `tempo_source: midi` until a MIDI clock arrives |
-| `transform.tempo_source` | `config` | Where quantize processors get their tempo. `config` uses `target_bpm`; `midi` follows an incoming MIDI clock so changing tempo in your sequencer doesn't leave samples snapped to the old grid. See [Following your sequencer's tempo](#following-your-sequencers-tempo) |
+| `tempo.bpm` | `0.0` | Session tempo (BPM). Default for `stretch_quantize` / `pad_quantize` steps that carry no explicit `tempo:`, and the reference for the `duration_beats` selection filter. Only assignments that declare a quantize processor are quantized - there is no automatic stretch-every-rhythmic-sample behaviour. `0.0` means unset: such a quantize step is skipped, and a map that filters by `duration_beats` will not load. Also the fallback under `tempo.source: midi` until a MIDI clock arrives |
+| `tempo.source` | `config` | Where the session tempo comes from. `config` uses `tempo.bpm`; `midi` follows an incoming MIDI clock so changing tempo in your sequencer doesn't leave quantized samples or beat filters on the old grid. See [Following your sequencer's tempo](#following-your-sequencers-tempo) |
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
 | `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |
 | `transform.max_disk_mb` | auto | Max disk space (MB) for cached variant files; defaults to 3x memory budget. 0 disables |
@@ -2144,25 +2145,27 @@ weights - is optional and rarely needs changing.
 ### Following your sequencer's tempo
 
 `stretch_quantize` and `pad_quantize` snap a sample's onsets to a beat grid at
-`transform.target_bpm`. That's a fixed number in `config.yaml`, so if you change
-tempo in your sequencer and forget to change it here, every quantized sample
-keeps snapping to the old grid - it just quietly stops locking to your
+the session tempo, and the `duration_beats` selection filter measures sample
+length in beats at that same tempo. The tempo lives in `tempo.bpm` - a fixed
+number in `config.yaml`, so if you change tempo in your sequencer and forget to
+change it here, quantized samples keep snapping to the old grid and beat filters
+keep measuring against the old tempo - it just quietly stops matching your
 sequence.
 
-Set `tempo_source: midi` and subsample takes the tempo from the MIDI clock
+Set `tempo.source: midi` and subsample takes the tempo from the MIDI clock
 arriving on the player's MIDI input instead:
 
 ```yaml
-transform:
-  target_bpm: 125.0      # fallback, used until a clock is seen
-  tempo_source: midi     # follow the sequencer
+tempo:
+  bpm: 125.0        # fallback, used until a clock is seen
+  source: midi      # follow the sequencer
 ```
 
 Worth knowing:
 
-- **Set `target_bpm` anyway.** It's the fallback before any clock arrives (and
+- **Set `tempo.bpm` anyway.** It's the fallback before any clock arrives (and
   if your sequencer never sends one). At `0.0` nothing quantizes until the
-  transport starts.
+  transport starts, and a map that filters by `duration_beats` will not load.
 - **The clock must reach the same MIDI input as your notes** (`player.midi_device`
   or your virtual port). Notes on one port and clock on another and it sees
   nothing.
@@ -2173,10 +2176,10 @@ Worth knowing:
 - **It's sticky.** Stopping the transport keeps the last tempo rather than
   reverting, so stop/start doesn't re-bake anything.
 - **An assignment's own `tempo:` still wins**, as does a CC-bound one. Order is
-  step `tempo:` > MIDI clock > `target_bpm`.
+  step `tempo:` > MIDI clock > `tempo.bpm`.
 
-Leave `tempo_source` at `config` and nothing changes - except that if a clock
-*is* present and disagrees with `target_bpm`, you get one warning saying so
+Leave `tempo.source` at `config` and nothing changes - except that if a clock
+*is* present and disagrees with `tempo.bpm`, you get one warning saying so
 rather than silently wrong timing.
 
 ## Output

@@ -194,7 +194,7 @@ class Range:
 # of these; the field name is both the internal attribute and (for pitch,
 # with the _hz suffix stripped) the YAML key.
 _NUMERIC_FIELDS: tuple[str, ...] = (
-	"duration", "onsets", "tempo", "pitch_hz", "quantized_beats",
+	"duration", "duration_beats", "onsets", "tempo", "pitch_hz", "quantized_beats",
 )
 
 _VALID_OPERATORS: frozenset[str] = frozenset({"gte", "lte", "gt", "lt", "eq"})
@@ -342,9 +342,9 @@ class WherePredicate:
 
 	"""Filter criteria for sample selection.
 
-	Numeric dimensions (``duration``, ``onsets``, ``tempo``, ``pitch_hz``,
-	``quantized_beats``) each carry a Range; an empty Range means "no
-	filter on this dimension".  Non-numeric fields (``pitched``,
+	Numeric dimensions (``duration``, ``duration_beats``, ``onsets``,
+	``tempo``, ``pitch_hz``, ``quantized_beats``) each carry a Range; an
+	empty Range means "no filter on this dimension".  Non-numeric fields (``pitched``,
 	``reference``, ``name``, ``name_list``, ``name_glob``, ``name_regex``,
 	``name_path``, ``directory``) remain flat Optionals — they aren't
 	comparison predicates.
@@ -354,6 +354,7 @@ class WherePredicate:
 	ever populated for a given WherePredicate."""
 
 	duration:        Range = dataclasses.field(default_factory=Range)
+	duration_beats:  Range = dataclasses.field(default_factory=Range)
 	onsets:          Range = dataclasses.field(default_factory=Range)
 	tempo:           Range = dataclasses.field(default_factory=Range)
 	pitch_hz:        Range = dataclasses.field(default_factory=Range)
@@ -413,6 +414,7 @@ class WherePredicate:
 		self,
 		record: "subsample.library.SampleRecord",
 		beats_resolver: typing.Optional[typing.Callable[[int], typing.Optional[float]]] = None,
+		bpm: typing.Optional[float] = None,
 	) -> bool:
 
 		"""Return True if the record passes all active filter predicates."""
@@ -434,15 +436,25 @@ class WherePredicate:
 		if not self.pitch_hz.contains(record.pitch.dominant_pitch_hz):
 			return False
 
-		# quantized_beats is the only field that consults external state.
-		# We only call the resolver when a constraint is actually active;
-		# an empty Range skips the lookup entirely so non-quantized
-		# samples aren't excluded from otherwise-unconstrained queries.
+		# quantized_beats and duration_beats consult external state (the variant
+		# beat-length resolver, and the session tempo, respectively).  Each is
+		# checked only when its Range is active, so an unconstrained query never
+		# needs that state.
 		if not self.quantized_beats.is_empty():
 			beats = beats_resolver(record.sample_id) if beats_resolver is not None else None
 			if beats is None:
 				return False
 			if not self.quantized_beats.contains(beats):
+				return False
+
+		# duration_beats measures the sample's length in beats at the session
+		# tempo (bpm).  Fail closed when no usable tempo is available, mirroring
+		# the resolver-absent path above — the map loader rejects a duration_beats
+		# filter without a tempo upstream, so this guards direct construction.
+		if not self.duration_beats.is_empty():
+			if bpm is None or bpm <= 0.0:
+				return False
+			if not self.duration_beats.contains(record.duration * bpm / 60.0):
 				return False
 
 		if self.pitched is not None:
@@ -526,6 +538,7 @@ _LEGACY_WHERE_KEYS: dict[str, tuple[str, str]] = {
 # units explicit in Python, awkward in user-facing YAML).
 _NUMERIC_YAML_KEYS: dict[str, str] = {
 	"duration":        "duration",
+	"duration_beats":  "duration_beats",
 	"onsets":          "onsets",
 	"tempo":           "tempo",
 	"pitch":           "pitch_hz",
@@ -1271,6 +1284,7 @@ def query (
 	energy_profile_resolver: typing.Optional[
 		typing.Callable[[int], typing.Optional["subsample.transform.GridEnergyProfile"]]
 	] = None,
+	bpm:                     typing.Optional[float] = None,
 ) -> list["subsample.library.SampleRecord"]:
 
 	"""Evaluate a SelectSpec against a list of samples.
@@ -1306,6 +1320,10 @@ def query (
 		                   ``GridEnergyProfile`` (or None).  Required by the
 		                   ``beat_match`` order scorer, which excludes every
 		                   candidate when it is absent.
+		bpm:               Session tempo in BPM, used by the ``duration_beats``
+		                   where-predicate (which measures sample length in
+		                   beats).  None or <= 0 excludes every sample while a
+		                   ``duration_beats`` filter is active.
 
 	Returns:
 		List of matching SampleRecord objects, ordered by the requested
@@ -1351,7 +1369,7 @@ def query (
 		result: list["subsample.library.SampleRecord"] = []
 		for match in ranked:
 			record = by_id.get(match.sample_id)
-			if record is not None and where.matches(record, beats_resolver):
+			if record is not None and where.matches(record, beats_resolver, bpm):
 				result.append(record)
 
 		if primary.dir == "asc":
@@ -1368,7 +1386,7 @@ def query (
 				f"Valid scorers: {', '.join(sorted(valid_names))}"
 			)
 
-	filtered = [r for r in samples if where.matches(r, beats_resolver)]
+	filtered = [r for r in samples if where.matches(r, beats_resolver, bpm)]
 
 	# Score every (clause, record) pair exactly once, applying each
 	# "exclude"-policy scorer's filter as its clause is scored.  Without the
@@ -1754,6 +1772,7 @@ def _parse_where (
 
 	return WherePredicate(
 		duration        = _range_for("duration"),
+		duration_beats  = _range_for("duration_beats"),
 		onsets          = _range_for("onsets"),
 		tempo           = _range_for("tempo"),
 		pitch_hz        = _range_for("pitch_hz"),

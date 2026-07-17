@@ -1071,9 +1071,10 @@ class TestTransformConfig:
 		# max_memory_mb is derived from auto-detect (35% of global).
 		assert cfg.transform.max_memory_mb       > 0
 		assert cfg.transform.auto_pitch          is True
-		assert cfg.transform.target_bpm          == 0.0
 		assert cfg.transform.quantize_resolution == 16
-		assert cfg.transform.tempo_source        == "config"
+		# The session tempo lives in its own top-level section now.
+		assert cfg.tempo.bpm                     == 0.0
+		assert cfg.tempo.source                  == "config"
 
 	def test_tempo_source_parsed (self) -> None:
 
@@ -1086,10 +1087,25 @@ class TestTransformConfig:
 
 		for value, expected in (("midi", "midi"), ("MIDI", "midi"), ("config", "config")):
 			raw = dict(base_raw)
-			raw["transform"] = {"tempo_source": value}
+			raw["tempo"] = {"source": value}
 
 			cfg = subsample.config._build_config(raw)
-			assert cfg.transform.tempo_source == expected
+			assert cfg.tempo.source == expected
+
+	def test_tempo_bpm_parsed (self) -> None:
+
+		"""tempo.bpm reaches TempoConfig as a float."""
+
+		import yaml
+		base_raw: dict[str, typing.Any] = yaml.safe_load(
+			self._DEFAULT_CONFIG_PATH.read_text()
+		) or {}
+
+		raw = dict(base_raw)
+		raw["tempo"] = {"bpm": 125}
+
+		cfg = subsample.config._build_config(raw)
+		assert cfg.tempo.bpm == 125.0
 
 	def test_invalid_tempo_source_raises (self) -> None:
 
@@ -1102,10 +1118,40 @@ class TestTransformConfig:
 
 		for bad_value in ("clock", "auto", "", 120, True):
 			raw = dict(base_raw)
-			raw["transform"] = {"tempo_source": bad_value}
+			raw["tempo"] = {"source": bad_value}
 
-			with pytest.raises(ValueError, match="tempo_source"):
+			with pytest.raises(ValueError, match=r"tempo\.source"):
 				subsample.config._build_config(raw)
+
+	def test_moved_target_bpm_key_raises (self) -> None:
+
+		"""The pre-move transform.target_bpm key fails loudly, naming tempo.bpm."""
+
+		import yaml
+		base_raw: dict[str, typing.Any] = yaml.safe_load(
+			self._DEFAULT_CONFIG_PATH.read_text()
+		) or {}
+
+		raw = dict(base_raw)
+		raw["transform"] = {"target_bpm": 120.0}
+
+		with pytest.raises(ValueError, match=r"tempo\.bpm"):
+			subsample.config._build_config(raw)
+
+	def test_moved_tempo_source_key_raises (self) -> None:
+
+		"""The pre-move transform.tempo_source key fails loudly, naming tempo.source."""
+
+		import yaml
+		base_raw: dict[str, typing.Any] = yaml.safe_load(
+			self._DEFAULT_CONFIG_PATH.read_text()
+		) or {}
+
+		raw = dict(base_raw)
+		raw["transform"] = {"tempo_source": "midi"}
+
+		with pytest.raises(ValueError, match=r"tempo\.source"):
+			subsample.config._build_config(raw)
 
 	def test_valid_quantize_resolutions (self) -> None:
 
@@ -1510,7 +1556,7 @@ class TestOnSampleAddedNoAutoStretch:
 
 		enqueued_specs: list[subsample.transform.TransformSpec] = []
 
-		cfg = subsample.config.TransformConfig(target_bpm=120.0)
+		cfg = subsample.config.TransformConfig()
 
 		class _FakeProcessor:
 			def enqueue (self, record: typing.Any, spec: subsample.transform.TransformSpec) -> None:

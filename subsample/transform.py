@@ -3914,7 +3914,7 @@ def spec_from_process (
 				_warn_once(
 					"stretch_quantize-no-tempo",
 					"stretch_quantize: no tempo available (no explicit 'tempo:' "
-					"and transform.target_bpm is 0 in config.yaml) — step skipped",
+					"and tempo.bpm is 0 in config.yaml) — step skipped",
 				)
 
 		elif proc.name == "filter_low":
@@ -4098,7 +4098,7 @@ def spec_from_process (
 				_warn_once(
 					"pad_quantize-no-tempo",
 					"pad_quantize: no tempo available (no explicit 'tempo:' "
-					"and transform.target_bpm is 0 in config.yaml) — step skipped",
+					"and tempo.bpm is 0 in config.yaml) — step skipped",
 				)
 
 		elif proc.name == "vocoder":
