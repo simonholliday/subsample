@@ -1064,7 +1064,7 @@ class TestTransformConfig:
 
 	"""Config defaults load correctly and validation fires on bad values."""
 
-	_DEFAULT_CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+	_DEFAULT_CONFIG_PATH = subsample.config._locate_default_config()
 
 	def test_default_transform_values (self) -> None:
 		cfg = subsample.config.load_config(self._DEFAULT_CONFIG_PATH)

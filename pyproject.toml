@@ -49,7 +49,7 @@ dev = [
 include = ["subsample*"]
 
 [tool.setuptools.package-data]
-subsample = ["py.typed"]
+subsample = ["py.typed", "config.yaml.default"]
 
 [project.urls]
 Repository = "https://github.com/simonholliday/subsample"

@@ -13,7 +13,7 @@ import yaml
 import subsample.config
 
 
-_DEFAULT_CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+_DEFAULT_CONFIG_PATH = subsample.config._locate_default_config()
 
 
 def _load_with (
@@ -46,6 +46,19 @@ def _load_with (
 
 
 class TestLoadDefault:
+
+	def test_default_config_ships_inside_the_package (self) -> None:
+		"""The bundled default must live INSIDE the subsample package directory.
+
+		It ships as package data ([tool.setuptools.package-data] in
+		pyproject.toml); a repo-root location would vanish from non-editable
+		installs and crash startup. Locks review finding M25's fix in place.
+		"""
+
+		default = subsample.config._locate_default_config()
+
+		assert default.parent == pathlib.Path(subsample.config.__file__).parent
+		assert default.is_file()
 
 	def test_loads_default_config (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -417,6 +430,19 @@ class TestLoadCustomConfig:
 
 		with pytest.raises(FileNotFoundError):
 			subsample.config.load_config(nonexistent)
+
+	def test_explicit_path_expands_tilde (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""~/... explicit paths work even when the shell didn't expand them
+		(supervisor/systemd invocations pass the literal tilde through)."""
+
+		monkeypatch.setenv("HOME", str(tmp_path))
+		(tmp_path / "config.yaml").write_text("tempo:\n  bpm: 93.0\n")
+
+		cfg = subsample.config.load_config(pathlib.Path("~/config.yaml"))
+
+		assert cfg.tempo.bpm == 93.0
 
 	def test_similarity_custom_weights (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
@@ -977,7 +1003,7 @@ class TestSupervisorConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1016,7 +1042,7 @@ class TestAmbisonicConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1047,7 +1073,7 @@ class TestAmbisonicConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1067,7 +1093,7 @@ class TestAmbisonicConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1090,7 +1116,7 @@ class TestAmbisonicConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1110,7 +1136,7 @@ class TestAmbisonicConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1128,7 +1154,7 @@ class TestAmbisonicConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1158,7 +1184,7 @@ class TestAudioFormatConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1179,7 +1205,7 @@ class TestAudioFormatConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1200,7 +1226,7 @@ class TestAudioFormatConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1223,7 +1249,7 @@ class TestAudioFormatConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1243,7 +1269,7 @@ class TestAudioFormatConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1265,7 +1291,7 @@ class TestAudioFormatConfig:
 
 		import shutil
 
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1300,7 +1326,7 @@ class TestPreviewsConfig:
 
 		import shutil
 
-		default     = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default     = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1316,7 +1342,7 @@ class TestPreviewsConfig:
 
 		import shutil
 
-		default     = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default     = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1343,7 +1369,7 @@ class TestBufferFrames:
 
 		import shutil
 
-		default     = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default     = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 
@@ -1354,7 +1380,7 @@ class TestBufferFrames:
 
 	def test_default_is_none (self) -> None:
 		"""Unset → None → PortAudio picks the device default."""
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		cfg = subsample.config.load_config(default)
 		assert cfg.player.audio.buffer_frames is None
 

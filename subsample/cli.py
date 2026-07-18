@@ -29,6 +29,7 @@ import dataclasses
 import datetime
 import logging
 import pathlib
+import shutil
 import sys
 import threading
 import time
@@ -80,13 +81,16 @@ def _format_mmss (seconds: float) -> str:
 	return f"{s // 60:02d}:{s % 60:02d}"
 
 
-def _parse_args () -> argparse.Namespace:
+def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 
 	"""Parse command-line arguments.
 
+	Args:
+		argv: Argument list to parse; None (default) reads sys.argv.
+
 	Returns:
-		Namespace with a 'files' attribute containing a (possibly empty)
-		list of pathlib.Path objects.
+		Namespace with 'files' (a possibly empty list of pathlib.Path),
+		'config' (an explicit config path or None), and 'init' (bool).
 	"""
 
 	parser = argparse.ArgumentParser(
@@ -105,7 +109,50 @@ def _parse_args () -> argparse.Namespace:
 			"(e.g. recording_1.wav, recording_2.wav, …)."
 		),
 	)
-	return parser.parse_args()
+	parser.add_argument(
+		"--config",
+		type=pathlib.Path,
+		default=None,
+		metavar="PATH",
+		help=(
+			"Path to config.yaml (default: ./config.yaml in the current "
+			"directory, falling back to built-in defaults). Relative paths "
+			"inside the config still resolve against the current directory, "
+			"so one shared config can serve several project folders."
+		),
+	)
+	parser.add_argument(
+		"--init",
+		action="store_true",
+		help=(
+			"Write a fully commented starter config.yaml into the current "
+			"directory (a copy of the built-in defaults), then exit. "
+			"Refuses to overwrite an existing config.yaml."
+		),
+	)
+	return parser.parse_args(argv)
+
+
+def _init_config () -> None:
+
+	"""Write a starter config.yaml into the current directory, then exit.
+
+	The file is a byte-for-byte copy of the bundled defaults — every setting
+	present, documented, and safe to edit or delete freely (removed settings
+	fall back to the built-in defaults). Refuses to overwrite an existing
+	config.yaml so a project's tuned settings can never be lost to a stray
+	--init.
+	"""
+
+	target = pathlib.Path.cwd() / "config.yaml"
+
+	if target.exists():
+		_log.error("Refusing to overwrite existing %s — delete it first if you really want a fresh copy", target)
+		raise SystemExit(1)
+
+	shutil.copyfile(subsample.config._locate_default_config(), target)
+	print(f"Wrote {target}")
+	print("Every setting is documented inside; edit what you need, then run: subsample")
 
 
 def _build_trimmed_segment (
@@ -937,7 +984,16 @@ def _main_impl () -> None:
 
 	args = _parse_args()
 
-	cfg = subsample.config.load_config()
+	if args.init:
+		_init_config()
+		return
+
+	try:
+		cfg = subsample.config.load_config(args.config)
+	except FileNotFoundError as exc:
+		# A mistyped --config path should read as one clear line, not a traceback.
+		_log.error("%s", exc)
+		raise SystemExit(1)
 
 	# Wire the carrier cache budget from the resolved config.
 	subsample.transform.set_carrier_cache_budget(

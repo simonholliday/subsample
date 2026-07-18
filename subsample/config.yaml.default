@@ -1,11 +1,12 @@
 # Subsample default configuration.
 #
-# This file provides all default values. To customise, create a config.yaml
-# in the same directory containing only the settings you want to override —
-# all other values are inherited from this file automatically.
+# This file ships with Subsample and provides all default values. To
+# customise, create a config.yaml in the directory you run subsample from
+# (or point at one with --config) containing only the settings you want to
+# override — all other values are inherited from this file automatically.
 #
-# To start with a full copy you can edit freely:
-#   cp config.yaml.default config.yaml
+# To start with a full, freely editable copy of this file:
+#   subsample --init
 
 # ---------------------------------------------------------------------------
 # Memory budget — how much RAM Subsample may use for sample caches

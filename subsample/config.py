@@ -586,10 +586,19 @@ def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
 	if user_path is not None:
 		user = _read_yaml(user_path)
 		raw = _deep_merge(base, user)
-		_log.debug("Loaded config from %s + %s", default_path.name, user_path.name)
+		_log.info("Configuration: %s (over built-in defaults)", user_path.resolve())
 	else:
 		raw = base
-		_log.debug("Loaded config from %s", default_path.name)
+		if path is None:
+			# INFO on purpose: running from the wrong directory silently gives
+			# defaults-only — this line is the "which config am I on?" answer.
+			_log.info(
+				"Configuration: built-in defaults (no config.yaml in %s)",
+				pathlib.Path.cwd(),
+			)
+		else:
+			# Caller explicitly passed the bundled default (test convenience).
+			_log.debug("Configuration: built-in defaults (explicit default path)")
 
 	return _build_config(raw)
 
@@ -598,10 +607,15 @@ def _locate_default_config () -> pathlib.Path:
 
 	"""Return the path to the bundled config.yaml.default.
 
+	The file ships as package data inside the subsample package, so this
+	resolves correctly for editable and regular installs alike. (A plain
+	__file__-relative path rather than importlib.resources: load_config needs a
+	real filesystem Path, and subsample can never run from a zipped package.)
+
 	Raises FileNotFoundError if the file is missing (broken installation).
 	"""
 
-	default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+	default = pathlib.Path(__file__).parent / "config.yaml.default"
 
 	if not default.exists():
 		raise FileNotFoundError(
@@ -623,6 +637,7 @@ def _resolve_user_config_path (
 	"""
 
 	if explicit is not None:
+		explicit = explicit.expanduser()
 		if explicit.exists():
 			return explicit
 

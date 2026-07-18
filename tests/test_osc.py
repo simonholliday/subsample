@@ -319,7 +319,7 @@ class TestOscConfig:
 		"""Default config produces OscConfig with enabled=False."""
 
 		cfg = subsample.config.load_config(
-			pathlib.Path(__file__).parent.parent / "config.yaml.default"
+			subsample.config._locate_default_config()
 		)
 
 		assert isinstance(cfg.osc, subsample.config.OscConfig)
@@ -336,7 +336,7 @@ class TestOscConfig:
 		import subsample.config
 
 		# Copy the default config so we have a valid base.
-		default = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
 		shutil.copy(default, user_config)
 

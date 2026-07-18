@@ -286,6 +286,66 @@ class TestParseArgs:
 		args = subsample.cli._parse_args()
 		assert all(isinstance(f, pathlib.Path) for f in args.files)
 
+	def test_config_flag_parsed_as_path (self) -> None:
+		args = subsample.cli._parse_args(["--config", "../shared/config.yaml"])
+		assert args.config == pathlib.Path("../shared/config.yaml")
+
+	def test_config_flag_defaults_to_none (self) -> None:
+		"""No --config → None → load_config falls back to CWD discovery."""
+		args = subsample.cli._parse_args([])
+		assert args.config is None
+
+	def test_init_flag (self) -> None:
+		assert subsample.cli._parse_args(["--init"]).init is True
+		assert subsample.cli._parse_args([]).init is False
+
+
+class TestInitConfig:
+
+	"""Tests for subsample.cli._init_config() (the --init scaffold)."""
+
+	def test_writes_copy_of_bundled_default (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		capsys: pytest.CaptureFixture[str],
+	) -> None:
+		"""--init writes ./config.yaml as an exact copy of the bundled default."""
+
+		monkeypatch.chdir(tmp_path)
+
+		subsample.cli._init_config()
+
+		written = tmp_path / "config.yaml"
+		default = subsample.config._locate_default_config()
+		assert written.read_bytes() == default.read_bytes()
+		assert str(written) in capsys.readouterr().out
+
+	def test_refuses_to_overwrite (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""An existing config.yaml is never clobbered — tuned settings survive."""
+
+		monkeypatch.chdir(tmp_path)
+		existing = tmp_path / "config.yaml"
+		existing.write_text("tempo:\n  bpm: 111.0\n")
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli._init_config()
+
+		assert excinfo.value.code == 1
+		assert existing.read_text() == "tempo:\n  bpm: 111.0\n"
+
+	def test_scaffolded_config_loads (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""The scaffold parses and round-trips through load_config unchanged."""
+
+		monkeypatch.chdir(tmp_path)
+
+		subsample.cli._init_config()
+
+		cfg = subsample.config.load_config(tmp_path / "config.yaml")
+		assert isinstance(cfg, subsample.config.Config)
+
 
 class TestFormatMmss:
 
@@ -577,7 +637,7 @@ class TestPrintBanner:
 	"""_print_banner reports each ACTIVE subsystem's own settings — a player-only
 	run must show the player's output, not the (possibly disabled) recorder."""
 
-	_DEFAULT = pathlib.Path(__file__).parent.parent / "config.yaml.default"
+	_DEFAULT = subsample.config._locate_default_config()
 
 	def _player_only (self) -> subsample.config.Config:
 		import dataclasses

@@ -2060,10 +2060,8 @@ sudo dnf install portaudio-devel rubberband
 # macOS:
 brew install portaudio rubberband
 
-# Clone and install
-git clone https://github.com/simonholliday/subsample.git
-cd subsample
-pip install -e .
+# Install (directly from GitHub, or from a local clone with `pip install .`)
+pip install git+https://github.com/simonholliday/subsample.git
 
 # Run with built-in defaults (no config file needed)
 subsample
@@ -2073,9 +2071,11 @@ subsample recording.wav                # Single file
 subsample ./recordings/*.wav           # Multiple files (glob expansion)
 ```
 
-Subsample works out of the box with sensible defaults from `config.yaml.default`.
-To customise, create a `config.yaml` containing only the settings you want to
-override - everything else is inherited automatically. See
+Subsample works out of the box with sensible built-in defaults. To customise,
+run `subsample --init` in your project folder - it writes a starter
+`config.yaml` with every setting present and documented - or create a
+`config.yaml` by hand containing only the settings you want to override;
+everything else is inherited automatically. See
 [Configuration](#configuration) for details.
 
 **Live capture mode:** Subsample lists available audio input devices and lets you
@@ -2127,9 +2127,41 @@ that happens, raise `hold_time` so it spans the attack.
 
 ## Configuration
 
-Subsample always loads `config.yaml.default` as the base, then deep-merges
-your `config.yaml` on top. Your config only needs the settings you want to
-change - everything else is inherited from the defaults automatically.
+Subsample ships its defaults built in and deep-merges your `config.yaml` on
+top. Your config only needs the settings you want to change - everything else
+is inherited from the defaults automatically. `subsample --init` writes a
+starter `config.yaml` with every setting present and documented, ready to
+edit.
+
+### Where your config lives
+
+Subsample looks for `./config.yaml` in the directory you run it from, or
+takes an explicit path with `--config`:
+
+```bash
+cd my-project && subsample            # uses my-project/config.yaml
+subsample --config ../config.yaml     # an explicit file, wherever you keep it
+```
+
+The directory you run from is the project folder: relative paths in the
+config - `player.midi_map`, `instrument.directory`, `output.directory` - all
+resolve against it, whichever config file is in use. That supports both ways
+of laying out a multi-track project:
+
+- **A config per track:** each track folder holds its own `config.yaml`,
+  MIDI map, and samples; `cd track-01 && subsample`.
+- **One shared config:** a single `config.yaml` at the project top;
+  `cd track-01 && subsample --config ../config.yaml`. Shared settings come
+  from the one file, while the map, samples, and recordings still belong to
+  the track folder you ran from.
+
+Paths *inside* a MIDI map - sample directories, `definitions:` files - are
+the exception: they resolve relative to the map file itself, so a map and its
+sounds travel together (see [MIDI map](#midi-map)).
+
+At startup Subsample logs which configuration it is using; if you see
+`built-in defaults (no config.yaml in ...)` you are running without your
+config, usually because you launched from a different directory.
 
 The most common overrides:
 
