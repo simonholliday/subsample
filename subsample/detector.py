@@ -7,7 +7,7 @@ during brief pauses in the signal.
 
 By default one SNR threshold governs both the start and the end of a recording.
 An optional lower ``release_threshold_db`` decouples them (a Schmitt-trigger
-hysteresis pair): the recording still starts on the loud ``snr_threshold_db``
+hysteresis pair): the recording still starts on the loud ``threshold_db``
 attack, but ends only once the tail has decayed to the quieter release level, so
 a long decay (cymbal, ride, gong) rings out toward the noise floor instead of
 being cut short.  An optional ``retrigger_threshold_db`` ends a recording the
@@ -18,8 +18,8 @@ State machine:
   WARMUP -> IDLE        after warmup_seconds worth of chunks
   IDLE   -> RECORDING   when the SNR (open) threshold is exceeded
   RECORDING -> IDLE     when signal has been below the CLOSE threshold
-                        (release_threshold_db, or snr_threshold_db if unset) for
-                        hold_time seconds — returns the (start, end) boundary
+                        (release_threshold_db, or threshold_db if unset) for
+                        hold_seconds seconds — returns the (start, end) boundary
   RECORDING -> RECORDING when a re-trigger rise marks the next hit: returns the
                         finished (start, end) boundary and immediately opens a
                         new recording at the onset (only when retrigger is set)
@@ -55,7 +55,7 @@ _TAIL_FOLLOWER_ALPHA: float = 0.3
 # Minimum recording length, in seconds, before re-trigger can fire.  Spans the
 # attack transient (whose own peak would otherwise read as a rise over the
 # quieter onset chunk) and guarantees a re-triggered split cannot produce a
-# sub-perceptual fragment.  The effective guard is max(this, hold_time).
+# sub-perceptual fragment.  The effective guard is max(this, hold_seconds).
 _MIN_RETRIGGER_GUARD_SECONDS: float = 0.1
 
 
@@ -113,14 +113,14 @@ class LevelDetector:
 		# Derived frame counts for warmup and hold-time
 		chunks_per_second = sample_rate / chunk_size
 		self._warmup_chunks_remaining: int = round(cfg.warmup_seconds * chunks_per_second)
-		self._hold_chunks_total: int = max(1, round(cfg.hold_time * chunks_per_second))
+		self._hold_chunks_total: int = max(1, round(cfg.hold_seconds * chunks_per_second))
 
 		# CLOSE threshold: a recording ends when the tail falls below this many dB
 		# over ambient (release_threshold_db when set — decoupled from the louder
-		# start — otherwise snr_threshold_db, reproducing the historical behaviour).
+		# start — otherwise threshold_db, reproducing the historical behaviour).
 		self._close_threshold_db: float = (
 			cfg.release_threshold_db if cfg.release_threshold_db is not None
-			else cfg.snr_threshold_db
+			else cfg.threshold_db
 		)
 
 		# Re-trigger: precompute the linear rise ratio and the min-segment guard.
@@ -155,9 +155,9 @@ class LevelDetector:
 		"""Close a recording still open at end-of-stream, returning its bounds.
 
 		File-input mode streams a whole file through the detector; a recording
-		only closes on hold_time of quiet, a retrigger, or the buffer cap, so a
+		only closes on hold_seconds of quiet, a retrigger, or the buffer cap, so a
 		file that ends while a recording is still open (its last sound running to
-		within hold_time of the end) would drop that final segment.  Call this
+		within hold_seconds of the end) would drop that final segment.  Call this
 		after the last chunk to emit the open recording as (start, current_frame).
 
 		Returns None when no recording is open.  Resets the detector to IDLE.
@@ -185,7 +185,7 @@ class LevelDetector:
 		"""Per-sample amplitude gate for the TRAILING (tail) edge of trim_silence.
 
 		Built from the SAME close threshold and (floored) ambient the detector used
-		to end the recording — release_threshold_db when set, else snr_threshold_db.
+		to end the recording — release_threshold_db when set, else threshold_db.
 		The single source of truth for the tail so the trimmer cannot re-cut a
 		decayed tail back up to a louder level than the detector ended on (which
 		would undo the whole point of a decoupled release threshold).
@@ -199,7 +199,7 @@ class LevelDetector:
 
 		"""Per-sample amplitude gate for the LEADING (attack) edge of trim_silence.
 
-		Built from snr_threshold_db (the START/open trigger level) and the floored
+		Built from threshold_db (the START/open trigger level) and the floored
 		ambient — deliberately INDEPENDENT of release_threshold_db.  The attack edge
 		must trim tight to the transient regardless of how low the tail threshold is
 		set: a low release preserves a long decay, but it must not drag low-level
@@ -208,7 +208,7 @@ class LevelDetector:
 		"""
 
 		ambient = max(self._ambient_rms, _AMBIENT_FLOOR)
-		return float(ambient * (10.0 ** (self._cfg.snr_threshold_db / 20.0)))
+		return float(ambient * (10.0 ** (self._cfg.threshold_db / 20.0)))
 
 	def process_chunk (
 		self,
@@ -382,7 +382,7 @@ class LevelDetector:
 			# Seed the EMA on the first meaningful chunk rather than smoothing from zero
 			self._ambient_rms = max(chunk_rms, _AMBIENT_FLOOR)
 		else:
-			alpha = self._cfg.ema_alpha
+			alpha = self._cfg.floor_adaptation
 			self._ambient_rms = alpha * chunk_rms + (1.0 - alpha) * self._ambient_rms
 
 	def _onset_offset (self, chunk: numpy.ndarray) -> int:
@@ -430,15 +430,15 @@ class LevelDetector:
 
 	def _exceeds_threshold (self, chunk_rms: float) -> bool:
 
-		"""True if chunk_rms is at least snr_threshold_db above ambient (OPEN/start)."""
+		"""True if chunk_rms is at least threshold_db above ambient (OPEN/start)."""
 
-		return self._snr_db_over_ambient(chunk_rms) >= self._cfg.snr_threshold_db
+		return self._snr_db_over_ambient(chunk_rms) >= self._cfg.threshold_db
 
 	def _exceeds_close_threshold (self, chunk_rms: float) -> bool:
 
 		"""True while the tail is still above the CLOSE threshold (end/hold test).
 
-		Uses release_threshold_db when configured, otherwise snr_threshold_db — so
+		Uses release_threshold_db when configured, otherwise threshold_db — so
 		with no release set this is identical to _exceeds_threshold.
 		"""
 

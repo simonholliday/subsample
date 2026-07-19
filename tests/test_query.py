@@ -1875,6 +1875,24 @@ class TestVelocityPick:
 				 {"where": {"directory": "b"}, "order": "newest"}], "kit",
 			)
 
+	def test_velocity_chain_requires_consistent_direction (self) -> None:
+		"""The pick's ascending flag is baked once from the declaring spec, so a
+		chain mixing quietest and loudest specs is rejected — otherwise a
+		loudest-ordered fallback would invert velocity->sample when it wins."""
+		with pytest.raises(ValueError, match="[Ss][Aa][Mm][Ee] direction"):
+			subsample.query.parse_select(
+				[{"where": {"directory": "a"}, "order": "quietest", "pick": "velocity"},
+				 {"where": {"directory": "b"}, "order": "loudest"}], "kit",
+			)
+
+	def test_velocity_chain_same_direction_accepted (self) -> None:
+		"""A chain that is level-ordered in ONE consistent direction is fine."""
+		specs = subsample.query.parse_select(
+			[{"where": {"directory": "a"}, "order": "quietest", "pick": "velocity"},
+			 {"where": {"directory": "b"}, "order": "quietest"}], "kit",
+		)
+		assert len(specs) == 2
+
 	def test_order_direction_baked (self) -> None:
 		quiet = subsample.query.parse_select(
 			{"where": {"directory": "x"}, "order": "quietest", "pick": "velocity"}, "a",

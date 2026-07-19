@@ -36,10 +36,11 @@
 # to tune per-sample - load more samples and the kit improves.
 #
 # How to use:
-#   1. Copy this file to midi-map.yaml, OR set `player.midi_map:
-#      midi-map-gm-drums.yaml` in config.yaml
-#   2. Point `instrument.directory` in config.yaml at your sample
-#      directory
+#   1. `subsample --init` places this file in your project with
+#      `player.midi_map:` already pointing at it.  (Set the key
+#      yourself if you are wiring things by hand.)
+#   2. Point `library.directory` in config.yaml at your sample
+#      directory (default: samples/captures)
 #   3. Play any MIDI controller on channel 10 (standard GM drum
 #      channel)
 #

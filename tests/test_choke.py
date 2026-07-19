@@ -20,6 +20,7 @@ import mido
 import numpy
 import pytest
 
+import subsample.config
 import subsample.library
 import subsample.player
 import subsample.query
@@ -452,7 +453,7 @@ assignments:
 		# Regression guard on the shipped kit: load the real GM drums map and
 		# assert its choke groups compile as intended (a typo'd drum symbol or an
 		# asymmetric hat group would fail here).
-		gm_map = pathlib.Path(__file__).resolve().parent.parent / "midi-map-gm-drums.yaml"
+		gm_map = subsample.config.data_dir() / "midi-map-gm-drums.yaml"
 		note_map = subsample.player.load_midi_map(gm_map, []).note_map
 		cm = subsample.player._build_choke_map(note_map)
 

@@ -6,9 +6,10 @@ an adjacent `.analysis.json` sidecar, rebuilds the PreviewData from the
 audio + existing analysis, and writes a fresh `<audio>.preview.png`
 sidecar.
 
-Does **not** touch the `.analysis.json` sidecars — the embedded `preview`
-data block inside them is written only by the main capture pipeline.  PNGs
-are pure raster output and can be rewritten freely.
+Reads each sidecar through `subsample.cache.load_cache`, which re-analyses and
+rewrites a `.analysis.json` that is version- or MD5-stale (so a stale sidecar IS
+refreshed as a side effect); an up-to-date sidecar is left untouched.  The PNG
+itself is pure raster output and is always rewritten.
 
 This script will be superseded by a proper `python -m subsample
 regen-previews` CLI later, which will also refresh the embedded preview

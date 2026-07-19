@@ -11,10 +11,10 @@ import subsample.detector
 
 
 def _make_detection_config (
-	snr_threshold_db: float = 6.0,
-	hold_time: float = 0.5,
+	threshold_db: float = 6.0,
+	hold_seconds: float = 0.5,
 	warmup_seconds: float = 0.0,  # 0 warmup for most tests — skip straight to IDLE
-	ema_alpha: float = 0.5,       # High alpha for fast ambient adjustment in tests
+	floor_adaptation: float = 0.5,       # High alpha for fast ambient adjustment in tests
 	release_threshold_db: typing.Optional[float] = None,
 	retrigger_threshold_db: typing.Optional[float] = None,
 	fade_out_ms: float = 0.0,
@@ -23,12 +23,12 @@ def _make_detection_config (
 	"""Factory for test DetectionConfig with sensible defaults."""
 
 	return subsample.config.DetectionConfig(
-		snr_threshold_db=snr_threshold_db,
-		hold_time=hold_time,
+		threshold_db=threshold_db,
+		hold_seconds=hold_seconds,
 		warmup_seconds=warmup_seconds,
-		ema_alpha=ema_alpha,
-		trim_pre_samples=0,
-		trim_post_samples=0,
+		floor_adaptation=floor_adaptation,
+		trim_pre_ms=0,
+		trim_post_ms=0,
 		release_threshold_db=release_threshold_db,
 		retrigger_threshold_db=retrigger_threshold_db,
 		fade_out_ms=fade_out_ms,
@@ -36,10 +36,10 @@ def _make_detection_config (
 
 
 def _make_detector (
-	snr_threshold_db: float = 6.0,
-	hold_time: float = 0.5,
+	threshold_db: float = 6.0,
+	hold_seconds: float = 0.5,
 	warmup_seconds: float = 0.0,
-	ema_alpha: float = 0.5,
+	floor_adaptation: float = 0.5,
 	sample_rate: int = 1000,
 	chunk_size: int = 100,
 	release_threshold_db: typing.Optional[float] = None,
@@ -49,10 +49,10 @@ def _make_detector (
 	"""Factory for test LevelDetector with sensible defaults."""
 
 	cfg = _make_detection_config(
-		snr_threshold_db=snr_threshold_db,
-		hold_time=hold_time,
+		threshold_db=threshold_db,
+		hold_seconds=hold_seconds,
 		warmup_seconds=warmup_seconds,
-		ema_alpha=ema_alpha,
+		floor_adaptation=floor_adaptation,
 		release_threshold_db=release_threshold_db,
 		retrigger_threshold_db=retrigger_threshold_db,
 	)
@@ -112,7 +112,7 @@ class TestIdleToRecording:
 		"""Code-review regression: the triggering chunk must NOT be folded into
 		the ambient floor before its own SNR test (which deflated the measured
 		SNR and could miss sharp drum hits)."""
-		detector = _make_detector(ema_alpha=0.5)
+		detector = _make_detector(floor_adaptation=0.5)
 
 		for i in range(3):
 			detector.process_chunk(_silent_chunk(), current_frame=(i + 1) * 100)
@@ -138,9 +138,9 @@ class TestIdleToRecording:
 
 class TestHoldTime:
 
-	def test_recording_ends_after_hold_time (self) -> None:
-		# hold_time=0.5, chunk_size=100, sample_rate=1000 → 5 hold chunks
-		detector = _make_detector(hold_time=0.5, sample_rate=1000, chunk_size=100)
+	def test_recording_ends_after_hold_seconds (self) -> None:
+		# hold_seconds=0.5, chunk_size=100, sample_rate=1000 → 5 hold chunks
+		detector = _make_detector(hold_seconds=0.5, sample_rate=1000, chunk_size=100)
 
 		# Seed ambient
 		detector.process_chunk(_silent_chunk(), current_frame=100)
@@ -160,19 +160,19 @@ class TestHoldTime:
 	def test_ambient_not_updated_during_recording (self) -> None:
 		"""Ambient EMA must not track the signal while recording is active.
 
-		ema_alpha=0.2: without the freeze, ambient drifts toward the signal level
+		floor_adaptation=0.2: without the freeze, ambient drifts toward the signal level
 		and SNR drops below 6 dB after ~4 loud chunks, ending the recording early.
 		With the freeze, the 14 dB SNR established at trigger is preserved and the
 		recording continues for as long as the signal is present.
 
-		Note: ema_alpha must not be too high (e.g. 0.9), because _update_ambient
+		Note: floor_adaptation must not be too high (e.g. 0.9), because _update_ambient
 		runs on the trigger chunk while still in IDLE — a very high alpha would push
 		ambient so close to signal that the threshold is never exceeded.
 		"""
 		detector = _make_detector(
-			snr_threshold_db=6.0,
-			hold_time=0.5,
-			ema_alpha=0.2,
+			threshold_db=6.0,
+			hold_seconds=0.5,
+			floor_adaptation=0.2,
 			sample_rate=1000,
 			chunk_size=100,
 		)
@@ -196,8 +196,8 @@ class TestHoldTime:
 		assert detector.state == subsample.detector.DetectorState.RECORDING
 
 	def test_recording_extends_while_signal_present (self) -> None:
-		# hold_time=0.2 → 2 hold chunks
-		detector = _make_detector(hold_time=0.2, sample_rate=1000, chunk_size=100, ema_alpha=0.01)
+		# hold_seconds=0.2 → 2 hold chunks
+		detector = _make_detector(hold_seconds=0.2, sample_rate=1000, chunk_size=100, floor_adaptation=0.01)
 
 		# Seed ambient
 		detector.process_chunk(_silent_chunk(), current_frame=100)
@@ -216,8 +216,8 @@ class TestHoldTime:
 		assert detector.state == subsample.detector.DetectorState.RECORDING
 
 	def test_recording_boundary_frames_are_correct (self) -> None:
-		# hold_time=0.1 → 1 hold chunk at these settings
-		detector = _make_detector(hold_time=0.1, sample_rate=1000, chunk_size=100)
+		# hold_seconds=0.1 → 1 hold chunk at these settings
+		detector = _make_detector(hold_seconds=0.1, sample_rate=1000, chunk_size=100)
 
 		# Seed ambient at frame 100
 		detector.process_chunk(_silent_chunk(), current_frame=100)
@@ -238,9 +238,9 @@ class TestThresholdMath:
 
 	def test_snr_below_threshold_does_not_trigger (self) -> None:
 		# 6 dB threshold — need signal to be ~2x ambient RMS
-		detector = _make_detector(snr_threshold_db=6.0, ema_alpha=0.99)
+		detector = _make_detector(threshold_db=6.0, floor_adaptation=0.99)
 
-		# Large ambient first chunk (ema_alpha=0.99 → ambient ≈ chunk_rms after first chunk)
+		# Large ambient first chunk (floor_adaptation=0.99 → ambient ≈ chunk_rms after first chunk)
 		big_ambient = numpy.full(100, 5000, dtype=numpy.int16)
 		detector.process_chunk(big_ambient, current_frame=100)
 
@@ -378,7 +378,7 @@ class TestOnsetRefinement:
 	def test_start_pulled_to_the_strike (self) -> None:
 		sr, cs = 48000, 512
 		detector = _make_detector(
-			snr_threshold_db=10.0, hold_time=0.01, sample_rate=sr, chunk_size=cs,
+			threshold_db=10.0, hold_seconds=0.01, sample_rate=sr, chunk_size=cs,
 		)
 		# First chunk seeds ambient (warmup) to a quiet floor, then IDLE.
 		quiet = numpy.full((cs, 1), 10, dtype=numpy.int16)
@@ -389,7 +389,7 @@ class TestOnsetRefinement:
 		transient[400:] = 8000
 		detector.process_chunk(transient, current_frame=2 * cs)
 
-		# Close the recording (hold_time ~1 chunk) and read the boundary.
+		# Close the recording (hold_seconds ~1 chunk) and read the boundary.
 		result = None
 		frame = 3 * cs
 		for _ in range(5):
@@ -411,7 +411,7 @@ class TestOnsetRefinement:
 		# A flat chunk (peak from sample 0) has its onset at 0 — no shift, so the
 		# refinement never mis-fires on a signal that is loud from the first sample.
 		detector = _make_detector(
-			snr_threshold_db=6.0, hold_time=0.01, sample_rate=48000, chunk_size=512,
+			threshold_db=6.0, hold_seconds=0.01, sample_rate=48000, chunk_size=512,
 		)
 		detector.process_chunk(numpy.full((512, 1), 100, dtype=numpy.int16), current_frame=512)
 		detector.process_chunk(numpy.full((512, 1), 8000, dtype=numpy.int16), current_frame=1024)
@@ -431,7 +431,7 @@ class TestOnsetRefinement:
 class TestReleaseThreshold:
 
 	"""Decoupled CLOSE threshold (release_threshold_db): a recording opens on the
-	loud snr_threshold_db attack but ends only once the tail falls below the lower
+	loud threshold_db attack but ends only once the tail falls below the lower
 	release level, so a long decay is preserved instead of cut at the start level."""
 
 	def _open_recording (
@@ -447,7 +447,7 @@ class TestReleaseThreshold:
 		# A tail at 12 dB over ambient is below the open threshold but above release,
 		# so with the single-threshold model it would have ended — here it does not.
 		detector = _make_detector(
-			snr_threshold_db=20.0, hold_time=0.5,
+			threshold_db=20.0, hold_seconds=0.5,
 			release_threshold_db=6.0, sample_rate=1000, chunk_size=100,
 		)
 		ambient = 100
@@ -463,13 +463,13 @@ class TestReleaseThreshold:
 
 	def test_tail_below_release_ends_after_hold (self) -> None:
 		detector = _make_detector(
-			snr_threshold_db=20.0, hold_time=0.5,
+			threshold_db=20.0, hold_seconds=0.5,
 			release_threshold_db=6.0, sample_rate=1000, chunk_size=100,
 		)
 		ambient = 100
 		self._open_recording(detector, ambient)
 
-		# hold_time 0.5 s at 10 chunks/s = 5 hold chunks.
+		# hold_seconds 0.5 s at 10 chunks/s = 5 hold chunks.
 		quiet = _at_db_over(ambient, 3.0)  # below release (6)
 		result = None
 		frame = 300
@@ -486,7 +486,7 @@ class TestReleaseThreshold:
 		# (close).  Attack > tail whenever release < snr, so a low release preserves
 		# a long tail without loosening the attack trim.
 		detector = _make_detector(
-			snr_threshold_db=20.0, release_threshold_db=6.0,
+			threshold_db=20.0, release_threshold_db=6.0,
 			sample_rate=1000, chunk_size=100,
 		)
 		# First chunk seeds the ambient EMA (warmup) to 100, then IDLE.
@@ -499,17 +499,17 @@ class TestReleaseThreshold:
 
 	def test_attack_threshold_independent_of_release (self) -> None:
 		# The whole point: changing release must not change the attack gate.
-		high_release = _make_detector(snr_threshold_db=20.0, release_threshold_db=15.0, sample_rate=1000, chunk_size=100)
-		low_release = _make_detector(snr_threshold_db=20.0, release_threshold_db=1.0, sample_rate=1000, chunk_size=100)
+		high_release = _make_detector(threshold_db=20.0, release_threshold_db=15.0, sample_rate=1000, chunk_size=100)
+		low_release = _make_detector(threshold_db=20.0, release_threshold_db=1.0, sample_rate=1000, chunk_size=100)
 		for det in (high_release, low_release):
 			det.process_chunk(_loud_chunk(amplitude=100), current_frame=100)
 		assert high_release.attack_amplitude_threshold == low_release.attack_amplitude_threshold
 
 	def test_snr_only_ends_at_snr_level (self) -> None:
-		# Backward-compat: with no release set, the CLOSE reuses snr_threshold_db,
+		# Backward-compat: with no release set, the CLOSE reuses threshold_db,
 		# so the same 12-dB tail that release=6 preserves ends the recording here.
 		detector = _make_detector(
-			snr_threshold_db=20.0, hold_time=0.3, sample_rate=1000, chunk_size=100,
+			threshold_db=20.0, hold_seconds=0.3, sample_rate=1000, chunk_size=100,
 		)
 		ambient = 100
 		self._open_recording(detector, ambient)
@@ -534,7 +534,7 @@ class TestRetrigger:
 
 	def test_next_hit_splits_into_two_segments (self) -> None:
 		detector = _make_detector(
-			snr_threshold_db=20.0, hold_time=0.3,
+			threshold_db=20.0, hold_seconds=0.3,
 			release_threshold_db=6.0, retrigger_threshold_db=12.0,
 			sample_rate=1000, chunk_size=100,
 		)
@@ -564,7 +564,7 @@ class TestRetrigger:
 		# attack peak — a large rise over the quieter onset chunk — from splitting
 		# the hit off from its tail.  One strike must yield exactly one segment.
 		detector = _make_detector(
-			snr_threshold_db=15.0, hold_time=0.3,
+			threshold_db=15.0, hold_seconds=0.3,
 			release_threshold_db=4.0, retrigger_threshold_db=10.0,
 			sample_rate=1000, chunk_size=100,
 		)
@@ -586,19 +586,19 @@ class TestRetrigger:
 		assert detector.state == subsample.detector.DetectorState.IDLE
 
 	def test_two_stage_attack_needs_a_hold_that_spans_it (self) -> None:
-		# The re-trigger guard = max(hold_time, 0.1 s).  A two-stage attack — a soft
+		# The re-trigger guard = max(hold_seconds, 0.1 s).  A two-stage attack — a soft
 		# onset that opens the gate, then a louder transient arriving AFTER the guard
 		# (breath before a flute note, mallet contact before a bowl, a bow scratch) —
-		# reads the transient as a re-strike when hold_time is short, over-splitting
+		# reads the transient as a re-strike when hold_seconds is short, over-splitting
 		# one gesture into two.  The honest precondition: the whole attack must land
-		# within the guard, so slow/two-stage attacks need a longer hold_time.  A
+		# within the guard, so slow/two-stage attacks need a longer hold_seconds.  A
 		# clean fast-attack ride cymbal (the documented target) is unaffected.
 		onset = [700, 700, 700]
 		transient_decay = [9000, 6000, 3000, 1500, 800, 400, 200, 150] + [100] * 10
 
-		def run (hold_time: float) -> int:
+		def run (hold_seconds: float) -> int:
 			detector = _make_detector(
-				snr_threshold_db=10.0, hold_time=hold_time,
+				threshold_db=10.0, hold_seconds=hold_seconds,
 				release_threshold_db=4.0, retrigger_threshold_db=12.0,
 				sample_rate=1000, chunk_size=100,
 			)
@@ -619,7 +619,7 @@ class TestRetrigger:
 		# With retrigger unset, a second hit before silence just resets the hold —
 		# the two hits merge into one recording (historical behaviour).
 		detector = _make_detector(
-			snr_threshold_db=20.0, hold_time=0.3,
+			threshold_db=20.0, hold_seconds=0.3,
 			release_threshold_db=6.0, sample_rate=1000, chunk_size=100,
 		)
 		ambient = 100
@@ -645,10 +645,10 @@ class TestFinalize:
 
 		"""A recording still open when the input ends is emitted as
 		(start, current_frame), and the detector returns to IDLE — without this,
-		file input would drop a final sound running to within hold_time of EOF."""
+		file input would drop a final sound running to within hold_seconds of EOF."""
 
 		detector = _make_detector(
-			snr_threshold_db=20.0, hold_time=0.5, sample_rate=1000, chunk_size=100,
+			threshold_db=20.0, hold_seconds=0.5, sample_rate=1000, chunk_size=100,
 		)
 		# Seed ambient, then open with a chunk far above the open threshold.
 		detector.process_chunk(_loud_chunk(amplitude=100), current_frame=100)
@@ -668,7 +668,7 @@ class TestFinalize:
 		"""With no recording open, finalize is a no-op returning None."""
 
 		detector = _make_detector(
-			snr_threshold_db=20.0, hold_time=0.5, sample_rate=1000, chunk_size=100,
+			threshold_db=20.0, hold_seconds=0.5, sample_rate=1000, chunk_size=100,
 		)
 
 		assert detector.finalize(current_frame=500) is None

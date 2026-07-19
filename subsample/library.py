@@ -153,8 +153,9 @@ class ReferenceLibrary:
 
 		"""Build the index from a list of SampleRecords.
 
-		Use load_reference_library() rather than calling this directly.
-		Each record is assigned a session-unique ID via allocate_id().
+		Use load_reference_library() rather than calling this directly.  Records
+		are indexed by uppercased name for case-insensitive lookup; IDs are
+		assigned by the loader that constructs the records, not here.
 		"""
 
 		# Store records keyed by uppercased name for O(1) case-insensitive lookup.
@@ -559,12 +560,22 @@ class _LoadedSample:
 def _sweep_orphans (directory: pathlib.Path) -> None:
 
 	"""Recursively delete .analysis.json and .preview.png sidecars whose
-	audio counterpart is absent in the same directory.
+	audio counterpart is absent in the same directory — routine housekeeping
+	after a sample is removed or renamed.
 
 	Subsample only writes these two compound suffixes itself, so the sweep
 	never touches user-created files: a `.preview.png` named like ours but
 	written by a third-party tool would still be deleted, but that's the
 	same name collision the user is responsible for avoiding.
+
+	ONE exception: a directory named ``reference`` is left untouched, because
+	its fingerprints are audio-less BY DESIGN — subsample ships them and
+	`subsample --init` scaffolds them into ``samples/reference/``, where the
+	similarity engine loads them by path with no WAV ever present.  The check
+	is scoped to the swept tree (a ``reference`` folder ABOVE the project can't
+	accidentally exempt everything), and covers both the case where the swept
+	root itself is the reference directory and where it is a subdirectory of a
+	broader ``library.directory``.
 
 	Failures (e.g. permission denied) are logged at ERROR and skipped;
 	never aborts the wider library load.
@@ -576,6 +587,17 @@ def _sweep_orphans (directory: pathlib.Path) -> None:
 
 		name = path.name
 
+		# Crash litter: a save that was SIGKILLed (or lost power) between mkstemp
+		# and the atomic rename leaves a `<sidecar>.tmpXXXX` file behind.  Clean
+		# it wherever it appears — it is never a valid fingerprint.
+		if ".analysis.json.tmp" in name or ".preview.png.tmp" in name:
+			try:
+				path.unlink()
+				_log.info("Deleted crash-leftover temp file %s", path)
+			except OSError as exc:
+				_log.error("Failed to delete temp file %s: %s", path, exc)
+			continue
+
 		if name.endswith(subsample.cache.SIDECAR_SUFFIX):
 			audio_name = name[: -len(subsample.cache.SIDECAR_SUFFIX)]
 		elif name.endswith(subsample.cache.PREVIEW_PNG_SUFFIX):
@@ -586,6 +608,11 @@ def _sweep_orphans (directory: pathlib.Path) -> None:
 		audio_path = path.parent / audio_name
 
 		if audio_path.exists():
+			continue
+
+		# Leave the curated reference directory alone (audio-less by design).
+		enclosing_dirs = path.relative_to(directory).parts[:-1]
+		if directory.name == "reference" or "reference" in enclosing_dirs:
 			continue
 
 		try:

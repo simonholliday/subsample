@@ -73,7 +73,7 @@ class AudioConfig:
 
 	sample_rate: int
 	bit_depth: int
-	chunk_size: int
+	buffer_frames: int
 	channels: typing.Optional[int] = None
 	"""Number of input channels to capture.  None = auto-detect from device."""
 	input: typing.Optional[tuple[int, ...]] = None
@@ -135,6 +135,15 @@ class RecorderConfig:
 	``.analysis.json`` sidecar (compact data the Supervisor dashboard
 	renders as SVG on demand).  Set False to save ~15-25 KB per PNG and
 	~4 KB of JSON per sample if you do not browse the library visually."""
+	directory: str = "samples/captures"
+	"""Directory where captured recordings are saved.  Absolute, or relative
+	to the directory subsample runs from.  Created automatically.  Point
+	library.directory at the same path (the default pairing) for a
+	persistent library that grows across sessions."""
+	filename_format: str = "%Y-%m-%d_%H-%M-%S-%3f"
+	"""strftime format for recording filenames (no extension; .wav/.flac is
+	added automatically).  %3f is a custom token for zero-padded 3-digit
+	milliseconds.  Timestamps are the moment the recording ended."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -210,8 +219,9 @@ class PlayerConfig:
 	midi_map: typing.Optional[str] = None
 	"""Path to a MIDI routing map file (YAML). Defines which MIDI notes
 	trigger which samples. Required when the player is enabled — without
-	it the player will not start. See midi-map.yaml.default for the format
-	specification. midi-map-gm-drums.yaml is a complete GM percussion kit."""
+	it the player will not start. `subsample --init` scaffolds two maps and
+	wires in midi-map-gm-drums.yaml (a complete GM percussion kit); the
+	template it copies to midi-map.yaml documents the full format."""
 
 	watch_midi_map: bool = False
 	"""When True, monitor the midi_map file at runtime for changes and
@@ -236,22 +246,22 @@ class PlayerConfig:
 @dataclasses.dataclass(frozen=True)
 class DetectionConfig:
 
-	snr_threshold_db: float
-	hold_time: float
+	threshold_db: float
+	hold_seconds: float
 	warmup_seconds: float
-	ema_alpha: float
-	trim_pre_samples: int
-	trim_post_samples: int
+	floor_adaptation: float
+	trim_pre_ms: float
+	trim_post_ms: float
 
 	release_threshold_db: typing.Optional[float] = None
 	"""Separate CLOSE threshold, in dB over the pre-hit ambient floor, at which a
 	sounding tail is treated as returned to silence and the recording ends (after
-	the hold_time debounce).  This decouples the end from the start: snr_threshold_db
+	the hold_seconds debounce).  This decouples the end from the start: threshold_db
 	stays the loud OPEN threshold that catches the attack, while a lower
 	release_threshold_db lets a long decay (cymbal, ride, gong) ring out toward the
-	noise floor instead of being cut ~16 dB above it.  Must be below snr_threshold_db
+	noise floor instead of being cut ~16 dB above it.  Must be below threshold_db
 	(a Schmitt-trigger hysteresis pair: open high, close low).  None (default) makes
-	the end reuse snr_threshold_db - identical to the historical single-threshold
+	the end reuse threshold_db - identical to the historical single-threshold
 	behaviour."""
 
 	retrigger_threshold_db: typing.Optional[float] = None
@@ -262,24 +272,17 @@ class DetectionConfig:
 	background noise holds above release_threshold_db.  None (default) disables
 	re-triggering; a recording then ends only on silence or the buffer cap.
 
-	Assumes each hit's whole attack lands within max(hold_time, 0.1 s): a sound with
+	Assumes each hit's whole attack lands within max(hold_seconds, 0.1 s): a sound with
 	a slow or two-stage attack (a soft onset, then a louder transient a moment later -
 	breath before a flute note, mallet contact before a bowl) can otherwise read its
 	own late transient as a re-strike and over-split.  Fast-attack percussion (drums,
-	cymbals) is unaffected; for slower material, raise hold_time so it spans the
+	cymbals) is unaffected; for slower material, raise hold_seconds so it spans the
 	attack.  Typical: 10-15 dB, comfortably above any tail amplitude modulation."""
 
 	fade_out_ms: float = 0.0
 	"""Length of a half-cosine fade applied to each segment's trailing edge, in
 	milliseconds.  Masks a cut taken mid-tail or at the next hit so it never clicks.
-	0.0 (default) keeps the historical ~2 ms declick (trim_post_samples)."""
-
-
-@dataclasses.dataclass(frozen=True)
-class OutputConfig:
-
-	directory: str
-	filename_format: str
+	0.0 (default) keeps the historical ~2 ms declick (trim_post_ms)."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -333,7 +336,7 @@ class SimilarityConfig:
 
 
 @dataclasses.dataclass(frozen=True)
-class InstrumentConfig:
+class LibraryConfig:
 
 	max_memory_mb: float = 100.0
 	"""Maximum audio memory (MB) for in-memory instrument samples.
@@ -351,7 +354,7 @@ class InstrumentConfig:
 	any orphaned sidecars are deleted automatically."""
 
 	watch: bool = False
-	"""When True, monitor instrument.directory at runtime for new audio
+	"""When True, monitor library.directory at runtime for new audio
 	files and hot-load them into the live instrument library without
 	restarting.
 
@@ -370,7 +373,7 @@ class InstrumentConfig:
 	another via a shared directory) and with audio files from any external
 	application.
 
-	Requires instrument.directory to be set and player.enabled to be True."""
+	Requires library.directory to be set and player.enabled to be True."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -411,7 +414,7 @@ class TransformConfig:
 	max_memory_mb: float = 50.0
 	"""Maximum memory (MB) for in-memory derivative audio (transform variants).
 
-	Separate from instrument.max_memory_mb — derivatives are disposable and
+	Separate from library.max_memory_mb — derivatives are disposable and
 	regenerated on demand, so they have their own independent budget.
 	Eviction strategy: parent-priority FIFO (all variants of the oldest parent
 	are evicted together to keep variant sets intact).
@@ -457,7 +460,7 @@ class OscConfig:
 	requests from other OSC-compatible apps.
 
 	Requires the optional ``python-osc`` dependency:
-	``pip install subsample[osc]``
+	``pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"``
 	"""
 
 	enabled: bool = False
@@ -495,7 +498,7 @@ class SupervisorConfig:
 	MIDI activity, library contents, and recorder status.
 
 	Requires the optional ``supervisor`` dependency:
-	``pip install subsample[supervisor]``
+	``pip install "subsample[supervisor] @ git+https://github.com/simonholliday/subsample.git"``
 	"""
 
 	enabled: bool = False
@@ -546,15 +549,14 @@ class Config:
 
 	recorder: RecorderConfig
 	detection: DetectionConfig
-	output: OutputConfig
 	max_memory_mb: typing.Optional[float] = None
 	"""Total memory budget (MB) for all sample caches.
 	None = auto-detect: min(25% of total system RAM, 1024 MB).
 	When resolved, the budget is split automatically:
-	60% instruments, 35% transform variants, 5% carrier.
-	Overridden by explicit per-cache settings in instrument/transform sections."""
+	60% library samples, 35% transform variants, 5% carrier.
+	Overridden by explicit per-cache settings in library/transform sections."""
 	analysis: AnalysisConfig = dataclasses.field(default_factory=AnalysisConfig)
-	instrument: InstrumentConfig = dataclasses.field(default_factory=InstrumentConfig)
+	library: LibraryConfig = dataclasses.field(default_factory=LibraryConfig)
 	similarity: SimilarityConfig = dataclasses.field(default_factory=SimilarityConfig)
 	player: PlayerConfig = dataclasses.field(default_factory=PlayerConfig)
 	transform: TransformConfig = dataclasses.field(default_factory=TransformConfig)
@@ -603,19 +605,28 @@ def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
 	return _build_config(raw)
 
 
+def data_dir () -> pathlib.Path:
+
+	"""Return the directory of bundled product data (subsample/data/).
+
+	Holds the default config, the shipped MIDI maps, and the GM reference
+	sidecars, all declared as package data so editable and regular installs
+	resolve identically. (A plain __file__-relative path rather than
+	importlib.resources: callers need real filesystem Paths, and subsample can
+	never run from a zipped package.)
+	"""
+
+	return pathlib.Path(__file__).parent / "data"
+
+
 def _locate_default_config () -> pathlib.Path:
 
 	"""Return the path to the bundled config.yaml.default.
 
-	The file ships as package data inside the subsample package, so this
-	resolves correctly for editable and regular installs alike. (A plain
-	__file__-relative path rather than importlib.resources: load_config needs a
-	real filesystem Path, and subsample can never run from a zipped package.)
-
 	Raises FileNotFoundError if the file is missing (broken installation).
 	"""
 
-	default = pathlib.Path(__file__).parent / "config.yaml.default"
+	default = data_dir() / "config.yaml.default"
 
 	if not default.exists():
 		raise FileNotFoundError(
@@ -657,10 +668,12 @@ def _deep_merge (
 
 	"""Recursively merge override onto base, returning a new dict.
 
-	For each key in override: if both values are dicts, recurse; otherwise the
-	override value wins (including explicit None / YAML null). Keys present in
-	base but absent from override are preserved unchanged. Neither input is
-	mutated.
+	For each key in override: if both values are dicts, recurse; if the base
+	value is a dict and the override is None (a section commented out entirely in
+	the user file), the base defaults are preserved; otherwise the override value
+	wins (including an explicit None on a scalar key — e.g. `channels: null`).
+	Keys present in base but absent from override are preserved unchanged.
+	Neither input is mutated.
 	"""
 
 	result = dict(base)
@@ -787,8 +800,49 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	audio_raw      = _section(recorder_raw, "audio", trackers, "recorder.audio")
 	buffer_raw     = _section(recorder_raw, "buffer", trackers, "recorder.buffer")
 	detection_raw  = _section(raw, "detection", trackers)
-	output_raw     = _section(raw, "output", trackers)
 	analysis_raw   = _section(raw, "analysis", trackers)
+
+	# ------------------------------------------------------------------
+	# Renamed keys (2026-07) — hard errors naming the exact replacement, so
+	# an old config fails loudly instead of silently using defaults.
+	# (Same policy as the transform.target_bpm → tempo.bpm migration.)
+	# ------------------------------------------------------------------
+	if "output" in raw:
+		raise ValueError(
+			"The `output:` section has moved into `recorder:` — "
+			"`output.directory` is now `recorder.directory` and "
+			"`output.filename_format` is now `recorder.filename_format`."
+		)
+	if "instrument" in raw:
+		raise ValueError(
+			"The `instrument:` section is now called `library:` — rename the "
+			"section (its keys are unchanged: library.directory, "
+			"library.max_memory_mb, library.watch)."
+		)
+	for old_key, new_key in (
+		("snr_threshold_db", "threshold_db"),
+		("ema_alpha", "floor_adaptation"),
+		("hold_time", "hold_seconds"),
+	):
+		if old_key in detection_raw:
+			raise ValueError(
+				f"`detection.{old_key}` is now `detection.{new_key}` — rename the key."
+			)
+	for old_key, new_key in (
+		("trim_pre_samples", "trim_pre_ms"),
+		("trim_post_samples", "trim_post_ms"),
+	):
+		if old_key in detection_raw:
+			raise ValueError(
+				f"`detection.{old_key}` is now `detection.{new_key}` and is measured "
+				"in milliseconds, not samples — at 44100 Hz divide the old value by "
+				"44.1 (the old defaults, 10 and 90 samples, are now 0.25 and 2.0 ms)."
+			)
+	if "chunk_size" in audio_raw:
+		raise ValueError(
+			"`recorder.audio.chunk_size` is now `recorder.audio.buffer_frames` — "
+			"rename the key."
+		)
 
 	device_raw = audio_raw.get("device")
 	if device_raw is not None and not isinstance(device_raw, str):
@@ -873,7 +927,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	audio = AudioConfig(
 		sample_rate=int(_require(audio_raw, "sample_rate", "recorder.audio")),
 		bit_depth=int(_require(audio_raw, "bit_depth", "recorder.audio")),
-		chunk_size=int(_require(audio_raw, "chunk_size", "recorder.audio")),
+		buffer_frames=int(_require(audio_raw, "buffer_frames", "recorder.audio")),
 		channels=channels,
 		input=input_channels,
 		device=device_raw,
@@ -916,8 +970,8 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		raise ValueError(f"recorder.audio.sample_rate must be > 0 (got {audio.sample_rate})")
 	if audio.channels is not None and audio.channels <= 0:
 		raise ValueError(f"recorder.audio.channels must be > 0 (got {audio.channels})")
-	if audio.chunk_size <= 0:
-		raise ValueError(f"recorder.audio.chunk_size must be > 0 (got {audio.chunk_size})")
+	if audio.buffer_frames <= 0:
+		raise ValueError(f"recorder.audio.buffer_frames must be > 0 (got {audio.buffer_frames})")
 	if audio.float_import_ceiling_dbfs is not None and audio.float_import_ceiling_dbfs > 0.0:
 		raise ValueError(
 			"recorder.audio.float_import_ceiling_dbfs must be <= 0 dBFS (a ceiling at or "
@@ -936,6 +990,8 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		buffer=buffer,
 		enabled=bool(recorder_raw.get("enabled", True)),
 		previews=bool(recorder_raw.get("previews", True)),
+		directory=str(_require(recorder_raw, "directory", "recorder")),
+		filename_format=str(_require(recorder_raw, "filename_format", "recorder")),
 	)
 
 	player_raw      = _section(raw, "player", trackers)
@@ -1066,12 +1122,12 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	retrigger_threshold_raw = detection_raw.get("retrigger_threshold_db", None)
 
 	detection = DetectionConfig(
-		snr_threshold_db=float(_require(detection_raw, "snr_threshold_db", "detection")),
-		hold_time=float(_require(detection_raw, "hold_time", "detection")),
+		threshold_db=float(_require(detection_raw, "threshold_db", "detection")),
+		hold_seconds=float(_require(detection_raw, "hold_seconds", "detection")),
 		warmup_seconds=float(_require(detection_raw, "warmup_seconds", "detection")),
-		ema_alpha=float(_require(detection_raw, "ema_alpha", "detection")),
-		trim_pre_samples=int(detection_raw.get("trim_pre_samples", 10)),
-		trim_post_samples=int(detection_raw.get("trim_post_samples", 90)),
+		floor_adaptation=float(_require(detection_raw, "floor_adaptation", "detection")),
+		trim_pre_ms=float(detection_raw.get("trim_pre_ms", 0.25)),
+		trim_post_ms=float(detection_raw.get("trim_post_ms", 2.0)),
 		release_threshold_db=(
 			None if release_threshold_raw is None else float(release_threshold_raw)
 		),
@@ -1081,20 +1137,27 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		fade_out_ms=float(detection_raw.get("fade_out_ms", 0.0)),
 	)
 
-	if not (0.0 < detection.ema_alpha <= 1.0):
+	if not (0.0 < detection.floor_adaptation <= 1.0):
 		raise ValueError(
-			f"detection.ema_alpha must be in (0, 1] (got {detection.ema_alpha})"
+			f"detection.floor_adaptation must be in (0, 1] (got {detection.floor_adaptation})"
 		)
-	if detection.hold_time <= 0:
-		raise ValueError(f"detection.hold_time must be > 0 (got {detection.hold_time})")
+	if detection.hold_seconds <= 0:
+		raise ValueError(f"detection.hold_seconds must be > 0 (got {detection.hold_seconds})")
+	if detection.trim_pre_ms < 0 or detection.trim_post_ms < 0:
+		raise ValueError(
+			"detection.trim_pre_ms and trim_post_ms must be >= 0 (padding in ms); "
+			f"got trim_pre_ms={detection.trim_pre_ms}, trim_post_ms={detection.trim_post_ms}"
+		)
+	if detection.fade_out_ms < 0:
+		raise ValueError(f"detection.fade_out_ms must be >= 0 (got {detection.fade_out_ms})")
 	if detection.release_threshold_db is not None and not (
-		0.0 < detection.release_threshold_db < detection.snr_threshold_db
+		0.0 < detection.release_threshold_db < detection.threshold_db
 	):
 		raise ValueError(
-			"detection.release_threshold_db must be > 0 and below snr_threshold_db "
+			"detection.release_threshold_db must be > 0 and below threshold_db "
 			f"(the CLOSE threshold sits under the OPEN threshold); got "
 			f"release_threshold_db={detection.release_threshold_db}, "
-			f"snr_threshold_db={detection.snr_threshold_db}"
+			f"threshold_db={detection.threshold_db}"
 		)
 	if detection.retrigger_threshold_db is not None and detection.retrigger_threshold_db <= 0:
 		raise ValueError(
@@ -1103,11 +1166,6 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		)
 	if detection.fade_out_ms < 0:
 		raise ValueError(f"detection.fade_out_ms must be >= 0 (got {detection.fade_out_ms})")
-
-	output = OutputConfig(
-		directory=str(_require(output_raw, "directory", "output")),
-		filename_format=str(_require(output_raw, "filename_format", "output")),
-	)
 
 	analysis = AnalysisConfig(
 		start_bpm=float(analysis_raw.get("start_bpm", 120.0)),
@@ -1126,11 +1184,11 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			f"(got {analysis.tempo_min} >= {analysis.tempo_max})"
 		)
 
-	instrument_raw  = _section(raw, "instrument", trackers)
-	instrument = InstrumentConfig(
-		max_memory_mb=float(instrument_raw.get("max_memory_mb", 100.0)),
-		directory=str(instrument_raw.get("directory", "samples/captures")),
-		watch=bool(instrument_raw.get("watch", False)),
+	library_raw  = _section(raw, "library", trackers)
+	library = LibraryConfig(
+		max_memory_mb=float(library_raw.get("max_memory_mb", 100.0)),
+		directory=str(library_raw.get("directory", "samples/captures")),
+		watch=bool(library_raw.get("watch", False)),
 	)
 
 	similarity_raw  = _section(raw, "similarity", trackers)
@@ -1215,11 +1273,11 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	)
 
 	# Resolve the memory budget.  Per-cache overrides take precedence for the
-	# instrument and transform memory caches.  The carrier cache (which has no
+	# library and transform memory caches.  The carrier cache (which has no
 	# per-cache config key) and the variant disk cache derive from the budget
 	# UNCONDITIONALLY — that is the documented 5%/3x contract, so it must hold
 	# even when both instrument and transform are given explicit values.
-	instrument_explicit = "max_memory_mb" in instrument_raw
+	library_explicit   = "max_memory_mb" in library_raw
 	transform_explicit  = "max_memory_mb" in transform_raw
 	disk_explicit       = "max_disk_mb" in transform_raw
 
@@ -1237,10 +1295,10 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		# it (when both are explicit there is no unifying budget to report, but
 		# the carrier/disk caches still need a basis).
 		effective_budget = _auto_detect_memory_mb()
-		global_budget    = None if (instrument_explicit and transform_explicit) else effective_budget
+		global_budget    = None if (library_explicit and transform_explicit) else effective_budget
 
-	if not instrument_explicit:
-		instrument = dataclasses.replace(instrument, max_memory_mb=effective_budget * 0.60)
+	if not library_explicit:
+		library = dataclasses.replace(library, max_memory_mb=effective_budget * 0.60)
 
 	if not transform_explicit:
 		transform = dataclasses.replace(transform, max_memory_mb=effective_budget * 0.35)
@@ -1250,6 +1308,16 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	# The carrier cache has no per-cache override path — always 5% of the budget.
 	transform = dataclasses.replace(transform, carrier_memory_mb=effective_budget * 0.05)
+
+	# Memory budgets must be positive — a zero or negative value (global or a
+	# per-cache override) yields a degenerate cache that evicts everything on the
+	# first insert rather than an error the user can see.
+	if global_raw is not None and (global_budget is None or global_budget <= 0):
+		raise ValueError(f"max_memory_mb must be > 0 (got {global_raw})")
+	if library.max_memory_mb <= 0:
+		raise ValueError(f"library.max_memory_mb must be > 0 (got {library.max_memory_mb})")
+	if transform.max_memory_mb <= 0:
+		raise ValueError(f"transform.max_memory_mb must be > 0 (got {transform.max_memory_mb})")
 
 	# --- OSC ---
 	osc_raw         = _section(raw, "osc", trackers)
@@ -1312,10 +1380,9 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	return Config(
 		recorder=recorder,
 		detection=detection,
-		output=output,
 		max_memory_mb=global_budget,
 		analysis=analysis,
-		instrument=instrument,
+		library=library,
 		similarity=similarity,
 		player=player,
 		transform=transform,

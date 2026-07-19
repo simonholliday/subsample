@@ -88,6 +88,37 @@ class TestBuildMixMatrix:
 		assert mat[4, 0] == pytest.approx(0.0)  # BL silent
 		assert mat[5, 0] == pytest.approx(0.0)  # BR silent
 
+	def test_quad_to_5_1_routes_rears_by_position (self) -> None:
+		"""Quad (FL, FR, BL, BR) upmixed to 5.1 must send its rears to the
+		SURROUND pair (BL/BR = rows 4/5), NOT to the centre and LFE (rows 2/3)
+		that raw index alignment would hit."""
+		mat = subsample.channel.build_mix_matrix(4, 6)
+		assert mat.shape == (6, 4)
+		assert mat[0, 0] == pytest.approx(1.0)  # FL -> FL
+		assert mat[1, 1] == pytest.approx(1.0)  # FR -> FR
+		assert mat[4, 2] == pytest.approx(1.0)  # BL -> surround/back L
+		assert mat[5, 3] == pytest.approx(1.0)  # BR -> surround/back R
+		assert mat[2, 2] == pytest.approx(0.0)  # NOT the centre speaker
+		assert mat[3, 3] == pytest.approx(0.0)  # NOT the LFE
+
+	def test_quad_to_7_1_routes_rears_by_position (self) -> None:
+		"""Quad to 7.1 lands its rears on the back pair (rows 4/5), not FC/LFE."""
+		mat = subsample.channel.build_mix_matrix(4, 8)
+		assert mat.shape == (8, 4)
+		assert mat[4, 2] == pytest.approx(1.0)  # BL -> BL
+		assert mat[5, 3] == pytest.approx(1.0)  # BR -> BR
+		assert mat[2, 2] == pytest.approx(0.0)  # not FC
+		assert mat[3, 3] == pytest.approx(0.0)  # not LFE
+
+	def test_quad_pan_to_7_1_places_rears_by_position (self) -> None:
+		"""A length-4 (quad) pan on an 8-channel output must place the rear
+		weights on the back pair too, exercising the pan expand path."""
+		pan = numpy.array([25.0, 25.0, 25.0, 25.0], dtype=numpy.float32)
+		mat = subsample.channel.build_mix_matrix(4, 8, pan)
+		# Only the four quad positions carry signal: FL, FR, BL, BR (rows 0,1,4,5).
+		active_rows = sorted({int(r) for r in numpy.nonzero(mat)[0]})
+		assert active_rows == [0, 1, 4, 5]
+
 	def test_mono_to_stereo_no_pan (self) -> None:
 		"""Mono to stereo without pan defaults to CENTRE — equal-power L/R,
 		matching `pan: [50, 50]` — not hard-left."""
@@ -95,6 +126,14 @@ class TestBuildMixMatrix:
 		assert mat.shape == (2, 1)
 		assert mat[0, 0] == pytest.approx(numpy.sqrt(0.5))
 		assert mat[1, 0] == pytest.approx(numpy.sqrt(0.5))
+
+	def test_mono_to_5_1_spreads_to_front_pair_not_centre (self) -> None:
+		"""A mono source on a layout WITH a centre channel still spreads to the
+		front L/R pair (documented `pan: [50,50]` centre), not the FC speaker."""
+		mat = subsample.channel.build_mix_matrix(1, 6)
+		assert mat[0, 0] == pytest.approx(numpy.sqrt(0.5))  # FL
+		assert mat[1, 0] == pytest.approx(numpy.sqrt(0.5))  # FR
+		assert mat[2, 0] == pytest.approx(0.0)              # not FC
 
 	# -- Pan weights --
 

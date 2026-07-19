@@ -30,7 +30,7 @@ import threading
 import typing
 
 import numpy
-import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+import soundfile
 
 import subsample.ambisonic
 import subsample.analysis
@@ -192,15 +192,12 @@ class SampleProcessor:
 		self._on_complete     = on_complete
 		self._warn_backlog    = warn_backlog
 
-		output_dir = pathlib.Path(cfg.output.directory)
+		output_dir = pathlib.Path(cfg.recorder.directory)
 		output_dir.mkdir(parents=True, exist_ok=True)
 		self._output_dir = output_dir
 
 		self._n_workers = _compute_worker_count()
-		_log.info(
-			"SampleProcessor: %d worker(s) (cpu_count=%d)",
-			self._n_workers, os.cpu_count() or 1,
-		)
+		_log.debug("analysis: %d background worker(s)", self._n_workers)
 
 		self._executor = concurrent.futures.ThreadPoolExecutor(
 			max_workers=self._n_workers,
@@ -472,7 +469,7 @@ class SampleProcessor:
 		channel_format: str = "pcm",
 		preview_data: typing.Optional[subsample.preview.PreviewData] = None,
 		loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
-	) -> tuple[pathlib.Path, float] | None:
+	) -> typing.Optional[tuple[pathlib.Path, float]]:
 
 		"""Write a single audio segment to disk and save its analysis sidecar.
 
@@ -543,7 +540,7 @@ class SampleProcessor:
 
 		fname_base = (
 			filename_base if filename_base is not None
-			else _format_filename(timestamp, self._cfg.output.filename_format)
+			else _format_filename(timestamp, self._cfg.recorder.filename_format)
 		)
 		filepath = self._output_dir / (fname_base + extension)
 

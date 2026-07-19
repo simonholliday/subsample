@@ -1,5 +1,6 @@
 """Tests for subsample.cli — argument parsing and detection pipeline helpers."""
 
+import dataclasses
 import logging
 import pathlib
 import sys
@@ -12,6 +13,7 @@ import numpy
 import pytest
 
 import subsample.analysis
+import subsample.audio
 import subsample.buffer
 import subsample.cli
 import subsample.config
@@ -26,22 +28,22 @@ import tests.helpers
 
 
 def _make_detection_cfg (
-	snr_threshold_db: float = 6.0,
-	trim_pre_samples: int = 8,
-	trim_post_samples: int = 8,
-	hold_time: float = 0.1,
+	threshold_db: float = 6.0,
+	trim_pre_ms: int = 8,
+	trim_post_ms: int = 8,
+	hold_seconds: float = 0.1,
 	release_threshold_db: typing.Optional[float] = None,
 	retrigger_threshold_db: typing.Optional[float] = None,
 	fade_out_ms: float = 0.0,
 ) -> subsample.config.DetectionConfig:
 	"""Return a DetectionConfig suitable for unit tests."""
 	return subsample.config.DetectionConfig(
-		snr_threshold_db = snr_threshold_db,
-		ema_alpha        = 0.1,
-		hold_time        = hold_time,
+		threshold_db = threshold_db,
+		floor_adaptation        = 0.1,
+		hold_seconds        = hold_seconds,
 		warmup_seconds   = 0.0,
-		trim_pre_samples = trim_pre_samples,
-		trim_post_samples = trim_post_samples,
+		trim_pre_ms = trim_pre_ms,
+		trim_post_ms = trim_post_ms,
 		release_threshold_db = release_threshold_db,
 		retrigger_threshold_db = retrigger_threshold_db,
 		fade_out_ms = fade_out_ms,
@@ -93,6 +95,42 @@ def _make_buffer_and_detector (
 	return buf, detector
 
 
+class TestTrimMsConversion:
+
+	"""trim_pre_ms / trim_post_ms are DURATIONS (a Stage-A frames->ms rename);
+	the segment builder must convert them to sample counts before trimming."""
+
+	def test_ms_converted_to_samples (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""_build_trimmed_segment converts via round(ms/1000*sr).  A regression
+		passing the ms value straight through as a sample count would shrink the
+		audible pre/post padding ~44x at 44.1 kHz — this pins the conversion."""
+
+		captured: dict[str, int] = {}
+
+		def fake_trim (
+			segment: numpy.ndarray, tail_thr: float, *,
+			pre_samples: int, post_samples: int,
+			fade_out_samples: int, lead_amplitude_threshold: float,
+		) -> numpy.ndarray:
+			captured["pre"] = pre_samples
+			captured["post"] = post_samples
+			return segment
+
+		monkeypatch.setattr("subsample.trim.trim_silence", fake_trim)
+
+		buf = unittest.mock.Mock()
+		buf.read_range.return_value = numpy.zeros((1000, 1), dtype=numpy.float32)
+		detector = unittest.mock.Mock()
+		detector.tail_amplitude_threshold = 0.01
+		detector.attack_amplitude_threshold = 0.02
+		cfg = _make_detection_cfg(trim_pre_ms=20, trim_post_ms=10)
+
+		subsample.cli._build_trimmed_segment(buf, detector, cfg, 44100, 500, 800)
+
+		assert captured["pre"] == 882    # round(20 / 1000 * 44100)
+		assert captured["post"] == 441   # round(10 / 1000 * 44100)
+
+
 class TestProcessChunk:
 
 	"""Tests for subsample.cli._process_chunk()."""
@@ -118,9 +156,9 @@ class TestProcessChunk:
 		buf, detector = _make_buffer_and_detector(
 			sample_rate=sample_rate,
 			chunk_size=chunk_size,
-			detection_cfg=_make_detection_cfg(snr_threshold_db=3.0),
+			detection_cfg=_make_detection_cfg(threshold_db=3.0),
 		)
-		cfg = _make_detection_cfg(snr_threshold_db=3.0)
+		cfg = _make_detection_cfg(threshold_db=3.0)
 
 		# Feed low-amplitude chunks to establish an ambient floor before the burst.
 		# If the ambient is near zero, the first loud chunk seeds ambient directly
@@ -135,8 +173,8 @@ class TestProcessChunk:
 		for _ in range(10):
 			subsample.cli._process_chunk(loud, buf, detector, cfg, sample_rate)
 
-		# Feed trailing silence to close the recording (hold_time expires)
-		# hold_time=0.1s at 44100 Hz / 512 frames ≈ 9 chunks
+		# Feed trailing silence to close the recording (hold_seconds expires)
+		# hold_seconds=0.1s at 44100 Hz / 512 frames ≈ 9 chunks
 		silent = numpy.zeros((chunk_size, 1), dtype=numpy.int16)
 		segments = []
 		for _ in range(30):
@@ -155,9 +193,9 @@ class TestProcessChunk:
 		buf, detector = _make_buffer_and_detector(
 			sample_rate=sample_rate,
 			chunk_size=chunk_size,
-			detection_cfg=_make_detection_cfg(snr_threshold_db=3.0),
+			detection_cfg=_make_detection_cfg(threshold_db=3.0),
 		)
-		cfg = _make_detection_cfg(snr_threshold_db=3.0)
+		cfg = _make_detection_cfg(threshold_db=3.0)
 
 		ambient = numpy.full((chunk_size, 1), 100, dtype=numpy.int16)
 		loud = numpy.full((chunk_size, 1), 8000, dtype=numpy.int16)
@@ -190,20 +228,20 @@ class TestSegmentationIntegration:
 		# threshold but above release=6.  With release set, BOTH the detector end
 		# AND the trim gate use 6 dB, so the tail survives; with release unset both
 		# use 20 dB and the tail is cut at the start level.  A regression that
-		# reverted cli's trim gate to snr_threshold_db would fail only here.
+		# reverted cli's trim gate to threshold_db would fail only here.
 		blocks = [(100, 8), (8000, 1), (400, 12), (100, 8)]  # ambient, attack, 12 dB tail, silence
 
 		with_release = _stream_chunks(
 			_make_detection_cfg(
-				snr_threshold_db=20.0, release_threshold_db=6.0, hold_time=0.3,
-				trim_pre_samples=0, trim_post_samples=0,
+				threshold_db=20.0, release_threshold_db=6.0, hold_seconds=0.3,
+				trim_pre_ms=0, trim_post_ms=0,
 			),
 			blocks,
 		)
 		without = _stream_chunks(
 			_make_detection_cfg(
-				snr_threshold_db=20.0, hold_time=0.3,
-				trim_pre_samples=0, trim_post_samples=0,
+				threshold_db=20.0, hold_seconds=0.3,
+				trim_pre_ms=0, trim_post_ms=0,
 			),
 			blocks,
 		)
@@ -220,15 +258,15 @@ class TestSegmentationIntegration:
 
 		faded = _stream_chunks(
 			_make_detection_cfg(
-				snr_threshold_db=10.0, hold_time=0.3, fade_out_ms=50.0,
-				trim_pre_samples=0, trim_post_samples=0,
+				threshold_db=10.0, hold_seconds=0.3, fade_out_ms=50.0,
+				trim_pre_ms=0, trim_post_ms=0,
 			),
 			blocks,
 		)
 		plain = _stream_chunks(
 			_make_detection_cfg(
-				snr_threshold_db=10.0, hold_time=0.3, fade_out_ms=0.0,
-				trim_pre_samples=0, trim_post_samples=0,
+				threshold_db=10.0, hold_seconds=0.3, fade_out_ms=0.0,
+				trim_pre_ms=0, trim_post_ms=0,
 			),
 			blocks,
 		)
@@ -247,9 +285,9 @@ class TestSegmentationIntegration:
 
 		segments = _stream_chunks(
 			_make_detection_cfg(
-				snr_threshold_db=20.0, release_threshold_db=6.0,
-				retrigger_threshold_db=12.0, hold_time=0.3,
-				trim_pre_samples=0, trim_post_samples=0,
+				threshold_db=20.0, release_threshold_db=6.0,
+				retrigger_threshold_db=12.0, hold_seconds=0.3,
+				trim_pre_ms=0, trim_post_ms=0,
 			),
 			blocks,
 		)
@@ -299,52 +337,349 @@ class TestParseArgs:
 		assert subsample.cli._parse_args(["--init"]).init is True
 		assert subsample.cli._parse_args([]).init is False
 
+	def test_help_lists_tool_commands (self, capsys: pytest.CaptureFixture[str]) -> None:
+		"""`subsample --help` names every tool subcommand and the ./ escape rule."""
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli._parse_args(["--help"])
+
+		assert excinfo.value.code == 0
+		out = capsys.readouterr().out
+		for command in subsample.cli._TOOL_COMMANDS:
+			assert command in out
+		assert "./import" in out
+
+
+class TestToolDispatch:
+
+	"""The first CLI argument routes to a tool subcommand before run-mode."""
+
+	def test_every_command_module_has_main (self) -> None:
+		"""The dispatch table's targets exist and expose main(argv) -> int."""
+
+		import importlib
+
+		for name, (module_path, _description) in subsample.cli._TOOL_COMMANDS.items():
+			module = importlib.import_module(module_path)
+			assert callable(module.main), name
+
+	def test_command_routes_to_tool_parser (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		"""`subsample catalog --help` reaches the tool's parser, prog-named."""
+
+		monkeypatch.setattr(sys, "argv", ["subsample", "catalog", "--help"])
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli.main()
+
+		assert excinfo.value.code == 0
+		assert "subsample catalog" in capsys.readouterr().out
+
+	def test_tool_exit_code_propagates (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""A tool's failure exit code becomes the process exit code."""
+
+		monkeypatch.setattr(sys, "argv", ["subsample", "analyze"])
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli.main()
+
+		assert excinfo.value.code == 2   # argparse usage error: FILE is required
+
+	def test_path_prefixed_name_is_a_file (self) -> None:
+		"""`subsample ./import` is a FILE argument, not the import command."""
+
+		args = subsample.cli._parse_args(["./import"])
+		assert args.files == [pathlib.Path("./import")]
+
+	def test_tool_return_code_becomes_exit_code (
+		self, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""A tool main() that RETURNS a nonzero int (catalog's missing-directory
+		`return 1`, not argparse's own SystemExit) becomes the process exit code
+		via the dispatch wrapper — the path the argparse-exit test can't reach."""
+
+		mock_module = unittest.mock.Mock()
+		mock_module.main.return_value = 7
+		monkeypatch.setattr(
+			subsample.cli.importlib, "import_module", lambda name: mock_module,
+		)
+		monkeypatch.setattr(sys, "argv", ["subsample", "catalog", "whatever"])
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli.main()
+
+		assert excinfo.value.code == 7
+
+	def test_flag_before_subcommand_errors (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""A global flag placed before the subcommand
+		(`subsample --config x catalog`) must NOT silently fall into file-input
+		mode and exit 0 — it errors with a non-zero code."""
+
+		monkeypatch.chdir(tmp_path)
+		cfg = tmp_path / "c.yaml"
+		cfg.write_text("recorder:\n  enabled: false\nplayer:\n  enabled: false\n")
+		monkeypatch.setattr(
+			sys, "argv", ["subsample", "--config", str(cfg), "catalog"],
+		)
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli.main()
+
+		assert excinfo.value.code == 2
+
+
+class TestListDevices:
+
+	"""--list-devices prints the three device sections and exits before any
+	config or recorder work."""
+
+	def test_flag_parses (self) -> None:
+		assert subsample.cli._parse_args(["--list-devices"]).list_devices is True
+		assert subsample.cli._parse_args([]).list_devices is False
+
+	def test_prints_three_sections (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		fake_pa = unittest.mock.MagicMock()
+		monkeypatch.setattr(subsample.audio, "create_pyaudio", lambda: fake_pa)
+		monkeypatch.setattr(
+			subsample.audio, "list_input_devices",
+			lambda pa: [{"name": "Fake Mic", "defaultSampleRate": 44100.0, "index": 0}],
+		)
+		monkeypatch.setattr(
+			subsample.audio, "list_output_devices",
+			lambda pa: [{"name": "Fake Out", "defaultSampleRate": 48000.0, "index": 1}],
+		)
+		monkeypatch.setattr(
+			subsample.player, "list_midi_input_devices",
+			lambda: ["Fake Keys 1"],
+		)
+
+		subsample.cli._list_devices()
+
+		out = capsys.readouterr().out
+		assert "Audio inputs" in out and "Fake Mic" in out and "44100 Hz" in out
+		assert "Audio outputs" in out and "Fake Out" in out
+		assert "MIDI inputs" in out and "Fake Keys 1" in out
+		fake_pa.terminate.assert_called_once()
+
+	def test_list_devices_through_main_runs_before_config (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		"""--list-devices is handled in main() BEFORE any config load, so it
+		works with no config.yaml present (config load must not run)."""
+
+		monkeypatch.setattr(subsample.audio, "create_pyaudio", lambda: unittest.mock.MagicMock())
+		monkeypatch.setattr(subsample.audio, "list_input_devices", lambda pa: [])
+		monkeypatch.setattr(subsample.audio, "list_output_devices", lambda pa: [])
+		monkeypatch.setattr(subsample.player, "list_midi_input_devices", lambda: [])
+		monkeypatch.setattr(
+			subsample.config, "load_config",
+			unittest.mock.Mock(side_effect=AssertionError("config must not load")),
+		)
+		monkeypatch.setattr(sys, "argv", ["subsample", "--list-devices"])
+
+		subsample.cli.main()
+
+		assert "Audio inputs" in capsys.readouterr().out
+
+
+class TestConfigErrorsExitCleanly:
+
+	"""A broken config yields ONE clean error line and exit 1 — no traceback."""
+
+	def test_renamed_key_config_exits_cleanly (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		bad = tmp_path / "old.yaml"
+		bad.write_text("detection:\n  snr_threshold_db: 9\n")
+		monkeypatch.setattr(sys, "argv", ["subsample", "--config", str(bad)])
+
+		# Safety net: if the migration hard-error were ever removed (the exact
+		# regression this guards), load_config would succeed and _main_impl would
+		# proceed to real startup — a live PyAudio recorder + an unbounded wait
+		# loop, i.e. a hung suite rather than a red test.  Make the device layer
+		# raise so a regression fails fast instead of hanging.
+		monkeypatch.setattr(
+			subsample.audio, "create_pyaudio",
+			unittest.mock.Mock(side_effect=RuntimeError("startup must not be reached")),
+		)
+
+		with pytest.raises(SystemExit) as excinfo, caplog.at_level(logging.ERROR):
+			subsample.cli.main()
+
+		assert excinfo.value.code == 1
+		assert any("detection.threshold_db" in r.message for r in caplog.records)
+
 
 class TestInitConfig:
 
-	"""Tests for subsample.cli._init_config() (the --init scaffold)."""
+	"""Tests for subsample.cli._init_config() (the --init project scaffold)."""
 
-	def test_writes_copy_of_bundled_default (
+	def test_scaffolds_full_project (
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 		capsys: pytest.CaptureFixture[str],
 	) -> None:
-		"""--init writes ./config.yaml as an exact copy of the bundled default."""
+		"""--init creates the complete project manifest in CWD."""
 
 		monkeypatch.chdir(tmp_path)
 
 		subsample.cli._init_config()
 
-		written = tmp_path / "config.yaml"
-		default = subsample.config._locate_default_config()
-		assert written.read_bytes() == default.read_bytes()
-		assert str(written) in capsys.readouterr().out
+		assert (tmp_path / "config.yaml").is_file()
+		assert (tmp_path / "midi-map-gm-drums.yaml").is_file()
+		assert (tmp_path / "midi-map.yaml").is_file()
+		assert (tmp_path / ".gitignore").read_text() == "samples/variant-cache/\n"
+		assert (tmp_path / "samples" / "captures").is_dir()
+		assert (tmp_path / "samples" / "reference" / "CREDITS.md").is_file()
+		sidecars = list((tmp_path / "samples" / "reference").glob("*.analysis.json"))
+		assert len(sidecars) >= 40
+		assert "Created a Subsample project" in capsys.readouterr().out
 
-	def test_refuses_to_overwrite (
+	def test_scaffolded_config_wires_gm_map_and_keeps_defaults (
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 	) -> None:
-		"""An existing config.yaml is never clobbered — tuned settings survive."""
-
-		monkeypatch.chdir(tmp_path)
-		existing = tmp_path / "config.yaml"
-		existing.write_text("tempo:\n  bpm: 111.0\n")
-
-		with pytest.raises(SystemExit) as excinfo:
-			subsample.cli._init_config()
-
-		assert excinfo.value.code == 1
-		assert existing.read_text() == "tempo:\n  bpm: 111.0\n"
-
-	def test_scaffolded_config_loads (
-		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-	) -> None:
-		"""The scaffold parses and round-trips through load_config unchanged."""
+		"""The scaffolded config is the documented defaults with exactly one
+		change: the GM kit map wired in (player stays disabled)."""
 
 		monkeypatch.chdir(tmp_path)
 
 		subsample.cli._init_config()
 
 		cfg = subsample.config.load_config(tmp_path / "config.yaml")
-		assert isinstance(cfg, subsample.config.Config)
+		assert cfg.player.midi_map == "midi-map-gm-drums.yaml"
+		assert cfg.player.enabled is False
+
+		defaults = subsample.config.load_config(subsample.config._locate_default_config())
+		unwired = dataclasses.replace(
+			cfg, player=dataclasses.replace(cfg.player, midi_map=defaults.player.midi_map),
+		)
+		assert unwired == defaults
+
+	def test_refuses_when_any_target_exists (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""All-or-nothing: one existing target (not just config.yaml) aborts
+		the whole scaffold and creates nothing."""
+
+		monkeypatch.chdir(tmp_path)
+		existing = tmp_path / "midi-map.yaml"
+		existing.write_text("assignments: []\n")
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli._init_config()
+
+		assert excinfo.value.code == 1
+		assert existing.read_text() == "assignments: []\n"
+		assert not (tmp_path / "config.yaml").exists()
+		assert not (tmp_path / "midi-map-gm-drums.yaml").exists()
+		assert not (tmp_path / "samples").exists()
+		assert not (tmp_path / ".gitignore").exists()
+
+	def test_appends_to_existing_gitignore (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""An existing .gitignore (a GitHub-initialised project, say) is not a
+		conflict — the scaffold appends its line, preserving what's there."""
+
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / ".gitignore").write_text("*.wav\n.venv/\n")
+
+		subsample.cli._init_config()
+
+		lines = (tmp_path / ".gitignore").read_text().splitlines()
+		assert lines[:2] == ["*.wav", ".venv/"]
+		assert "samples/variant-cache/" in lines
+
+	def test_appends_to_gitignore_without_trailing_newline (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""An existing .gitignore with NO trailing newline gets a separator so the
+		appended line is not glued onto the previous one (the separator branch)."""
+
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / ".gitignore").write_text("*.wav")   # no trailing newline
+
+		subsample.cli._init_config()
+
+		lines = (tmp_path / ".gitignore").read_text().splitlines()
+		assert lines[0] == "*.wav"
+		assert "samples/variant-cache/" in lines
+
+	def test_init_through_main_runs_before_config (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""--init is handled in main() BEFORE any config load, so it scaffolds
+		even in a directory with no config.yaml (config load must not run)."""
+
+		monkeypatch.chdir(tmp_path)
+		monkeypatch.setattr(
+			subsample.config, "load_config",
+			unittest.mock.Mock(side_effect=AssertionError("config must not load")),
+		)
+		monkeypatch.setattr(sys, "argv", ["subsample", "--init"])
+
+		subsample.cli.main()
+
+		assert (tmp_path / "config.yaml").is_file()
+
+	def test_gitignore_line_not_duplicated (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / ".gitignore").write_text("samples/variant-cache/\n")
+
+		subsample.cli._init_config()
+
+		assert (tmp_path / ".gitignore").read_text() == "samples/variant-cache/\n"
+
+	def test_refuses_inside_a_source_checkout (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""The subsample repo itself is the app, not a music project."""
+
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / "subsample").mkdir()
+		(tmp_path / "subsample" / "__init__.py").write_text("")
+
+		with pytest.raises(SystemExit) as excinfo, caplog.at_level(logging.ERROR):
+			subsample.cli._init_config()
+
+		assert excinfo.value.code == 1
+		assert any("source repository" in r.message for r in caplog.records)
+		assert not (tmp_path / "config.yaml").exists()
+
+	def test_scaffolded_maps_load_with_scaffolded_references (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		"""The product guarantee: both scaffolded maps load, and the GM kit's
+		path-based references resolve from the scaffolded sidecars alone (no
+		WAV audio is shipped — the fingerprint is the reference)."""
+
+		monkeypatch.chdir(tmp_path)
+
+		subsample.cli._init_config()
+
+		gm = subsample.player.load_midi_map(tmp_path / "midi-map-gm-drums.yaml", [])
+		assert len(gm.note_map) > 0
+
+		template = subsample.player.load_midi_map(tmp_path / "midi-map.yaml", [])
+		assert (9, 36) in template.note_map
+
+		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		instrument_lib.samples.return_value = []
+
+		subsample.player._resolve_path_references(
+			gm.note_map, [matrix], instrument_lib, with_preview=False,
+		)
+
+		assert matrix.add_reference.call_count >= 40
 
 
 class TestFormatMmss:
@@ -426,12 +761,12 @@ class TestProcessInputFiles:
 
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(textwrap.dedent(f"""\
-			output:
+			recorder:
 			  directory: {out_dir}
 			detection:
-			  snr_threshold_db: 10.0
+			  threshold_db: 10.0
 			  warmup_seconds: 0.0
-			  hold_time: 0.15
+			  hold_seconds: 0.15
 		"""))
 		cfg = subsample.config.load_config(config_file)
 
@@ -442,7 +777,12 @@ class TestProcessInputFiles:
 
 	def test_missing_and_unreadable_files_skipped (
 		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+		monkeypatch: pytest.MonkeyPatch,
 	) -> None:
+		# chdir into the empty tmp dir so load_config(None) sees no stray
+		# config.yaml — otherwise this test runs against whatever config sits in
+		# the invocation directory (the repo root holds a personal one).
+		monkeypatch.chdir(tmp_path)
 		bad = tmp_path / "not_audio.wav"
 		bad.write_bytes(b"this is not a wav file")
 
@@ -654,8 +994,8 @@ class TestPrintBanner:
 			midi_map="midi-map-gm-drums.yaml",
 			audio=dataclasses.replace(cfg.player.audio, sample_rate=48000, channels=8, bit_depth=None),
 		)
-		instrument = dataclasses.replace(cfg.instrument, directory="samples/captures")
-		return dataclasses.replace(cfg, recorder=recorder, player=player, instrument=instrument)
+		library = dataclasses.replace(cfg.library, directory="samples/captures")
+		return dataclasses.replace(cfg, recorder=recorder, player=player, library=library)
 
 	def _recorder_only (self) -> subsample.config.Config:
 		import dataclasses
@@ -682,7 +1022,7 @@ class TestPrintBanner:
 
 		# The disabled recorder's rate and capture-only fields must not appear.
 		assert "44100" not in line
-		assert "SNR" not in line
+		assert "trigger ≥" not in line
 		assert "buffer" not in line
 
 	def test_player_output_bit_depth_falls_back_to_recorder (self, capsys: pytest.CaptureFixture) -> None:
@@ -697,7 +1037,7 @@ class TestPrintBanner:
 
 		assert "recorder" in line
 		assert "44100 Hz" in line
-		assert "SNR" in line
+		assert "trigger ≥" in line
 		assert "buffer" in line
 		# No player output segment.
 		assert "map " not in line
@@ -711,5 +1051,5 @@ class TestPrintBanner:
 
 		assert "recorder + player" in line
 		assert "48000 Hz" in line          # player output
-		assert "SNR" in line               # recorder capture-only field
+		assert "trigger ≥" in line     # recorder capture-only field
 		assert "||" in line                # two segments joined

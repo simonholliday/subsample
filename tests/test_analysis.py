@@ -917,6 +917,27 @@ class TestLowRateAnalysis:
 			result = subsample.analysis.analyze_all(self._tone(sr), params, cfg)
 			assert 0.0 <= result[0].spectral_contrast <= 1.0
 
+	def test_analyze_all_survives_sub_pyin_rates (self) -> None:
+		"""Below ~4186 Hz the default pyin fmax (2093) exceeded Nyquist and
+		raised ParameterError; the fmax is now clamped so these still analyse."""
+		cfg = subsample.config.AnalysisConfig()
+		for sr in (4000, 5000):
+			params = subsample.analysis.compute_params(sr)
+			result = subsample.analysis.analyze_all(self._tone(sr), params, cfg)
+			assert 0.0 <= result[0].spectral_contrast <= 1.0
+
+	def test_analyze_all_survives_very_short_audio (self) -> None:
+		"""~70-110 sample audio at 44.1 kHz clamps n_fft small enough that the
+		[200,400] Hz contrast sub-band held no FFT bin and librosa raised
+		IndexError; the bin-spacing guard now returns a flat score instead."""
+		cfg = subsample.config.AnalysisConfig()
+		params = subsample.analysis.compute_params(44100)
+		rng = numpy.random.default_rng(0)
+		for n in (70, 90, 110):
+			short = (rng.standard_normal(n) * 0.1).astype(numpy.float32)
+			result = subsample.analysis.analyze_all(short, params, cfg)
+			assert 0.0 <= result[0].spectral_contrast <= 1.0
+
 
 class TestSpectralFlatnessDiscrimination:
 

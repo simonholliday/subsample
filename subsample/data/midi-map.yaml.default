@@ -5,7 +5,10 @@
 # This file maps MIDI input (channel + note) to sample playback.
 #
 # How to use:
-#   1. Copy this file to midi-map.yaml
+#   1. `subsample --init` placed this file in your project as
+#      midi-map.yaml; point `player.midi_map:` at it when you want
+#      to build your own map (the scaffold wires the GM kit map by
+#      default)
 #   2. Uncomment any of the EXAMPLES below to try them
 #   3. Delete or comment out the ACTIVE assignments at the bottom
 #      if you don't want the default drum kit + pitched keyboard
@@ -16,7 +19,8 @@
 #   Channels   1-16 (standard MIDI numbering)
 #   Notes      36 (number), C3 (name), [36, 38] (list), C2..C4 (range),
 #              drum.kick_1 (GM percussion symbolic name, case-insensitive)
-#   Note names C4 = MIDI 60 (Ableton / Logic / FL Studio standard)
+#   Note names use scientific pitch: C4 = MIDI 60 (as in REAPER; note that
+#   Ableton and Logic display 60 as C3, and FL Studio as C5)
 #              Sharps: C#4, D#4    Flats: Db4, Eb4
 #   Drum names drum.kick_1, drum.snare_1, drum.hi_hat_closed, etc.
 #              Full set: pymididefs.drums.GM_DRUM_MAP (GM percussion 27-87).
@@ -25,6 +29,10 @@
 #              "the kick" rather than choosing kick_1 vs kick_2.
 #              Drum names aren't sequential, so ranges (drum.x..drum.y)
 #              aren't supported - use a list instead.
+#   Your names Mount a definitions file to name your own sounds:
+#              `definitions: { my: project.yaml }` then
+#              `notes: my.dawn_chorus_pheasant`.  See README
+#              "Naming your own sounds".
 #
 # Full grammar reference - every field, every predicate, every
 # processor parameter:
@@ -297,7 +305,7 @@ assignments:
   #   channel: 10
   #   notes: drum.kick_1
   #   select:
-  #     where: { reference: BD0025 }
+  #     where: { reference: samples/reference/GM36_BassDrum1.wav }
   #     pick: [1, 3]   # different kick on every hit, from your closest 3
 
   # - name: Any clap
@@ -484,7 +492,8 @@ assignments:
       where:
         reference: samples/reference/GM38_AcousticSnare.wav
       order: [{ by: similarity, dir: desc }]
-    pan: [50, 87]
+    pan: [50, 87]      # per-channel weights; or a position: pan: 27 = a touch right
+                       # (-100 hard left .. 0 centre .. 100 hard right)
 
 
   # --- Side stick ---

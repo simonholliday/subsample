@@ -666,24 +666,40 @@ class TestLoadInstrumentLibrary:
 		assert record.audio.shape[0] == 2048  # n_frames
 		assert record.audio.shape[1] == 1     # mono
 
-	def test_deletes_orphaned_sidecar_unconditionally (
+	def test_reference_dir_kept_others_deleted (
 		self,
 		tmp_path: pathlib.Path,
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
 		import logging
-		# Write sidecar only — no WAV.  The orphan sweep is unconditional
-		# (no opt-in flag), so the sidecar should be deleted and an INFO
-		# line emitted.
-		sidecar = _write_sidecar(tmp_path, "KICK")
+		# An audio-less sidecar inside a `reference/` directory is a curated
+		# fingerprint (shipped, and scaffolded by `subsample --init`) and must
+		# survive the sweep; the same audio-less shape ANYWHERE ELSE is an orphan
+		# and is deleted — routine housekeeping after a sample is removed.
+		ref_dir = tmp_path / "reference"
+		ref_dir.mkdir()
+		kept   = _write_sidecar(ref_dir, "GM36_BassDrum1")
+		orphan = _write_sidecar(tmp_path, "OLD_CAPTURE")
 		with caplog.at_level(logging.INFO, logger="subsample.library"):
 			lib = subsample.library.load_instrument_library(
 				tmp_path, 10 * 1024 * 1024, with_preview=False,
 			)
 		assert len(lib) == 0
-		assert not sidecar.exists()
+		assert kept.exists(), "reference fingerprint must be kept"
+		assert not orphan.exists(), "orphaned capture sidecar must be deleted"
 		messages = [r.message for r in caplog.records]
 		assert any("orphaned" in m.lower() for m in messages)
+
+	def test_reference_dir_as_sweep_root_kept (self, tmp_path: pathlib.Path) -> None:
+		# When library.directory IS the reference dir, its audio-less sidecars
+		# are still exempt (the swept root itself is named `reference`).
+		ref_root = tmp_path / "reference"
+		ref_root.mkdir()
+		kept = _write_sidecar(ref_root, "GM42_ClosedHiHat")
+		subsample.library.load_instrument_library(
+			ref_root, 10 * 1024 * 1024, with_preview=False,
+		)
+		assert kept.exists()
 
 	def test_same_stem_different_folders_coexist (
 		self, tmp_path: pathlib.Path,
@@ -742,8 +758,11 @@ class TestLoadInstrumentLibrary:
 		assert record.filepath == wav_path
 
 	def test_orphan_sweep_keeps_good_samples (self, tmp_path: pathlib.Path) -> None:
-		# One orphan sidecar + one valid pair — valid sample loads; orphan is cleaned up.
-		sidecar_orphan = _write_sidecar(tmp_path, "ORPHAN")
+		# One STALE orphan sidecar + one valid pair — valid sample loads; the
+		# stale orphan is cleaned up.  (A valid audio-less sidecar would be
+		# kept as a reference fingerprint, so use a version-mismatched one.)
+		sidecar_orphan = tmp_path / ("ORPHAN.wav" + subsample.cache.SIDECAR_SUFFIX)
+		sidecar_orphan.write_text('{"analysis_version": "0"}')
 		_write_wav_and_sidecar(tmp_path, "KICK")
 		lib = subsample.library.load_instrument_library(
 			tmp_path, 10 * 1024 * 1024, with_preview=False,
@@ -759,7 +778,9 @@ class TestLoadInstrumentLibrary:
 	) -> None:
 		import logging
 		import unittest.mock
-		sidecar = _write_sidecar(tmp_path, "KICK")
+		# A stale sidecar is a genuine orphan the sweep tries to unlink.
+		sidecar = tmp_path / ("KICK.wav" + subsample.cache.SIDECAR_SUFFIX)
+		sidecar.write_text('{"analysis_version": "0"}')
 
 		with unittest.mock.patch.object(
 			type(sidecar), "unlink",
@@ -923,10 +944,12 @@ class TestLoadInstrumentLibraryRecursive:
 
 	def test_orphan_in_nested_directory (self, tmp_path: pathlib.Path) -> None:
 		# Orphans deep in the tree should be discovered by the recursive
-		# sweep just like top-level ones.
+		# sweep just like top-level ones: an orphan preview PNG (always a
+		# derived artifact) and a stale sidecar are both cleaned up.
 		deep = tmp_path / "a" / "b" / "c"
 		deep.mkdir(parents=True)
-		sidecar = _write_sidecar(deep, "ghost")
+		sidecar = deep / ("ghost.wav" + subsample.cache.SIDECAR_SUFFIX)
+		sidecar.write_text('{"analysis_version": "0"}')
 		png = deep / ("ghost.wav" + subsample.cache.PREVIEW_PNG_SUFFIX)
 		png.write_bytes(b"x")
 
@@ -939,8 +962,11 @@ class TestLoadInstrumentLibraryRecursive:
 		assert deep.exists(), "Empty directory is left in place; we never created it"
 
 	def test_directory_with_only_orphans (self, tmp_path: pathlib.Path) -> None:
-		_write_sidecar(tmp_path, "ghost1")
-		_write_sidecar(tmp_path, "ghost2")
+		# Stale orphans (version-mismatched, no audio) are swept away; a
+		# directory left holding only genuine orphans ends up empty.
+		for stem in ("ghost1", "ghost2"):
+			p = tmp_path / (stem + ".wav" + subsample.cache.SIDECAR_SUFFIX)
+			p.write_text('{"analysis_version": "0"}')
 
 		lib = subsample.library.load_instrument_library(
 			tmp_path, 10 * 1024 * 1024, with_preview=False,

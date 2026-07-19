@@ -162,7 +162,7 @@ def _fire (
 def main () -> int:
 
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("--assignment", default="Kicks", help="Assignment name to fire (default: Kicks, as in midi-map.yaml.default).")
+	parser.add_argument("--assignment", default="Kicks", help="Assignment name to fire (default: Kicks, as in the shipped map template).")
 	parser.add_argument("--hits", type=int, default=500, help="Warm-phase hit count (default: 500).")
 	parser.add_argument("--gap-ms", type=float, default=5.0, help="Spacing between warm hits, ms (default: 5).")
 	parser.add_argument("--drain-s", type=float, default=6.0, help="Seconds to wait for transform workers to bake variants (default: 6).")
@@ -201,10 +201,10 @@ def main () -> int:
 		print("This harness covers single-directory maps only; this map declares programs.", file=sys.stderr)
 		return 1
 
-	print(f"Loading instrument library from {cfg.instrument.directory} …")
+	print(f"Loading instrument library from {cfg.library.directory} …")
 	instrument_library = subsample.library.load_instrument_library(
-		pathlib.Path(cfg.instrument.directory),
-		int(cfg.instrument.max_memory_mb * 1024 * 1024),
+		pathlib.Path(cfg.library.directory),
+		int(cfg.library.max_memory_mb * 1024 * 1024),
 		load_audio=True,
 		with_preview=cfg.recorder.previews,
 		target_sample_rate=output_sr,

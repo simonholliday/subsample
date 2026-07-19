@@ -57,6 +57,11 @@ _REGION_FLOOR_DB:    typing.Final[float] = 12.0
 _REGION_ATTACK_HEAD: typing.Final[float] = 0.30
 _REGION_MARGIN_S:    typing.Final[float] = 0.050
 
+# Peak RMS below this (~ -80 dBFS) is treated as silence — there is no real
+# sustain content to loop, and a zero-referenced percentile floor would
+# otherwise pass every frame and report a confident loop of nothing.
+_SILENCE_RMS_FLOOR:  typing.Final[float] = 1e-4
+
 # Minimum loop length.  Short loops repeat audibly (a fast "rate" the ear hears
 # as artefact) on evolving/tonal material, so the length-bonus prefers longer
 # loops; but a stationary texture loops cleanly even short, so the hard floor is
@@ -156,6 +161,12 @@ def find_sustain_region (mono: numpy.ndarray, sample_rate: int) -> typing.Option
 	env = librosa.feature.rms(y=mono, frame_length=_N_FFT, hop_length=_HOP)[0]
 
 	if env.size == 0:
+		return None
+
+	# Pure silence makes the percentile floor 0, so `env >= floor` is True for
+	# every frame and the whole signal reads as one perfect sustain — a
+	# "confident" loop of nothing.  Require real energy before looking for one.
+	if float(numpy.max(env)) < _SILENCE_RMS_FLOOR:
 		return None
 
 	floor = float(numpy.percentile(env, 90)) * 10.0 ** (-_REGION_FLOOR_DB / 20.0)

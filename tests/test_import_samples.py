@@ -1,33 +1,20 @@
-"""Tests for scripts/import_samples.py — the bulk sample-import tool.
+"""Tests for subsample.tools.import_samples (`subsample import`) — the bulk
+sample-import tool."""
 
-The script lives in scripts/ (not the subsample package), so it is loaded here
-via importlib from its file path.
-"""
-
-import importlib.util
 import pathlib
-import types
 
 import numpy
 import soundfile
 
 import subsample.analysis
+import subsample.config
 
 
-def _load_script () -> types.ModuleType:
+import subsample.tools.import_samples
 
-	"""Load scripts/import_samples.py as a module from its file path."""
-
-	script = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "import_samples.py"
-	spec   = importlib.util.spec_from_file_location("import_samples", script)
-	assert spec is not None and spec.loader is not None
-
-	module = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(module)
-	return module
-
-
-import_samples = _load_script()
+# Short alias — the tool was a standalone script before subsample.tools existed,
+# and every test below refers to it by its old bare module name.
+import_samples = subsample.tools.import_samples
 
 
 class TestHotFloatImport:
@@ -47,7 +34,10 @@ class TestHotFloatImport:
 		out = tmp_path / "out"
 		out.mkdir()
 
-		assert import_samples._import_file(src, out, force=True, float_ceiling_dbfs=-1.0)
+		assert import_samples._import_file(
+			src, out, force=True, float_ceiling_dbfs=-1.0,
+			rhythm_cfg=subsample.config.AnalysisConfig(),
+		)
 
 		written = out / "hot.wav"
 		data, _ = soundfile.read(str(written), always_2d=True)
@@ -65,7 +55,10 @@ class TestHotFloatImport:
 		out = tmp_path / "out"
 		out.mkdir()
 
-		assert import_samples._import_file(src, out, force=True, float_ceiling_dbfs=None)
+		assert import_samples._import_file(
+			src, out, force=True, float_ceiling_dbfs=None,
+			rhythm_cfg=subsample.config.AnalysisConfig(),
+		)
 
 		data, _ = soundfile.read(str(out / "hot.wav"), always_2d=True)
 		# Without a ceiling the over-unity peaks clip to the rail.

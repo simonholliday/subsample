@@ -26,14 +26,13 @@ def _load_with (
 
 	cfg: dict = {
 		"recorder": {
-			"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1, "chunk_size": 512},
+			"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1, "buffer_frames": 512},
 			"buffer": {"max_seconds": 60},
 		},
 		"detection": {
-			"snr_threshold_db": 12.0, "hold_time": 0.5,
-			"warmup_seconds": 1.0, "ema_alpha": 0.1,
+			"threshold_db": 12.0, "hold_seconds": 0.5,
+			"warmup_seconds": 1.0, "floor_adaptation": 0.1,
 		},
-		"output": {"directory": "./samples", "filename_format": "%Y-%m-%d_%H-%M-%S"},
 	}
 	if detection:
 		cfg["detection"].update(detection)
@@ -47,6 +46,13 @@ def _load_with (
 
 class TestLoadDefault:
 
+	"""Loads of the SHIPPED subsample/data/config.yaml.default.
+
+	The test_default_* methods pin the shipped default values — changing a
+	default in config.yaml.default must update the matching test here (and
+	vice versa), so drift between the two is always a test failure.
+	"""
+
 	def test_default_config_ships_inside_the_package (self) -> None:
 		"""The bundled default must live INSIDE the subsample package directory.
 
@@ -57,8 +63,49 @@ class TestLoadDefault:
 
 		default = subsample.config._locate_default_config()
 
-		assert default.parent == pathlib.Path(subsample.config.__file__).parent
+		assert default.parent == subsample.config.data_dir()
+		assert subsample.config.data_dir().parent == pathlib.Path(subsample.config.__file__).parent
 		assert default.is_file()
+
+	def test_data_dir_ships_the_product_assets (self) -> None:
+		"""subsample/data/ holds everything --init scaffolds a project from: both
+		MIDI maps and the GM reference sidecars with their credits file.  This
+		checks the files exist in the SOURCE tree (which data_dir() resolves to in
+		a checkout) — the same files the package-data globs pull into a wheel; it
+		does not itself build or inspect a wheel."""
+
+		data = subsample.config.data_dir()
+
+		assert (data / "midi-map-gm-drums.yaml").is_file()
+		assert (data / "midi-map.yaml.default").is_file()
+		assert (data / "reference" / "CREDITS.md").is_file()
+		sidecars = list((data / "reference").glob("*.analysis.json"))
+		assert len(sidecars) >= 40
+
+	def test_shipped_reference_sidecars_are_version_current (self) -> None:
+		"""Every shipped GM reference sidecar must carry the CURRENT
+		ANALYSIS_VERSION.
+
+		A stale sidecar with no WAV beside it cannot self-heal — it would be
+		silently skipped, emptying every pip user's reference library. This is
+		the release tripwire: after an ANALYSIS_VERSION bump, re-run
+		scripts/extract_gm_drums.py to regenerate the shipped copies.
+		"""
+
+		import json
+
+		import subsample.analysis
+
+		sidecars = sorted((subsample.config.data_dir() / "reference").glob("*.analysis.json"))
+		assert sidecars
+
+		for path in sidecars:
+			with path.open(encoding="utf-8") as fh:
+				version = json.load(fh)["analysis_version"]
+			assert version == subsample.analysis.ANALYSIS_VERSION, (
+				f"{path.name} is at analysis_version {version!r}, current is "
+				f"{subsample.analysis.ANALYSIS_VERSION!r} — re-run scripts/extract_gm_drums.py"
+			)
 
 	def test_loads_default_config (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -69,7 +116,6 @@ class TestLoadDefault:
 		assert isinstance(cfg.recorder.buffer, subsample.config.BufferConfig)
 		assert isinstance(cfg.player, subsample.config.PlayerConfig)
 		assert isinstance(cfg.detection, subsample.config.DetectionConfig)
-		assert isinstance(cfg.output, subsample.config.OutputConfig)
 		assert isinstance(cfg.analysis, subsample.config.AnalysisConfig)
 
 	def test_default_audio_values (self) -> None:
@@ -77,9 +123,11 @@ class TestLoadDefault:
 
 		assert cfg.recorder.audio.sample_rate == 44100
 		assert cfg.recorder.audio.bit_depth == 16
-		assert cfg.recorder.audio.channels == 1
+		# channels is commented out in the shipped default → None = auto-detect
+		# the device's channel count at startup.
+		assert cfg.recorder.audio.channels is None
 		assert cfg.recorder.audio.input is None
-		assert cfg.recorder.audio.chunk_size == 512
+		assert cfg.recorder.audio.buffer_frames == 512
 
 	def test_default_buffer_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -106,16 +154,16 @@ class TestLoadDefault:
 	def test_default_detection_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.detection.snr_threshold_db == 12.0
-		assert cfg.detection.hold_time == 0.5
+		assert cfg.detection.threshold_db == 12.0
+		assert cfg.detection.hold_seconds == 0.5
 		assert cfg.detection.warmup_seconds == 1.0
-		assert cfg.detection.ema_alpha == 0.1
+		assert cfg.detection.floor_adaptation == 0.1
 
 	def test_default_output_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.output.directory == "samples/captures"
-		assert cfg.output.filename_format == "%Y-%m-%d_%H-%M-%S-%3f"
+		assert cfg.recorder.directory == "samples/captures"
+		assert cfg.recorder.filename_format == "%Y-%m-%d_%H-%M-%S-%3f"
 
 	def test_default_analysis_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
@@ -125,12 +173,12 @@ class TestLoadDefault:
 		assert cfg.analysis.tempo_max == 300.0
 
 	def test_default_instrument_values (self) -> None:
-		# TEST DEPENDENCY: config.yaml.default instrument section defaults
-		# instrument.max_memory_mb is derived from auto-detect (60% of global).
+		# TEST DEPENDENCY: config.yaml.default library section defaults
+		# library.max_memory_mb is derived from auto-detect (60% of global).
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.instrument.max_memory_mb > 0
-		assert cfg.instrument.directory == "samples/captures"
+		assert cfg.library.max_memory_mb > 0
+		assert cfg.library.directory == "samples/captures"
 
 	def test_default_similarity_values (self) -> None:
 		# Similarity section is commented-out in config.yaml.default so defaults
@@ -150,17 +198,14 @@ class TestLoadDefault:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 1024
+			    buffer_frames: 1024
 			  buffer:
 			    max_seconds: 60
 			detection:
-			  snr_threshold_db: 6.0
-			  hold_time: 0.5
+			  threshold_db: 6.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 3.0
-			  ema_alpha: 0.01
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.01
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -173,8 +218,8 @@ class TestLoadDefault:
 	def test_default_trim_padding_values (self) -> None:
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert cfg.detection.trim_pre_samples == 10
-		assert cfg.detection.trim_post_samples == 90
+		assert cfg.detection.trim_pre_ms == 0.25
+		assert cfg.detection.trim_post_ms == 2.0
 
 
 class TestLoadCustomConfig:
@@ -215,21 +260,19 @@ class TestLoadCustomConfig:
 	def test_loads_custom_yaml (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
 			recorder:
+			  directory: /tmp/my_samples
 			  audio:
 			    sample_rate: 48000
 			    bit_depth: 24
 			    channels: 2
-			    chunk_size: 2048
+			    buffer_frames: 2048
 			  buffer:
 			    max_seconds: 30
 			detection:
-			  snr_threshold_db: 10.0
-			  hold_time: 1.0
+			  threshold_db: 10.0
+			  hold_seconds: 1.0
 			  warmup_seconds: 3.0
-			  ema_alpha: 0.05
-			output:
-			  directory: /tmp/my_samples
-			  filename_format: "%H-%M-%S"
+			  floor_adaptation: 0.05
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -240,8 +283,8 @@ class TestLoadCustomConfig:
 		assert cfg.recorder.audio.bit_depth == 24
 		assert cfg.recorder.audio.channels == 2
 		assert cfg.recorder.buffer.max_seconds == 30
-		assert cfg.detection.snr_threshold_db == 10.0
-		assert cfg.output.directory == "/tmp/my_samples"
+		assert cfg.detection.threshold_db == 10.0
+		assert cfg.recorder.directory == "/tmp/my_samples"
 
 	def test_recorder_enabled_flag (self, tmp_path: pathlib.Path) -> None:
 		yaml_content = textwrap.dedent("""\
@@ -251,17 +294,14 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -277,7 +317,7 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			player:
@@ -285,13 +325,10 @@ class TestLoadCustomConfig:
 			  audio:
 			    device: "Focusrite Output"
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -308,20 +345,17 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			player:
 			  enabled: true
 			  midi_device: "Launchpad"
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -337,19 +371,16 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			player:
 			  midi_device: 42
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -364,20 +395,17 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			player:
 			  enabled: true
 			  virtual_midi_port: "Subsample Virtual MIDI"
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -394,19 +422,16 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			player:
 			  virtual_midi_port: 99
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -420,7 +445,7 @@ class TestLoadCustomConfig:
 		with pytest.raises(dataclasses.FrozenInstanceError):
 			cfg.recorder = subsample.config.RecorderConfig(  # type: ignore[misc]
 				audio=subsample.config.AudioConfig(
-					sample_rate=99, bit_depth=16, channels=1, chunk_size=1024
+					sample_rate=99, bit_depth=16, channels=1, buffer_frames=1024
 				),
 				buffer=subsample.config.BufferConfig(max_seconds=60),
 			)
@@ -451,17 +476,14 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 			similarity:
 			  weight_spectral: 2.0
 			  weight_timbre: 0.0
@@ -484,17 +506,14 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 			similarity:
 			  weight_spectral: -1.0
 		""")
@@ -512,17 +531,14 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			{channels_line}
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			detection:
-			  snr_threshold_db: 6.0
-			  hold_time: 0.5
+			  threshold_db: 6.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 3.0
-			  ema_alpha: 0.01
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.01
 		""")
 
 	def test_channels_explicit (self, tmp_path: pathlib.Path) -> None:
@@ -541,13 +557,14 @@ class TestLoadCustomConfig:
 
 		assert cfg.recorder.audio.channels is None
 
-	def test_channels_omitted_inherits_default (self, tmp_path: pathlib.Path) -> None:
-		"""Omitting channels in user config inherits the default value (1 = mono)."""
+	def test_channels_omitted_auto_detects (self, tmp_path: pathlib.Path) -> None:
+		"""Omitting channels inherits the shipped default, which is commented
+		out → None = auto-detect the device's channel count at startup."""
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(self._minimal_yaml(""))
 		cfg = subsample.config.load_config(config_file)
 
-		assert cfg.recorder.audio.channels == 1
+		assert cfg.recorder.audio.channels is None
 
 	def test_channels_zero_raises (self, tmp_path: pathlib.Path) -> None:
 		"""channels: 0 should raise ValueError at config-load time."""
@@ -565,17 +582,14 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 8
 			    channels: 1
-			    chunk_size: 1024
+			    buffer_frames: 1024
 			  buffer:
 			    max_seconds: 60
 			detection:
-			  snr_threshold_db: 6.0
-			  hold_time: 0.5
+			  threshold_db: 6.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 2.0
-			  ema_alpha: 0.01
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.01
 			""")
 		config_file = tmp_path / "bad_config.yaml"
 		config_file.write_text(yaml_content)
@@ -591,19 +605,16 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			player:
 			{player_section}
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 		""")
 
 	def test_player_max_polyphony_custom (self, tmp_path: pathlib.Path) -> None:
@@ -642,20 +653,17 @@ class TestLoadCustomConfig:
 			    sample_rate: 44100
 			    bit_depth: 16
 			    channels: 1
-			    chunk_size: 512
+			    buffer_frames: 512
 			  buffer:
 			    max_seconds: 60
 			player:
 			  limiter_threshold_db: -1.5
 			  limiter_ceiling_db: -3.0
 			detection:
-			  snr_threshold_db: 12.0
-			  hold_time: 0.5
+			  threshold_db: 12.0
+			  hold_seconds: 0.5
 			  warmup_seconds: 1.0
-			  ema_alpha: 0.1
-			output:
-			  directory: ./samples
-			  filename_format: "%Y-%m-%d_%H-%M-%S"
+			  floor_adaptation: 0.1
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -748,30 +756,30 @@ class TestConfigCascade:
 		assert cfg.recorder.audio.device == "Test Mic"
 		assert cfg.recorder.audio.sample_rate == 44100
 		assert cfg.recorder.audio.bit_depth == 16
-		assert cfg.detection.snr_threshold_db == 12.0
-		assert cfg.output.directory == "samples/captures"
+		assert cfg.detection.threshold_db == 12.0
+		assert cfg.recorder.directory == "samples/captures"
 
 	def test_partial_section_inherits_sibling_keys (self, tmp_path: pathlib.Path) -> None:
 		"""Overriding one key in a section leaves sibling keys at their defaults."""
 		yaml_content = textwrap.dedent("""\
 			detection:
-			  snr_threshold_db: 6.0
+			  threshold_db: 6.0
 		""")
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
 
 		cfg = subsample.config.load_config(config_file)
 
-		assert cfg.detection.snr_threshold_db == 6.0
-		assert cfg.detection.hold_time == 0.5
+		assert cfg.detection.threshold_db == 6.0
+		assert cfg.detection.hold_seconds == 0.5
 		assert cfg.detection.warmup_seconds == 1.0
-		assert cfg.detection.ema_alpha == 0.1
+		assert cfg.detection.floor_adaptation == 0.1
 
 	def test_default_path_explicit_no_double_merge (self) -> None:
 		"""Passing the default config path explicitly loads correctly without double-merging."""
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 		assert cfg.recorder.audio.sample_rate == 44100
-		assert cfg.detection.trim_pre_samples == 10
+		assert cfg.detection.trim_pre_ms == 0.25
 
 	def test_channels_null_override_yields_none (self, tmp_path: pathlib.Path) -> None:
 		"""Explicitly setting channels: null in user config overrides the default (1)."""
@@ -799,17 +807,15 @@ class TestInputRouting:
 			"  audio:\n"
 			"    sample_rate: 44100\n"
 			"    bit_depth: 16\n"
-			"    chunk_size: 512\n"
+			"    buffer_frames: 512\n"
 			f"    {audio_extra}\n"
 			"  buffer:\n"
 			"    max_seconds: 10\n"
 			"detection:\n"
-			"  snr_threshold_db: 6\n"
-			"  hold_time: 0.5\n"
+			"  threshold_db: 6\n"
+			"  hold_seconds: 0.5\n"
 			"  warmup_seconds: 2\n"
-			"  ema_alpha: 0.1\n"
-			"output:\n"
-			"  directory: /tmp/test\n"
+			"  floor_adaptation: 0.1\n"
 		)
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -876,17 +882,15 @@ class TestMemoryBudget:
 			"  audio:\n"
 			"    sample_rate: 44100\n"
 			"    bit_depth: 16\n"
-			"    chunk_size: 512\n"
+			"    buffer_frames: 512\n"
 			"    channels: 1\n"
 			"  buffer:\n"
 			"    max_seconds: 10\n"
 			"detection:\n"
-			"  snr_threshold_db: 6\n"
-			"  hold_time: 0.5\n"
+			"  threshold_db: 6\n"
+			"  hold_seconds: 0.5\n"
 			"  warmup_seconds: 2\n"
-			"  ema_alpha: 0.1\n"
-			"output:\n"
-			"  directory: /tmp/test\n"
+			"  floor_adaptation: 0.1\n"
 		)
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml_content)
@@ -895,7 +899,7 @@ class TestMemoryBudget:
 	def test_explicit_global_splits_correctly (self, tmp_path: pathlib.Path) -> None:
 		"""max_memory_mb: 200 → instrument 120, transform 70, carrier 10."""
 		cfg = self._make_config(tmp_path, "max_memory_mb: 200")
-		assert cfg.instrument.max_memory_mb == pytest.approx(120.0)
+		assert cfg.library.max_memory_mb == pytest.approx(120.0)
 		assert cfg.transform.max_memory_mb == pytest.approx(70.0)
 		assert cfg.transform.carrier_memory_mb == pytest.approx(10.0)
 		assert cfg.transform.max_disk_mb == pytest.approx(600.0)
@@ -905,10 +909,10 @@ class TestMemoryBudget:
 		cfg = self._make_config(
 			tmp_path,
 			"max_memory_mb: 200\n"
-			"instrument:\n"
+			"library:\n"
 			"  max_memory_mb: 300\n",
 		)
-		assert cfg.instrument.max_memory_mb == 300.0
+		assert cfg.library.max_memory_mb == 300.0
 		assert cfg.transform.max_memory_mb == pytest.approx(70.0)
 
 	def test_both_per_cache_ignores_global (self, tmp_path: pathlib.Path) -> None:
@@ -916,12 +920,12 @@ class TestMemoryBudget:
 		cfg = self._make_config(
 			tmp_path,
 			"max_memory_mb: 200\n"
-			"instrument:\n"
+			"library:\n"
 			"  max_memory_mb: 300\n"
 			"transform:\n"
 			"  max_memory_mb: 80\n",
 		)
-		assert cfg.instrument.max_memory_mb == 300.0
+		assert cfg.library.max_memory_mb == 300.0
 		assert cfg.transform.max_memory_mb == 80.0
 
 	def test_both_per_cache_still_derives_carrier_and_disk_from_global (self, tmp_path: pathlib.Path) -> None:
@@ -931,7 +935,7 @@ class TestMemoryBudget:
 		cfg = self._make_config(
 			tmp_path,
 			"max_memory_mb: 1000\n"
-			"instrument:\n"
+			"library:\n"
 			"  max_memory_mb: 300\n"
 			"transform:\n"
 			"  max_memory_mb: 80\n",
@@ -962,7 +966,7 @@ class TestMemoryBudget:
 	def test_auto_detect_2gb_system (self, mock_detect: unittest.mock.MagicMock, tmp_path: pathlib.Path) -> None:
 		"""On a 2 GB system, auto-detect → 512 MB budget."""
 		cfg = self._make_config(tmp_path, "")
-		assert cfg.instrument.max_memory_mb == pytest.approx(512.0 * 0.60)
+		assert cfg.library.max_memory_mb == pytest.approx(512.0 * 0.60)
 		assert cfg.transform.max_memory_mb == pytest.approx(512.0 * 0.35)
 		assert cfg.transform.carrier_memory_mb == pytest.approx(512.0 * 0.05)
 		assert cfg.transform.max_disk_mb == pytest.approx(512.0 * 3.0)
@@ -971,7 +975,7 @@ class TestMemoryBudget:
 	def test_auto_detect_16gb_system (self, mock_detect: unittest.mock.MagicMock, tmp_path: pathlib.Path) -> None:
 		"""On a 16 GB+ system, auto-detect → 1024 MB cap."""
 		cfg = self._make_config(tmp_path, "")
-		assert cfg.instrument.max_memory_mb == pytest.approx(1024.0 * 0.60)
+		assert cfg.library.max_memory_mb == pytest.approx(1024.0 * 0.60)
 		assert cfg.transform.max_memory_mb == pytest.approx(1024.0 * 0.35)
 
 	def test_auto_detect_returns_positive (self) -> None:
@@ -1434,7 +1438,7 @@ class TestSegmentationConfig:
 
 	def test_parse_release_retrigger_fade (self, tmp_path: pathlib.Path) -> None:
 		cfg = _load_with(tmp_path, detection={
-			"snr_threshold_db": 10.5, "release_threshold_db": 4.0,
+			"threshold_db": 10.5, "release_threshold_db": 4.0,
 			"retrigger_threshold_db": 12.0, "fade_out_ms": 30.0,
 		})
 		assert cfg.detection.release_threshold_db == 4.0
@@ -1449,7 +1453,7 @@ class TestSegmentationConfig:
 
 	def test_release_must_be_below_snr (self, tmp_path: pathlib.Path) -> None:
 		with pytest.raises(ValueError, match="release_threshold_db"):
-			_load_with(tmp_path, detection={"snr_threshold_db": 10.0, "release_threshold_db": 12.0})
+			_load_with(tmp_path, detection={"threshold_db": 10.0, "release_threshold_db": 12.0})
 
 	def test_release_must_be_positive (self, tmp_path: pathlib.Path) -> None:
 		with pytest.raises(ValueError, match="release_threshold_db"):
@@ -1466,3 +1470,73 @@ class TestSegmentationConfig:
 	def test_float_ceiling_must_be_non_positive (self, tmp_path: pathlib.Path) -> None:
 		with pytest.raises(ValueError, match="float_import_ceiling_dbfs"):
 			_load_with(tmp_path, audio={"float_import_ceiling_dbfs": 3.0})
+
+
+class TestRenamedKeyMigrations:
+
+	"""The 2026-07 rename batch hard-errors with the replacement named, instead
+	of silently ignoring an old key (the unknown-key sweep only warns).  One
+	test per renamed key/section, matching the migration messages in
+	_build_config."""
+
+	def _load (self, tmp_path: pathlib.Path, body: str) -> subsample.config.Config:
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(textwrap.dedent(body))
+		return subsample.config.load_config(config_file)
+
+	def test_output_section_moved (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="moved into `recorder:`"):
+			self._load(tmp_path, """\
+				output:
+				  directory: /tmp/x
+			""")
+
+	def test_instrument_section_renamed (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="now called `library:`"):
+			self._load(tmp_path, """\
+				instrument:
+				  directory: /tmp/x
+			""")
+
+	def test_snr_threshold_db_renamed (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="`detection.threshold_db`"):
+			self._load(tmp_path, """\
+				detection:
+				  snr_threshold_db: 9.0
+			""")
+
+	def test_ema_alpha_renamed (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="`detection.floor_adaptation`"):
+			self._load(tmp_path, """\
+				detection:
+				  ema_alpha: 0.1
+			""")
+
+	def test_hold_time_renamed (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="`detection.hold_seconds`"):
+			self._load(tmp_path, """\
+				detection:
+				  hold_time: 0.5
+			""")
+
+	def test_trim_pre_samples_renamed_with_unit_note (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="milliseconds"):
+			self._load(tmp_path, """\
+				detection:
+				  trim_pre_samples: 10
+			""")
+
+	def test_trim_post_samples_renamed_with_unit_note (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="`detection.trim_post_ms`"):
+			self._load(tmp_path, """\
+				detection:
+				  trim_post_samples: 90
+			""")
+
+	def test_chunk_size_renamed (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="`recorder.audio.buffer_frames`"):
+			self._load(tmp_path, """\
+				recorder:
+				  audio:
+				    chunk_size: 512
+			""")

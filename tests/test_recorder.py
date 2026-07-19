@@ -49,17 +49,15 @@ def _make_config (output_dir: pathlib.Path) -> subsample.config.Config:
 	return subsample.config.Config(
 		recorder=subsample.config.RecorderConfig(
 			audio=subsample.config.AudioConfig(
-				sample_rate=44100, bit_depth=16, channels=1, chunk_size=512,
+				sample_rate=44100, bit_depth=16, channels=1, buffer_frames=512,
 			),
 			buffer=subsample.config.BufferConfig(max_seconds=10),
-		),
-		detection=subsample.config.DetectionConfig(
-			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
-			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,
-		),
-		output=subsample.config.OutputConfig(
 			directory=str(output_dir),
 			filename_format="%Y-%m-%d_%H-%M-%S",
+		),
+		detection=subsample.config.DetectionConfig(
+			threshold_db=12.0, floor_adaptation=0.1, hold_seconds=0.5,
+			warmup_seconds=0.0, trim_pre_ms=8, trim_post_ms=8,
 		),
 	)
 
@@ -310,18 +308,16 @@ def _make_ambisonic_config (output_dir: pathlib.Path, ambisonic_format: str) -> 
 	return subsample.config.Config(
 		recorder=subsample.config.RecorderConfig(
 			audio=subsample.config.AudioConfig(
-				sample_rate=44100, bit_depth=16, channels=4, chunk_size=512,
+				sample_rate=44100, bit_depth=16, channels=4, buffer_frames=512,
 				ambisonic_format=ambisonic_format,
 			),
 			buffer=subsample.config.BufferConfig(max_seconds=10),
-		),
-		detection=subsample.config.DetectionConfig(
-			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
-			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,
-		),
-		output=subsample.config.OutputConfig(
 			directory=str(output_dir),
 			filename_format="%Y-%m-%d_%H-%M-%S",
+		),
+		detection=subsample.config.DetectionConfig(
+			threshold_db=12.0, floor_adaptation=0.1, hold_seconds=0.5,
+			warmup_seconds=0.0, trim_pre_ms=8, trim_post_ms=8,
 		),
 	)
 
@@ -401,18 +397,16 @@ def _make_flac_config (
 	return subsample.config.Config(
 		recorder=subsample.config.RecorderConfig(
 			audio=subsample.config.AudioConfig(
-				sample_rate=44100, bit_depth=bit_depth, channels=channels, chunk_size=512,
+				sample_rate=44100, bit_depth=bit_depth, channels=channels, buffer_frames=512,
 				audio_format="flac",
 			),
 			buffer=subsample.config.BufferConfig(max_seconds=10),
-		),
-		detection=subsample.config.DetectionConfig(
-			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
-			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,
-		),
-		output=subsample.config.OutputConfig(
 			directory=str(output_dir),
 			filename_format="%Y-%m-%d_%H-%M-%S",
+		),
+		detection=subsample.config.DetectionConfig(
+			threshold_db=12.0, floor_adaptation=0.1, hold_seconds=0.5,
+			warmup_seconds=0.0, trim_pre_ms=8, trim_post_ms=8,
 		),
 	)
 
@@ -571,18 +565,16 @@ def _make_config_with_previews (
 	return subsample.config.Config(
 		recorder=subsample.config.RecorderConfig(
 			audio=subsample.config.AudioConfig(
-				sample_rate=44100, bit_depth=16, channels=1, chunk_size=512,
+				sample_rate=44100, bit_depth=16, channels=1, buffer_frames=512,
 			),
 			buffer=subsample.config.BufferConfig(max_seconds=10),
+			directory=str(output_dir),
+			filename_format="%Y-%m-%d_%H-%M-%S",
 			previews=previews,
 		),
 		detection=subsample.config.DetectionConfig(
-			snr_threshold_db=12.0, ema_alpha=0.1, hold_time=0.5,
-			warmup_seconds=0.0, trim_pre_samples=8, trim_post_samples=8,
-		),
-		output=subsample.config.OutputConfig(
-			directory=str(output_dir),
-			filename_format="%Y-%m-%d_%H-%M-%S",
+			threshold_db=12.0, floor_adaptation=0.1, hold_seconds=0.5,
+			warmup_seconds=0.0, trim_pre_ms=8, trim_post_ms=8,
 		),
 	)
 

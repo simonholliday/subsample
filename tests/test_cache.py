@@ -482,27 +482,31 @@ class TestEnsureSampleAssets:
 		assert "preview" in payload
 		assert self._png_path(wav_path).exists()
 
-	def test_degenerate_audio_skipped_not_raised (self, tmp_path: pathlib.Path) -> None:
-		"""A readable-but-degenerate file (a few ms of audio) must warn and
-		return None — not let a librosa exception escape and abort the whole
-		startup load over one junk file."""
+	def test_very_short_audio_analyzed_not_raised (self, tmp_path: pathlib.Path) -> None:
+		"""A readable-but-very-short file (a few ms) analyses to a flat-featured
+		result instead of crashing the analysis pipeline.  It USED to raise a
+		librosa IndexError/ParameterError (dropped as junk); the low-rate /
+		short-audio guards now let it through, so it must return a result, not
+		raise."""
 
 		wav_path = tmp_path / "click.wav"
 		tests.helpers._make_wav(wav_path, n_frames=100)
 
 		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
 
-		assert result is None
+		assert result is not None
 
-	def test_one_degenerate_file_does_not_abort_library_load (
+	def test_one_unreadable_file_does_not_abort_library_load (
 		self,
 		tmp_path: pathlib.Path,
 	) -> None:
-		"""End-to-end: a directory with one good and one degenerate file loads
-		the good one instead of crashing the recursive load."""
+		"""End-to-end: a directory with one good file and one UNREADABLE file
+		loads the good one instead of crashing the recursive load — the
+		resilience guarantee (one bad file must skip, not abort)."""
 
 		tests.helpers._make_wav(tmp_path / "good.wav")
-		tests.helpers._make_wav(tmp_path / "junk.wav", n_frames=100)
+		# Not a decodable audio file — read fails, the file is skipped.
+		(tmp_path / "junk.wav").write_bytes(b"RIFFnot a real wav at all" * 4)
 
 		library = subsample.library.load_instrument_library(
 			tmp_path, max_memory_bytes=4 * 1024 * 1024, with_preview=False,

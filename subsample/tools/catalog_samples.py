@@ -44,25 +44,25 @@ With --pitched, --quantizable and/or --loopable the CSV is replaced by a plain
 list of matching file paths, one per line (all requested capabilities must hold)
 — pipeable into a player or file tool for auditioning and hand-curating sets:
 
-	python scripts/catalog_samples.py --pitched | mpv --playlist=-
-	python scripts/catalog_samples.py ~/samples --quantizable | xargs -I{} cp {} ~/curated/
-	python scripts/catalog_samples.py ~/samples --loopable | mpv --playlist=-
+	subsample catalog --pitched | mpv --playlist=-
+	subsample catalog ~/samples --quantizable | xargs -I{} cp {} ~/curated/
+	subsample catalog ~/samples --loopable | mpv --playlist=-
 
 The first run over a directory without .analysis.json sidecars is slow (each
 file is fully analysed, same cost as a startup load); results are cached as
 sidecars so later runs are instant.  Progress goes to stderr, data to stdout.
 
 Usage:
-	python scripts/catalog_samples.py                          # configured instrument.directory
-	python scripts/catalog_samples.py path/to/samples          # explicit directory
-	python scripts/catalog_samples.py -o samples.csv           # write CSV to a file
-	python scripts/catalog_samples.py --full                   # every property incl. MFCC vectors
-	python scripts/catalog_samples.py --group                  # cluster near-duplicates
-	python scripts/catalog_samples.py --group --pitched        # one keeper path per pitched-sound group
-	python scripts/catalog_samples.py --loopable               # paths of loop-candidate samples only
-	python scripts/catalog_samples.py --order similarity       # rows ordered by sonic similarity
-	python scripts/catalog_samples.py --pitched                # paths of pitched samples only
-	python scripts/catalog_samples.py --pitched --quantizable  # paths matching both
+	subsample catalog                          # configured library.directory
+	subsample catalog path/to/samples          # explicit directory
+	subsample catalog -o samples.csv           # write CSV to a file
+	subsample catalog --full                   # every property incl. MFCC vectors
+	subsample catalog --group                  # cluster near-duplicates
+	subsample catalog --group --pitched        # one keeper path per pitched-sound group
+	subsample catalog --loopable               # paths of loop-candidate samples only
+	subsample catalog --order similarity       # rows ordered by sonic similarity
+	subsample catalog --pitched                # paths of pitched samples only
+	subsample catalog --pitched --quantizable  # paths matching both
 """
 
 import argparse
@@ -77,18 +77,11 @@ import typing
 import pymididefs.notes
 
 import subsample.analysis
-import subsample.audio
 import subsample.cache
 import subsample.config
 import subsample.library
 import subsample.similarity
-
-
-logging.basicConfig(
-	level=logging.WARNING,
-	format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-	datefmt="%H:%M:%S",
-)
+import subsample.tools._shared
 
 
 # Junk-triage thresholds (module constants — corpus-dependent, easy to tune).
@@ -408,7 +401,7 @@ def _group_keeper (records: list[subsample.library.SampleRecord], group: list[in
 def _load_all (
 	paths:         list[pathlib.Path],
 	show_progress: bool,
-) -> tuple[list[tuple[pathlib.Path, tuple]], int]:
+) -> tuple[list[tuple[pathlib.Path, subsample.cache.SampleAssets]], int]:
 
 	"""Analyze/read every path (cache-first), returning (loaded, n_skipped).
 
@@ -416,7 +409,7 @@ def _load_all (
 	and omitted.  Progress is drawn to stderr only when it is a TTY.
 	"""
 
-	loaded:    list[tuple[pathlib.Path, tuple]] = []
+	loaded:    list[tuple[pathlib.Path, subsample.cache.SampleAssets]] = []
 	n_skipped: int = 0
 
 	for i, path in enumerate(paths, start=1):
@@ -440,7 +433,7 @@ def _load_all (
 
 
 def _emission_plan (
-	loaded:  list[tuple[pathlib.Path, tuple]],
+	loaded:  list[tuple[pathlib.Path, subsample.cache.SampleAssets]],
 	records: typing.Optional[list[subsample.library.SampleRecord]],
 	cfg:     typing.Optional[subsample.config.Config],
 	args:    argparse.Namespace,
@@ -499,7 +492,7 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 	"""Parse command-line arguments."""
 
 	parser = argparse.ArgumentParser(
-		prog="catalog_samples",
+		prog="subsample catalog",
 		description="Write a CSV of every sample's detected properties, or list samples matching a capability filter",
 	)
 	parser.add_argument(
@@ -507,7 +500,7 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 		type=pathlib.Path,
 		nargs="?",
 		default=None,
-		help="Sample directory to catalog (default: instrument.directory from config.yaml)",
+		help="Sample directory to catalog (default: library.directory from config.yaml)",
 	)
 	parser.add_argument(
 		"-o", "--output",
@@ -568,9 +561,11 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 	return parser.parse_args(argv)
 
 
-def main (argv: typing.Optional[list[str]] = None) -> None:
+def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	"""Catalog a sample directory to CSV, or list paths matching a capability filter."""
+
+	subsample.tools._shared.configure_logging()
 
 	args = _parse_args(argv)
 
@@ -581,25 +576,22 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 	# and both need the similarity weights from config.
 	two_pass = args.group or args.order == "similarity"
 
-	# Always load config: this script writes sidecars the player later trusts, so
-	# it must read hot float sources at the same ceiling the player will (a
-	# differently-scaled analysis would leave the player playing audio its own
-	# fingerprint doesn't describe).  A missing config falls back to the packaged
-	# default, whose ceiling matches audio.py's own default.
-	cfg = subsample.config.load_config(args.config)
-	subsample.audio.set_float_import_ceiling(
-		cfg.recorder.audio.float_import_ceiling_dbfs
-	)
+	# Always load config: this tool writes sidecars the player later trusts, so
+	# it must analyse at the same float-import ceiling AND tempo priors the
+	# player will (a differently-scaled or differently-tuned analysis would
+	# leave the player trusting a fingerprint that doesn't match its playback).
+	# load_config_and_wire handles both, plus a clean one-line config error.
+	cfg = subsample.tools._shared.load_config_and_wire(args.config)
 
 	if args.directory is not None:
 		directory = args.directory
 	else:
 		assert cfg is not None
-		directory = pathlib.Path(cfg.instrument.directory)
+		directory = pathlib.Path(cfg.library.directory)
 
 	if not directory.is_dir():
 		print(f"Directory not found: {directory}", file=sys.stderr)
-		sys.exit(1)
+		return 1
 
 	paths = _collect_audio_files(directory)
 
@@ -671,10 +663,12 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 		if out is not sys.stdout:
 			out.close()
 
+	return 0
+
 
 if __name__ == "__main__":
 	try:
-		main()
+		sys.exit(main())
 	except BrokenPipeError:
 		# Downstream closed the pipe early (head, or quitting mpv mid-playlist)
 		# — normal pipeline behaviour, not an error.  Redirect stdout to

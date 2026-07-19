@@ -1567,6 +1567,19 @@ def _parse_name_operator_dict (
 			f"'path:' for an individual file."
 		)
 
+	# A glob ending in an audio extension can never match: record.name is the
+	# extensionless stem.  Warn rather than reject (it is valid glob syntax) so a
+	# `matches: "*.wav"` copied from a filename doesn't silently match nothing.
+	if op == "matches":
+		_AUDIO_EXTS = (".wav", ".flac", ".aif", ".aiff", ".ogg", ".mp3", ".m4a", ".opus")
+		if op_value.lower().endswith(_AUDIO_EXTS):
+			_log.warning(
+				"MIDI map assignment %r: name pattern %r ends in an audio "
+				"extension, but patterns match the extensionless filename stem — "
+				"it will match nothing.  Drop the extension (e.g. '*kick*').",
+				assignment_name, op_value,
+			)
+
 	if op == "regex":
 		try:
 			re.compile(op_value)
@@ -1668,6 +1681,14 @@ def _parse_where (
 
 			# Dict → operator block.  Scalar (int/float/str) → eq shorthand.
 			if isinstance(value, dict):
+				if not value:
+					# An empty operator block builds an unconstrained Range that
+					# silently matches the whole library — reject it.
+					raise ValueError(
+						f"MIDI map assignment {assignment_name!r}: {key!r} has an "
+						f"empty operator block — give at least one of "
+						f"{', '.join(sorted(_VALID_OPERATORS))}, or a scalar for eq."
+					)
 				for op, op_value in value.items():
 					if op not in _VALID_OPERATORS:
 						raise ValueError(
@@ -1800,13 +1821,29 @@ def _coerce_range_value (
 	if field == "pitch_hz" and isinstance(value, str):
 		return _note_name_to_hz(value)
 
+	# Reject bool before float() — YAML `yes`/`no` parse to True/False and
+	# float(True) == 1.0 would silently filter on a phantom numeric value.
+	if isinstance(value, bool):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: value for {source_key!r} "
+			f"must be a number, not a boolean (got {value!r})"
+		)
+
 	try:
-		return float(value)
+		result = float(value)
 	except (TypeError, ValueError) as exc:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: value for "
 			f"{source_key!r} must be numeric (got {value!r})"
 		) from exc
+
+	if not math.isfinite(result):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: value for {source_key!r} "
+			f"must be a finite number (got {value!r})"
+		)
+
+	return result
 
 
 def _note_name_to_hz (name: str) -> float:
@@ -2004,6 +2041,13 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 			f"{sorted(unknown)} for a velocity pick.  Valid keys: "
 			f"{', '.join(sorted(_VALID_VELOCITY_PICK_KEYS))}"
 		)
+	elif unknown:
+		_log.warning(
+			"MIDI map assignment %r: unknown velocity 'pick' key(s) %s ignored — "
+			"valid keys: %s",
+			assignment_name, sorted(unknown),
+			", ".join(sorted(_VALID_VELOCITY_PICK_KEYS)),
+		)
 
 	mode = str(raw.get("mode", "")).strip().lower()
 
@@ -2137,6 +2181,13 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 				f"MIDI map assignment {assignment_name!r}: unknown 'pick' "
 				f"operator(s) {sorted(unknown)}.  Valid operators: "
 				f"{', '.join(sorted(_VALID_PICK_OPERATORS))}"
+			)
+		elif unknown:
+			_log.warning(
+				"MIDI map assignment %r: unknown 'pick' operator(s) %s ignored — "
+				"valid operators: %s",
+				assignment_name, sorted(unknown),
+				", ".join(sorted(_VALID_PICK_OPERATORS)),
 			)
 
 		# eq pins both bounds; other operators define lo (gte/gt) and hi (lte/lt).
@@ -2282,6 +2333,13 @@ def _parse_select_spec (
 			f"{sorted(unknown)}.  Valid keys: order, order_by, pick, where "
 			f"(filters like directory:/name:/duration: nest under 'where:')."
 		)
+	elif unknown:
+		_log.warning(
+			"MIDI map assignment %r: unknown 'select' key(s) %s ignored — valid "
+			"keys: order, order_by, pick, where (filters like directory:/name:/"
+			"duration: nest under 'where:').",
+			assignment_name, sorted(unknown),
+		)
 
 	where = _parse_where(raw.get("where"), assignment_name, midi_map_dir)
 
@@ -2398,9 +2456,14 @@ def parse_select (
 		# A velocity pick governs the WHOLE fallback chain (the player applies the
 		# first explicit pick to every spec), so each spec's pool must be
 		# level-ordered — otherwise a fallback that wins ranks by age/duration and
-		# the velocity→timbre mapping breaks.  Require a level primary order on
-		# every spec when any spec is a velocity pick.
+		# the velocity→timbre mapping breaks.  And because the pick's ascending
+		# flag is baked once from the declaring spec, every spec must order in the
+		# SAME direction: a quietest-declared pick drawing from a loudest-ordered
+		# fallback would map velocity 127 to the QUIETEST sample.  Require a level
+		# primary order, all in one direction, on every spec.
 		if any(spec.pick.mode == "velocity" for spec in specs):
+			directions: set[str] = set()
+
 			for spec in specs:
 				if not spec.order or spec.order[0].by != "level":
 					raise ValueError(
@@ -2408,6 +2471,15 @@ def parse_select (
 						f"fallback chain requires every spec to declare a level-based "
 						f"primary order (order: quietest or loudest)"
 					)
+				directions.add(spec.order[0].dir)
+
+			if len(directions) > 1:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: a 'pick: velocity' "
+					f"fallback chain must order every spec in the SAME direction "
+					f"(all 'quietest' or all 'loudest') — mixing them inverts the "
+					f"velocity-to-sample mapping when a fallback wins"
+				)
 
 		return specs
 
@@ -2696,6 +2768,18 @@ def parse_process (
 						f"bandwidth must be a frequency in Hz above "
 						f"{bw_floor:.0f} (got {bw!r})"
 					)
+
+	# distort's mode enum, validated at load like radio's above — a typo'd mode
+	# would otherwise fall through to a WARNING and pass the audio unchanged on
+	# every render, silently doing nothing.
+	for step in steps:
+		if step.name == "distort":
+			d_mode = str(step.get("mode", "hard_clip")).lower()
+			if d_mode not in ("hard_clip", "fold", "bit_crush", "downsample"):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: distort mode must be "
+					f"hard_clip, fold, bit_crush, or downsample (got {step.get('mode')!r})"
+				)
 
 	# repitch's fixed `note:` must be a MIDI note number (0-127) or a valid
 	# note name — an invalid value would otherwise raise inside the rtmidi

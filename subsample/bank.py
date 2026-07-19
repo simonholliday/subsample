@@ -42,7 +42,7 @@ Usage flow
    the new active bank.
 
 When no ``programs:`` key is present in the MIDI map, ``cli.py`` builds no
-BankManager at all — it loads the single ``cfg.instrument.directory`` library
+BankManager at all — it loads the single ``cfg.library.directory`` library
 directly, and the player branches on ``bank_manager is not None`` wherever the
 active pool matters (the two paths are deliberately separate).
 """
@@ -130,6 +130,14 @@ def parse_banks (
 
 		if not isinstance(entry, dict):
 			raise ValueError(f"MIDI map programs[{idx}]: expected a mapping, got {type(entry).__name__}")
+
+		unknown = set(entry) - {"name", "directory", "map", "program"}
+		if unknown:
+			raise ValueError(
+				f"MIDI map programs[{idx}]: unknown key(s) {sorted(unknown)} — "
+				f"valid keys: name, directory, map, program (a typo like 'prgoram' "
+				f"would otherwise silently fall back to the list index)"
+			)
 
 		name = entry.get("name")
 		if name is None:

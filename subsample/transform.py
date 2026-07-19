@@ -126,7 +126,7 @@ import librosa
 import numpy
 import pyrubberband
 import scipy.signal
-import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+import soundfile
 
 import pymididefs.notes
 
@@ -677,8 +677,9 @@ class TransformSpec:
 	steps: tuple[TransformStep, ...]
 
 # The identity spec: no transform steps.  Used for the base variant — a
-# float32, peak-normalised copy of the original at the recorder's sample rate,
-# ready for mixing.  Every sample gets one regardless of pitch stability.
+# float32, peak-normalised copy of the original resampled to the PLAYER OUTPUT
+# rate (like every variant; see _execute), ready for mixing.  Every sample gets
+# one regardless of pitch stability.
 _BASE_VARIANT_SPEC: TransformSpec = TransformSpec(steps=())
 
 # ---------------------------------------------------------------------------
@@ -740,12 +741,12 @@ class TransformResult:
 
 	level:
 	    LevelResult computed from the mono mix of the derivative audio.
-	    Stored here so the player can apply the same gain formula it uses for
-	    original SampleRecords:
-	        norm_gain  = target_rms / level.rms
-	        final_gain = min(norm_gain * vel_scale, 1.0 / level.peak)
-	    At trigger time the player: multiplies by final_gain, pans to stereo
-	    if mono, and appends a Voice.  No int→float conversion needed.
+	    Stored here so the player can loudness-normalise this derivative the same
+	    way it does an original SampleRecord (RMS toward the polyphony target,
+	    scaled by note velocity).  At trigger time the player applies that gain,
+	    then maps channels to the output layout via a mix matrix and clamps
+	    against a per-render anti-clip ceiling (see player._render_float) — no
+	    int→float conversion needed here.
 
 	duration:
 	    Length of the derivative in seconds (may differ from the original if
@@ -888,9 +889,9 @@ class TransformCache:
 
 		"""Convenience: look up the base variant (identity spec) for a sample.
 
-		The base variant is a float32, peak-normalised copy at the recorder's
-		sample rate, with no transform steps applied.  Returns None if not yet
-		computed.
+		The base variant is a float32, peak-normalised copy at the PLAYER OUTPUT
+		sample rate (like every variant; see _execute), with no transform steps
+		applied.  Returns None if not yet computed.
 		"""
 
 		key = TransformKey(sample_id=sample_id, spec=_BASE_VARIANT_SPEC)
@@ -1123,7 +1124,7 @@ class VariantDiskCache:
 				header = f.read(_VARIANT_HEADER_SIZE)
 
 				if len(header) < _VARIANT_HEADER_SIZE:
-					_log.warning("Variant cache: corrupt header in %s — deleting", path.name)
+					_log.warning("Variant cache: unreadable file %s — discarded; it will be re-rendered when needed", path.name)
 					path.unlink(missing_ok=True)
 					return None
 
@@ -1132,7 +1133,7 @@ class VariantDiskCache:
 				)
 
 				if magic not in (_VARIANT_MAGIC, _VARIANT_MAGIC_V1):
-					_log.warning("Variant cache: bad magic in %s — deleting", path.name)
+					_log.warning("Variant cache: unreadable file %s — discarded; it will be re-rendered when needed", path.name)
 					path.unlink(missing_ok=True)
 					return None
 
@@ -1147,14 +1148,14 @@ class VariantDiskCache:
 				actual_size = path.stat().st_size
 
 				if expected_bytes > actual_size:
-					_log.warning("Variant cache: corrupt size header in %s — deleting", path.name)
+					_log.warning("Variant cache: unreadable file %s — discarded; it will be re-rendered when needed", path.name)
 					path.unlink(missing_ok=True)
 					return None
 
 				body = f.read(expected_bytes)
 
 				if len(body) < expected_bytes:
-					_log.warning("Variant cache: truncated body in %s — deleting", path.name)
+					_log.warning("Variant cache: unreadable file %s — discarded; it will be re-rendered when needed", path.name)
 					path.unlink(missing_ok=True)
 					return None
 
@@ -1202,7 +1203,11 @@ class VariantDiskCache:
 									energy=tuple(float(v) for v in energy_values),
 								)
 
-			audio = numpy.frombuffer(body, dtype=numpy.float32).reshape(n_frames, channels)
+			# numpy.frombuffer yields a READ-ONLY view into the immutable bytes;
+			# worker renders return writable arrays.  Copy so a disk-cache hit is
+			# indistinguishable from a fresh render — otherwise any later in-place
+			# mutation of a cached result would raise only for cache hits.
+			audio = numpy.frombuffer(body, dtype=numpy.float32).reshape(n_frames, channels).copy()
 
 			# Touch mtime so recently-used files survive the LRU eviction.
 			os.utime(path, None)
@@ -1417,7 +1422,7 @@ class TransformProcessor:
 		self._disk_cache         = disk_cache
 
 		n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
-		_log.info("TransformProcessor: %d worker(s) (cpu_count=%d)", n_workers, os.cpu_count() or 1)
+		_log.debug("rendering: %d background worker(s)", n_workers)
 
 		self._executor = concurrent.futures.ThreadPoolExecutor(
 			max_workers=n_workers,
@@ -1507,6 +1512,10 @@ class TransformProcessor:
 			# them, the success-path clear below was skipped and the stale bounds
 			# would otherwise attach to this (reused worker's) result.
 			_segment_bounds_local.bounds = None
+			# Tracks whether an earlier reverse in this chain has mirrored the
+			# buffer's timeline, so a following quantize mirrors the original-
+			# timeline attack positions instead of slicing silence.
+			_segment_bounds_local.reversed = False
 
 			# enqueue() guards against None audio, but the type system can't see that.
 			if record.audio is None:
@@ -1563,7 +1572,12 @@ class TransformProcessor:
 			# Apply each step in declaration order, dispatching via _HANDLERS.
 			# Handlers receive the audio's true sample rate so all DSP operates at
 			# full resolution before the final downsample.
-			for step in spec.steps:
+			#
+			# A zero-length buffer has nothing to transform, and several handlers
+			# (gate, distort, transient, reshape, vocoder, hpss) would raise or
+			# produce NaN on an empty reduction where filter/compress already
+			# guard — skip the chain and let the empty buffer pass through.
+			for step in spec.steps if audio.shape[0] > 0 else ():
 				handler = self._HANDLERS.get(type(step))
 
 				if handler is None:
@@ -1621,7 +1635,9 @@ class TransformProcessor:
 						step.target_bpm, step.resolution,
 					)
 
-					_log.info(
+					# DEBUG: the raw per-slot energy vector is diagnostic internals,
+					# not something a musician wants on the console at INFO.
+					_log.debug(
 						"Grid energy: sample %d  bpm=%.1f  res=%d  slots=%d  %s",
 						key.sample_id, step.target_bpm, step.resolution,
 						len(energy_profile.energy),
@@ -1782,10 +1798,10 @@ class TransformManager:
 
 		"""Return the cached base variant for a sample, or None if not ready.
 
-		The base variant is a float32, peak-normalised copy at the recorder's
-		sample rate, with no DSP applied.  Every sample gets one — regardless
-		of pitch stability — so the playback path never needs to call
-		_pcm_to_float32() at trigger time.
+		The base variant is a float32, peak-normalised copy at the PLAYER OUTPUT
+		sample rate (like every variant; see _execute), with no DSP applied.
+		Every sample gets one — regardless of pitch stability — so the playback
+		path never needs to call _pcm_to_float32() at trigger time.
 
 		On a miss, enqueues the base variant for background production and
 		returns None.  The caller should fall back to _render() for this
@@ -2202,6 +2218,7 @@ def _apply_time_stretch (
 	# where each transient becomes audible, not where spectral flux peaks.
 	# Falls back to onset_times for pre-v10 analysis data (inside the helper).
 	attack_times = subsample.analysis.effective_attack_times(record.rhythm)
+	attack_times = _mirror_attacks_if_reversed(attack_times, audio, sample_rate)
 
 	# Single-hit or no-onset samples: simple global stretch.  has_beat_map is
 	# the shared eligibility test, so tools that report "quantizable" can
@@ -2333,7 +2350,35 @@ def _apply_reverse (
 			sorted((n - end, n - start) for start, end in bounds)
 		)
 
+	# Flip the timeline flag so a LATER quantize in the chain ([reverse,
+	# pad_quantize/stretch_quantize]) knows to mirror record.rhythm's
+	# original-timeline attack positions onto the now-reversed buffer.
+	_segment_bounds_local.reversed = not getattr(_segment_bounds_local, "reversed", False)
+
 	return audio[::-1].copy()
+
+
+def _mirror_attacks_if_reversed (
+	attack_times: typing.Sequence[float],
+	audio:        numpy.ndarray,
+	sample_rate:  int,
+) -> tuple[float, ...]:
+
+	"""Mirror original-timeline attack positions when an earlier reverse in the
+	chain flipped the buffer.
+
+	A hit at original time t sits at (buffer_duration - t) after a reverse, so a
+	following quantize must slice there, not at t (which would land on silence).
+	With no reverse in the chain — the common case — the positions are returned
+	unchanged.
+	"""
+
+	if not getattr(_segment_bounds_local, "reversed", False):
+		return tuple(attack_times)
+
+	buffer_dur = audio.shape[0] / sample_rate
+
+	return tuple(sorted(buffer_dur - t for t in attack_times))
 
 
 # ---------------------------------------------------------------------------
@@ -3383,6 +3428,7 @@ def _apply_pad_quantize (
 
 	# Prefer sample-accurate attack times, same as stretch_quantize.
 	attack_times = subsample.analysis.effective_attack_times(record.rhythm)
+	attack_times = _mirror_attacks_if_reversed(attack_times, audio, sample_rate)
 
 	# Fewer than 2 attacks: nothing to quantize (shared eligibility test).
 	if not subsample.analysis.has_beat_map(record.rhythm):
@@ -3542,7 +3588,18 @@ def _load_carrier (path: str, target_sr: int) -> numpy.ndarray:
 	differs from target_sr.
 	"""
 
-	cache_key = f"{path}@{target_sr}"
+	# Fold the file's identity (mtime+size) into the key so replacing the carrier
+	# WAV at the same path serves the new audio, not a stale in-memory copy —
+	# mirroring the identity that variant_cache_key folds into the DISK key, so a
+	# fresh render after a carrier swap never pairs a new-mtime disk entry with
+	# old-mtime carrier audio.
+	try:
+		st = os.stat(path)
+		identity = f"{st.st_mtime_ns}:{st.st_size}"
+	except OSError:
+		identity = "?"
+
+	cache_key = f"{path}@{target_sr}@{identity}"
 
 	# Double-checked load: the unlocked-looking first read IS under the lock;
 	# the disk read + resample below deliberately run outside it, and the

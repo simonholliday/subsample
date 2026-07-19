@@ -1,11 +1,7 @@
-"""Tests for scripts/catalog_samples.py — the sample-property catalog tool.
-
-The script lives in scripts/ (not the subsample package), so it is loaded
-here via importlib from its file path.
-"""
+"""Tests for subsample.tools.catalog_samples (`subsample catalog`) — the
+sample-property catalog tool."""
 
 import csv
-import importlib.util
 import io
 import json
 import pathlib
@@ -20,20 +16,11 @@ import subsample.config
 import tests.helpers
 
 
-def _load_script () -> types.ModuleType:
+import subsample.tools.catalog_samples
 
-	"""Load scripts/catalog_samples.py as a module from its file path."""
-
-	script = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "catalog_samples.py"
-	spec   = importlib.util.spec_from_file_location("catalog_samples", script)
-	assert spec is not None and spec.loader is not None
-
-	module = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(module)
-	return module
-
-
-catalog_samples = _load_script()
+# Short alias — the tool was a standalone script before subsample.tools existed,
+# and every test below refers to it by its old bare module name.
+catalog_samples = subsample.tools.catalog_samples
 
 
 def _fix_sidecar_md5 (wav_path: pathlib.Path, sidecar_path: pathlib.Path) -> None:
@@ -311,10 +298,7 @@ class TestCsvOutput:
 		assert len(list(reader)) == 1
 
 	def test_missing_directory_exits (self, tmp_path: pathlib.Path) -> None:
-		with pytest.raises(SystemExit) as excinfo:
-			catalog_samples.main([str(tmp_path / "nope")])
-
-		assert excinfo.value.code == 1
+		assert catalog_samples.main([str(tmp_path / "nope")]) == 1
 
 	def test_empty_directory_emits_header_only (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
 		header, rows = _run_csv(capsys, [str(tmp_path)])
@@ -341,16 +325,17 @@ class TestCsvOutput:
 
 		def fake_load_config (path: typing.Optional[pathlib.Path] = None) -> types.SimpleNamespace:
 			# Mirrors the real Config shape for every attribute main() reads — it
-			# also wires the float import ceiling so the catalog analyses hot float
-			# sources exactly as the player will.
+			# wires the float import ceiling AND the analysis tempo priors so the
+			# catalog analyses hot float sources exactly as the player will.
 			return types.SimpleNamespace(
-				instrument=types.SimpleNamespace(directory=str(tmp_path)),
+				library=types.SimpleNamespace(directory=str(tmp_path)),
 				recorder=types.SimpleNamespace(
 					audio=types.SimpleNamespace(
 						float_import_ceiling_dbfs
 							= subsample.config.AudioConfig.float_import_ceiling_dbfs,
 					),
 				),
+				analysis=subsample.config.AnalysisConfig(),
 			)
 
 		monkeypatch.setattr(subsample.config, "load_config", fake_load_config)

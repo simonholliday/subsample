@@ -15,9 +15,9 @@ is given:
 so you can A/B whether the crossfade earns its place on your material.
 
 Usage:
-	python scripts/suggest_loops.py /path/to/samples           # report only
-	python scripts/suggest_loops.py file.wav                    # a single file
-	python scripts/suggest_loops.py ~/samples --render /tmp/loop_demo
+	subsample loops /path/to/samples           # report only
+	subsample loops file.wav                    # a single file
+	subsample loops ~/samples --render /tmp/loop_demo
 """
 
 import argparse
@@ -32,13 +32,8 @@ import soundfile
 import subsample.analysis
 import subsample.cache
 import subsample.loopfind
+import subsample.tools._shared
 
-
-logging.basicConfig(
-	level=logging.WARNING,
-	format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-	datefmt="%H:%M:%S",
-)
 
 _log = logging.getLogger(__name__)
 
@@ -78,12 +73,14 @@ def _render (path: pathlib.Path, loop: subsample.loopfind.LoopPoints, audio: num
 	soundfile.write(str(out_dir / f"{path.stem}_loop_butt.wav"), butt, sr)
 
 
-def main (argv: typing.Optional[list[str]] = None) -> None:
+def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	"""Report (and optionally render) loop points for loop-candidate samples."""
 
+	subsample.tools._shared.configure_logging()
+
 	parser = argparse.ArgumentParser(
-		prog="suggest_loops",
+		prog="subsample loops",
 		description="Find and audition loop points for loop-candidate samples",
 	)
 	parser.add_argument("paths", type=pathlib.Path, nargs="+", help="Audio files or directories")
@@ -95,13 +92,25 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 		"--all", action="store_true",
 		help="Try every file, not only those the is_loopable gate passes",
 	)
+	parser.add_argument(
+		"--config",
+		type=pathlib.Path,
+		default=None,
+		metavar="PATH",
+		help="Path to config.yaml (default: auto-discover as per main app)",
+	)
 	args = parser.parse_args(argv)
+
+	# ensure_sample_assets heals missing/stale sidecars, so wire the float
+	# ceiling and analysis tempo priors from config first — a sidecar this tool
+	# writes must match what the player would compute.
+	subsample.tools._shared.load_config_and_wire(args.config)
 
 	files = _collect_audio_files(args.paths)
 
 	if not files:
 		print("No audio files found.", file=sys.stderr)
-		sys.exit(1)
+		return 1
 
 	n_candidates = n_found = 0
 
@@ -124,8 +133,16 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 			print(f"{path.name}: could not read audio — {exc}", file=sys.stderr)
 			continue
 
-		pitch_hz = assets.pitch.dominant_pitch_hz if assets.pitch.dominant_pitch_hz > 0.0 else None
-		loop     = subsample.loopfind.find_loop(audio, sr, pitch_hz=pitch_hz)
+		# Prefer the STORED loop — computed on the mono/mid at analysis time, it is
+		# the exact set of points the player loops.  Re-running find_loop on this
+		# raw full-channel read would diverge from playback for ambisonic and
+		# multichannel samples.  --all is the explicit "explore every file" mode,
+		# so it re-runs the finder (non-candidates have no stored loop anyway).
+		if args.all:
+			pitch_hz = assets.pitch.dominant_pitch_hz if assets.pitch.dominant_pitch_hz > 0.0 else None
+			loop     = subsample.loopfind.find_loop(audio, sr, pitch_hz=pitch_hz)
+		else:
+			loop     = assets.loop
 
 		if loop is None:
 			print(f"{path.name:40s} loopable but no clean loop found (no sustain region, or every junction fails-musical)")
@@ -149,6 +166,8 @@ def main (argv: typing.Optional[list[str]] = None) -> None:
 		summary += f"; auditions in {args.render}"
 	print(summary, file=sys.stderr)
 
+	return 0
+
 
 if __name__ == "__main__":
-	main()
+	raise SystemExit(main())

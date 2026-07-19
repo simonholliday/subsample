@@ -26,9 +26,10 @@ Why cosine similarity?
   Cosine similarity measures the angle between two vectors, ignoring
   magnitude. For timbral comparison the *shape* of the fingerprint matters
   more than its overall scale: a kick drum always looks like a kick drum
-  whether it was loud or quiet. Because the spectral group values are in
-  [0, 1] (non-negative) and the MFCC groups are L2-normalised, the result
-  is guaranteed to lie in [0, 1].
+  whether it was loud or quiet. The non-negative spectral groups keep the
+  composite score in [0, 1] for most sample pairs, but the signed MFCC groups
+  can push it slightly negative for very dissimilar timbres — so rankings are
+  by descending score, not an assumed [0, 1] range.
 
 Primary usage — per-reference ranked lists:
   matrix = SimilarityMatrix(reference_library, cfg.similarity)

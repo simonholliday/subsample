@@ -641,8 +641,8 @@ def analyze_mono (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
 	*,
-	_pyin_voiced_flag: numpy.ndarray | None = None,
-	_hpss_ratio: float | None = None,
+	_pyin_voiced_flag: typing.Optional[numpy.ndarray] = None,
+	_hpss_ratio: typing.Optional[float] = None,
 ) -> AnalysisResult:
 
 	"""Compute analysis metrics from a pre-normalised float32 mono array.
@@ -695,6 +695,13 @@ def analyze_mono (
 	# all but the noisiest material — pass S_magnitude so the Wiener entropy is
 	# the documented [0, 1] tonal→noise measure.
 	flatness = librosa.feature.spectral_flatness(S=S_magnitude)
+
+	# librosa returns flatness 1.0 for an all-zero spectrum (digital silence),
+	# reading as "pure noise" while every other metric of a silent file reads
+	# 0.0 — which skews the similarity fingerprint.  Silence has no spectral
+	# content, so report 0.0 (the tonal end), consistent with its other metrics.
+	if float(numpy.max(S_magnitude)) <= 0.0:
+		flatness = numpy.zeros_like(flatness)
 
 	attack, release = _compute_attack_release(mono, params)
 	centroid = _compute_spectral_centroid(params, S_magnitude)
@@ -866,7 +873,7 @@ def analyze_rhythm (
 	params: AnalysisParams,
 	rhythm_cfg: subsample.config.AnalysisConfig,
 	*,
-	_percussive: numpy.ndarray | None = None,
+	_percussive: typing.Optional[numpy.ndarray] = None,
 ) -> RhythmResult:
 
 	"""Detect rhythmic properties from a pre-normalised float32 mono array.
@@ -1328,7 +1335,7 @@ def is_loopable (
 
 def compute_level (
 	mono: numpy.ndarray,
-	params: AnalysisParams | None = None,
+	params: typing.Optional[AnalysisParams] = None,
 ) -> LevelResult:
 
 	"""Compute peak, RMS, crest factor, and noise floor from a normalised float32 mono signal.
@@ -1551,7 +1558,7 @@ def analyze_pitch (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
 	*,
-	_pyin_result: _PYINResult | None = None,
+	_pyin_result: typing.Optional[_PYINResult] = None,
 ) -> tuple[PitchResult, TimbreResult]:
 
 	"""Detect pitch and timbre properties from a pre-normalised float32 mono array.
@@ -1825,7 +1832,7 @@ def _pyin_min_frame_length (params: AnalysisParams) -> int:
 	return int(math.ceil(params.sample_rate / _PYIN_FMIN)) + 1
 
 
-def _run_pyin (mono: numpy.ndarray, params: AnalysisParams) -> _PYINResult | None:
+def _run_pyin (mono: numpy.ndarray, params: AnalysisParams) -> typing.Optional[_PYINResult]:
 
 	"""Run pyin (probabilistic YIN) pitch detection on a mono float32 signal.
 
@@ -1844,14 +1851,41 @@ def _run_pyin (mono: numpy.ndarray, params: AnalysisParams) -> _PYINResult | Non
 	if mono.shape[0] < _pyin_min_frame_length(params):
 		return None
 
-	return librosa.pyin(
-		mono,
-		fmin=_PYIN_FMIN,
-		fmax=_PYIN_FMAX,
-		sr=params.sample_rate,
-		frame_length=params.n_fft,
-		hop_length=params.hop_length,
-	)
+	# pyin requires fmax < Nyquist.  For very low sample rates (below ~4186 Hz —
+	# telephone-band material, some SDR captures) the default _PYIN_FMAX exceeds
+	# Nyquist and librosa raises ParameterError, which would abort the whole
+	# analysis.  Clamp fmax just under Nyquist; if that leaves no usable band
+	# above fmin, treat the signal as unpitched rather than crashing.
+	nyquist = params.sample_rate / 2.0
+	fmax = min(_PYIN_FMAX, nyquist * 0.99)
+
+	if fmax <= _PYIN_FMIN:
+		return None
+
+	# Clamp frame_length/hop to the signal length, exactly as analyze_mono and
+	# analyze_pitch do before their own STFTs.  analyze_all shares this one pyin
+	# call across both, so without the clamp a short signal would be analysed at
+	# a different (unclamped) frame_length here than analyze_pitch would use
+	# standalone — two paths, two answers for the same audio.  The min-length
+	# guard above guarantees the clamped frame_length still exceeds one period.
+	frame_length = min(params.n_fft, mono.shape[0])
+	hop_length   = min(params.hop_length, frame_length)
+
+	# Clamping frame_length to a very short signal can drop below the two-fmin-
+	# periods librosa likes and it warns about accuracy — expected here (the
+	# signal is simply short) and not actionable, so silence that one advisory.
+	with warnings.catch_warnings():
+		warnings.filterwarnings(
+			"ignore", message=".*less than two periods.*", category=UserWarning,
+		)
+		return librosa.pyin(
+			mono,
+			fmin=_PYIN_FMIN,
+			fmax=fmax,
+			sr=params.sample_rate,
+			frame_length=frame_length,
+			hop_length=hop_length,
+		)
 
 
 def to_mono_float (
@@ -2319,6 +2353,15 @@ def _compute_spectral_contrast (
 	if params.n_fft < 64:
 		return 0.0
 
+	# librosa.spectral_contrast also needs at least one FFT bin inside the
+	# narrowest sub-band [_CONTRAST_FMIN, 2*_CONTRAST_FMIN].  For very short audio
+	# the n_fft analyze_mono clamped to the signal length can be small enough
+	# (~64-110 samples at 44.1 kHz) that the bin spacing sr/n_fft exceeds
+	# _CONTRAST_FMIN and that band holds no bin, which makes librosa raise
+	# IndexError and drop the sample.  Report a flat spectrum instead.
+	if params.sample_rate / params.n_fft > _CONTRAST_FMIN:
+		return 0.0
+
 	# librosa.spectral_contrast needs every sub-band below Nyquist:
 	# fmin * 2^(n_bands - 1) < sr/2.  Its default n_bands=6 (fmin=200) exceeds
 	# Nyquist for any sr <= 12800 Hz (200 * 2^5 = 6400 >= sr/2), raising
@@ -2351,7 +2394,7 @@ def _compute_voiced_fraction (
 	mono: numpy.ndarray,
 	params: AnalysisParams,
 	*,
-	pyin_voiced_flag: numpy.ndarray | None = None,
+	pyin_voiced_flag: typing.Optional[numpy.ndarray] = None,
 ) -> float:
 
 	"""Measure the fraction of frames where a fundamental frequency was detected.

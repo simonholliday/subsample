@@ -146,14 +146,58 @@ def _get_downmix (in_ch: int, out_ch: int) -> typing.Optional[numpy.ndarray]:
 	return None
 
 
+def _position_upmix (in_ch: int, out_ch: int) -> numpy.ndarray:
+
+	"""Upmix in_ch -> out_ch (in_ch < out_ch) by SPEAKER POSITION, not raw index.
+
+	Each input channel routes to the output channel at the same SMPTE position
+	(FL->FL, BL->BL, ...), so a quad source (FL, FR, BL, BR) sends its rears to
+	the surround pair of a 5.1/7.1 output instead of landing on the centre and
+	the LFE (which raw index alignment does).  A mono/centre source with no
+	dedicated output centre spreads equal-power to the front L/R pair (matching
+	the documented `pan: [50, 50]` centre).  Positions absent from the output
+	layout are dropped; extra output channels stay silent.  Falls back to
+	conservative index alignment for any non-standard layout.
+	"""
+
+	mat = numpy.zeros((out_ch, in_ch), dtype=numpy.float32)
+
+	# A mono source has no speaker position — it spreads equal-power to the
+	# front L/R pair (the documented `pan: [50, 50]` centre), never onto a
+	# physical centre channel even when the output layout has one.
+	if in_ch == 1:
+		centre_gain = numpy.float32(numpy.sqrt(0.5))
+		mat[0, 0] = centre_gain
+		if out_ch >= 2:
+			mat[1, 0] = centre_gain
+		return mat
+
+	in_layout  = STANDARD_LAYOUTS.get(in_ch)
+	out_layout = STANDARD_LAYOUTS.get(out_ch)
+
+	if in_layout is None or out_layout is None:
+		n = min(in_ch, out_ch)
+		mat[:n, :n] = numpy.eye(n, dtype=numpy.float32)
+		return mat
+
+	out_index = {ch: i for i, ch in enumerate(out_layout)}
+
+	for src_i, ch in enumerate(in_layout):
+		dst = out_index.get(ch)
+		if dst is not None:
+			mat[dst, src_i] = 1.0
+
+	return mat
+
+
 def _build_default_matrix (in_ch: int, out_ch: int) -> numpy.ndarray:
 
 	"""Build a default mix matrix with no user pan weights.
 
 	- in == out: identity (each channel maps 1:1)
 	- in > out: ITU downmix if available, else truncate to first out_ch channels
-	- mono in, multi out: centre (equal-power front L/R), matching `pan: [50, 50]`
-	- other in < out: map input to first in_ch output channels, extras silent
+	- in < out: position-aware upmix (mono -> centre spread, quad rears -> the
+	  surround pair, each source channel to its matching speaker position)
 	"""
 
 	if in_ch == out_ch:
@@ -169,19 +213,8 @@ def _build_default_matrix (in_ch: int, out_ch: int) -> numpy.ndarray:
 		# Fallback: take the first out_ch input channels.
 		return numpy.eye(out_ch, in_ch, dtype=numpy.float32)
 
-	# Upmix (in < out).
-	if in_ch == 1 and out_ch >= 2:
-		# A mono source with no pan defaults to CENTRE — spread equal-power to the
-		# front L/R pair rather than hard-left, matching the documented
-		# `pan: [50, 50]` centre (whose constant-power gains are sqrt(0.5) each).
-		mat = numpy.zeros((out_ch, 1), dtype=numpy.float32)
-		centre_gain = numpy.float32(numpy.sqrt(0.5))
-		mat[0, 0] = centre_gain
-		mat[1, 0] = centre_gain
-		return mat
-
-	# Other upmixes: map input to corresponding front positions, rest silent.
-	return numpy.eye(out_ch, in_ch, dtype=numpy.float32)
+	# Upmix (in < out) — route by speaker position, not raw index.
+	return _position_upmix(in_ch, out_ch)
 
 
 def build_mix_matrix (
@@ -247,11 +280,12 @@ def build_mix_matrix (
 		fold = _build_default_matrix(target_ch, out_channels)
 		return (fold @ weighted).astype(numpy.float32)
 
-	# Target is smaller than output — expand into front positions.
-	result = numpy.zeros((out_channels, in_channels), dtype=numpy.float32)
-	result[:target_ch, :] = weighted
+	# Target is smaller than output — place each target-layout channel at its
+	# matching speaker position in the larger output (position-aware, so a quad
+	# pan target's rears reach the surround pair, not the centre and LFE).
+	place = _position_upmix(target_ch, out_channels)   # (out_channels, target_ch)
 
-	return result
+	return (place @ weighted).astype(numpy.float32)
 
 
 # ---------------------------------------------------------------------------

@@ -46,7 +46,7 @@ you focus on playing.
   - [Works with Subsequence](#works-with-subsequence)
 - **5. Project Info**
   - [Performance](#performance)
-  - [Scripts](#scripts)
+  - [Tools](#tools)
   - [Roadmap](#roadmap)
   - [Architecture](#architecture)
   - [Requirements](#requirements)
@@ -183,7 +183,7 @@ record from - for example `[3, 4]` records a stereo pair from inputs 3 and 4.
 You can also feed it pre-recorded WAV files - they pass through the same
 detection pipeline, making it easy to build sample libraries from existing
 recordings. For pre-trimmed sources (commercial sample packs, field recordings,
-SDR radio captures), `import_samples.py` bypasses detection entirely and imports
+SDR radio captures), `subsample import` bypasses detection entirely and imports
 files directly with silence trimming, safety fades, re-encoding, and full
 analysis.
 
@@ -278,14 +278,17 @@ player:
   midi_map: midi-map.yaml
 ```
 
-Two maps ship with the project:
+Two maps ship with Subsample, and `subsample --init` places both in your
+project:
 
-- **[midi-map.yaml.default](midi-map.yaml.default)** - a heavily-commented
-  template; open it, copy to `midi-map.yaml`, uncomment the example you want,
-  and go.
-- **[midi-map-gm-drums.yaml](midi-map-gm-drums.yaml)** - a complete General
-  MIDI percussion kit, ready to play against any sample library you point it
-  at. Instant kit, no tweaking needed.
+- **midi-map.yaml** (from the template
+  [midi-map.yaml.default](subsample/data/midi-map.yaml.default)) - a
+  heavily-commented starting point; uncomment the example you want and go.
+- **midi-map-gm-drums.yaml**
+  ([source](subsample/data/midi-map-gm-drums.yaml)) - a complete General MIDI
+  percussion kit, ready to play against any sample library you point it at.
+  Instant kit, no tweaking needed - `--init` wires it into `config.yaml` for
+  you.
 
 ### Tutorial - five steps from simple to expressive
 
@@ -327,11 +330,15 @@ may change, but you never have to rewrite the YAML.
       reference: samples/reference/GM36_BassDrum1.wav
 ```
 
-`reference` points at a reference WAV shipped in `samples/reference/`. The
-library's samples are ranked against this reference by a 58-dimensional
-spectral/rhythmic fingerprint; the top-ranked match plays. (When `reference`
-is set and no `order` is given, `order: [{ by: similarity, dir: desc }]` is
-assumed - see [Implicit defaults](#implicit-defaults) further down.)
+`reference` points at a reference sample by path. subsample ships (and
+`subsample --init` scaffolds into `samples/reference/`) a precomputed
+fingerprint sidecar for each General MIDI sound - the `.analysis.json` files
+only, no audio - so the path above resolves from its fingerprint even though no
+WAV sits beside it. The library's samples are ranked against that reference by
+a 58-dimensional spectral/rhythmic fingerprint; the top-ranked match plays.
+(When `reference` is set and no `order` is given,
+`order: [{ by: similarity, dir: desc }]` is assumed - see
+[Implicit defaults](#implicit-defaults) further down.)
 
 #### Step 3 - rule-based selection
 
@@ -413,11 +420,11 @@ features (programs, ambisonic capture, MIDI CC mapping).
 ### The GM drums map - instant professional drum kit
 
 Before the reference, a quick mention of the "no-config" path. If you want a
-complete drum kit in under a minute, use
-[midi-map-gm-drums.yaml](midi-map-gm-drums.yaml) directly. Point it at your
-instrument directory (any sample collection will do) and every MIDI drum note
-automatically finds the closest matching sample and plays it through a
-professional mix chain:
+complete drum kit in under a minute, use the `midi-map-gm-drums.yaml` that
+`subsample --init` placed in your project (it is even pre-wired into the
+scaffolded `config.yaml`). Point Subsample at any sample collection and every
+MIDI drum note automatically finds the closest matching sample and plays it
+through a professional mix chain:
 
 - **Similarity matching** - each note finds the best sample via spectral
   fingerprint comparison against GM reference sounds
@@ -459,7 +466,7 @@ when you want to try something the tutorial didn't show.
 | `release` | no | Shape the note-off fade for a sustained voice (`mode: gated` or `loop`; ignored with a warning on `mode: one_shot`). A number of ms, `true` for an adaptive tail, `full` to play the remaining audio to its natural end with no fade (a loop rings out its real tail), or `{time, curve}` where `curve` is `cosine` (default) or `exponential`; `time` may be CC-bound. `mode: loop` defaults to the adaptive tail when unset. See Release below |
 | `silenced_by` | no | Choke: the note(s) whose arrival cuts this sound with a fast ~10 ms damp (a hi-hat choke). A note, a list of notes, or `self` (a re-strike stops the previous hit), and `self` may sit in a list. Overrides `release` and rings-out; not valid on `zone-tuned`. See Choke below |
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
-| `pan` | no | Per-channel weights (constant-power normalised at mix time) e.g. `[50, 50]` = centre (default). Ratios matter, not absolute values: `[1, 1]` and `[100, 100]` are both centre. |
+| `pan` | no | Stereo position `-100` (hard left) to `100` (hard right), `0` = centre (default) - or a per-channel weight list for surround/asymmetric routing (`[50, 50]` = centre; ratios matter, not absolute values). Constant-power normalised at mix time. See Pan below |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
 | `extract` | no | Collapse a multi-channel sample to one channel at playback: `omni`, `left`, `right`, `front`, `back`, `side`, `depth`, `height`, or `channel.N` (see Channel extraction below) |
 | `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
@@ -538,13 +545,15 @@ tail, shaped by `release`.
 - name: Pad
   channel: 1
   notes: C2..C4
+  select:
+    where: { loopable: true }
   mode: loop            # attack, then loop the sustain while held
   release: full         # on note-off, ring out the natural tail (no fade)
 ```
 
 subsample finds the loop points automatically - the steadiest slice of the
 sustain, with a short crossfade so the wrap is inaudible. The `loopable` catalog
-column and `scripts/suggest_loops.py` let you preview which samples loop well. To
+column and `subsample loops` let you preview which samples loop well. To
 place the loop by hand, give `loop:` in seconds (crossfade in ms):
 
 ```yaml
@@ -667,7 +676,7 @@ error listing the templates you defined.
 
 ```yaml
 notes: 36          # single MIDI note number
-notes: C4          # note name (C4 = MIDI 60, same as Ableton/Logic/FL Studio)
+notes: C4          # scientific pitch (C4 = MIDI 60, as in REAPER; Ableton/Logic show 60 as C3, FL as C5)
 notes: drum.kick_1 # GM percussion by symbolic name (case-insensitive)
 notes: [36, 35]    # list - each gets the next similarity rank (first = best match)
 notes: [drum.kick_1, drum.snare_1]   # list of symbolic names
@@ -807,7 +816,7 @@ is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
 | `pitch` | Hz or note name | Filter by detected frequency. Each operator value is either a Hz float (`{ gte: 130.8 }`) or a note name (`{ gte: C3, lt: C6 }`). The two forms are interchangeable - note names are converted to Hz at parse time. Sharps: `C#4`; flats: `Db4`. |
 | `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
-| `loopable` | bool | `true` = has a steady sustaining region (tonal or textural) worth looping while a key is held; `false` = does not. A coarse candidate flag over existing analysis - see the loopable column of `catalog_samples.py` to preview which samples pass |
+| `loopable` | bool | `true` = has a steady sustaining region (tonal or textural) worth looping while a key is held; `false` = does not. A coarse candidate flag over existing analysis - see the loopable column of `subsample catalog` to preview which samples pass |
 | `reference` | path | Similarity match against a reference sample (path to WAV) |
 | `name` | string / list / dict | Filename stem match. Four forms — see below. Legacy: a path-like scalar value (containing `/` or starting with `.`) is still auto-detected as a `path:` |
 | `path` | path | Match a specific WAV file at this path (relative paths resolved against the MIDI map's directory). Preferred over `name:` for file references |
@@ -951,6 +960,7 @@ at roughly that strength.
 
 ```yaml
 - notes: drum.snare
+  channel: 10
   select:
     where: { directory: snare }
     order: quietest       # required - ranks the pool quiet to loud
@@ -1326,16 +1336,26 @@ params.
 
 ### Pan
 
-`pan` is a list of per-channel weights. The values are **relative**, not
-percentages: only the ratio between channels matters. `[50, 50]`, `[1, 1]`,
-and `[100, 100]` all produce centre. The raw weights are normalised to
-constant-power gains at mix time, so perceived loudness stays equal across
-pan positions.
+The simple form is a single **position**, the way a mixer pan pot reads:
+`-100` hard left, `0` centre, `+100` hard right.
 
 ```yaml
-pan: [50, 50]    # centre (default)
-pan: [100, 0]    # hard left
-pan: [75, 25]    # left of centre
+pan: 0       # centre (default)
+pan: -100    # hard left
+pan: -50     # halfway left
+pan: 30      # a touch right
+```
+
+For surround layouts or asymmetric routing, `pan` also accepts a list of
+per-channel weights. The values are **relative**, not percentages: only the
+ratio between channels matters. `[50, 50]`, `[1, 1]`, and `[100, 100]` all
+produce centre. Either form is normalised to constant-power gains at mix
+time, so perceived loudness stays equal across pan positions.
+
+```yaml
+pan: [50, 50]    # centre (same as pan: 0)
+pan: [100, 0]    # hard left (same as pan: -100)
+pan: [75, 25]    # left of centre (same as pan: -50)
 ```
 
 Channel order follows SMPTE: `[L, R]` for stereo; `[L, R, C, LFE, Ls, Rs]` for
@@ -1398,7 +1418,7 @@ on the incoming velocity. Two common uses:
   velocity: [100, 127]
   select:
     where:
-      reference: SNARE_HARD
+      name: { matches: "*snare-hard*" }
 ```
 
 This assignment fires only for velocities 100-127. The original velocity reaches
@@ -1414,7 +1434,7 @@ the gain calculation unchanged.
     trigger: [0, 63]
     rescale: true                # → output range [0, 127]
   select:
-    where: { reference: HAT_SOFT }
+    where: { name: { matches: "*hat-soft*" } }
 
 - name: Hard hat
   channel: 10
@@ -1423,7 +1443,7 @@ the gain calculation unchanged.
     trigger: [64, 127]
     rescale: [10, 100]           # custom output range
   select:
-    where: { reference: HAT_HARD }
+    where: { name: { matches: "*hat-hard*" } }
 ```
 
 `rescale: true` is shorthand for `[0, 127]`. With rescale on, each layer
@@ -1470,7 +1490,7 @@ explicit "yes, I meant these to overlap":
   notes: 36
   stack: true
   select:
-    where: { reference: KICK_BODY }
+    where: { name: { matches: "*kick-body*" } }
 
 - name: Sub sine
   channel: 10
@@ -1478,7 +1498,7 @@ explicit "yes, I meant these to overlap":
   stack: true
   output: [4]                    # send the sub to its own output if you like
   select:
-    where: { reference: SUB_SINE }
+    where: { name: { matches: "*sub-sine*" } }
 ```
 
 Each stacked sample keeps its own settings - gain, pan, output routing,
@@ -1743,9 +1763,9 @@ to 128 programs by Program Change number alone. The terminology mirrors that:
 what a synth calls a "program" (one Program Change slot) is one entry here; the
 MIDI term "bank" (a group of 128 programs reached via Bank Select) has no role.
 
-When `programs:` is absent, the single `instrument.directory` from config.yaml is
+When `programs:` is absent, the single `library.directory` from config.yaml is
 used as before - you do not need a `programs:` block for a single instrument set.
-When present, it overrides `instrument.directory`. Each program gets its own
+When present, it overrides `library.directory`. Each program gets its own
 sample library, similarity index, and transform cache.
 
 With the `directory:` form, assignments are program-agnostic - the same top-level
@@ -1773,7 +1793,7 @@ default_program: 0
 
 - The `map:` path is resolved **relative to the parent map's directory**.
   A `directory:` program, by contrast, resolves **relative to the working
-  directory you launch subsample from** (like `instrument.directory`) - if a
+  directory you launch subsample from** (like `library.directory`) - if a
   kit works from the project root but not elsewhere, this asymmetry is why.
 - The preset is an ordinary mapper file with its own `assignments:`. Its samples
   come from its own `where: { directory: ... }` predicates and path references,
@@ -1789,7 +1809,7 @@ default_program: 0
 - You can **mix** `map:` and `directory:` programs in one map.
 
 `map:` and `directory:` programs are eager-loaded at startup so switching stays
-instant. If a program's samples don't fit within `instrument.max_memory_mb`, a
+instant. If a program's samples don't fit within `library.max_memory_mb`, a
 startup warning notes that switching to it may lag (samples reload from disk).
 
 > **Editing a preset:** the file watcher follows only the top-level map. Editing a
@@ -1828,9 +1848,11 @@ names from a mounted definitions file, e.g. `cc: my.brightness` - see
 
 ```yaml
 process:
-  - pad_quantize: { grid: 16, strength: { cc: 1 } }
-  - stretch_quantize: { tempo: { cc: 2, min: 60, max: 180 }, grid: 16 }
-  - filter_low: { freq: { cc: 74, min: 200, max: 16000 } }
+  - pad_quantize: { grid: 16, strength: { cc: 1 } }         # bare CC binding
+  - filter_low: { freq: { cc: 74, min: 200, max: 16000 } }  # ranged CC binding
+# stretch_quantize's tempo binds the same way - but a chain may hold only one
+# quantizer, so use it in place of pad_quantize, not alongside it:
+#   - stretch_quantize: { tempo: { cc: 2, min: 60, max: 180 }, grid: 16 }
 ```
 
 | Field | Required | Default | Description |
@@ -2063,20 +2085,41 @@ brew install portaudio rubberband
 # Install (directly from GitHub, or from a local clone with `pip install .`)
 pip install git+https://github.com/simonholliday/subsample.git
 
-# Run with built-in defaults (no config file needed)
+# Create a project: a documented config, the ready-to-play GM drum kit map,
+# an editable map template, and the GM reference data the kit matches against
+mkdir my-project && cd my-project
+subsample --init
+
+# Start capturing - every distinct sound lands in samples/captures/
 subsample
 
-# Or process audio files through the detection pipeline
-subsample recording.wav                # Single file
-subsample ./recordings/*.wav           # Multiple files (glob expansion)
+# Or feed it existing recordings instead of a microphone
+subsample recording.wav                # chop one file into samples
+subsample ./recordings/*.wav           # or many (glob expansion)
 ```
 
-Subsample works out of the box with sensible built-in defaults. To customise,
-run `subsample --init` in your project folder - it writes a starter
-`config.yaml` with every setting present and documented - or create a
-`config.yaml` by hand containing only the settings you want to override;
-everything else is inherited automatically. See
-[Configuration](#configuration) for details.
+Subsample also runs with no project at all - built-in defaults cover
+everything, and a hand-written `config.yaml` containing only the settings you
+want to override works the same way (everything else is inherited
+automatically; see [Configuration](#configuration)).
+
+### First sound - from install to a playable kit
+
+1. **Get samples into the library.** Run `subsample` and make sounds at the
+   microphone - each distinct sound is captured, trimmed, and analysed into
+   `samples/captures/` - or bring existing sounds:
+   `subsample import ~/my-pack/*.wav` (trims, fades, and analyses them in),
+   or simply copy audio files (WAV, FLAC, AIFF, OGG, MP3) into
+   `samples/captures/`; everything there loads at startup.
+2. **Turn the player on.** In `config.yaml`, set `player.enabled: true` and
+   your devices: `player.audio.device` (output), and `player.midi_device`
+   (or `player.virtual_midi_port` if a sequencer on the same machine will
+   drive it). The GM kit map is already wired in by `--init`.
+3. **Play channel 10.** Run `subsample` again and play your controller or
+   sequencer on MIDI channel 10 - kick on 36, snare on 38, hi-hats on 42/46.
+   Every GM drum note plays whichever of your samples sounds closest to that
+   drum, through a pre-mixed channel strip. Load more samples and the kit
+   improves.
 
 **Live capture mode:** Subsample lists available audio input devices and lets you
 choose one (or auto-selects if only one is present). It calibrates ambient noise
@@ -2092,7 +2135,7 @@ about a second of room tone at the start of an imported file, or set
 ### Chopping long-decay takes
 
 By default a recording starts when the level rises above the ambient floor by
-`detection.snr_threshold_db` and ends when it falls back below that same
+`detection.threshold_db` and ends when it falls back below that same
 threshold. That works for short, well-separated hits, but it cuts a long decay
 short - a ride cymbal or gong ringing down over many seconds is chopped off the
 moment it drops near (but not to) the noise floor, often 15 dB above silence.
@@ -2103,7 +2146,7 @@ silence, strike again - and give the recorder a separate, lower threshold for th
 
 ```yaml
 detection:
-  snr_threshold_db: 10.5         # START: still fires only on the loud attack
+  threshold_db: 10.5         # START: still fires only on the loud attack
   release_threshold_db: 4.0      # END: let the tail ring out to ~4 dB over the floor
   retrigger_threshold_db: 12.0   # or end the moment the next hit lands, whichever comes first
   fade_out_ms: 30                # a smooth fade so the tail never clicks
@@ -2119,11 +2162,11 @@ next hit, whichever comes first*. Both default to off, preserving the original
 single-threshold behaviour.
 
 `retrigger_threshold_db` assumes each hit's attack lands quickly - within
-`max(hold_time, 0.1s)`. That fits drums, cymbals, and other fast-attack
+`max(hold_seconds, 0.1s)`. That fits drums, cymbals, and other fast-attack
 percussion. A sound with a slow or two-stage attack (a soft onset then a louder
 transient a moment later - breath before a flute note, mallet contact before a
 bowl) can read its own transient as a new hit and split one gesture into two; if
-that happens, raise `hold_time` so it spans the attack.
+that happens, raise `hold_seconds` so it spans the attack.
 
 ## Configuration
 
@@ -2144,7 +2187,7 @@ subsample --config ../config.yaml     # an explicit file, wherever you keep it
 ```
 
 The directory you run from is the project folder: relative paths in the
-config - `player.midi_map`, `instrument.directory`, `output.directory` - all
+config - `player.midi_map`, `library.directory`, `recorder.directory` - all
 resolve against it, whichever config file is in use. That supports both ways
 of laying out a multi-track project:
 
@@ -2165,10 +2208,10 @@ config, usually because you launched from a different directory.
 
 The most common overrides:
 
-- **First run:** set `recorder.audio.device` (your microphone) and `output.directory`
+- **First run:** set `recorder.audio.device` (your microphone) and `recorder.directory`
 - **For MIDI playback:** set `player.enabled: true`, `player.midi_device` or `player.virtual_midi_port`, and `player.audio.device`
 - **If you hear clipping:** raise `player.max_polyphony`; the `limiter_threshold_db` and `limiter_ceiling_db` defaults protect against distortion automatically
-- **If recordings miss quiet sounds or trigger on noise:** tune `detection.snr_threshold_db`
+- **If recordings miss quiet sounds or trigger on noise:** tune `detection.threshold_db`
 
 Everything else - chunk sizes, buffer lengths, transform settings, similarity
 weights - is optional and rarely needs changing.
@@ -2177,12 +2220,12 @@ weights - is optional and rarely needs changing.
 |---|---|---|
 | `max_memory_mb` | auto | Total cache memory budget. Auto-detect: min(25% of system RAM, 1024 MB). Split: 60% instruments, 35% transforms, 5% carrier |
 | `recorder.enabled` | `true` | Enable live audio capture; set to `false` to process files only |
-| `recorder.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt |
+| `recorder.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt. `subsample --list-devices` shows the names |
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
 | `recorder.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
 | `recorder.audio.channels` | `1` | 1 = mono, 2 = stereo. Omit (or set to `null`) to auto-detect from the selected device |
 | `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
-| `recorder.audio.chunk_size` | `512` | Frames per buffer read |
+| `recorder.audio.buffer_frames` | `512` | Frames per buffer read |
 | `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, ~40-60% smaller, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
 | `recorder.audio.float_import_ceiling_dbfs` | `-1.0` | Ceiling (dBFS) for 32-bit float / 64-bit double audio, wherever it is read - CLI file-input (`subsample <file>`), `directory:`/`path:` loads, OSC import, and the watcher. Peaks above full scale (these formats have no hard 0 dBFS limit) are scaled down to fit instead of hard-clipping on the way in. Whole-file, so dynamics are preserved; inaudible, since playback re-normalises. Integer sources untouched. `null` clips as before (this was the behaviour in prior versions). A hot float sample analysed before this existed can play a decibel or two quiet until re-analysed - delete its `.analysis.json` sidecar to refresh it |
 | `recorder.previews` | `true` | Emit a `.preview.png` thumbnail sidecar (1024x256, ~15-25 KB) and embed a compact `preview` data block in `.analysis.json` so the Supervisor dashboard can render a scalable SVG on demand. See [Sample previews](#sample-previews) |
@@ -2192,7 +2235,7 @@ weights - is optional and rarely needs changing.
 | `player.max_polyphony` | `8` | Headroom divisor, not a voice cap: per-voice gain = 1/max\_polyphony, so this many voices at full velocity sum to full scale. Voices are never cut off. Raise if clipping; lower for louder individual voices |
 | `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched. `0.0` disables the limiter |
 | `player.limiter_ceiling_db` | `-0.1` | Maximum output level (dBFS) the limiter allows; must exceed threshold (ignored when the limiter is disabled) |
-| `player.midi_device` | `none` | MIDI input device name (substring match); if unset, auto-select or prompt |
+| `player.midi_device` | `none` | MIDI input device name (substring match); if unset, auto-select or prompt. `subsample --list-devices` shows the names |
 | `player.audio.device` | `none` | Audio output device name for playback |
 | `player.audio.sample_rate` | auto | Output sample rate; defaults to recorder rate. Do not set higher than source. |
 | `player.audio.bit_depth` | auto | Output bit depth (16, 24, or 32); defaults to recorder bit depth |
@@ -2201,23 +2244,23 @@ weights - is optional and rarely needs changing.
 | `player.virtual_midi_port` | `none` | Name for a virtual MIDI input port; overrides `player.midi_device` |
 | `player.watch_midi_map` | `false` | Monitor the `midi_map` file for changes and reload assignments on save (see Live-coding) |
 | `player.strict_midi_map` | `true` | Reject unknown `where:` keys, unknown processor names, and non-bool `pitched:` values at parse time. Set to `false` to silently ignore unknown keys when loading older or hand-edited MIDI maps |
-| `detection.snr_threshold_db` | `12.0` | dB above ambient to trigger recording |
-| `detection.hold_time` | `0.5` | Seconds to hold recording open after signal drops |
+| `detection.threshold_db` | `12.0` | dB above ambient to trigger recording |
+| `detection.hold_seconds` | `0.5` | Seconds to hold recording open after signal drops |
 | `detection.warmup_seconds` | `1.0` | Calibration period before detection activates |
-| `detection.ema_alpha` | `0.1` | Ambient noise adaptation speed (lower = slower) |
-| `detection.trim_pre_samples` | `10` | Samples to keep before signal onset (S-curve fade applied) |
-| `detection.trim_post_samples` | `90` | Samples to keep after signal end (S-curve fade applied) |
-| `detection.release_threshold_db` | `null` | Separate CLOSE threshold (dB above ambient) for ending a recording. Lower than `snr_threshold_db` so a long decay rings out toward silence instead of being cut short; the recording still starts on the louder attack. `null` reuses `snr_threshold_db`. See [Chopping long-decay takes](#chopping-long-decay-takes) |
-| `detection.retrigger_threshold_db` | `null` | While recording, a rise of this many dB over the decaying tail ends the current sample and starts the next - so spaced hits whose tails never fully fade are still separated. `null` disables. Pair with `release_threshold_db`. Assumes each attack lands within `max(hold_time, 0.1s)`; raise `hold_time` for slow/two-stage attacks or they over-split |
+| `detection.floor_adaptation` | `0.1` | How quickly the tracked room level follows changes, 0-1. Higher = only sudden-onset sounds trigger; lower = gradual builds trigger too |
+| `detection.trim_pre_ms` | `0.25` | Milliseconds of audio kept before the detected onset, with a smooth fade-in so the start never clicks |
+| `detection.trim_post_ms` | `2.0` | Milliseconds of audio kept after the detected end, with a smooth fade-out so the stop never clicks |
+| `detection.release_threshold_db` | `null` | Separate CLOSE threshold (dB above ambient) for ending a recording. Lower than `threshold_db` so a long decay rings out toward silence instead of being cut short; the recording still starts on the louder attack. `null` reuses `threshold_db`. See [Chopping long-decay takes](#chopping-long-decay-takes) |
+| `detection.retrigger_threshold_db` | `null` | While recording, a rise of this many dB over the decaying tail ends the current sample and starts the next - so spaced hits whose tails never fully fade are still separated. `null` disables. Pair with `release_threshold_db`. Assumes each attack lands within `max(hold_seconds, 0.1s)`; raise `hold_seconds` for slow/two-stage attacks or they over-split |
 | `detection.fade_out_ms` | `0.0` | Smooth fade (ms) on each sample's trailing edge, masking a cut taken mid-decay or at the next hit. `0.0` keeps the ~2 ms declick |
-| `output.directory` | `./samples/captures` | Where WAV files are saved |
-| `output.filename_format` | `%Y-%m-%d_%H-%M-%S-%3f` | strftime format for filenames (`%3f` = 3-digit milliseconds) |
+| `recorder.directory` | `samples/captures` | Where recordings are saved (also the default `library.directory`, so captures join the playable library) |
+| `recorder.filename_format` | `%Y-%m-%d_%H-%M-%S-%3f` | strftime format for filenames (`%3f` = 3-digit milliseconds) |
 | `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
-| `instrument.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
-| `instrument.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Overridden by `programs:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
-| `instrument.watch` | `false` | Monitor `instrument.directory` (or each program directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio. Watches the top level of each directory only - drop new files there, not into subdirectories (see Watching for new samples) |
+| `library.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
+| `library.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Overridden by `programs:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
+| `library.watch` | `false` | Monitor `library.directory` (or each program directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio. Watches the top level of each directory only - drop new files there, not into subdirectories (see Watching for new samples) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
@@ -2230,9 +2273,9 @@ weights - is optional and rarely needs changing.
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
 | `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |
 | `transform.max_disk_mb` | auto | Max disk space (MB) for cached variant files; defaults to 3x memory budget. 0 disables |
-| `supervisor.enabled` | `false` | Enable the Supervisor web dashboard (broadcasts state via WebSocket for live monitoring). Requires `pip install subsample[supervisor]` |
+| `supervisor.enabled` | `false` | Enable the Supervisor web dashboard (broadcasts state via WebSocket for live monitoring). Requires `pip install "subsample[supervisor] @ git+https://github.com/simonholliday/subsample.git"` |
 | `supervisor.port` | `9003` | WebSocket port the Supervisor server listens on |
-| `osc.enabled` | `false` | Enable OSC integration (send sample events, optionally receive import requests). Requires `pip install subsample[osc]` |
+| `osc.enabled` | `false` | Enable OSC integration (send sample events, optionally receive import requests). Requires `pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"` |
 | `osc.send_host` | `127.0.0.1` | Destination host for outgoing `/sample/captured` and `/sample/loaded` messages |
 | `osc.send_port` | `9000` | Destination UDP port for outgoing OSC messages |
 | `osc.receive_enabled` | `false` | Listen for `/sample/import` messages to load audio files into the in-memory library from other apps (reads in place, does not copy) |
@@ -2310,7 +2353,7 @@ samples/
   field_recording_2.wav
 ```
 
-Both modes write to the same output directory. Point `instrument.directory` at
+Both modes write to the same output directory. Point `library.directory` at
 the same path to get a persistent library that grows on disk across sessions.
 
 ### Storage format
@@ -2388,17 +2431,22 @@ alongside its full analysis data. A configurable memory cap prevents unbounded
 growth; the oldest samples are evicted when a new one would exceed the limit.
 The budget is auto-detected by default (60% of the global memory allocation -
 see `max_memory_mb` in the configuration table) and can be overridden via
-`instrument.max_memory_mb`. WAV files on disk are never deleted.
+`library.max_memory_mb`. WAV files on disk are never deleted.
 
 ### Persistent library across sessions
 
 ```yaml
-output:
-  directory: samples/captures
+recorder:
+  directory: samples/captures     # where new captures are written
 
-instrument:
-  directory: samples/captures
+library:
+  directory: samples/captures     # where the playable library loads from
 ```
+
+This pairing is the default - out of the box every capture lands straight in
+the playable library, and the library persists and grows across sessions.
+Point the two at different folders to play one collection while recording
+into another.
 
 On startup, Subsample walks `./samples/captures` recursively, so samples can be
 organised into subdirectories - `kicks/`, `snares/`, `percussion/clangs/`, or
@@ -2422,7 +2470,7 @@ full archive on disk is unaffected.
 
 ### Watching for new samples
 
-Set `instrument.watch: true` to monitor the instrument directory for new audio
+Set `library.watch: true` to monitor the instrument directory for new audio
 files at runtime and load them without restarting. The watcher detects audio
 files from any source - another Subsample instance, a DAW, an SDR recorder, a
 script, or any other application that writes audio to the watched directory.
@@ -2474,12 +2522,10 @@ dedicated host.
 ```yaml
 recorder:
   enabled: true
+  directory: "/mnt/shared/samples"
 
 player:
   enabled: false
-
-output:
-  directory: "/mnt/shared/samples"
 ```
 
 **Player machine** (`config.yaml`):
@@ -2490,7 +2536,7 @@ recorder:
 player:
   enabled: true
 
-instrument:
+library:
   directory: "/mnt/shared/samples"
   watch: true
 ```
@@ -2554,17 +2600,13 @@ ranked list per reference - most similar instrument first. When a sample is
 evicted from the instrument
 library, it is also removed from the ranked lists.
 
-Query the ranked lists programmatically:
+Reference lookups are case-insensitive.
 
-```python
-# Most kick-like instrument in memory
-sample_id = similarity_matrix.get_match("GM36_BassDrum1", rank=0)
-
-# Second-most kick-like (for a separate kick_2 mapping)
-sample_id = similarity_matrix.get_match("GM36_BassDrum1", rank=1)
-```
-
-Lookup is case-insensitive.
+The GM drum references placed in your project by `subsample --init` are
+sidecar files only - the acoustic fingerprints derived from the FluidR3_GM
+SoundFont (MIT licence; see `samples/reference/CREDITS.md`). No audio is
+distributed: the fingerprint is all the similarity engine needs, so the kit
+matches against them without any reference WAVs on disk.
 
 ## Virtual MIDI
 
@@ -2581,7 +2623,7 @@ while Subsample is running. Overrides `player.midi_device`.
 > the same machine means two real-time workloads compete for CPU and I/O. This
 > works well on a modern multi-core machine but may cause xruns or timing drift
 > on lower-powered hardware. If you experience dropouts, reduce
-> `recorder.audio.chunk_size`, lower the sequencer's buffer size, or disable the
+> `recorder.audio.buffer_frames`, lower the sequencer's buffer size, or disable the
 > recorder (`recorder.enabled: false`) to run Subsample in playback-only mode.
 
 ## OSC integration
@@ -2592,7 +2634,7 @@ other OSC-compatible application. OSC support is an optional extra: install it
 with
 
 ```bash
-pip install -e ".[osc]"
+pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"
 ```
 
 then enable it in `config.yaml`:
@@ -2625,7 +2667,7 @@ When `osc.receive_enabled` is also true, Subsample listens on
 
 | Address | Effect | Arguments |
 |---|---|---|
-| `/sample/import` | Read the file at the given path, analyse it, and load it into the in-memory instrument library for immediate playback. The file is read in place - it is not copied or moved. The sample is available until the next restart; for persistence, place the file in `instrument.directory` instead (or as well). | `file_path:str` |
+| `/sample/import` | Read the file at the given path, analyse it, and load it into the in-memory instrument library for immediate playback. The file is read in place - it is not copied or moved. The sample is available until the next restart; for persistence, place the file in `library.directory` instead (or as well). | `file_path:str` |
 
 This is more targeted than the directory watcher and lets external applications
 load specific files into the library on demand - for example, a radio scanner
@@ -2678,12 +2720,27 @@ into its library.
 
 Each project is independently useful and has no dependency on the other.
 
-## Scripts
+## Tools
+
+Five companion tools ship inside Subsample as subcommands - run
+`subsample <command> --help` for each one's full options:
+
+| Command | What it does |
+|---|---|
+| `subsample import` | Import pre-trimmed audio (sample packs, field recordings) into the library |
+| `subsample catalog` | CSV catalog of every sample's detected properties, with curation aids |
+| `subsample analyze` | Analyze audio files and print their detected metrics |
+| `subsample similar` | Rank library samples against each reference by similarity |
+| `subsample loops` | Find and audition seamless loop points in sustained samples |
+
+(A file argument that shares a command name needs a path prefix:
+`subsample ./import` treats it as an input file to chop into the capture
+library, while `subsample import` runs the import tool.)
 
 ### Analyzing recorded files
 
 ```bash
-python scripts/analyze_file.py samples/2026-03-17_14-32-01.wav
+subsample analyze samples/2026-03-17_14-32-01.wav
 ```
 
 Output:
@@ -2693,6 +2750,7 @@ spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=
 pitch:    pitch=440.0Hz  chroma=A  pitch_conf=0.89  stability=0.120st  voiced_frames=86
 level:    peak -1.2dBFS  rms -12.6dBFS  crest 11.4dB  floor -42.3dBFS
 noisiness: 0.012  (0 = clean event, 1 = wall-to-wall noise)
+loop:     0.412s -> 1.187s (775 ms, xfade 30 ms, junction_flux 0.08)
 ```
 
 Spectral metrics (all [0, 1]):
@@ -2738,10 +2796,10 @@ not shown in script output): `mfcc` (mean, average timbre), `mfcc_delta`
 ### Cataloging a sample directory
 
 ```bash
-python scripts/catalog_samples.py                          # configured instrument.directory
-python scripts/catalog_samples.py path/to/samples          # any directory
-python scripts/catalog_samples.py -o samples.csv           # write to a file
-python scripts/catalog_samples.py --full                   # every property incl. MFCC vectors
+subsample catalog                          # configured library.directory
+subsample catalog path/to/samples          # any directory
+subsample catalog -o samples.csv           # write to a file
+subsample catalog --full                   # every property incl. MFCC vectors
 ```
 
 Walks a directory (recursively, the same walk the instrument library performs
@@ -2775,9 +2833,9 @@ into a player to audition a capability group, or into file tools to build
 curated sets:
 
 ```bash
-python scripts/catalog_samples.py --pitched | mpv --playlist=-
-python scripts/catalog_samples.py ~/samples --quantizable | xargs -I{} cp {} ~/curated/
-python scripts/catalog_samples.py ~/samples --loopable | mpv --playlist=-
+subsample catalog --pitched | mpv --playlist=-
+subsample catalog ~/samples --quantizable | xargs -I{} cp {} ~/curated/
+subsample catalog ~/samples --loopable | mpv --playlist=-
 ```
 
 Files without an `.analysis.json` sidecar are analyzed on the way (slow on the
@@ -2790,9 +2848,9 @@ Leaving a mic running for hours or days produces thousands of samples, many of
 them the same sound over and over. Three options help thin them down:
 
 ```bash
-python scripts/catalog_samples.py --group              # cluster near-duplicates
-python scripts/catalog_samples.py --group --pitched    # one keeper path per pitched-sound group
-python scripts/catalog_samples.py --order similarity   # rows ordered by how alike they sound
+subsample catalog --group              # cluster near-duplicates
+subsample catalog --group --pitched    # one keeper path per pitched-sound group
+subsample catalog --order similarity   # rows ordered by how alike they sound
 ```
 
 - **`--group`** clusters samples that sound nearly identical (the same event
@@ -2834,12 +2892,12 @@ Files are silence-trimmed, safety-faded, re-encoded as standard PCM WAV, fully
 analyzed, and saved with sidecar JSON.
 
 ```bash
-python scripts/import_samples.py /path/to/samples/*.wav
-python scripts/import_samples.py --to samples/captures /path/to/sample-pack/*.wav
-python scripts/import_samples.py --force "/mnt/sdr/audio/2026-01-15/*.wav"
+subsample import /path/to/samples/*.wav
+subsample import --to samples/captures /path/to/sample-pack/*.wav
+subsample import --force "/mnt/sdr/audio/2026-01-15/*.wav"
 ```
 
-- `--to DIR` - target directory (default: `output.directory` from config.yaml)
+- `--to DIR` - target directory (default: `recorder.directory` from config.yaml)
 - `--force` - overwrite existing files in target directory
 
 Handles WAV, BWF (Broadcast Wave Format), FLAC, AIFF, OGG, and any other format
@@ -2849,8 +2907,8 @@ so the rest of the pipeline can load them reliably.
 ### Similarity report
 
 ```bash
-python scripts/similarity_report.py           # top 5 per reference (default)
-python scripts/similarity_report.py --top 10  # top 10 per reference
+subsample similar           # top 5 per reference (default)
+subsample similar --top 10  # top 10 per reference
 ```
 
 Example output:
@@ -2861,14 +2919,41 @@ Reference: GM36_BassDrum1
   3.  #8     0.7601  kick_soft       ./samples/kick_soft.wav
 ```
 
+### Finding loop points
+
+Preview and audition the seamless loops that `mode: loop` playback will use:
+
+```bash
+subsample loops samples/captures            # propose loop points for loop candidates
+subsample loops pad.wav --render auditions/ # also write A/B audition WAVs
+```
+
+For each loop-candidate sample this prints the proposed loop start/end,
+crossfade, and junction quality (or a note that no clean loop exists - such a
+sample plays gated instead). `--render DIR` writes two audition files per
+sample: the crossfaded loop and the raw butt-joint, so you can hear exactly
+what the player will do before a key is ever held.
+
+### Maintainer scripts
+
+The remaining scripts in `scripts/` are maintainer tools and need a repo
+checkout: `measure_midi_latency.py` and `measure_handler_timing.py` (the
+latency guards described under [Performance](#performance)),
+`regen_previews_png.py` (regenerate preview thumbnails after a format bump),
+and `extract_gm_drums.py` (regenerate the shipped GM reference fingerprints
+from a SoundFont).
+
 ## Roadmap
 
 ### MIDI expressiveness
 
-- **Per-trigger sample variation** - cycle through alternative samples on
-  repeated triggers to avoid the machine-gun effect on rapid notes. (Distinct
-  from the existing per-hit segment round-robin, which cycles through detected
-  hits inside a single sliced loop.)
+- **Round-robin sample cycling** - step *deterministically* through alternative
+  samples on repeated triggers. Random per-trigger variation already ships
+  (`pick: [1, 3]` or `pick: any` draws a fresh sample on every hit - see
+  [Select](#select---which-sample-to-play)); this item is the strict-rotation
+  complement, plus per-note rotation state. (Distinct from the existing per-hit
+  segment round-robin, which cycles through detected hits inside a single
+  sliced loop.)
 
 ### Sample management
 
@@ -2991,15 +3076,21 @@ one. Subsample is not currently tested against native Windows Python.
 
 ## Tests
 
+For working on Subsample itself (everything above works from a plain
+`pip install` - no clone needed): clone the repo, install editable with the
+dev extras, and run the suite.
+
 ```bash
+git clone https://github.com/simonholliday/subsample.git && cd subsample
 pip install -e ".[dev]"
 pytest
 ```
 
 ## Type Checking
 
+Same setup as [Tests](#tests):
+
 ```bash
-pip install -e ".[dev]"
 mypy subsample
 ```
 

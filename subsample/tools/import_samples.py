@@ -5,14 +5,14 @@ OGG, etc.), trims leading/trailing silence, applies safety fades to prevent
 clicks, re-encodes as standard PCM WAV, runs the full analysis pipeline, and
 saves a sidecar JSON alongside each imported file.
 
-The target directory defaults to the configured output.directory from
+The target directory defaults to the configured recorder.directory from
 config.yaml. Use --to to override.
 
 Usage:
-	python scripts/import_samples.py <path/to/file.wav> [...]
-	python scripts/import_samples.py "/path/to/sample pack/*.wav"
-	python scripts/import_samples.py --to samples/captures kick.wav snare.wav
-	python scripts/import_samples.py --force --to samples/radio /mnt/sdr/audio/*.wav
+	subsample import <path/to/file.wav> [...]
+	subsample import "/path/to/sample pack/*.wav"
+	subsample import --to samples/captures kick.wav snare.wav
+	subsample import --force --to samples/radio /mnt/sdr/audio/*.wav
 """
 
 import argparse
@@ -30,13 +30,8 @@ import subsample.analysis
 import subsample.audio
 import subsample.cache
 import subsample.config
+import subsample.tools._shared
 
-
-logging.basicConfig(
-	level=logging.WARNING,
-	format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-	datefmt="%H:%M:%S",
-)
 
 _log = logging.getLogger(__name__)
 
@@ -128,7 +123,7 @@ def _resolve_subtype (info: soundfile._SoundFileInfo) -> str:
 	Falls back to PCM_16 for compressed or exotic formats.
 	"""
 
-	sub = info.subtype
+	sub = str(info.subtype)
 
 	if sub in ("PCM_16", "PCM_24", "PCM_32"):
 		return sub
@@ -142,6 +137,7 @@ def _import_file (
 	target_dir: pathlib.Path,
 	force: bool,
 	float_ceiling_dbfs: typing.Optional[float],
+	rhythm_cfg: subsample.config.AnalysisConfig,
 ) -> bool:
 
 	"""Import a single audio file into the target directory.
@@ -193,25 +189,23 @@ def _import_file (
 
 	faded = _apply_safety_fades(trimmed, samplerate)
 
-	# Write as standard PCM WAV
-
-	subtype = _resolve_subtype(info)
+	# Analyze BEFORE writing anything.  A librosa failure on degenerate input
+	# (very short or very low-sample-rate audio) then skips this one file
+	# cleanly instead of leaving a sidecar-less WAV in the library that every
+	# later startup scan re-skips.
+	mono = numpy.asarray(numpy.mean(faded, axis=1), dtype=numpy.float32)
+	params = subsample.analysis.compute_params(samplerate)
 
 	try:
-		soundfile.write(str(target_path), faded, samplerate, subtype=subtype)
-	except (OSError, soundfile.SoundFileError) as exc:
-		print(f"  {filepath.name}  ERROR writing: {exc}", file=sys.stderr)
+		result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
+			mono, params, rhythm_cfg,
+		)
+	except Exception as exc:
+		# librosa raises assorted exceptions (ParameterError, IndexError, ...) on
+		# degenerate input; one bad file must not abort the whole import batch
+		# (mirrors cache.ensure_sample_assets' skip-don't-abort contract).
+		print(f"  {filepath.name}  (skipped, could not analyze: {exc})", file=sys.stderr)
 		return False
-
-	# Analyze
-
-	mono = numpy.mean(faded, axis=1, dtype=numpy.float32)
-	params = subsample.analysis.compute_params(samplerate)
-	rhythm_cfg = subsample.config.AnalysisConfig()
-
-	result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
-		mono, params, rhythm_cfg,
-	)
 
 	duration = faded.shape[0] / samplerate
 
@@ -219,6 +213,17 @@ def _import_file (
 	# sidecar already carries its loop — a loop=None sidecar would match on
 	# version + MD5 forever and never re-analyse (permanently unloopable).
 	loop = subsample.cache.compute_loop(mono, samplerate, result, pitch, level, duration)
+
+	# Write as standard PCM WAV, then hash it immediately — pairing the analysis
+	# above with an MD5 taken after a possible concurrent overwrite of the target
+	# would write a sidecar that never self-heals.
+	subtype = _resolve_subtype(info)
+
+	try:
+		soundfile.write(str(target_path), faded, samplerate, subtype=subtype)
+	except (OSError, soundfile.SoundFileError) as exc:
+		print(f"  {filepath.name}  ERROR writing: {exc}", file=sys.stderr)
+		return False
 
 	# Save sidecar
 
@@ -255,13 +260,15 @@ def _import_file (
 	return True
 
 
-def main () -> None:
+def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	"""Import pre-trimmed audio files into the Subsample capture library."""
 
+	subsample.tools._shared.configure_logging()
+
 
 	parser = argparse.ArgumentParser(
-		prog="import_samples",
+		prog="subsample import",
 		description="Import pre-trimmed audio files into the Subsample capture library.",
 	)
 	parser.add_argument(
@@ -269,7 +276,7 @@ def main () -> None:
 		type=str,
 		default=None,
 		metavar="DIR",
-		help="Target directory (default: output.directory from config.yaml). "
+		help="Target directory (default: recorder.directory from config.yaml). "
 		     "Import to the instrument directory to make samples immediately playable.",
 	)
 	parser.add_argument(
@@ -278,30 +285,38 @@ def main () -> None:
 		help="Overwrite existing files in target directory",
 	)
 	parser.add_argument(
+		"--config",
+		type=pathlib.Path,
+		default=None,
+		metavar="PATH",
+		help="Path to config.yaml (default: auto-discover as per main app)",
+	)
+	parser.add_argument(
 		"files",
 		nargs="*",
 		metavar="FILE",
 		help="Audio files or glob patterns to import",
 	)
 
-	args = parser.parse_args()
+	args = parser.parse_args(argv)
 
 	if not args.files:
 		parser.print_usage(sys.stderr)
-		sys.exit(1)
+		return 1
 
 	# Resolve target directory
 
-	# Resolve the float import ceiling from config so a hot 32-bit-float source
-	# is scaled to fit rather than hard-clipped on the 16-bit write — the same
-	# guard the live/CLI import path applies (config's default is -1 dBFS).
-	cfg = subsample.config.load_config()
+	# Load config so a hot 32-bit-float source is scaled to fit the ceiling
+	# rather than hard-clipped on the 16-bit write, AND so the analysis uses the
+	# configured tempo priors — the same guards the live/CLI import path applies,
+	# so an imported sidecar matches what the player would compute.
+	cfg = subsample.tools._shared.load_config_and_wire(args.config)
 	float_ceiling = cfg.recorder.audio.float_import_ceiling_dbfs
 
 	if args.to is not None:
 		target_dir = pathlib.Path(args.to)
 	else:
-		target_dir = pathlib.Path(cfg.output.directory)
+		target_dir = pathlib.Path(cfg.recorder.directory)
 
 	target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -322,7 +337,7 @@ def main () -> None:
 
 	if not paths:
 		print("No input files.", file=sys.stderr)
-		sys.exit(1)
+		return 1
 
 	# Import
 
@@ -338,13 +353,20 @@ def main () -> None:
 			skipped += 1
 			continue
 
-		if _import_file(filepath, target_dir, args.force, float_ceiling):
+		if _import_file(filepath, target_dir, args.force, float_ceiling, cfg.analysis):
 			imported += 1
 		else:
 			skipped += 1
 
 	print(f"Imported {imported} file(s), skipped {skipped}")
 
+	# Files were given but nothing was imported (all missing/unreadable/already
+	# present) — exit non-zero so a script sees it rather than a false success.
+	if imported == 0 and skipped > 0:
+		return 1
+
+	return 0
+
 
 if __name__ == "__main__":
-	main()
+	raise SystemExit(main())

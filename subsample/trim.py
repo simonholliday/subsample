@@ -1,9 +1,9 @@
 """Sub-chunk silence trimming for Subsample.
 
-After the detector emits recording boundaries, the captured segment always
-starts and ends on a chunk boundary (1024 frames by default). This module
-trims leading and trailing silence to sample-level precision, with optional
-padding to preserve a few samples of context on each side.
+After the detector emits recording boundaries, the captured segment starts and
+ends on an audio-read boundary (recorder.audio.buffer_frames, default 512). This
+module trims leading and trailing silence to sample-level precision, with
+optional padding to preserve a few samples of context on each side.
 
 When padding is kept, an S-curve (half-cosine) fade is applied over the
 padding region — from silence up to the signal on the leading edge, and

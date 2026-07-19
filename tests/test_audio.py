@@ -104,43 +104,43 @@ class TestAudioReader:
 
 	"""Tests for the callback-based audio capture."""
 
-	def _make_audio_cfg (self, chunk_size: int = 16) -> subsample.config.AudioConfig:
+	def _make_audio_cfg (self, buffer_frames: int = 16) -> subsample.config.AudioConfig:
 		"""Build a minimal AudioConfig for testing."""
 		return subsample.config.AudioConfig(
 			sample_rate=44100,
 			bit_depth=16,
 			channels=1,
-			chunk_size=chunk_size,
+			buffer_frames=buffer_frames,
 		)
 
 	def _make_reader (
 		self,
-		chunk_size: int = 16,
+		buffer_frames: int = 16,
 	) -> tuple["subsample.audio.AudioReader", typing.Any]:
 		"""Return (reader, mock_stream) with pa.open() mocked out."""
 		mock_stream = unittest.mock.MagicMock()
 		mock_pa = unittest.mock.MagicMock()
 		mock_pa.open.return_value = mock_stream
 
-		cfg = self._make_audio_cfg(chunk_size=chunk_size)
+		cfg = self._make_audio_cfg(buffer_frames=buffer_frames)
 		reader = subsample.audio.AudioReader(mock_pa, device_index=0, audio_cfg=cfg)
 
 		return reader, mock_stream
 
 	def test_read_returns_correct_shape (self) -> None:
-		"""read() should unpack raw bytes and return shape (chunk_size, channels)."""
-		chunk_size = 16
-		reader, _ = self._make_reader(chunk_size=chunk_size)
+		"""read() should unpack raw bytes and return shape (buffer_frames, channels)."""
+		buffer_frames = 16
+		reader, _ = self._make_reader(buffer_frames=buffer_frames)
 
 		# Simulate the callback delivering raw int16 bytes
-		raw = numpy.zeros(chunk_size, dtype=numpy.int16).tobytes()
-		reader._callback(raw, chunk_size, {}, 0)
+		raw = numpy.zeros(buffer_frames, dtype=numpy.int16).tobytes()
+		reader._callback(raw, buffer_frames, {}, 0)
 
 		chunk = reader.read()
 
 		reader.stop()
 
-		assert chunk.shape == (chunk_size, 1)
+		assert chunk.shape == (buffer_frames, 1)
 		assert chunk.dtype == numpy.int16
 
 	def test_overflow_count_incremented (self) -> None:
@@ -179,11 +179,11 @@ class TestAudioReader:
 
 	def test_read_no_timeout_returns_chunk (self) -> None:
 		"""read() with no timeout argument should still return a chunk when data is available."""
-		chunk_size = 16
-		reader, _ = self._make_reader(chunk_size=chunk_size)
+		buffer_frames = 16
+		reader, _ = self._make_reader(buffer_frames=buffer_frames)
 
-		raw = numpy.zeros(chunk_size, dtype=numpy.int16).tobytes()
-		reader._callback(raw, chunk_size, {}, 0)
+		raw = numpy.zeros(buffer_frames, dtype=numpy.int16).tobytes()
+		reader._callback(raw, buffer_frames, {}, 0)
 
 		# Should not require a timeout argument — backward-compatible call.
 		chunk = reader.read()
@@ -191,7 +191,7 @@ class TestAudioReader:
 		reader.stop()
 
 		assert chunk is not None
-		assert chunk.shape == (chunk_size, 1)
+		assert chunk.shape == (buffer_frames, 1)
 
 
 class TestFindDeviceByName:

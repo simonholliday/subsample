@@ -39,14 +39,22 @@ desktop.ini
 *.avi
 *.mov
 
-# Analysis sidecars — generated locally, not tracked (except in
-# samples/reference/ which un-ignores them via its own .gitignore).
+# Analysis sidecars — generated locally, not tracked, EXCEPT the shipped GM
+# reference fingerprints under subsample/data/reference/ (package data,
+# re-tracked below).
 *.analysis.json
 
 # Preview PNGs — generated alongside each sample for OS file-manager
 # thumbnails; regeneratable via scripts/regen_previews_png.py from the
 # audio + analysis sidecar, so there's no reason to track them.
 *.preview.png
+
+# Shipped product data (subsample/data/) is package data and must stay
+# trackable, so re-include the maps and reference fingerprints that the broad
+# `midi-map-*.yaml` / `*.analysis.json` patterns above would otherwise ignore.
+# Audio is deliberately NOT re-included — data/ ships fingerprints, never WAVs.
+!subsample/data/*.yaml
+!subsample/data/reference/*.analysis.json
 
 # Third-party sample-browser databases (e.g. Sononym writes sononym.db into
 # any folder it scans).  Never tracked anywhere under samples/.
@@ -63,9 +71,6 @@ samples/*
 !samples/instrument/
 !samples/reference/
 !samples/variant-cache/
-
-# Local-only extraction script (not distributed; see samples/reference/CREDITS.md)
-scripts/extract_gm_drums.py
 
 # Documentation build output
 docs/html/

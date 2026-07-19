@@ -259,13 +259,14 @@ programs: { brushes: 1 }
 		with pytest.raises(ValueError, match="defined in section 'notes'"):
 			subsample.definitions.resolve_scalar(defs, "channels", "my.ride_edge_soft", "t")
 
-	def test_non_symbolic_dotted_string_keeps_int_error (self, tmp_path: pathlib.Path) -> None:
+	def test_non_symbolic_dotted_string_gives_labelled_error (self, tmp_path: pathlib.Path) -> None:
 
-		"""'1.5' is not symbol-shaped — it falls through to int() and keeps
-		the exact invalid-literal error it produced before this feature."""
+		"""'1.5' is not symbol-shaped — it falls through to int(), whose
+		failure is wrapped in a context-labelled ValueError (not the raw,
+		context-free 'invalid literal' message)."""
 
 		defs = self._defs(tmp_path)
-		with pytest.raises(ValueError, match="invalid literal"):
+		with pytest.raises(ValueError, match="t: expected a whole number"):
 			subsample.definitions.resolve_scalar(defs, "cc", "1.5", "t")
 
 	def test_context_in_messages (self, tmp_path: pathlib.Path) -> None:

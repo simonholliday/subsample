@@ -27,7 +27,9 @@ Press Ctrl+C to stop cleanly.
 import argparse
 import dataclasses
 import datetime
+import importlib
 import logging
+import os
 import pathlib
 import shutil
 import sys
@@ -81,6 +83,32 @@ def _format_mmss (seconds: float) -> str:
 	return f"{s // 60:02d}:{s % 60:02d}"
 
 
+_TOOL_COMMANDS: dict[str, tuple[str, str]] = {
+	"import":  ("subsample.tools.import_samples",    "import pre-trimmed audio files into the sample library"),
+	"catalog": ("subsample.tools.catalog_samples",   "CSV catalog of every sample's detected properties, with curation aids"),
+	"analyze": ("subsample.tools.analyze_file",      "analyze audio files and print their detected metrics"),
+	"similar": ("subsample.tools.similarity_report", "rank library samples against each reference by similarity"),
+	"loops":   ("subsample.tools.suggest_loops",     "find and audition seamless loop points in sustained samples"),
+}
+"""Subcommand name → (tool module, one-line description).  The first CLI
+argument is checked against these BEFORE the run-mode parser, so `subsample
+catalog ...` routes to the tool; a FILE that shares a command name needs a path
+prefix (`subsample ./import`)."""
+
+
+def _tool_epilog () -> str:
+
+	"""Return the --help epilog listing the tool subcommands."""
+
+	lines = ["commands:"]
+	for name, (_module, description) in _TOOL_COMMANDS.items():
+		lines.append(f"  {name:<10}{description}")
+	lines.append("")
+	lines.append("Run `subsample <command> --help` for a command's own options.")
+	lines.append("A FILE named like a command needs a path prefix: `subsample ./import`.")
+	return "\n".join(lines)
+
+
 def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 
 	"""Parse command-line arguments.
@@ -96,6 +124,8 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
 		prog="subsample",
 		description="Ambient audio sample recorder and analyser",
+		epilog=_tool_epilog(),
+		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
 	parser.add_argument(
 		"files",
@@ -122,37 +152,163 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 		),
 	)
 	parser.add_argument(
+		"--list-devices",
+		action="store_true",
+		help=(
+			"List the audio input, audio output, and MIDI input devices on "
+			"this machine, then exit. Any name shown can be used (or "
+			"substring-matched) in config.yaml's device settings."
+		),
+	)
+	parser.add_argument(
 		"--init",
 		action="store_true",
 		help=(
-			"Write a fully commented starter config.yaml into the current "
-			"directory (a copy of the built-in defaults), then exit. "
-			"Refuses to overwrite an existing config.yaml."
+			"Create a complete starter project in the current directory - a "
+			"fully commented config.yaml, the ready-to-play GM drum kit map, "
+			"an editable map template, and the GM reference data - then exit. "
+			"Refuses to overwrite existing files."
 		),
 	)
 	return parser.parse_args(argv)
 
 
-def _init_config () -> None:
+def _list_devices () -> None:
 
-	"""Write a starter config.yaml into the current directory, then exit.
+	"""Print every audio input/output and MIDI input device on this machine.
 
-	The file is a byte-for-byte copy of the bundled defaults — every setting
-	present, documented, and safe to edit or delete freely (removed settings
-	fall back to the built-in defaults). Refuses to overwrite an existing
-	config.yaml so a project's tuned settings can never be lost to a stray
-	--init.
+	Same names and format as the interactive pickers, so a name seen here can
+	be pasted (whole, or any substring) straight into recorder.audio.device,
+	player.audio.device, or player.midi_device in config.yaml.
 	"""
 
-	target = pathlib.Path.cwd() / "config.yaml"
+	pa = subsample.audio.create_pyaudio()
+	try:
+		inputs  = subsample.audio.list_input_devices(pa)
+		outputs = subsample.audio.list_output_devices(pa)
+	finally:
+		pa.terminate()
 
-	if target.exists():
-		_log.error("Refusing to overwrite existing %s — delete it first if you really want a fresh copy", target)
+	print("Audio inputs (recorder.audio.device):")
+	for i, device in enumerate(inputs):
+		print(f"  [{i}] {device['name']}  (default {int(device['defaultSampleRate'])} Hz)")
+	if not inputs:
+		print("  (none found)")
+
+	print("Audio outputs (player.audio.device):")
+	for i, device in enumerate(outputs):
+		print(f"  [{i}] {device['name']}  (default {int(device['defaultSampleRate'])} Hz)")
+	if not outputs:
+		print("  (none found)")
+
+	print("MIDI inputs (player.midi_device):")
+	midi_names = subsample.player.list_midi_input_devices()
+	for i, name in enumerate(midi_names):
+		print(f"  [{i}] {name}")
+	if not midi_names:
+		print("  (none found)")
+
+
+def _init_config () -> None:
+
+	"""Scaffold a complete Subsample project in the current directory.
+
+	Creates config.yaml (a copy of the documented defaults with the GM kit
+	map pre-wired), the two shipped MIDI maps (the instant GM drum kit and an
+	editable template), the GM reference fingerprints the kit matches
+	against, the samples directories, and a .gitignore for the regenerable
+	variant cache. All-or-nothing: if ANY target file already exists, nothing
+	is created — a project's tuned files can never be lost to a stray --init.
+	"""
+
+	data = subsample.config.data_dir()
+	cwd = pathlib.Path.cwd()
+
+	# Guard against scaffolding into a subsample SOURCE checkout — the repo is
+	# the app, not a music project.  (A real project directory never contains
+	# the subsample package itself.)
+	if (cwd / "subsample" / "__init__.py").exists():
+		_log.error(
+			"This looks like the subsample source repository (it contains the "
+			"subsample/ package) — run --init in your music project directory instead"
+		)
 		raise SystemExit(1)
 
-	shutil.copyfile(subsample.config._locate_default_config(), target)
-	print(f"Wrote {target}")
-	print("Every setting is documented inside; edit what you need, then run: subsample")
+	reference_sources = sorted((data / "reference").glob("*.analysis.json"))
+	reference_sources.append(data / "reference" / "CREDITS.md")
+
+	copies = [
+		(data / "midi-map-gm-drums.yaml", cwd / "midi-map-gm-drums.yaml"),
+		(data / "midi-map.yaml.default", cwd / "midi-map.yaml"),
+	]
+	copies.extend(
+		(src, cwd / "samples" / "reference" / src.name) for src in reference_sources
+	)
+
+	# .gitignore is deliberately NOT a conflict target: a real project may well
+	# have one already (a GitHub-initialised repo does), and ignore files are
+	# additive — the scaffold appends its line instead (below).
+	targets = [cwd / "config.yaml"] + [target for _, target in copies]
+
+	existing = [target for target in targets if target.exists()]
+	if existing:
+		shown = ", ".join(str(p.relative_to(cwd)) for p in existing[:5])
+		if len(existing) > 5:
+			shown += f" (+{len(existing) - 5} more)"
+		_log.error(
+			"Refusing to overwrite existing file(s): %s — nothing was created. "
+			"Run --init in an empty directory, or move these aside first",
+			shown,
+		)
+		raise SystemExit(1)
+
+	(cwd / "samples" / "captures").mkdir(parents=True, exist_ok=True)
+	(cwd / "samples" / "reference").mkdir(parents=True, exist_ok=True)
+
+	# The scaffolded config is the documented defaults with exactly one edit:
+	# the GM kit map wired in (player stays disabled — the user flips
+	# player.enabled when ready to play). The count guard keeps this from ever
+	# silently breaking if the default file's comment changes.
+	wired = "midi_map: midi-map-gm-drums.yaml"
+	default_text = subsample.config._locate_default_config().read_text(encoding="utf-8")
+	if default_text.count("# " + wired) != 1:
+		raise RuntimeError(
+			"Bundled config.yaml.default no longer contains the expected "
+			f"'# {wired}' line — cannot wire the starter map. Please report this bug."
+		)
+	(cwd / "config.yaml").write_text(
+		default_text.replace("# " + wired, wired), encoding="utf-8",
+	)
+
+	for src, target in copies:
+		shutil.copyfile(src, target)
+
+	# Create the ignore file, or append our line to an existing one (exact-line
+	# match, so a commented-out mention doesn't count as present).
+	gitignore = cwd / ".gitignore"
+	ignore_line = "samples/variant-cache/"
+
+	if gitignore.exists():
+		existing_text = gitignore.read_text(encoding="utf-8")
+		if ignore_line not in existing_text.splitlines():
+			separator = "" if existing_text.endswith("\n") or not existing_text else "\n"
+			gitignore.write_text(
+				existing_text + separator + ignore_line + "\n", encoding="utf-8",
+			)
+	else:
+		gitignore.write_text(ignore_line + "\n", encoding="utf-8")
+
+	n_refs = len(reference_sources) - 1  # excluding CREDITS.md
+	print(f"Created a Subsample project in {cwd}:")
+	print("  config.yaml              every setting documented; the GM kit map is pre-wired")
+	print("  midi-map-gm-drums.yaml   instant GM drum kit — plays your closest-matching samples")
+	print("  midi-map.yaml            a commented template for building your own map")
+	print(f"  samples/reference/       {n_refs} GM reference fingerprints the kit matches against")
+	print("  samples/captures/        recordings land here, and the library loads from here")
+	print()
+	print("Next: connect a microphone and run `subsample` to start capturing sounds.")
+	print("To play the kit, set player.enabled: true in config.yaml (plus your MIDI")
+	print("and audio devices), then play MIDI channel 10.")
 
 
 def _build_trimmed_segment (
@@ -170,21 +326,21 @@ def _build_trimmed_segment (
 	produce identically-trimmed segments.
 	"""
 
-	pre = detection_cfg.trim_pre_samples
+	pre = round(detection_cfg.trim_pre_ms / 1000.0 * sample_rate)
 	# Read back `pre` extra frames before the detector's start boundary so
 	# trim_silence has raw audio available for its fade-in window.
 	segment = buf.read_range(max(0, start_frame - pre), end_frame)
 
 	# Tail edge uses the CLOSE threshold (keeps a decayed tail); attack edge uses
-	# the snr (open) threshold (trims tight to the transient) — both owned by the
+	# the open threshold (trims tight to the transient) — both owned by the
 	# detector so they cannot drift from what it ended on.
 	fade_out_samples = round(detection_cfg.fade_out_ms / 1000.0 * sample_rate)
 
 	trimmed = subsample.trim.trim_silence(
 		segment,
 		detector.tail_amplitude_threshold,
-		pre_samples=detection_cfg.trim_pre_samples,
-		post_samples=detection_cfg.trim_post_samples,
+		pre_samples=pre,
+		post_samples=round(detection_cfg.trim_post_ms / 1000.0 * sample_rate),
 		fade_out_samples=fade_out_samples,
 		lead_amplitude_threshold=detector.attack_amplitude_threshold,
 	)
@@ -206,7 +362,7 @@ def _process_chunk (
 	if a recording is completed, retrieves and trims the segment.
 
 	Args:
-		chunk:         One audio chunk, shape (chunk_size, channels).
+		chunk:         One audio chunk, shape (buffer_frames, channels).
 		buf:           Circular buffer receiving the audio stream.
 		detector:      Level detector tracking ambient noise and recording state.
 		detection_cfg: Detection settings (SNR threshold, trim params, etc.).
@@ -230,19 +386,25 @@ def _process_chunk (
 def _process_input_files (
 	files: list[pathlib.Path],
 	cfg: subsample.config.Config,
-) -> None:
+) -> int:
 
 	"""Process audio files through the detection pipeline, writing segments to disk.
 
 	Each file is read with its native sample rate, bit depth, and channel count.
-	Detected segments are written to cfg.output.directory with names derived from
+	Detected segments are written to cfg.recorder.directory with names derived from
 	the source filename (e.g. field_recording_1.wav, field_recording_2.wav, …).
 	Files that cannot be read are skipped with a warning.
 
 	Args:
 		files: Paths to audio files to process.
 		cfg:   Application config (detection settings, output directory).
+
+	Returns:
+		The number of files successfully read and processed — 0 means every input
+		was missing or unreadable, which the caller surfaces as a non-zero exit.
 	"""
+
+	processed = 0
 
 	for path in files:
 		if not path.exists():
@@ -275,7 +437,7 @@ def _process_input_files (
 		detector = subsample.detector.LevelDetector(
 			cfg.detection,
 			file_info.sample_rate,
-			cfg.recorder.audio.chunk_size,
+			cfg.recorder.audio.buffer_frames,
 			max_recording_frames=max_frames,
 		)
 
@@ -284,7 +446,7 @@ def _process_input_files (
 		writer = subsample.recorder.SampleProcessor(cfg, analysis_params, on_complete=None, warn_backlog=False)
 
 		segment_index = 1
-		chunk_size = cfg.recorder.audio.chunk_size
+		buffer_frames = cfg.recorder.audio.buffer_frames
 		n_frames = file_info.audio.shape[0]
 		file_duration_sec = n_frames / file_info.sample_rate
 
@@ -302,8 +464,8 @@ def _process_input_files (
 			# detected segments to the worker pool.  Fast for in-memory files
 			# (essentially memory bandwidth + detector cost), so the periodic tick
 			# below will only fire for very large files.
-			for offset in range(0, n_frames, chunk_size):
-				chunk = file_info.audio[offset : offset + chunk_size]
+			for offset in range(0, n_frames, buffer_frames):
+				chunk = file_info.audio[offset : offset + buffer_frames]
 
 				trimmed = _process_chunk(chunk, buf, detector, cfg.detection, file_info.sample_rate)
 
@@ -319,7 +481,7 @@ def _process_input_files (
 
 				now = time.monotonic()
 				if now - last_progress_time >= _PROGRESS_LOG_INTERVAL_SEC:
-					position_sec = min(file_duration_sec, (offset + chunk_size) / file_info.sample_rate)
+					position_sec = min(file_duration_sec, (offset + buffer_frames) / file_info.sample_rate)
 					pct = 100.0 * position_sec / file_duration_sec if file_duration_sec > 0 else 100.0
 					wall_elapsed = now - start_time
 					# Extrapolate remaining wall time from the ratio of audio read so far.
@@ -334,7 +496,7 @@ def _process_input_files (
 					last_progress_time = now
 
 			# End of file: flush a recording still open (its last sound ran to
-			# within hold_time of EOF) so the final segment is not silently lost.
+			# within hold_seconds of EOF) so the final segment is not silently lost.
 			flush = detector.finalize(buf.frames_written)
 			if flush is not None:
 				trimmed = _build_trimmed_segment(
@@ -385,8 +547,11 @@ def _process_input_files (
 			wall_total = time.monotonic() - start_time
 			count = segment_index - 1
 			print(f"  → {count} segment(s) processed from {path.name} in {_format_mmss(wall_total)}")
+			processed += 1
 		finally:
 			writer.shutdown()
+
+	return processed
 
 
 def _run_recorder (
@@ -495,7 +660,7 @@ def _run_recorder (
 	detector = subsample.detector.LevelDetector(
 		cfg.detection,
 		audio_cfg.sample_rate,
-		audio_cfg.chunk_size,
+		audio_cfg.buffer_frames,
 		max_recording_frames=max_frames,
 	)
 
@@ -589,7 +754,7 @@ def _load_bank (
 		a nested ``programs:`` block.
 	"""
 
-	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
+	max_instrument_bytes = int(cfg.library.max_memory_mb * 1024 * 1024)
 
 	preset_result: typing.Optional[subsample.player.MidiMapResult] = None
 
@@ -789,7 +954,8 @@ def _start_player (
 		print(
 			"Player enabled but no MIDI map configured — "
 			"set player.midi_map in config.yaml "
-			"(e.g. midi_map: \"./midi-map-gm-drums.yaml\").",
+			"(e.g. midi_map: \"./midi-map-gm-drums.yaml\"; "
+			"`subsample --init` scaffolds a project with that map wired in).",
 			file=sys.stderr,
 		)
 		_log.warning("player.midi_map is not set — player will not start")
@@ -812,7 +978,11 @@ def _start_player (
 				reference_library.names(),
 				strict=cfg.player.strict_midi_map,
 			)
-		except (FileNotFoundError, ValueError) as exc:
+		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+			# yaml.YAMLError (a plain indentation typo in a hand-edited map) is
+			# the commonest live-coding failure and is NOT a ValueError — catch
+			# it here too so the player thread reports one clean line instead of
+			# dying with a traceback while the recorder keeps running.
 			print(f"Error loading MIDI map: {exc}", file=sys.stderr)
 			return
 
@@ -835,23 +1005,31 @@ def _start_player (
 		else cfg.recorder.audio.sample_rate
 	)
 
-	subsample.player._resolve_path_references(
-		midi_map, matrices, instrument_library,
-		target_sample_rate=effective_output_sr,
-		with_preview=cfg.recorder.previews,
-	)
+	# Resolve path references and run the post-parse validators inside one
+	# guard: each can raise a ValueError (or a file OSError) that would
+	# otherwise escape this thread target as a raw traceback and leave the
+	# player dead while the rest of the app runs on.  One clean line + return.
+	try:
+		subsample.player._resolve_path_references(
+			midi_map, matrices, instrument_library,
+			target_sample_rate=effective_output_sr,
+			with_preview=cfg.recorder.previews,
+		)
 
-	# Validate `extract:` directives now that all candidate samples are
-	# loaded: any assignment whose extract is incompatible with even one of
-	# its matching samples is rejected here, before audio playback begins.
-	subsample.player._validate_assignment_extracts(midi_map, instrument_library)
+		# Validate `extract:` directives now that all candidate samples are
+		# loaded: any assignment whose extract is incompatible with even one of
+		# its matching samples is rejected here, before audio playback begins.
+		subsample.player._validate_assignment_extracts(midi_map, instrument_library)
 
-	# duration_beats measures sample length in beats, so a map that uses it
-	# needs a session tempo to resolve — reject at startup (like the extract
-	# check above) rather than silently emptying the pool at the first note.
-	subsample.player._validate_beat_filter_tempo(
-		midi_map, midi_map_result.zone_templates, cfg.tempo.bpm,
-	)
+		# duration_beats measures sample length in beats, so a map that uses it
+		# needs a session tempo to resolve — reject at startup (like the extract
+		# check above) rather than silently emptying the pool at the first note.
+		subsample.player._validate_beat_filter_tempo(
+			midi_map, midi_map_result.zone_templates, cfg.tempo.bpm,
+		)
+	except (FileNotFoundError, ValueError, OSError) as exc:
+		print(f"Error loading MIDI map: {exc}", file=sys.stderr)
+		return
 
 	# Virtual port mode: bypass hardware device selection entirely.
 	# MidiPlayer.run() will open the named virtual port with virtual=True.
@@ -886,9 +1064,13 @@ def _start_player (
 		if sv_cell is not None and sv_cell[0] is not None:
 			player.events.on("cc", sv_cell[0]._on_cc)
 
-		_apply_active_preset_rules(player, bank_manager)
-		player.update_pitched_assignments()
 		try:
+			# update_pitched_assignments materialises zones and rebuilds the
+			# candidate cache; a map error deferred past parse (e.g. `order:
+			# similarity` with no reference) surfaces here, so it must sit
+			# inside the guard alongside run().
+			_apply_active_preset_rules(player, bank_manager)
+			player.update_pitched_assignments()
 			player.run()
 		except (ValueError, OSError) as exc:
 			# OSError covers PortAudio rejecting the device/format and mido
@@ -949,9 +1131,12 @@ def _start_player (
 	if sv_cell is not None and sv_cell[0] is not None:
 		player.events.on("cc", sv_cell[0]._on_cc)
 
-	_apply_active_preset_rules(player, bank_manager)
-	player.update_pitched_assignments()
 	try:
+		# See the virtual-port branch: update_pitched_assignments can surface a
+		# deferred map error (e.g. `order: similarity` with no reference), so it
+		# runs inside the guard with run().
+		_apply_active_preset_rules(player, bank_manager)
+		player.update_pitched_assignments()
 		player.run()
 	except (ValueError, OSError) as exc:
 		# OSError: PortAudio/mido device-open failure — see the virtual-port
@@ -961,7 +1146,28 @@ def _start_player (
 
 def main () -> None:
 
-	"""Entry point — runs the ambient audio sampler."""
+	"""Entry point — tool subcommands first, else the ambient audio sampler."""
+
+	argv = sys.argv[1:]
+
+	if argv and argv[0] in _TOOL_COMMANDS:
+		# Lazy import: only the requested tool's module is loaded, and a tool
+		# ImportError surfaces as-is rather than being masked as run-mode.
+		module = importlib.import_module(_TOOL_COMMANDS[argv[0]][0])
+		try:
+			rc = module.main(argv[1:])
+			# Flush INSIDE the guard: small output fits the pipe buffer, so the
+			# write during main() succeeds and BrokenPipe would otherwise surface
+			# only at interpreter-shutdown flush ("Exception ignored…" + exit 120).
+			# Forcing the flush here raises it where the handler can catch it.
+			sys.stdout.flush()
+			raise SystemExit(rc)
+		except BrokenPipeError:
+			# Downstream closed the pipe early (`subsample catalog | head`) —
+			# normal pipeline behaviour, not an error.  Redirect stdout to
+			# devnull so interpreter shutdown doesn't raise a second time.
+			os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+			raise SystemExit(0)
 
 	_main_impl()
 
@@ -988,10 +1194,17 @@ def _main_impl () -> None:
 		_init_config()
 		return
 
+	if args.list_devices:
+		_list_devices()
+		return
+
 	try:
 		cfg = subsample.config.load_config(args.config)
-	except FileNotFoundError as exc:
-		# A mistyped --config path should read as one clear line, not a traceback.
+	except (OSError, ValueError) as exc:
+		# A config problem — mistyped --config path, a directory or unreadable
+		# file at that path (IsADirectoryError/PermissionError, both OSError),
+		# malformed YAML, or a renamed key — should read as one clear line, not
+		# a traceback.
 		_log.error("%s", exc)
 		raise SystemExit(1)
 
@@ -1016,11 +1229,9 @@ def _main_impl () -> None:
 
 	_log.info(
 		"Memory budget: instrument %.0f MB, transform %.0f MB, carrier %.0f MB, disk %.0f MB",
-		cfg.instrument.max_memory_mb, cfg.transform.max_memory_mb,
+		cfg.library.max_memory_mb, cfg.transform.max_memory_mb,
 		cfg.transform.carrier_memory_mb, cfg.transform.max_disk_mb,
 	)
-
-	_print_banner(cfg)
 
 	# --- Application event emitter ---
 	# Integrations (OSC sender, Supervisor dashboard, etc.) subscribe here
@@ -1034,7 +1245,7 @@ def _main_impl () -> None:
 			app_events.on("sample_loaded", _osc_sender.on_sample_loaded_event)
 			print(f"  OSC sender   : sending to {cfg.osc.send_host}:{cfg.osc.send_port}")
 		except ImportError:
-			_log.warning("OSC enabled but python-osc not installed. pip install subsample[osc]")
+			_log.warning("OSC enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
 
 	# Reference library starts empty.  Path-based references declared in
 	# the MIDI map are loaded later by _resolve_path_references() during
@@ -1046,16 +1257,34 @@ def _main_impl () -> None:
 	# library loader will pick them up on the next subsample startup.  This is
 	# deliberate — file-input mode is a batch chop, not a hybrid live session.
 	if args.files:
+		# Catch a global flag placed BEFORE the subcommand (git-style muscle
+		# memory): `subsample --config x.yaml catalog` parses `catalog` as an
+		# input FILE, not the tool, and would silently "process" it as a missing
+		# file and exit 0.  A positional that exactly names a tool and is not an
+		# actual file is almost certainly a misordered subcommand.
+		for f in args.files:
+			if str(f) in _TOOL_COMMANDS and not f.exists():
+				_log.error(
+					"%r is a subcommand, not an input file — run it first, with its "
+					"own flags after it: `subsample %s --config ...`.",
+					str(f), str(f),
+				)
+				raise SystemExit(2)
+
 		# Recorder banner shows the live-capture config; file-input mode reads
 		# at each source's native format.  Clarify so a 32-bit float source
 		# isn't mistaken for "24-bit" because that's what the config says.
 		print("File input mode: reading each file at its native sample rate, bit depth, channel count.")
-		_process_input_files(args.files, cfg)
+		if _process_input_files(args.files, cfg) == 0:
+			# Every input was missing or unreadable — exit non-zero so a script
+			# or pipeline sees the failure instead of a misleading success.
+			_log.error("No input files could be processed.")
+			raise SystemExit(1)
 		return
 
 	# --- Bank detection ---
 	# Pre-load the MIDI map to check for bank definitions before loading
-	# instrument libraries.  Banks override cfg.instrument.directory.
+	# instrument libraries.  Banks override cfg.library.directory.
 	bank_manager: typing.Optional[subsample.bank.BankManager] = None
 	bank_definitions: list[subsample.bank.BankDefinition] = []
 	bank_channel: int = subsample.bank.DEFAULT_BANK_CHANNEL
@@ -1074,6 +1303,10 @@ def _main_impl () -> None:
 		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
 			_log.warning("Could not pre-load MIDI map for bank detection: %s", exc)
 
+	# Now that bank detection has run, print the startup summary (multi-bank mode
+	# reports per-program pools rather than the ignored library.directory).
+	_print_banner(cfg, multi_bank=bool(bank_definitions))
+
 	# Resolve the effective output sample rate for the player.
 	output_sample_rate = (
 		cfg.player.audio.sample_rate
@@ -1082,54 +1315,60 @@ def _main_impl () -> None:
 	)
 
 	# Declare shared variables before the bank/single-directory branch.
-	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
+	max_instrument_bytes = int(cfg.library.max_memory_mb * 1024 * 1024)
 	instrument_library:  subsample.library.InstrumentLibrary
 	similarity_matrix:   typing.Optional[subsample.similarity.SimilarityMatrix] = None
 	transform_manager:   typing.Optional[subsample.transform.TransformManager] = None
 
 	# --- Multi-bank loading ---
 	# When the MIDI map declares banks, load each one independently.
-	# cfg.instrument.directory is ignored (banks take precedence).
+	# cfg.library.directory is ignored (banks take precedence).
 	if bank_definitions:
 		_log.info(
-			"MIDI map declares %d program(s) — ignoring instrument.directory (%s)",
-			len(bank_definitions), cfg.instrument.directory,
+			"MIDI map declares %d program(s) — ignoring library.directory (%s)",
+			len(bank_definitions), cfg.library.directory,
 		)
 
 		parent_map_dir = pathlib.Path(typing.cast(str, cfg.player.midi_map)).parent
 
 		banks: list[subsample.bank.Bank] = []
-		for defn in bank_definitions:
-			bank = _load_bank(defn, reference_library, cfg, output_sample_rate, parent_map_dir)
-			banks.append(bank)
-			source = defn.map_path if defn.map_path is not None else defn.directory
-			print(
-				f"  Program {defn.program:<3d}  : {defn.name!r} — "
-				f"{len(bank.instrument_library)} sample(s) from {source}"
-			)
+		try:
+			for defn in bank_definitions:
+				bank = _load_bank(defn, reference_library, cfg, output_sample_rate, parent_map_dir)
+				banks.append(bank)
+				source = defn.map_path if defn.map_path is not None else defn.directory
+				print(
+					f"  Program {defn.program:<3d}  : {defn.name!r} — "
+					f"{len(bank.instrument_library)} sample(s) from {source}"
+				)
+		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+			# A bad `map:` preset path or malformed preset file must read as one
+			# clean line, not a raw traceback out of the main thread.
+			_log.error("Could not load program bank: %s", exc)
+			raise SystemExit(1)
 
 		bank_manager = subsample.bank.BankManager(banks, bank_channel, default_program=default_bank)
 
 		# Eager-load memory guard (WARN only — never blocks startup).  A
 		# program whose audio cannot stay fully resident within
-		# instrument.max_memory_mb is evicting at load, so the first triggers
+		# library.max_memory_mb is evicting at load, so the first triggers
 		# after a switch to it will reload from disk (lag).  And because each
 		# program's library is capped independently, N programs can use up to
 		# N× the configured budget in aggregate.
 		for bank in banks:
 			if bank.instrument_library.memory_used >= bank.instrument_library.memory_limit:
 				_log.warning(
-					"Program %r exceeds instrument.max_memory_mb (%.0f MB) — samples "
+					"Program %r exceeds library.max_memory_mb (%.0f MB) — samples "
 					"will reload on switch (lag); raise the limit to keep it resident",
-					bank.name, cfg.instrument.max_memory_mb,
+					bank.name, cfg.library.max_memory_mb,
 				)
 		total_used = sum(b.instrument_library.memory_used for b in banks)
 		if total_used > max_instrument_bytes:
 			_log.warning(
 				"Programs use %.0f MB of audio in total — more than the "
-				"instrument.max_memory_mb budget (%.0f MB); eager-loading every "
+				"library.max_memory_mb budget (%.0f MB); eager-loading every "
 				"program multiplies the budget by the program count",
-				total_used / (1024 * 1024), cfg.instrument.max_memory_mb,
+				total_used / (1024 * 1024), cfg.library.max_memory_mb,
 			)
 
 		# The primary instrument_library/similarity/transform used by the
@@ -1151,7 +1390,7 @@ def _main_impl () -> None:
 		# active — skipping it saves memory when player is disabled.
 		if cfg.player.enabled:
 			instrument_library = subsample.library.load_instrument_library(
-				pathlib.Path(cfg.instrument.directory),
+				pathlib.Path(cfg.library.directory),
 				max_instrument_bytes,
 				load_audio=True,
 				with_preview=cfg.recorder.previews,
@@ -1159,7 +1398,7 @@ def _main_impl () -> None:
 			)
 			print(
 				f"  Instruments  : {len(instrument_library)} sample(s) loaded"
-				f" from {cfg.instrument.directory}"
+				f" from {cfg.library.directory}"
 			)
 			_log.info(
 				"Instrument library: %d sample(s)  [%s]",
@@ -1265,7 +1504,7 @@ def _main_impl () -> None:
 			_sv_cell[0].start_threaded()
 			print(f"  Supervisor   : ws://localhost:{cfg.supervisor.port}")
 		except ImportError:
-			_log.warning("Supervisor enabled but not installed. pip install subsample[supervisor]")
+			_log.warning("Supervisor enabled but not installed. pip install 'subsample[supervisor] @ git+https://github.com/simonholliday/subsample.git'")
 		except OSError as exc:
 			# A busy WebSocket port (or similar bind failure) must not abort
 			# the whole startup — mirror the OSC receiver's degradation.
@@ -1274,6 +1513,13 @@ def _main_impl () -> None:
 				cfg.supervisor.port, exc,
 			)
 
+	# Subsystem threads are daemons: an interactive device-selection prompt
+	# blocks in input(), which Ctrl+C (delivered to the main thread) cannot
+	# interrupt.  Without daemon status the interpreter would wait on that
+	# stuck thread forever after the main thread prints "Done." and returns.
+	# On a clean shutdown the join below still lets a well-behaved thread
+	# flush and exit normally; daemon status only matters when a thread is
+	# genuinely stuck, where killing it at process exit is exactly right.
 	if cfg.recorder.enabled:
 		threads.append(threading.Thread(
 			target=_run_recorder,
@@ -1285,6 +1531,7 @@ def _main_impl () -> None:
 				app_events,
 			),
 			name="recorder",
+			daemon=True,
 		))
 
 	if cfg.player.enabled:
@@ -1303,6 +1550,7 @@ def _main_impl () -> None:
 					preloaded_midi_map_result,
 				),
 				name="player",
+				daemon=True,
 			))
 
 	if not threads:
@@ -1316,7 +1564,7 @@ def _main_impl () -> None:
 	# new samples into the playback pipeline.
 	instrument_watchers: list[subsample.watcher.InstrumentWatcher] = []
 
-	if cfg.instrument.watch and cfg.player.enabled:
+	if cfg.library.watch and cfg.player.enabled:
 
 		# Multi-bank mode: one watcher per bank directory.
 		if bank_manager is not None:
@@ -1389,7 +1637,7 @@ def _main_impl () -> None:
 				               transform_manager, _player_cell)
 
 			watcher = subsample.watcher.InstrumentWatcher(
-				directory=pathlib.Path(cfg.instrument.directory),
+				directory=pathlib.Path(cfg.library.directory),
 				known_sidecars=known_sidecars,
 				on_sample_loaded=_on_watched_sample,
 				target_sample_rate=output_sample_rate,
@@ -1399,7 +1647,7 @@ def _main_impl () -> None:
 			)
 			watcher.start()
 			instrument_watchers.append(watcher)
-			print(f"  Watcher      : monitoring {cfg.instrument.directory} for new samples")
+			print(f"  Watcher      : monitoring {cfg.library.directory} for new samples")
 
 	# --- MIDI map file watcher ---
 	# Monitors the MIDI map YAML file for changes so assignments can be
@@ -1575,7 +1823,7 @@ def _main_impl () -> None:
 			print(f"  OSC receiver : listening on port {cfg.osc.receive_port}")
 
 		except ImportError:
-			_log.warning("OSC receive enabled but python-osc not installed. pip install subsample[osc]")
+			_log.warning("OSC receive enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
 		except OSError as exc:
 			# OscReceiver binds the UDP socket in its constructor, so a busy port
 			# raises OSError here (not ImportError).  Log and continue rather
@@ -1584,6 +1832,8 @@ def _main_impl () -> None:
 
 	for t in threads:
 		t.start()
+
+	startup_failed = False
 
 	try:
 		# Block the main thread without spinning. Event.wait() releases the GIL
@@ -1600,7 +1850,10 @@ def _main_impl () -> None:
 			# an empty list (watcher/OSC-only mode) never triggers this.
 			if threads and not any(t.is_alive() for t in threads):
 				if not shutdown_event.is_set():
+					# Nobody asked to stop — a subsystem failed at startup.
+					# Exit non-zero so scripts/CI see the failure.
 					_log.error("All subsystems have stopped — exiting.")
+					startup_failed = True
 				break
 
 	except KeyboardInterrupt:
@@ -1630,10 +1883,28 @@ def _main_impl () -> None:
 	elif transform_manager is not None:
 		transform_manager.shutdown()
 
-	print("Done.")
+	if not startup_failed:
+		print("Done.")
+
+	# A subsystem thread still alive here is wedged in an uninterruptible
+	# input() prompt (device selection) that Ctrl+C — delivered only to the
+	# main thread — could not reach.  The threads are daemons, so the process
+	# CAN exit; but a normal return would let the interpreter abort with a
+	# fatal buffered-stdin error while finalizing the wedged daemon.  Flush
+	# and hard-exit cleanly instead (all other subsystems are already stopped).
+	if any(t.is_alive() for t in threads):
+		sys.stdout.flush()
+		sys.stderr.flush()
+		os._exit(0)
+
+	# A subsystem died at startup without anyone asking to stop — surface it
+	# as a non-zero exit (startup_failed implies no live threads, so this never
+	# co-occurs with the stuck-daemon path above).
+	if startup_failed:
+		raise SystemExit(1)
 
 
-def _print_banner (cfg: subsample.config.Config) -> None:
+def _print_banner (cfg: subsample.config.Config, multi_bank: bool = False) -> None:
 
 	"""Print the startup summary line.
 
@@ -1642,6 +1913,10 @@ def _print_banner (cfg: subsample.config.Config) -> None:
 	player its resolved OUTPUT format + the map and sample source it plays from.
 	A player-only run therefore reports the player's output (e.g. 48000 Hz, 8ch),
 	not the disabled recorder's capture rate.
+
+	``multi_bank`` is True when the MIDI map declares ``programs:`` — the pool then
+	comes from each program's own directory/map, so the banner says so instead of
+	naming library.directory (which multi-bank mode ignores).
 	"""
 
 	modes = []
@@ -1664,8 +1939,8 @@ def _print_banner (cfg: subsample.config.Config) -> None:
 			f"rec {cfg.recorder.audio.sample_rate} Hz  "
 			f"{cfg.recorder.audio.bit_depth}-bit  {ch_str}  |  "
 			f"buffer {cfg.recorder.buffer.max_seconds}s  |  "
-			f"SNR ≥ {cfg.detection.snr_threshold_db} dB  |  "
-			f"→ {cfg.output.directory}"
+			f"trigger ≥ {cfg.detection.threshold_db} dB over ambient  |  "
+			f"→ {cfg.recorder.directory}"
 		)
 
 	if cfg.player.enabled:
@@ -1685,9 +1960,12 @@ def _print_banner (cfg: subsample.config.Config) -> None:
 		)
 		out_ch  = cfg.player.audio.channels if cfg.player.audio.channels is not None else 2
 		map_str = cfg.player.midi_map if cfg.player.midi_map is not None else "(no map)"
+		# Multi-bank mode ignores library.directory — each program supplies its own
+		# pool, so naming a single directory would mislead.
+		source = "per-program pools" if multi_bank else str(cfg.library.directory)
 		segments.append(
 			f"out {out_rate} Hz  {out_bits}-bit  {out_ch}ch  |  "
-			f"map {map_str}  |  ← {cfg.instrument.directory}"
+			f"map {map_str}  |  ← {source}"
 		)
 
 	body = "  ||  ".join(segments) if segments else "file-only"

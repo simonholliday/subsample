@@ -11,25 +11,24 @@
 # ---------------------------------------------------------------------------
 # Memory budget — how much RAM Subsample may use for sample caches
 # ---------------------------------------------------------------------------
-# Subsample maintains three in-memory caches: instrument samples (raw PCM),
+# Subsample maintains three in-memory caches: library samples (raw PCM),
 # transform variants (processed float32 audio), and carrier files (vocoder).
-# The budget is split automatically: 60% instruments, 35% transforms, 5% carrier.
+# The budget is split automatically: 60% library, 35% transforms, 5% carrier.
 #
 # max_memory_mb: null
 # null (default) = auto-detect from system RAM: min(25% of total, 1024 MB).
 # Examples:  2 GB Raspberry Pi → 512 MB.  16 GB+ workstation → 1024 MB.
 # Set explicitly to override, e.g.:  max_memory_mb: 500
 #
-# For fine-grained control, set individual cache budgets in the instrument
+# For fine-grained control, set individual cache budgets in the library
 # and transform sections below — these override the global split.
 
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # supervisor — live web dashboard via WebSocket
 # ---------------------------------------------------------------------------
 # Broadcasts state (MIDI activity, library contents, recorder status) to
 # the Supervisor dashboard for live monitoring in a browser.
-# Requires: pip install subsample[supervisor]
+# Requires: pip install "subsample[supervisor] @ git+https://github.com/simonholliday/subsample.git"
 
 # supervisor:
 #   enabled: false
@@ -39,7 +38,7 @@
 # osc — send sample events and receive file import requests via OSC
 # ---------------------------------------------------------------------------
 # OSC (Open Sound Control) integration for communicating with other apps.
-# Requires the optional python-osc dependency: pip install subsample[osc]
+# Requires the optional python-osc dependency: pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"
 #
 # Sender: forwards /sample/captured and /sample/loaded events when samples
 # are recorded or loaded — so sequencers, visualisers, or other audio tools
@@ -110,6 +109,22 @@
 recorder:
   enabled: true
 
+  directory: samples/captures
+  # Directory where recordings are saved. Absolute, or relative to the
+  # directory you run subsample from. Created automatically. This is also
+  # the default library.directory, so out of the box every capture joins
+  # the playable library.
+
+  filename_format: "%Y-%m-%d_%H-%M-%S-%3f"
+  # strftime format for recording filenames (no extension; .wav or .flac is
+  # added automatically). Timestamps are the datetime the recording ended.
+  # %3f is a custom token for zero-padded 3-digit milliseconds (000-999).
+  # Examples:
+  #   "%Y-%m-%d_%H-%M-%S-%3f"    → 2026-03-18_14-32-01-123.wav (default)
+  #   "%Y-%m-%d_%H-%M-%S"        → 2026-03-18_14-32-01.wav (no ms; may overwrite same-second files)
+  #   "%H-%M-%S"                  → 14-32-01.wav (time only, overwrites same-second files)
+  #   "%Y%m%d_%H%M%S"             → 20260318_143201.wav (compact, ISO 8601-ish)
+
   # previews: true
   # Visual sample previews.  When enabled (default), every captured or
   # imported sample gets two artefacts:
@@ -129,28 +144,25 @@ recorder:
     # Case-insensitive substring match — "Samson" matches the full device name above.
     # If omitted, subsample auto-selects when only one input device is present,
     # or shows an interactive numbered menu when multiple devices are found.
-    # Run subsample once without this set to see available device names.
+    # Run `subsample --list-devices` to see available device names.
 
     sample_rate: 44100
     # Sample rate in Hz. Standard values: 44100 (CD quality), 48000 (professional), 16000 (speech).
     # Lower = less CPU, smaller files. Higher = better fidelity for music.
     # Range: 8000–192000 Hz (device dependent).
-    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
     bit_depth: 16
     # Bits per sample: 16, 24, or 32. Controls dynamic range and file size.
     # 16-bit: ±96 dB SNR, sufficient for most recordings. Common for audio devices.
     # 24-bit: ±144 dB SNR, better for studio-quality audio or very quiet sources.
     # 32-bit: ±192 dB SNR, rarely needed for recording purposes.
-    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
 
-    channels: 1
+    # channels: 1
     # Number of input channels: 1 = mono, 2 = stereo.
-    # Mono: simpler processing, half the file size. Stereo: spatial information preserved.
-    # Set to null (or omit the key entirely) to auto-detect from the selected device.
-    # When auto-detected, the device's maxInputChannels is used — e.g. a stereo USB
-    # microphone will record in stereo without any manual setting.
-    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+    # Left commented (the default) = auto-detect from the selected device: its
+    # maxInputChannels is used, so a stereo USB microphone records in stereo with
+    # no manual setting. Uncomment and set a number to force a specific count.
+    # Mono: simpler processing, half the file size. Stereo: spatial info preserved.
 
     # input: null
     # Physical input channels to record from (1-indexed, matching your interface
@@ -163,13 +175,11 @@ recorder:
     # When both channels and input are omitted and the device has 3+
     # inputs, you will be prompted to choose.
 
-    chunk_size: 512
-    # Frames requested per PortAudio callback. PortAudio adapts internally to the
-    # hardware period size, but aligning to it avoids redundant buffering.
-    # Smaller (256, 512): lower latency, more callbacks per second (slight CPU overhead).
-    # Larger (1024, 2048): higher latency, fewer callbacks (less overhead). Default 512 is
-    # optimal for USB audio devices with typical ALSA period sizes.
-    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_audio_values
+    buffer_frames: 512
+    # Frames per audio read — how much audio arrives at once from the device.
+    # Smaller (256, 512): lower input latency. Larger (1024, 2048): less CPU.
+    # Default 512 suits USB audio interfaces. The output-side twin is
+    # player.audio.buffer_frames.
 
     # audio_format: wav
     # Output container for captured and imported samples.
@@ -223,7 +233,6 @@ recorder:
     # is kept before a trigger event. Larger = more pre-signal context; smaller = less RAM.
     # At 44100 Hz mono 16-bit, 60s ≈ 5.3 MB. Useful range: 10–120 seconds.
     # Must be large enough to hold at least one complete expected recording.
-    # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_buffer_values
 
 # ---------------------------------------------------------------------------
 # player — MIDI input listener and sample playback
@@ -263,14 +272,16 @@ player:
   # samples.  Required when the player is enabled — without it, the player
   # will not start.
   #
-  # Included maps:
+  # `subsample --init` places two maps in your project (and wires the first
+  # one in here):
   #   midi-map-gm-drums.yaml   — complete GM percussion kit (47 instruments),
   #                               pre-mixed with console-style filtering and
   #                               panning.  Recommended starting point.
-  #   midi-map.yaml.default    — template with format documentation and
-  #                               examples.  Copy and customise.
+  #   midi-map.yaml            — heavily commented template with examples.
+  #                               Edit and point midi_map at it to build your
+  #                               own.
   #
-  # See midi-map.yaml.default for the full format specification.
+  # See the README's "MIDI map" section for the full format reference.
 
   # watch_midi_map: false
   # When true, monitor the midi_map file at runtime for changes and reload
@@ -282,16 +293,16 @@ player:
   # strict_midi_map: true
   # When true (default), reject unknown `where:` keys, unknown processor
   # names, and non-bool `pitched:` values at parse time — surfaces typos
-  # early.  Set to false to silently ignore unknown keys, which can help
-  # when loading older or hand-edited MIDI maps that pre-date a renamed
-  # key.
+  # early.  Set to false to log a warning for each unknown key and carry on,
+  # which can help when loading older or hand-edited MIDI maps that pre-date
+  # a renamed key.
 
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
   # Case-insensitive substring match — "Launch" matches "Launchpad MK3 MIDI 1".
   # If omitted, auto-selects when only one MIDI device is present, or shows an
   # interactive numbered menu when multiple are found.
-  # Run subsample once with player.enabled: true to see available MIDI device names.
+  # Run `subsample --list-devices` to see available MIDI device names.
   # Ignored when virtual_midi_port is set.
 
   # virtual_midi_port: "Subsample Virtual MIDI"
@@ -344,62 +355,58 @@ player:
 # ---------------------------------------------------------------------------
 
 detection:
-  snr_threshold_db: 12.0
-  # Signal-to-noise ratio (dB) above ambient required to trigger a recording.
-  # Ambient floor is tracked via EMA; trigger fires when chunk_rms > ambient * 10^(threshold/20).
-  # Range: 3–20 dB. Smaller = more sensitive (catches quiet sounds, more false triggers).
-  # Larger = less sensitive (ignores noise, may miss quiet signals).
-  # Typical: 6–12 dB. Set higher for noisy environments, lower for quiet detection.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
+  threshold_db: 12.0
+  # How far above the room's background level a sound must rise to start a
+  # recording, in dB. The background (ambient floor) is tracked continuously,
+  # so this means "louder than the room by N dB", not an absolute level.
+  # Smaller = more sensitive (catches quiet sounds, more false triggers).
+  # Larger = less sensitive (rejects noise, may miss quiet hits).
+  # Range: 3–20 dB. Typical: 6–12 dB — higher in noisy rooms, lower for
+  # quiet sources.
 
-  ema_alpha: 0.1
-  # Exponential moving average smoothing factor for ambient noise tracking.
-  # Ambient = alpha * chunk_rms + (1 - alpha) * ambient_prev.
-  # Range: 0.001–0.1. Default 0.1 ≈ 10-chunk averaging (~0.1s at 44100 Hz, 512 chunk_size).
-  #
-  # Lower (0.001–0.01): floor adapts slowly (0.01 ≈ 100-chunk / ~5s averaging). Stable
-  #   baseline; captures both gradual swells and sudden transients. Good for variable
-  #   environments (e.g. room with occasional noise).
-  # Higher (0.05–0.1): floor chases gradual level rises, so only sounds with a sudden onset
-  #   (fast attack — claps, drums, plucks) exceed the threshold. Slow buildups are ignored.
-  #   Use this to be selective about transients and filter out gradual ambient changes.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
+  floor_adaptation: 0.1
+  # How quickly the tracked room level follows changes, 0–1.
+  # Higher (0.05–0.1): the floor chases gradual level rises, so only sounds
+  #   with a sudden onset (claps, drums, plucks) trigger — slow swells read as
+  #   "the room getting louder" and are ignored.
+  # Lower (0.001–0.01): the floor moves slowly and stays put, so gradual
+  #   builds AND transients both trigger. Good for variable rooms (occasional
+  #   traffic, voices).
+  # (Technically the exponential-moving-average factor:
+  # ambient = a*level + (1-a)*previous. Default 0.1 ≈ 0.1 s of averaging at
+  # 44100 Hz with 512-frame buffers.)
 
-  hold_time: 0.5
-  # Seconds to hold the recording open after signal drops below threshold.
+  hold_seconds: 0.5
+  # Seconds to hold the recording open after the signal drops below threshold.
   # Prevents split recordings on brief pauses (e.g. breath between words).
   # Range: 0.1–2.0 seconds. Larger = longer tail preservation, risk of extra silence/noise.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
 
   warmup_seconds: 1.0
-  # Seconds of ambient sampling before detection activates. The ambient floor EMA is
-  # initialized during warmup; a longer warmup yields a more stable baseline.
-  # Range: 1–10 seconds. Typical: 2–5 seconds. Longer = slower startup, cleaner detection.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_detection_values
+  # Seconds of ambient sampling before detection activates. The room level is
+  # calibrated during warmup; a longer warmup yields a more stable baseline.
+  # Range: 1–10 seconds. The 1.0 default favours a fast startup; raise to 2–5
+  # for a cleaner, more stable floor in variable rooms.
 
-  trim_pre_samples: 10
-  # Extra audio samples to keep before the detected signal onset when trimming silence.
-  # Creates a fade-in envelope (S-curve) over these samples for smooth audio onset.
-  # At 44100 Hz, 10 samples ≈ 0.23 ms. Range: 0–100 samples.
-  # Smaller = abrupt onset. Larger = longer fade-in and pre-signal context.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
+  trim_pre_ms: 0.25
+  # Extra audio kept before the detected onset, in milliseconds, with a smooth
+  # fade-in over it so the start never clicks.
+  # Smaller = tighter attack. Larger = more pre-hit context. Range: 0–2 ms.
 
-  trim_post_samples: 90
-  # Extra audio samples to keep after the detected signal end when trimming silence.
-  # Creates a fade-out envelope (S-curve) over these samples for smooth audio release.
-  # At 44100 Hz, 90 samples ≈ 2.04 ms. Range: 0–100 samples.
-  # Smaller = abrupt cutoff. Larger = longer fade-out and post-signal tail.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_trim_padding_values
+  trim_post_ms: 2.0
+  # Extra audio kept after the detected end, in milliseconds, with a smooth
+  # fade-out over it so the stop never clicks.
+  # Smaller = abrupt cutoff. Larger = softer tail edge. Range: 0–2 ms.
+  # (For musically long fades on cut tails, use fade_out_ms below.)
 
   # release_threshold_db: null
   # Separate CLOSE threshold (dB over the ambient floor) for ending a recording.
-  # By default the recording ends when the level falls back below snr_threshold_db
+  # By default the recording ends when the level falls back below threshold_db
   # — which cuts a long decay short, well above silence. Set a smaller value here
   # to let the tail ring out: the recording still STARTS on the loud
-  # snr_threshold_db attack, but only ENDS once the tail has decayed to this
+  # threshold_db attack, but only ENDS once the tail has decayed to this
   # quieter level. Ideal for cymbals, rides, gongs and other long-decay hits.
-  # Must be below snr_threshold_db. Typical: 2–6 dB (closer to 0 preserves more
-  # tail). null (default) reuses snr_threshold_db — unchanged behaviour.
+  # Must be below threshold_db. Typical: 2–6 dB (closer to 0 preserves more
+  # tail). null (default) reuses threshold_db — unchanged behaviour.
 
   # retrigger_threshold_db: null
   # While a recording is open, a rise of this many dB over the decaying tail is
@@ -409,38 +416,16 @@ detection:
   # never fully fade (a tail sitting on background noise). Pair it with
   # release_threshold_db when chopping a single take of spaced hits. Typical:
   # 10–15 dB (well above any tail modulation). null (default) disables it.
-  # Assumes each attack lands within max(hold_time, 0.1s): a slow or two-stage
+  # Assumes each attack lands within max(hold_seconds, 0.1s): a slow or two-stage
   # attack (a soft onset then a louder transient a beat later) can otherwise read
   # its own transient as a re-strike and over-split. Fast-attack percussion is
-  # fine; for slower material, raise hold_time so it spans the attack.
+  # fine; for slower material, raise hold_seconds so it spans the attack.
 
   # fade_out_ms: 0.0
   # Length (ms) of a smooth fade applied to each sample's trailing edge — masks a
   # cut taken part-way down a decay (via release_threshold_db) or at the next hit
   # (via retrigger_threshold_db) so it never clicks. 0.0 (default) keeps the tiny
   # ~2 ms declick. Typical for long-decay material: 20–50 ms.
-
-# ---------------------------------------------------------------------------
-# output — WAV file writing
-# ---------------------------------------------------------------------------
-
-output:
-  directory: samples/captures
-  # Directory where WAV files are saved. May be absolute or relative to cwd.
-  # Example: /tmp/recordings, ~/audio_capture, samples/captures.
-  # Directory is created automatically if it does not exist.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values
-
-  filename_format: "%Y-%m-%d_%H-%M-%S-%3f"
-  # strftime format for output filenames (no extension; .wav is added automatically).
-  # Timestamps are the datetime the recording ended, not started.
-  # %3f is a custom token for zero-padded 3-digit milliseconds (000-999).
-  # Examples:
-  #   "%Y-%m-%d_%H-%M-%S-%3f"    → 2026-03-18_14-32-01-123.wav (default)
-  #   "%Y-%m-%d_%H-%M-%S"        → 2026-03-18_14-32-01.wav (no ms; may overwrite same-second files)
-  #   "%H-%M-%S"                  → 14-32-01.wav (time only, overwrites same-second files)
-  #   "%Y%m%d_%H%M%S"             → 20260318_143201.wav (compact, ISO 8601-ish)
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_output_values
 
 # ---------------------------------------------------------------------------
 # analysis — rhythm and pitch analysis parameters
@@ -452,19 +437,16 @@ analysis:
   # but does not constrain it; librosa.beat.beat_track uses this as a starting point.
   # Set to the expected tempo of your source material for faster convergence.
   # Range: 30–300 BPM. Ignored if tempo_min and tempo_max bracket the detected tempo.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_analysis_values
 
   tempo_min: 30.0
   # Minimum tempo (BPM) considered during beat detection.
   # Tempos below this are not detected, even if present in the audio.
   # Range: 10–100 BPM. Typical: 30–60 BPM for slow music.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_analysis_values
 
   tempo_max: 300.0
   # Maximum tempo (BPM) considered during beat detection.
   # Tempos above this are not detected, even if present in the audio.
   # Range: 150–300 BPM. Typical: 200–300 BPM for fast music.
-  # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_analysis_values
 
 # similarity:
 #   weight_spectral: 1.0
@@ -513,52 +495,41 @@ analysis:
 # Reference samples (the sounds each MIDI note should resemble) are declared
 # as path-based predicates in the MIDI map, not here:
 #   where: { reference: samples/reference/GM36_BassDrum1.wav }
-# Named instrument samples (where: { name: path/to/file.wav }) also work.
+# Samples can also be selected by name (where: { name: my-kick } matches the
+# filename stem) or by exact file (where: { path: kicks/my-kick.wav }).
 # If a WAV file is referenced but has no .analysis.json sidecar, Subsample
 # generates one automatically on startup.
 # See midi-map-gm-drums.yaml for examples.
 
-# instrument:
+# library:
 #   max_memory_mb: 100.0
-#   # Maximum audio memory (MB) for in-memory instrument samples. When this
+#   # Maximum audio memory (MB) for in-memory library samples. When this
 #   # limit is exceeded, oldest samples are evicted (FIFO) to make room for new
 #   # ones — newest captures are always kept, oldest are dropped. WAV files on
 #   # disk are never deleted. At 44100 Hz 16-bit mono, 100 MB ≈ 19 minutes.
-#   # Overrides the global max_memory_mb split for instrument samples.
-#   # TEST DEPENDENCY: test_config.py::TestLoadDefault::test_default_instrument_values
+#   # Overrides the global max_memory_mb split for library samples.
 #
 #   directory: samples/captures
-#   # Directory of instrument samples to load at startup.  Walked recursively,
-#   # so samples can be organised into subdirectories (kicks/, snares/, …)
-#   # however suits the user.  Each sample is identified by its audio file;
-#   # subsample regenerates missing `.analysis.json` and `.preview.png`
-#   # sidecars at startup, and automatically deletes any sidecar/PNG whose
-#   # audio counterpart has gone away.
+#   # Directory of samples to load into the playable library at startup.
+#   # Walked recursively, so samples can be organised into subdirectories
+#   # (kicks/, snares/, …) however suits the user.  Each sample is identified
+#   # by its audio file; subsample regenerates missing `.analysis.json` and
+#   # `.preview.png` sidecars at startup, and automatically deletes any
+#   # sidecar/PNG whose audio counterpart has gone away.
 #   # Overridden when programs: is declared in the MIDI map (see README).
-#   # Default: samples/captures (same as output.directory).
+#   # Default: samples/captures — the same place the recorder writes
+#   # (recorder.directory), so every new capture joins the playable library
+#   # and the library persists and grows across sessions.  Point it
+#   # somewhere else to play one collection while recording into another.
 #
 #   watch: false
-#   # When true, monitor instrument.directory at runtime for new audio files
+#   # When true, monitor library.directory at runtime for new audio files
 #   # and hot-load them without restarting. Detects audio files from any
 #   # source — another subsample instance (via sidecar), a DAW, or any
 #   # application that writes WAV/FLAC/AIFF/OGG/MP3 files. Files without
 #   # sidecars are auto-analyzed after a brief grace period and file-size
 #   # stability check (to handle files still being written).
-#   # Requires instrument.directory and player.enabled.
-#   #
-#   # Persistent library pattern — set this to the same path as output.directory:
-#   #
-#   #   output:
-#   #     directory: samples/captures
-#   #   instrument:
-#   #     directory: samples/captures
-#   #
-#   # On startup, all existing WAV files are loaded into memory.
-#   # As new recordings arrive they are written to disk (persisting)
-#   # AND added to the in-memory library in one step. The memory limit keeps only
-#   # the most recent samples in RAM; the full archive on disk is never affected.
-#   # Across sessions the library grows on disk; in memory it always holds the
-#   # freshest max_memory_mb worth of audio.
+#   # Requires library.directory and player.enabled.
 
 # ---------------------------------------------------------------------------
 # transform — in-memory derivative audio (pitch variants, time-stretch, etc.)
@@ -570,7 +541,7 @@ analysis:
 # persisted to disk (variant_cache_dir) for faster startup.
 #
 # Pitch shifting and time-stretching are active (requires rubberband-cli).
-# See README-AGENTS.md "Transform pipeline" for implementation guidance.
+# See the README's "Transforms" section for how the pipeline behaves.
 
 # transform:
 #   max_memory_mb: 50.0
@@ -579,7 +550,6 @@ analysis:
 #   # Eviction: parent-priority FIFO — all variants of the oldest parent are
 #   # evicted together so remaining sets stay complete and playable.
 #   # At 44100 Hz float32 stereo, 50 MB ≈ 150 seconds of derivative audio.
-#   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
 #
 #   auto_pitch: true
 #   # When true, pitch-shifted variants are pre-computed for every MIDI note in the
@@ -593,7 +563,6 @@ analysis:
 #   # that don't specify an explicit grid.
 #   # 1 = whole notes, 2 = half, 4 = quarter, 8 = eighth, 16 = sixteenth.
 #   # Higher values give finer onset alignment.
-#   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
 #
 #   variant_cache_dir: samples/variant-cache
 #   # Directory for persistent disk cache of transform variants.
@@ -626,7 +595,6 @@ analysis:
 #   # set.  Also the fallback under source: midi, until a clock is first seen —
 #   # set a sensible tempo here even when following the clock, so beat-based
 #   # behaviour works from the very first note.
-#   # TEST DEPENDENCY: test_transform.py::TestTransformConfig::test_default_transform_values
 #
 #   source: config
 #   # Where the session tempo comes from.

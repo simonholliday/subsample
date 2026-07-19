@@ -85,7 +85,7 @@ class CircularBuffer:
 		if n_frames > self._max_frames:
 			raise ValueError(
 				f"Chunk ({n_frames} frames) exceeds buffer capacity ({self._max_frames} frames). "
-				"Reduce recorder.audio.chunk_size or increase recorder.buffer.max_seconds in config.yaml."
+				"Reduce recorder.audio.buffer_frames or increase recorder.buffer.max_seconds in config.yaml."
 			)
 		head = self.write_head
 		space_to_end = self._max_frames - head

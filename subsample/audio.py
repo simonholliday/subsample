@@ -229,7 +229,7 @@ def read_audio_file (
 	# WAV would do the same, and a 24-bit ALAC file would lose its upper
 	# 8 bits of precision.
 	try:
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
+		import soundfile
 
 		sf_info = soundfile.info(str(path))
 		subtype = (sf_info.subtype or "").upper()
@@ -413,7 +413,7 @@ class AudioReader:
 		reader.stop()           # stops and closes the stream
 	"""
 
-	_QUEUE_MAX: int = 64  # chunks of headroom (≈0.74s at 44100 Hz with the default 512-frame chunk; scales with chunk_size)
+	_QUEUE_MAX: int = 64  # chunks of headroom (≈0.74s at 44100 Hz with the default 512-frame chunk; scales with buffer_frames)
 
 	def __init__ (
 		self,
@@ -461,7 +461,7 @@ class AudioReader:
 			rate=audio_cfg.sample_rate,
 			input=True,
 			input_device_index=device_index,
-			frames_per_buffer=audio_cfg.chunk_size,
+			frames_per_buffer=audio_cfg.buffer_frames,
 			stream_callback=self._callback,
 		)
 
@@ -477,7 +477,7 @@ class AudioReader:
 			timeout: Maximum seconds to wait. None = block forever.
 
 		Returns:
-			Array of shape (chunk_size, channels), integer dtype, or None on timeout.
+			Array of shape (buffer_frames, channels), integer dtype, or None on timeout.
 		"""
 
 		try:

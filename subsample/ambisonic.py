@@ -454,12 +454,14 @@ def decoder_matrix (
 	angles   = _LAYOUT_ANGLES[out_channels]
 	n_active = sum(1 for a in angles if a is not None)
 
-	# W gain per speaker: 1/N_active.  For an LFE-less layout this gives
-	# Σ(1/N)² × N = 1/N × N = 1 (unit W → unity summed power across the array).
-	# When the layout has an LFE slot it ALSO receives g_w (see below), so the
-	# sum runs over N_active + 1 rows and the total exceeds 1/N — e.g. 5.1 has
-	# 6 rows at 0.2, Σ = 0.24, not 0.2.  That extra LFE contribution is
-	# intentional; only this energy identity is approximate for LFE layouts.
+	# W gain per speaker: 1/N_active.  W is the omnidirectional, in-phase
+	# component, so its per-speaker gains sum COHERENTLY (by amplitude) at the
+	# listener to N × (1/N) = 1 — unity omni reconstruction.  (By power the sum
+	# is N × (1/N)² = 1/N; coherent amplitude is the right measure for an in-phase
+	# term.)  Exact for an LFE-less layout; when the layout has an LFE slot it
+	# ALSO receives g_w, so the coherent sum runs over N_active + 1 rows and
+	# slightly exceeds 1 — e.g. 5.1's six 0.2 rows sum to 1.2.  That extra LFE
+	# contribution is intentional.
 	g_w = 1.0 / n_active
 
 	matrix = numpy.zeros((out_channels, _AMBI_CHANNELS_FIRST_ORDER), dtype=numpy.float32)

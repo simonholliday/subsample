@@ -1,7 +1,7 @@
 """Subsample: automatic sample harvester and MIDI instrument.
 
-Records audio signals that exceed a configurable SNR threshold above ambient
-noise, saving each detected event as a timestamped WAV file with full spectral,
+Records audio signals that rise a configurable number of dB above the ambient
+noise floor, saving each detected event as a timestamped WAV file with full spectral,
 rhythm, pitch, timbre, level, and band energy analysis. Incoming samples are
 mapped to MIDI notes via a composable select/process pipeline: select filters,
 orders, and picks samples by any combination of analysis metadata; process

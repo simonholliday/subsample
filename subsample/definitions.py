@@ -141,9 +141,13 @@ class Definitions:
 					break
 
 			valid = sorted(table)
-			listing = f" (valid: {', '.join(valid[:5])}…)" if valid else (
-				f" (the file mounts no {section!r} section)"
-			)
+			if valid:
+				# Only append the truncation ellipsis when the list is actually
+				# truncated (more than 5 names), not when the full set is shown.
+				suffix = "…" if len(valid) > 5 else ""
+				listing = f" (valid: {', '.join(valid[:5])}{suffix})"
+			else:
+				listing = f" (the file mounts no {section!r} section)"
 			raise ValueError(
 				f"{context}: unknown {section!r} name {name_l!r} under "
 				f"prefix {prefix_l!r}{listing}{hint}"
@@ -329,4 +333,14 @@ def resolve_scalar (
 
 		return definitions.lookup(section, prefix, name, context)
 
-	return int(raw)
+	# Verbatim int() coercion, but wrapped so a list/dict (TypeError) or a
+	# non-numeric string (a context-free ValueError) becomes one labelled
+	# ValueError — the callers below (program_channel, default_program,
+	# programs[].program) forward it to load_midi_map's ValueError contract.
+	try:
+		return int(raw)
+	except (TypeError, ValueError):
+		raise ValueError(
+			f"{context}: expected a whole number or a definitions name, "
+			f"got {raw!r}"
+		) from None

@@ -13,6 +13,7 @@ import numpy
 import pytest
 
 import subsample.bank
+import subsample.config
 import subsample.library
 import subsample.loopfind
 import subsample.player
@@ -859,9 +860,11 @@ class TestNoteOff:
 
 class TestCcPanic:
 
-	"""CC120 (All Sound Off) and CC123 (All Notes Off) end every held voice —
-	the safety net that stops a mode: loop voice looping forever if its note-off
-	is lost (review M24: this branch had no test coverage)."""
+	"""CC120 (All Sound Off) and CC123 (All Notes Off) both end held loop voices
+	— the safety net that stops a mode: loop voice looping forever if its
+	note-off is lost — but the MIDI spec distinguishes them: CC120 is a hard
+	mute that cuts EVERY voice (one_shots too, release: full too) with a fast
+	declick, while CC123 is a note-off for held notes (one_shots play on)."""
 
 	def _voice (self, *, one_shot: bool = False, looping: bool = False,
 	            release_to_end: bool = False) -> subsample.player._Voice:
@@ -884,6 +887,7 @@ class TestCcPanic:
 		player._cc_state     = {}
 		player._cc_omni      = {}
 		player._mapped_ccs   = set()
+		player._release_fade_frames = 441   # CC120's fast-declick length
 		player.events        = unittest.mock.MagicMock()
 		subsample.player.MidiPlayer._handle_message(
 			player, mido.Message("control_change", channel=0, control=control, value=127),
@@ -901,18 +905,32 @@ class TestCcPanic:
 		assert loop_voice.looping is False
 		assert loop_voice.releasing is True
 
-	def test_panic_leaves_one_shot_untouched (self) -> None:
-		"""one_shot voices play to their end regardless of a panic."""
+	def test_cc123_leaves_one_shot_untouched (self) -> None:
+		"""All Notes Off is a note-off — one_shot voices play to their end."""
 		one_shot = self._voice(one_shot=True)
-		self._drive(120, [one_shot])
+		self._drive(123, [one_shot])
 		assert one_shot.releasing is False
 
-	def test_panic_does_not_fade_release_to_end_voice (self) -> None:
-		"""A release: full voice stops looping but rings out (no fade)."""
+	def test_cc120_cuts_one_shot (self) -> None:
+		"""All Sound Off is a hard mute — even a ringing one_shot is fast-faded."""
+		one_shot = self._voice(one_shot=True)
+		self._drive(120, [one_shot])
+		assert one_shot.releasing is True
+
+	def test_cc123_does_not_fade_release_to_end_voice (self) -> None:
+		"""Under All Notes Off a release: full voice stops looping but rings out."""
 		full = self._voice(looping=True, release_to_end=True)
 		self._drive(123, [full])
 		assert full.looping is False
 		assert full.releasing is False   # release_to_end → not faded
+
+	def test_cc120_force_fades_release_to_end_voice (self) -> None:
+		"""All Sound Off overrides release: full — the voice is force-faded."""
+		full = self._voice(looping=True, release_to_end=True)
+		self._drive(120, [full])
+		assert full.looping is False
+		assert full.release_to_end is False
+		assert full.releasing is True
 
 
 # ---------------------------------------------------------------------------
@@ -2597,7 +2615,7 @@ assignments:
 
 	def test_default_map_parses (self) -> None:
 		"""The shipped midi-map.yaml.default parses without error."""
-		default_path = pathlib.Path(__file__).parent.parent / "midi-map.yaml.default"
+		default_path = subsample.config.data_dir() / "midi-map.yaml.default"
 		note_map = subsample.player.load_midi_map(default_path, []).note_map
 
 		assert len(note_map) > 0
@@ -2709,12 +2727,14 @@ assignments:
 		_asgn, pick = note_map[(9, 36)][0]
 		assert pick == subsample.query.PickSpec(1, 3)
 
-	def test_scalar_pan_and_output_raise_value_error (self, tmp_path: pathlib.Path) -> None:
-		"""A scalar `pan: 50` / `output: 3` must raise ValueError (the
-		documented contract) — a TypeError would escape the startup and
-		hot-reload catch sites as an unhandled traceback."""
+	def test_bad_scalar_pan_and_output_raise_value_error (self, tmp_path: pathlib.Path) -> None:
+		"""An out-of-range scalar `pan: 500` / any scalar `output: 3` must raise
+		ValueError (the documented contract) — a TypeError would escape the
+		startup and hot-reload catch sites as an unhandled traceback.  (An
+		IN-range scalar pan is valid: it is a stereo position, -100..100 —
+		see TestParsePanWeights.)"""
 
-		for field, value in (("pan", "50"), ("output", "3")):
+		for field, value in (("pan", "500"), ("output", "3")):
 			path = self._write_map(tmp_path, f"""
 assignments:
   - name: Kick
@@ -4253,8 +4273,21 @@ class TestParseNoteSpec:
 	def test_single_int (self) -> None:
 		assert subsample.player._parse_note_spec(36, "test") == [36]
 
+	def test_float_value_rejected (self) -> None:
+		"""A non-int scalar (`notes: 60.5`) raises a clean ValueError, not a raw
+		TypeError from trying to iterate it (which would breach load_midi_map's
+		documented contract and escape the CLI's catch sites)."""
+		with pytest.raises(ValueError, match="not a note or a list of notes"):
+			subsample.player._parse_note_spec(60.5, "test")
+
+	def test_yaml_bool_rejected (self) -> None:
+		"""`notes: yes` parses to True (an int subclass) — reject it rather than
+		silently mapping note 1."""
+		with pytest.raises(ValueError, match="is not a note"):
+			subsample.player._parse_note_spec(True, "test")
+
 	def test_single_note_name_c4 (self) -> None:
-		# C4 = MIDI 60 (Ableton/Logic convention)
+		# C4 = MIDI 60 (scientific pitch, as in REAPER)
 		assert subsample.player._parse_note_spec("C4", "test") == [60]
 
 	def test_single_note_name_c3 (self) -> None:
@@ -5810,7 +5843,9 @@ class TestProgramPresetSwitch:
 		caplog: pytest.LogCaptureFixture,
 	) -> None:
 
-		"""A preset whose update_assignments raises rolls back, player stays live."""
+		"""A preset whose update_assignments raises rolls back POOL and rules
+		together, so the player stays live and consistent on the previous
+		program (not torn: new pool under old rules)."""
 
 		import logging
 		import mido
@@ -5824,9 +5859,10 @@ class TestProgramPresetSwitch:
 			with caplog.at_level(logging.ERROR, logger="subsample.player"):
 				player._handle_message(mido.Message("program_change", channel=9, program=1))
 
-		# switch_to succeeded so the pool swapped, but the bad rules rolled
-		# back to the previous (top-level) set — degraded but live.
-		assert player._effective_instrument_library is lib_preset
+		# The rules rolled back AND the pool switched back to the previous
+		# program (0 = directory), so _effective_* and _note_map agree — no
+		# torn state where the new preset library serves the old top-level rules.
+		assert player._effective_instrument_library is lib_dir
 		assert player._note_map == top_map
 		assert any("failed to apply" in r.message for r in caplog.records)
 
@@ -6039,6 +6075,38 @@ class TestRenderBitDepth:
 		# int16 divisor: 2^14/32768 = 0.5 pre-gain — NOT the near-silence
 		# (2^14/2^31 ~ 7.6e-6) the config-driven divisor produced.
 		assert float(numpy.max(numpy.abs(out))) > 0.05
+
+	def test_render_resamples_when_record_rate_differs (self) -> None:
+		"""The int-PCM fallback resamples a record whose PCM is at a DIFFERENT
+		rate than the output (a live capture under a differing player rate)
+		rather than playing it at the wrong pitch/speed."""
+		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=instrument_library,
+			similarity_matrix=similarity_matrix,
+			midi_map={},
+			sample_rate=22050,
+			bit_depth=16,
+			output_sample_rate=44100,   # output rate ≠ record rate
+		)
+
+		record = unittest.mock.MagicMock(spec=subsample.library.SampleRecord)
+		record.audio = numpy.full((100, 1), 2 ** 14, dtype=numpy.int16)
+		record.audio_sample_rate = 22050
+		record.level = subsample.analysis.LevelResult(peak=0.5, rms=0.3)
+
+		s = float(numpy.sqrt(0.5))
+		mat = numpy.array([[s], [s]], dtype=numpy.float32)
+
+		out = player._render(record, 127, mat)
+
+		assert out is not None
+		# 22050 → 44100 roughly doubles the frame count (±resampler edge frames).
+		assert out.shape[0] == pytest.approx(200, abs=6)
 
 
 class TestRenderFloatGainDb:
@@ -7660,3 +7728,99 @@ class TestMidiClockHandling:
 		player.update_assignments()
 
 		assert player._target_bpm == 130.0
+
+
+class TestParsePanWeights:
+
+	"""_parse_pan_weights — the scalar stereo position and the weight list.
+
+	A scalar is sugar for a two-channel weight pair; only the RATIO between
+	weights matters (constant-power normalisation happens at mix time), so
+	equivalence is asserted on normalised ratios, not raw values.
+	"""
+
+	def _ratios (self, weights: numpy.ndarray) -> numpy.ndarray:
+		return weights / numpy.sum(weights)
+
+	def test_scalar_centre_equals_equal_weights (self) -> None:
+		scalar = subsample.player._parse_pan_weights(0, "t")
+		listed = subsample.player._parse_pan_weights([1, 1], "t")
+
+		assert scalar is not None and listed is not None
+		numpy.testing.assert_allclose(self._ratios(scalar), self._ratios(listed))
+
+	def test_nested_list_rejected (self) -> None:
+		"""A nested-list pan (`pan: [[0.5, 0.5]]`) must be rejected at parse — it
+		would otherwise build a 2-D array that passes the mono-length check then
+		makes an unhashable mix-matrix key on every note-on."""
+		with pytest.raises(ValueError, match="pan weights must be numbers"):
+			subsample.player._parse_pan_weights([[0.5, 0.5]], "t")
+
+	def test_string_weight_rejected (self) -> None:
+		"""A non-numeric weight gives a labelled error, not numpy's context-free
+		'could not convert string to float'."""
+		with pytest.raises(ValueError, match="pan weights must be numbers"):
+			subsample.player._parse_pan_weights([1.0, "x"], "t")
+
+	def test_scalar_hard_left_and_right (self) -> None:
+		left = subsample.player._parse_pan_weights(-100, "t")
+		right = subsample.player._parse_pan_weights(100, "t")
+
+		assert left is not None and right is not None
+		numpy.testing.assert_allclose(left, [1.0, 0.0])
+		numpy.testing.assert_allclose(right, [0.0, 1.0])
+
+	def test_scalar_half_left_ratio (self) -> None:
+		weights = subsample.player._parse_pan_weights(-50, "t")
+
+		assert weights is not None
+		numpy.testing.assert_allclose(self._ratios(weights), [0.75, 0.25])
+
+	def test_scalar_float_accepted (self) -> None:
+		weights = subsample.player._parse_pan_weights(25.0, "t")
+
+		assert weights is not None
+		numpy.testing.assert_allclose(self._ratios(weights), [0.375, 0.625])
+
+	def test_scalar_out_of_range_rejected (self) -> None:
+		with pytest.raises(ValueError, match="between -100"):
+			subsample.player._parse_pan_weights(101, "t")
+		with pytest.raises(ValueError, match="between -100"):
+			subsample.player._parse_pan_weights(-100.5, "t")
+
+	def test_bool_rejected (self) -> None:
+		"""YAML `pan: true` must error, not mean "just right of centre"."""
+		with pytest.raises(ValueError, match="position"):
+			subsample.player._parse_pan_weights(True, "t")
+
+	def test_string_rejected (self) -> None:
+		with pytest.raises(ValueError, match="position"):
+			subsample.player._parse_pan_weights("left", "t")
+
+	def test_list_form_unchanged (self) -> None:
+		weights = subsample.player._parse_pan_weights([50, 50], "t")
+
+		assert weights is not None
+		numpy.testing.assert_allclose(weights, [50.0, 50.0])
+
+	def test_map_loads_with_scalar_pan (self, tmp_path: pathlib.Path) -> None:
+		"""End-to-end: a map using `pan: -50` loads and stores the weight pair."""
+
+		map_path = tmp_path / "map.yaml"
+		map_path.write_text(
+			"assignments:\n"
+			"  - name: Panned\n"
+			"    channel: 10\n"
+			"    notes: 36\n"
+			"    pan: -50\n"
+			"    select:\n"
+			"      where: { name: x }\n"
+		)
+
+		note_map = subsample.player.load_midi_map(map_path, []).note_map
+		((assignment, _pick),) = note_map[(9, 36)]
+
+		assert assignment.pan_weights is not None
+		numpy.testing.assert_allclose(
+			assignment.pan_weights / numpy.sum(assignment.pan_weights), [0.75, 0.25],
+		)

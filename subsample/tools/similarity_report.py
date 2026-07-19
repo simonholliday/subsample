@@ -2,39 +2,33 @@
 
 Loads reference samples from a directory (--reference-dir, defaults to
 samples/reference) and instrument samples from the configured
-instrument.directory.  Builds a SimilarityMatrix and prints the top-N
+library.directory.  Builds a SimilarityMatrix and prints the top-N
 matches for each reference.
 
 Usage:
-	python scripts/similarity_report.py
-	python scripts/similarity_report.py --top 10
-	python scripts/similarity_report.py --reference-dir samples/reference
+	subsample similar
+	subsample similar --top 10
+	subsample similar --reference-dir samples/reference
 """
 
 import argparse
 import logging
 import pathlib
 import sys
+import typing
 
-import subsample.audio
 import subsample.config
 import subsample.library
 import subsample.similarity
+import subsample.tools._shared
 
 
-logging.basicConfig(
-	level=logging.WARNING,
-	format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-	datefmt="%H:%M:%S",
-)
-
-
-def _parse_args () -> argparse.Namespace:
+def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 
 	"""Parse command-line arguments."""
 
 	parser = argparse.ArgumentParser(
-		prog="similarity_report",
+		prog="subsample similar",
 		description="Show the top-N most similar instrument samples for each reference",
 	)
 	parser.add_argument(
@@ -58,21 +52,22 @@ def _parse_args () -> argparse.Namespace:
 		metavar="DIR",
 		help="Directory containing reference .analysis.json sidecar files (default: samples/reference)",
 	)
-	return parser.parse_args()
+	return parser.parse_args(argv)
 
 
-def main () -> None:
+def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	"""Load libraries, build similarity matrix, and print per-reference rankings."""
 
-	args = _parse_args()
+	subsample.tools._shared.configure_logging()
 
-	cfg = subsample.config.load_config(args.config)
+	args = _parse_args(argv)
 
-	# Loading libraries writes/heals sidecars via ensure_sample_assets, which
-	# reads through read_audio_file — wire the float ceiling so hot float sources
-	# are analysed at the same scale the player will read them.
-	subsample.audio.set_float_import_ceiling(cfg.recorder.audio.float_import_ceiling_dbfs)
+	# Loading libraries writes/heals sidecars via ensure_sample_assets, so wire
+	# the float ceiling AND analysis tempo priors from config first — a sidecar
+	# this tool heals must match what the player would compute.  Also gives a
+	# clean one-line config error instead of a traceback.
+	cfg = subsample.tools._shared.load_config_and_wire(args.config)
 
 	# --- Load libraries ---
 
@@ -80,18 +75,18 @@ def main () -> None:
 
 	if len(reference_library) == 0:
 		print("No reference samples found — nothing to compare against.", file=sys.stderr)
-		sys.exit(1)
+		return 1
 
-	max_instrument_bytes = int(cfg.instrument.max_memory_mb * 1024 * 1024)
+	max_instrument_bytes = int(cfg.library.max_memory_mb * 1024 * 1024)
 	instrument_library = subsample.library.load_instrument_library(
-		pathlib.Path(cfg.instrument.directory),
+		pathlib.Path(cfg.library.directory),
 		max_instrument_bytes,
 		with_preview=False,   # mandatory keyword-only; this report renders no previews
 	)
 
 	if len(instrument_library) == 0:
 		print("No instrument samples found — nothing to rank.", file=sys.stderr)
-		sys.exit(1)
+		return 1
 
 	# --- Build similarity matrix ---
 	# Uses cfg.similarity weights — identical to the live application.
@@ -130,6 +125,8 @@ def main () -> None:
 
 		print()
 
+	return 0
+
 
 if __name__ == "__main__":
-	main()
+	raise SystemExit(main())

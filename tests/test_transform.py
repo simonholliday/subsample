@@ -22,6 +22,22 @@ import subsample.transform
 import tests.helpers
 
 
+@pytest.fixture(autouse=True)
+def _reset_segment_thread_local () -> typing.Iterator[None]:
+
+	"""Reset the transform chain's thread-local state before every test.
+
+	Production resets it at the start of every _execute job; tests that call
+	handlers (_apply_reverse / _apply_pad_quantize / ...) directly bypass that,
+	so a `bounds` or `reversed` value set by one test would otherwise leak into
+	the next on the same worker thread.
+	"""
+
+	subsample.transform._segment_bounds_local.bounds = None
+	subsample.transform._segment_bounds_local.reversed = False
+	yield
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -1773,8 +1789,9 @@ class TestSaturate:
 
 	def test_no_values_exceed_one (self) -> None:
 		"""Heavy saturation should soft-clip — no output sample exceeds 1.0."""
-		numpy.random.seed(42)
-		audio = numpy.random.uniform(-0.9, 0.9, (1000, 2)).astype(numpy.float32)
+		# Local RNG — seeding numpy's global would leak into later tests.
+		rng = numpy.random.default_rng(42)
+		audio = rng.uniform(-0.9, 0.9, (1000, 2)).astype(numpy.float32)
 		record = _make_record(sample_id=1)
 		step = subsample.transform.Saturate(amount_db=20.0)
 		result = subsample.transform._apply_saturate(audio, 44100, record, step)
@@ -3934,16 +3951,18 @@ class TestVocoder:
 			# Budget fits one carrier (441 samples × 4 bytes = 1764) but not two.
 			subsample.transform._CARRIER_CACHE_MAX_BYTES = 1800
 
+			# The key now folds the file's mtime+size after the path@rate prefix
+			# (so a replaced carrier isn't served stale) — match by prefix.
 			mono1 = subsample.transform._load_carrier(str(c1), 44100)
-			key1 = f"{c1}@44100"
-			assert key1 in subsample.transform._carrier_cache
+			prefix1 = f"{c1}@44100@"
+			assert any(k.startswith(prefix1) for k in subsample.transform._carrier_cache)
 
 			mono2 = subsample.transform._load_carrier(str(c2), 44100)
-			key2 = f"{c2}@44100"
+			prefix2 = f"{c2}@44100@"
 
 			# c2 should be in cache; c1 should have been evicted.
-			assert key2 in subsample.transform._carrier_cache
-			assert key1 not in subsample.transform._carrier_cache
+			assert any(k.startswith(prefix2) for k in subsample.transform._carrier_cache)
+			assert not any(k.startswith(prefix1) for k in subsample.transform._carrier_cache)
 
 		finally:
 			subsample.transform._CARRIER_CACHE_MAX_BYTES = orig_max

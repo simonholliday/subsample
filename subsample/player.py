@@ -42,7 +42,8 @@ WARNING (throttled) with guidance to raise max_polyphony.
 
 MIDI routing is loaded from a yaml file at startup via load_midi_map().
 The map defines which MIDI notes (on which channels) trigger which samples.
-See midi-map.yaml.default for the format specification.
+See subsample/data/midi-map.yaml.default (scaffolded into projects as
+midi-map.yaml by --init) for the format specification.
 """
 
 import collections
@@ -602,28 +603,64 @@ def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing
 	channel count is known.
 
 	Args:
-		weights_raw:     Raw YAML value (list of numbers, or None for default).
+		weights_raw:     Raw YAML value — a scalar stereo position (-100 hard
+		                 left … 0 centre … +100 hard right), a list of
+		                 per-channel weights, or None for default routing.
 		assignment_name: Name for error messages.
 
 	Returns:
 		float32 numpy array of weights, or None if not specified (default routing).
 
 	Raises:
-		ValueError: If any weight is negative.
+		ValueError: If a position is out of range, a weight is negative, or
+		the value is neither a number nor a list of numbers.
 	"""
 
 	if weights_raw is None:
 		return None
 
-	# A scalar (`pan: 50`) must fail the documented ValueError contract, not
-	# leak a TypeError past the startup/hot-reload catch sites.
-	if isinstance(weights_raw, (str, int, float, bool)) or not hasattr(weights_raw, "__iter__"):
+	# bool is an int subclass — reject before the number check, or `pan: true`
+	# would silently mean "just right of centre".
+	if isinstance(weights_raw, bool):
 		raise ValueError(
-			f"MIDI map assignment {assignment_name!r}: pan must be a list of "
-			f"numbers (got {weights_raw!r})"
+			f"MIDI map assignment {assignment_name!r}: pan must be a position "
+			f"(-100..100) or a list of channel weights (got {weights_raw!r})"
+		)
+
+	# A scalar is a stereo pan position in the mixer-familiar convention:
+	# -100 hard left, 0 centre, +100 hard right.  Pure sugar for a two-channel
+	# weight pair — everything downstream (constant-power normalisation,
+	# down/upmix to the output layout) is unchanged.
+	if isinstance(weights_raw, (int, float)):
+		position = float(weights_raw)
+
+		if not (-100.0 <= position <= 100.0):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan position must be "
+				f"between -100 (hard left) and 100 (hard right); got {weights_raw!r}"
+			)
+
+		weights_raw = [(100.0 - position) / 200.0, (100.0 + position) / 200.0]
+
+	if isinstance(weights_raw, str) or not hasattr(weights_raw, "__iter__"):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan must be a position "
+			f"(-100..100) or a list of channel weights (got {weights_raw!r})"
 		)
 
 	weights = list(weights_raw)
+
+	# Every weight must be a plain number.  A nested list (`pan: [[0.5, 0.5]]`)
+	# would otherwise build a 2-D array that passes the mono-length check below
+	# but makes an unhashable mix-matrix cache key on every note-on; a string
+	# element would surface numpy's context-free "could not convert" message.
+	for w in weights:
+		if isinstance(w, bool) or not isinstance(w, (int, float)):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan weights must be "
+				f"numbers (got {w!r})"
+			)
+
 	weight_arr = numpy.array(weights, dtype=numpy.float32)
 
 	# `< 0` is False for NaN, so check finiteness explicitly — a NaN/inf weight
@@ -1720,9 +1757,28 @@ def _parse_note_spec (
 
 		return list(range(lo, hi + 1))
 
+	# Reject bool explicitly: YAML `yes`/`no` parse to True/False, and bool is
+	# an int subclass, so `notes: yes` would otherwise silently map note 1.
+	if isinstance(notes_raw, bool):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'notes' value "
+			f"{notes_raw!r} is not a note — use a number, note name, "
+			f"or drum.<name>"
+		)
+
 	# Single value (int or string).
 	if isinstance(notes_raw, (int, str)):
 		return [_parse_single_note(notes_raw, assignment_name, namespaces)]
+
+	# Anything else must be a list.  A bare non-list scalar (float, mapping,
+	# null) is a mistake — reject it with a clear message rather than crashing
+	# on iteration below (a float raises "not iterable", and load_midi_map
+	# promises FileNotFoundError/ValueError only).
+	if not isinstance(notes_raw, list):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'notes' value "
+			f"{notes_raw!r} is not a note or a list of notes"
+		)
 
 	# List of mixed values.  An empty list would silently map nothing while
 	# still claiming its channel against zone-tuned templates — reject it.
@@ -1994,7 +2050,7 @@ def _resolve_path_references (
 
 			# Skip if this exact file is already loaded — typically because the
 			# main instrument loader already picked it up (the predicate may
-			# point at a subtree of cfg.instrument.directory).  Keyed by PATH,
+			# point at a subtree of cfg.library.directory).  Keyed by PATH,
 			# not stem: two take-folders may each hold "01.wav", and both must
 			# load as distinct samples.
 			if instrument_lib.find_by_path(audio_path) is not None:
@@ -2006,6 +2062,15 @@ def _resolve_path_references (
 
 			if record is not None:
 				instrument_lib.add(record)
+				# Rank the new sample against every reference too.  At startup
+				# this no-ops (references are added just below, and add() early-
+				# returns while the matrix has none) and the add_reference pass
+				# ranks it via its instrument snapshot; on a hot-reload the
+				# references already exist, so this is what threads the newly
+				# loaded samples into their rankings — without it a similarity
+				# select silently never sees them until restart.
+				for matrix in matrices:
+					matrix.add(record)
 				loaded += 1
 
 		if loaded > 0:
@@ -2046,6 +2111,11 @@ def _resolve_path_references (
 			continue
 
 		instrument_lib.add(record)
+		# Path-pinned instruments load AFTER the reference pass above, so the
+		# add_reference snapshot never saw them — rank them into every existing
+		# reference here, or a similarity-ordered pool would never include them.
+		for matrix in matrices:
+			matrix.add(record)
 
 		_log.debug("Added path-based instrument from %s", path)
 
@@ -2443,6 +2513,22 @@ def load_midi_map (
 		if raw_default_bank is not None else None
 	)
 
+	# Validate default_program against the declared programs — an unknown number
+	# would otherwise silently start on the first bank, and setting it with no
+	# `programs:` block at all would be silently ignored.
+	if default_bank is not None:
+		if not bank_definitions:
+			raise ValueError(
+				f"MIDI map {path}: 'default_program' is set but there are no "
+				f"'programs:' — remove default_program or add a programs block."
+			)
+		declared = {d.program for d in bank_definitions}
+		if default_bank not in declared:
+			raise ValueError(
+				f"MIDI map {path}: default_program {default_bank} is not one of the "
+				f"declared program numbers {sorted(declared)}."
+			)
+
 	# Top-level `assignments:` is required for the no-programs case and
 	# whenever any program uses the `directory:` shorthand (those programs
 	# reuse the top-level assignments against their swapped pool).  When
@@ -2554,6 +2640,19 @@ def load_midi_map (
 		# Parse process block (optional — defaults to no processing).
 		process = subsample.query.parse_process(assignment_raw.get("process"), name, definitions)
 
+		# A where.quantized_beats filter measures the beat-length of the
+		# assignment's quantize OUTPUT, so without a stretch_quantize/pad_quantize
+		# step the resolver always returns None and the note is permanently silent.
+		# Warn at load rather than leave a dead note with no diagnostic.
+		if not (process.has_stretch_quantize() or process.has_pad_quantize()):
+			if any(not spec.where.quantized_beats.is_empty() for spec in select_specs):
+				_log.warning(
+					"MIDI map assignment %r: a where.quantized_beats filter has no "
+					"stretch_quantize/pad_quantize step to measure against — the note "
+					"will never match a sample.  Add a quantize step or drop the filter.",
+					name,
+				)
+
 		mode, loop_override = _parse_mode(assignment_raw, name, process)
 
 		# release: shapes the note-off fade, and only a voice that RECEIVES a
@@ -2577,13 +2676,30 @@ def load_midi_map (
 		if mode == "loop" and release is None:
 			release = subsample.query.ReleaseSpec(time=None, curve="cosine")
 
+		gain_raw = assignment_raw.get("gain", 0.0)
+
+		# Reject bool first (YAML `yes`/`no` → True/False, and float(True) == 1.0
+		# would silently mean +1 dB), then require a finite number — a NaN/inf
+		# gain would otherwise poison the whole voice render silently.
+		if isinstance(gain_raw, bool):
+			raise ValueError(
+				f"MIDI map assignment {name!r} (#{assignment_index}): "
+				f"'gain' must be a number in dB, not a boolean ({gain_raw!r})"
+			)
+
 		try:
-			gain_db = float(assignment_raw.get("gain", 0.0))
+			gain_db = float(gain_raw)
 		except (TypeError, ValueError) as exc:
 			raise ValueError(
 				f"MIDI map assignment {name!r} (#{assignment_index}): "
-				f"invalid 'gain' value {assignment_raw.get('gain')!r} — {exc}"
+				f"invalid 'gain' value {gain_raw!r} — {exc}"
 			) from exc
+
+		if not math.isfinite(gain_db):
+			raise ValueError(
+				f"MIDI map assignment {name!r} (#{assignment_index}): "
+				f"'gain' must be a finite number ({gain_raw!r})"
+			)
 
 		pan_weights    = _parse_pan_weights(assignment_raw.get("pan"), name)
 		output_routing = _parse_output_routing(assignment_raw.get("output"), name, pan_weights)
@@ -2649,6 +2765,18 @@ def load_midi_map (
 					f"supported on zone-tuned assignments — it would make the whole "
 					f"keyboard range monophonic.  Use manual ``notes:`` assignments "
 					f"for choke groups."
+				)
+
+			# A fallback chain on a zone-tuned assignment is silently truncated to
+			# its first spec (the materialiser needs a STABLE candidate list — a
+			# fallback firing mid-pattern would reshuffle every note's assigned
+			# sample).  Warn so the dropped specs aren't a silent surprise.
+			if len(select_specs) > 1:
+				_log.warning(
+					"MIDI map assignment %r: zone-tuned assignments use only the "
+					"first select spec — the %d fallback spec(s) are ignored (a "
+					"fallback firing mid-pattern would reshuffle the keyboard layout).",
+					name, len(select_specs) - 1,
 				)
 
 			zone_templates.append(ZoneTemplate(
@@ -2768,8 +2896,10 @@ class _Voice:
 	position:  Current read cursor in frames. Advances each callback call.
 	           Voice is removed when position >= len(audio).
 	releasing: Set to True when a note_off arrives for this note+channel
-	           (only for non-one-shot voices).  The callback applies a short
-	           cosine fade-out over the player's _release_fade_frames frames, then retires.
+	           (only for non-one-shot voices).  The callback then fades the voice
+	           out over release_frames with release_curve (the assignment's
+	           configured ``release:``, or the global declick default when unset),
+	           unless release_to_end is set, and retires it.
 	one_shot:  When True, note_off events are ignored — the sample plays to
 	           natural completion.  Kicks, snares, and cymbals are one-shot;
 	           hi-hats are not (open hi-hat is silenced by the closed pedal).
@@ -3185,6 +3315,10 @@ class MidiPlayer:
 		# Assignment ids already warned that their sample has no usable loop
 		# (mode: loop fail-musical) — so the note-on path warns once, not per hit.
 		self._loop_unavailable_warned: set[int] = set()
+
+		# (note, channel) pairs already warned that a resolved loop COLLAPSED when
+		# clamped to a shorter-than-expected rendered sample (falls back to gated).
+		self._loop_collapsed_warned: set[tuple[int, int]] = set()
 
 		# Number of output channels.  Determines the shape of the mix buffer
 		# and must match the pa.open(channels=...) call in run().  Defaults
@@ -3781,9 +3915,12 @@ class MidiPlayer:
 		converts to PCM bytes at the output bit depth, and returns the bytes.
 		Finished voices (cursor past end of audio) are removed from the list.
 
-		Releasing voices (note_off received): a cosine fade-out is applied over
-		min(remaining, self._release_fade_frames) frames, then the voice is retired.
-		This prevents an audible click on hard cutoff for tonal samples.
+		Releasing voices (note_off received): the voice fades out over the
+		configured release (voice.release_frames / release_curve — the
+		assignment's ``release:``, or the global declick default when unset),
+		capped to the audio remaining, then retires — unless release_to_end is
+		set, in which case it rings out to its natural end with no fade.  The
+		default declick prevents an audible click on hard cutoff for tonal samples.
 		"""
 
 		# Output underflow (xrun): PortAudio sets this flag when the previous
@@ -4222,6 +4359,10 @@ class MidiPlayer:
 				if active is not None and active.program == msg.program:
 					return
 
+				# Remember where we came from so a failed rule-apply can roll the
+				# POOL back too, not just the rules (see the except below).
+				previous_program = active.program if active is not None else None
+
 				if bm.switch_to(msg.program):
 					# Both dicts are guarded by _state_lock — clear them
 					# together so any concurrent reader (e.g. _select_segment
@@ -4258,9 +4399,19 @@ class MidiPlayer:
 					try:
 						self._apply_rule_set(*rule_set)
 					except Exception as exc:
+						# The rules rolled back, but switch_to already committed the
+						# POOL to the new bank — leaving _effective_* serving the new
+						# library under the old rules (largely silence).  Switch the
+						# pool back so pool and rules are consistent again.
+						if previous_program is not None:
+							bm.switch_to(previous_program)
+							with self._state_lock:
+								self._last_played.clear()
+								self._segment_counters.clear()
+
 						_log.error(
-							"Program %d (%s) rules failed to apply — keeping "
-							"previous rules: %s",
+							"Program %d (%s) rules failed to apply — staying on the "
+							"previous program: %s",
 							msg.program, bank.name, exc,
 						)
 			return
@@ -4276,12 +4427,28 @@ class MidiPlayer:
 				self._cc_omni[msg.control] = msg.value
 			self.events.emit("cc", channel=msg.channel, cc_number=msg.control, value=msg.value)
 
-			# CC120 (All Sound Off) / CC123 (All Notes Off): a panic that ends every
-			# held voice — the safety net that stops a mode: loop voice looping
-			# forever if its note-off is ever lost.  Same effect as a note-off for
-			# each: stop looping, then fade (unless release: full rings it out).  A
-			# separate _voices_lock section (never nested under _state_lock).
-			if msg.control in (120, 123):
+			# CC120 (All Sound Off) and CC123 (All Notes Off) are both panics that
+			# stop a mode: loop voice looping forever if its note-off is ever lost,
+			# but the MIDI spec distinguishes them and so do we.  A separate
+			# _voices_lock section (never nested under _state_lock).
+			if msg.control == 120:
+				# All Sound Off: emergency mute — fast-declick EVERY voice,
+				# including one_shots (a ringing one_shot open hi-hat must stop),
+				# overriding each voice's own release / release: full / loop tail
+				# with the fixed ~10 ms fade, exactly like a choke.
+				with self._voices_lock:
+					for voice in self._voices:
+						voice.looping        = False
+						voice.release_to_end = False
+						if voice.fade_pos == 0:
+							voice.release_frames = self._release_fade_frames
+							voice.release_curve  = 0
+						voice.releasing = True
+
+			elif msg.control == 123:
+				# All Notes Off: like a note-off for every held note — stop looping
+				# and fade (unless release: full rings it out).  one_shots ignore
+				# note-off, so they play on; CC120 above is the hard mute.
 				with self._voices_lock:
 					for voice in self._voices:
 						if not voice.one_shot:
@@ -4596,6 +4763,18 @@ class MidiPlayer:
 				loop_crossfade = xf
 				if xf > 0:
 					loop_xfade_in = audio[ls - xf : ls]
+			elif (note, channel) not in self._loop_collapsed_warned:
+				# The picked sample rendered shorter than its resolved loop start,
+				# so clamping collapsed the loop below the minimum length.  Play
+				# plain (gated) instead of a DC buzz — but say so once per note,
+				# not silently (mirrors the no-usable-loop fail-musical warning).
+				self._loop_collapsed_warned.add((note, channel))
+				_log.warning(
+					"Loop collapsed to nothing after clamping to the rendered "
+					"sample on note %d ch %d — the picked sample is shorter than "
+					"its loop start; playing gated instead.",
+					note, channel + 1,
+				)
 
 		voice = _Voice(
 			audio=audio, note=note, channel=channel,
@@ -4640,7 +4819,8 @@ class MidiPlayer:
 
 		Unlike _release_held (same-note steal / note-off), this:
 		  - cuts one_shot voices too — the whole point (a ringing open hi-hat is
-		    a one_shot, and one_shots ignore note-off AND the CC120/123 panic);
+		    a one_shot, and one_shots ignore note-off AND the CC123 all-notes-off
+		    panic; only CC120 all-sound-off and a choke cut them);
 		  - OVERRIDES the voice's own release / ``release: full`` / loop tail with
 		    the fixed ~10 ms declick — a choke is a physical damp, not a note-off.
 
@@ -4867,6 +5047,28 @@ class MidiPlayer:
 		record_depth = 16 if record.audio.dtype == numpy.int16 else 32
 		float_audio = subsample.transform._pcm_to_float32(record.audio, record_depth)
 
+		# Last-resort fallback: resample to the output rate when the record's PCM
+		# is at a different rate (a live capture at the recorder rate under a
+		# differing player.audio.sample_rate).  Disk-loaded samples already store
+		# PCM at the output rate, and the common config leaves the two rates
+		# equal, so this is a no-op there; without it the very first trigger of a
+		# fresh capture — before its resampled variant is ready — would play at
+		# the wrong pitch.  The cost falls only on that rare, one-off fallback,
+		# never on the pre-rendered variant path.
+		src_rate = record.audio_sample_rate
+		if (
+			isinstance(src_rate, int)
+			and src_rate != self._output_sample_rate
+			and float_audio.shape[0] > 0
+		):
+			import librosa
+			float_audio = librosa.resample(
+				float_audio.T,
+				orig_sr=src_rate,
+				target_sr=self._output_sample_rate,
+				res_type="soxr_hq",
+			).T.astype(numpy.float32)
+
 		return self._render_float(float_audio, record.level, velocity, mix_matrix, gain_db)
 
 	def _enqueue_quantize_variants (
@@ -4942,8 +5144,9 @@ class MidiPlayer:
 		keyboard range, sorts by pitch, and lays each sample across a
 		contiguous keyboard zone centred on its detected pitch.  Each
 		derived (channel, note) entry gets an Assignment that is a clone
-		of the template with its select replaced by an exact-stem-name
-		predicate so the query engine resolves to that specific sample at
+		of the template with its select replaced by a predicate pinned to
+		that sample's ``sample_id`` (not its stem — stems can collide across
+		take folders) so the query engine resolves to that specific sample at
 		note-on.
 
 		Called from ``__init__`` (so the startup log shows the materialised
@@ -5536,8 +5739,8 @@ class MidiPlayer:
 			self.update_assignments()
 		except Exception as exc:
 			_log.error(
-				"update_assignments failed during %s — playback continues with "
-				"the previous variant set: %s",
+				"Could not refresh note assignments during %s — playback "
+				"continues with the previous set: %s",
 				context, exc,
 			)
 
@@ -5725,6 +5928,7 @@ class MidiPlayer:
 		# so a best-effort clear here can at worst re-emit or drop one cosmetic
 		# warning, never corrupt state.
 		self._loop_unavailable_warned.clear()
+		self._loop_collapsed_warned.clear()
 
 		# Rebuild the choke table from the newly-applied base map.  On the
 		# rollback path above we never reached here, and _choke_map was not
@@ -5777,13 +5981,14 @@ class MidiPlayer:
 			new_result.note_map, new_result.zone_templates,
 		)
 
-		# Refresh the top-level snapshot — `directory:` programs reuse it.
-		self._top_level_note_map       = stripped_map
-		self._top_level_zone_templates = stripped_zones
-		self._top_level_mapped_ccs     = new_ccs
-
 		# A `map:` preset is live — don't clobber it with the top-level rules.
+		# Refresh the snapshot so the edit takes effect on the next non-preset
+		# switch (whose _apply_rule_set validates it and rolls back on failure);
+		# we can't validate here without applying, which would replace the preset.
 		if self._bank_manager is not None and self._bank_manager.active_bank.note_map is not None:
+			self._top_level_note_map       = stripped_map
+			self._top_level_zone_templates = stripped_zones
+			self._top_level_mapped_ccs     = new_ccs
 			_log.info(
 				"MIDI map reloaded (top-level): a map: preset is active, so the "
 				"edit applies to directory programs / on the next non-preset switch",
@@ -5792,7 +5997,16 @@ class MidiPlayer:
 
 		old_count = len(self._note_map)
 
+		# Apply the new rules FIRST: update_assignments validates them and
+		# _apply_rule_set rolls back the live rules + re-raises on failure.  Only
+		# refresh the top-level snapshot once they are known good — otherwise a
+		# broken hot-edit would become the snapshot a later `directory:` switch
+		# restores, even though it never applied cleanly here.
 		self._apply_rule_set(stripped_map, stripped_zones, new_ccs)
+
+		self._top_level_note_map       = stripped_map
+		self._top_level_zone_templates = stripped_zones
+		self._top_level_mapped_ccs     = new_ccs
 
 		_log.info(
 			"MIDI map reloaded: %d note(s)%s (was %d)",

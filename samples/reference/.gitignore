@@ -1,5 +1,7 @@
-# Reference sidecars and credits are tracked; audio is globally ignored.
-!*.analysis.json
-!CREDITS.md
+# Working area for extract_gm_drums.py (writes WAV + .analysis.json here before
+# copying the fingerprints into subsample/data/reference/).  The SHIPPED
+# reference fingerprints are package data under subsample/data/reference/;
+# anything regenerated in this folder is local-only scratch.  Only the empty
+# directory itself is tracked.
 !.gitignore
 !.gitkeep

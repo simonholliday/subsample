@@ -48,6 +48,13 @@ _log = logging.getLogger(__name__)
 SIDECAR_SUFFIX:     typing.Final[str] = ".analysis.json"
 PREVIEW_PNG_SUFFIX: typing.Final[str] = ".preview.png"
 
+# The process umask, captured once at import (reading it requires a set+restore,
+# which is not thread-safe — safe here because import runs before any threads).
+# Sidecars written via mkstemp would otherwise be 0600 (owner-only); apply the
+# umask so they get the ordinary data-file mode instead, like every other file.
+_UMASK: typing.Final[int] = os.umask(0)
+os.umask(_UMASK)
+
 # Audio file extensions that subsample considers part of an instrument
 # library.  Used by the recursive library load to discover audio files,
 # and by the watcher to filter directory events.  Lower-case throughout;
@@ -311,6 +318,11 @@ def save_cache (
 	)
 
 	try:
+		# mkstemp creates the temp file 0600 (owner-only); the sidecar it becomes
+		# is ordinary analysis data, so apply the umask for the normal data-file
+		# mode (0644 under the usual 022) instead of leaving it owner-private.
+		os.fchmod(fd, 0o666 & ~_UMASK)
+
 		with os.fdopen(fd, "w", encoding="utf-8") as f:
 			f.write(json_str)
 
@@ -665,7 +677,24 @@ def ensure_sample_assets (
 				png_path.name, exc,
 			)
 
-	return _deserialize_payload(payload, sidecar.name)
+	assets = _deserialize_payload(payload, sidecar.name)
+
+	if assets is None:
+		# The JSON parsed and the version + MD5 are fresh, but a field is missing
+		# or malformed so deserialization failed.  Without healing, this sample
+		# would be skipped on EVERY startup (the sidecar never looks stale).
+		# Re-analyse from the audio to rewrite a coherent sidecar.
+		_log.info(
+			"Sidecar %s parsed but is structurally invalid — re-analyzing to heal it",
+			sidecar.name,
+		)
+		return _reanalyze_and_save(
+			audio_path, cached_version=None, silent=True,
+			channel_format=prior_channel_format,
+			with_preview=with_preview,
+		)
+
+	return assets
 
 
 def load_sidecar (sidecar_path: pathlib.Path) -> SampleAssets | None:

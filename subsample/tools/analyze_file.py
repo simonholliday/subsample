@@ -10,15 +10,17 @@ automatically invalidated if the audio file changes or the analysis
 algorithm is updated.
 
 Usage:
-	python scripts/analyze_file.py <path/to/file.wav>
-	python scripts/analyze_file.py ./reference/*.wav
-	python scripts/analyze_file.py kick.wav snare.wav hat.wav
+	subsample analyze <path/to/file.wav>
+	subsample analyze ./reference/*.wav
+	subsample analyze kick.wav snare.wav hat.wav
 """
 
+import argparse
 import glob
 import logging
 import pathlib
 import sys
+import typing
 
 import numpy
 import soundfile
@@ -27,20 +29,21 @@ import subsample.analysis
 import subsample.audio
 import subsample.cache
 import subsample.config
+import subsample.tools._shared
 
-
-logging.basicConfig(
-	level=logging.WARNING,
-	format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-	datefmt="%H:%M:%S",
-)
 
 _log = logging.getLogger(__name__)
 
 
-def _analyze_file (filepath: pathlib.Path) -> None:
+def _analyze_file (
+	filepath: pathlib.Path,
+	rhythm_cfg: subsample.config.AnalysisConfig,
+) -> bool:
 
-	"""Analyze a single audio file and print its metrics."""
+	"""Analyze a single audio file and print its metrics.
+
+	Returns True on success, False if the file could not be read or analysed
+	(so the caller can exit non-zero when every input failed)."""
 
 	# Try the cache first — skips CPU-intensive analysis if nothing has changed
 	cached = subsample.cache.load_cache(filepath)
@@ -57,6 +60,18 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 		loop        = cached.loop
 
 	else:
+		# Hash the file BEFORE decoding and analysing it: hashing afterwards
+		# would pair the analysis of the old bytes with an MD5 of whatever the
+		# file became if it were overwritten mid-analysis — a permanently wrong
+		# sidecar that never self-heals (cache._reanalyze_and_save documents the
+		# same hash-first rule).
+		try:
+			audio_md5 = subsample.cache.compute_audio_md5(filepath)
+
+		except OSError as exc:
+			print(f"Error reading {filepath}: {exc}", file=sys.stderr)
+			return False
+
 		# Read through read_audio_file (not a raw soundfile.read) so this matches
 		# the cache/player pipeline exactly: hot float/double sources are scaled
 		# to the import ceiling, and the sidecar we write describes the audio the
@@ -67,19 +82,21 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 
 		except (OSError, ValueError) as exc:
 			print(f"Error reading {filepath}: {exc}", file=sys.stderr)
-			return
+			return False
 
 		mono = subsample.analysis.to_mono_float(file_info.audio, file_info.bit_depth)
 		samplerate = file_info.sample_rate
 
 		params = subsample.analysis.compute_params(samplerate)
 
-		# Use default analysis config (same as live capture defaults)
-		rhythm_cfg = subsample.config.AnalysisConfig()
-
 		# Run all three analyses; analyze_all() shares the pyin computation
 		# between spectral and pitch, avoiding ~200-300 ms of redundant work.
-		result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(mono, params, rhythm_cfg)
+		# A librosa failure on degenerate input skips this one file cleanly.
+		try:
+			result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(mono, params, rhythm_cfg)
+		except Exception as exc:
+			print(f"  {filepath.name}  (skipped, could not analyze: {exc})", file=sys.stderr)
+			return False
 
 		duration = len(mono) / samplerate
 
@@ -87,7 +104,6 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 
 		# Save results for next time; log but don't fail if the filesystem is read-only
 		try:
-			audio_md5 = subsample.cache.compute_audio_md5(filepath)
 			subsample.cache.save_cache(
 				audio_path = filepath,
 				audio_md5  = audio_md5,
@@ -120,14 +136,38 @@ def _analyze_file (filepath: pathlib.Path) -> None:
 	else:
 		print("loop:     none (not a loop candidate, or no clean junction)")
 
+	return True
 
-def main () -> None:
+
+def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	"""Analyze one or more audio files and print their metrics."""
 
-	if not sys.argv[1:]:
-		print("Usage: analyze_file <audio-file> [<audio-file> ...]", file=sys.stderr)
-		sys.exit(1)
+	subsample.tools._shared.configure_logging()
+
+	parser = argparse.ArgumentParser(
+		prog="subsample analyze",
+		description="Analyze audio files and print their detected metrics (rhythm, spectral, pitch, level, loop).",
+	)
+	parser.add_argument(
+		"files",
+		nargs="+",
+		metavar="FILE",
+		help="Audio files or quoted glob patterns to analyze",
+	)
+	parser.add_argument(
+		"--config",
+		type=pathlib.Path,
+		default=None,
+		metavar="PATH",
+		help="Path to config.yaml (default: auto-discover as per main app)",
+	)
+	args = parser.parse_args(argv)
+
+	# Wire the float ceiling and analysis tempo priors from config: analyze
+	# writes a sidecar the player later trusts, so it must analyse at the same
+	# scale and tuning the app itself would use.
+	cfg = subsample.tools._shared.load_config_and_wire(args.config)
 
 	# Expand each argument with glob so quoted wildcards work (e.g. "*.wav").
 	# If an argument contains glob metacharacters but matches nothing, report
@@ -138,7 +178,7 @@ def main () -> None:
 	_GLOB_CHARS = frozenset("*?[")
 
 	paths: list[pathlib.Path] = []
-	for arg in sys.argv[1:]:
+	for arg in args.files:
 		matches = sorted(glob.glob(arg))
 
 		if matches:
@@ -149,16 +189,21 @@ def main () -> None:
 			paths.append(pathlib.Path(arg))
 
 	if not paths:
-		sys.exit(1)
+		return 1
 
 	multi = len(paths) > 1
+	any_ok = False
 
 	for filepath in paths:
 		if multi:
 			print(f"\nAnalyzing {filepath.name} ...")
 
-		_analyze_file(filepath)
+		if _analyze_file(filepath, cfg.analysis):
+			any_ok = True
+
+	# Every input unreadable/unanalysable → non-zero exit for scripts/pipelines.
+	return 0 if any_ok else 1
 
 
 if __name__ == "__main__":
-	main()
+	raise SystemExit(main())
