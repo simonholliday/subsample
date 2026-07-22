@@ -481,6 +481,9 @@ def build_extract_matrix (
 	sample's position — `omni` is the equal-energy sum, `side`/`depth`/
 	`height` are figure-eight dipoles, `left`/`right`/`front`/`back` are
 	first-order cardioids, and `channel.N` is a literal index pick (1-indexed).
+	`blend` is a user-defined weighted sum to mono (one signed weight per input
+	channel, normalised so the weight magnitudes sum to 1 — a balance change
+	holds the level, a negative weight flips that channel's polarity).
 
 	Dispatches first on ``channel_format``.  For Ambisonic B-format (AmbiX
 	ACN order: W=0, Y=1, Z=2, X=3), the four channels already form a
@@ -523,6 +526,29 @@ def build_extract_matrix (
 		matrix = numpy.zeros((1, in_channels), dtype=numpy.float32)
 		matrix[0, n - 1] = 1.0
 		return matrix
+
+	# Weighted blend — a user-defined (1, in) mix to mono.  Format-agnostic (it
+	# operates on raw channels), normalised so the weight magnitudes sum to 1: a
+	# balance change holds the level, and a negative weight flips that channel's
+	# polarity (e.g. top mic + phase-inverted bottom snare mic).
+	if extract_spec.kind == "blend":
+		weights = extract_spec.weights
+
+		if weights is None:
+			raise ValueError("extract: 'blend' spec is missing weights")
+
+		if len(weights) != in_channels:
+			raise ValueError(
+				f"extract 'blend': {len(weights)} weight(s) for a {in_channels}-"
+				f"channel input — exactly one weight per input channel is required"
+			)
+
+		total = float(sum(abs(w) for w in weights))
+
+		if total == 0.0:
+			raise ValueError("extract 'blend': weights cannot all be zero")
+
+		return numpy.array([[w / total for w in weights]], dtype=numpy.float32)
 
 	# Named patterns: dispatch on channel_format.
 	if channel_format == "b_format_ambix":

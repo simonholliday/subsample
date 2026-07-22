@@ -807,6 +807,59 @@ def _parse_output_routing (
 	return tuple(ch - 1 for ch in channels)
 
 
+_VALID_EXTRACT_KEYS: typing.Final[frozenset[str]] = frozenset({"blend"})
+
+
+def _parse_extract_blend (
+	raw: dict[str, typing.Any], assignment_name: str,
+) -> subsample.query.ExtractSpec:
+
+	"""Parse the dict form ``extract: {blend: [w1, w2, ...]}`` into a blend ExtractSpec.
+
+	``blend`` is a per-input-channel weight list — at least one finite number,
+	not all zero, signed (a negative weight flips that channel's polarity).  The
+	weights are stored verbatim; ``subsample.channel.build_extract_matrix``
+	normalises them by the sum of their magnitudes (so a balance change holds the
+	level) and checks the count against the sample's channel layout at map load.
+	"""
+
+	unknown = set(raw.keys()) - _VALID_EXTRACT_KEYS
+
+	if unknown:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unknown extract key(s) "
+			f"{sorted(unknown)} (valid: {', '.join(sorted(_VALID_EXTRACT_KEYS))})"
+		)
+
+	weights_raw = raw.get("blend")
+
+	if not isinstance(weights_raw, list) or not weights_raw:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: extract 'blend' must be a "
+			f"non-empty list of per-channel weights, got {weights_raw!r}"
+		)
+
+	weights: list[float] = []
+
+	for w in weights_raw:
+		# bool is an int subclass — reject it so 'blend: [true]' can't slip through as 1.
+		if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: extract 'blend' weights "
+				f"must be finite numbers, got {w!r}"
+			)
+
+		weights.append(float(w))
+
+	if sum(abs(w) for w in weights) == 0.0:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: extract 'blend' weights "
+			f"cannot all be zero"
+		)
+
+	return subsample.query.ExtractSpec(kind="blend", weights=tuple(weights))
+
+
 def _parse_extract (raw: typing.Any, assignment_name: str) -> typing.Optional[subsample.query.ExtractSpec]:
 
 	"""Parse the ``extract:`` field from a MIDI map assignment into an ExtractSpec.
@@ -816,29 +869,36 @@ def _parse_extract (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 	    side, depth, height, left, right, front, back). Case-insensitive.
 	  - ``channel.<N>`` where N is a 1-indexed integer pointing at a literal
 	    input channel.
+	  - ``{blend: [w1, w2, ...]}`` — a weighted sum of the input channels to
+	    mono (one signed weight per channel; see _parse_extract_blend).
 	  - ``None`` (no extract — full multi-channel signal flows through pan/output).
 
 	Validation here is syntactic only.  Semantic compatibility against the
-	actual sample's ``channel_format`` is checked at map-load time by
+	actual sample's ``channel_format`` (and, for ``blend``, the weight count
+	against the channel count) is checked at map-load time by
 	``_validate_assignment_extracts`` once samples are resolved.
 
 	Args:
-		raw:             Raw YAML value (string, or None for no extract).
+		raw:             Raw YAML value (string, {blend: ...} mapping, or None).
 		assignment_name: Name for error messages.
 
 	Returns:
 		ExtractSpec or None.
 
 	Raises:
-		ValueError: On unknown kind, malformed channel.N, or wrong type.
+		ValueError: On unknown kind, malformed channel.N, bad blend weights, or wrong type.
 	"""
 
 	if raw is None:
 		return None
 
+	if isinstance(raw, dict):
+		return _parse_extract_blend(raw, assignment_name)
+
 	if not isinstance(raw, str):
 		raise ValueError(
-			f"MIDI map assignment {assignment_name!r}: extract must be a string, "
+			f"MIDI map assignment {assignment_name!r}: extract must be a string "
+			f"(a named pickup or channel.<n>) or a {{blend: [...]}} mapping, "
 			f"got {type(raw).__name__}"
 		)
 
@@ -2257,7 +2317,7 @@ def _validate_assignment_extracts (
 				# format reduces to the omni matrix (e.g. `front` on stereo —
 				# no F/B distinction exists).  Tell the user this is happening
 				# but don't reject; the audio result is still useful.
-				if assignment.extract.kind not in ("omni", "channel"):
+				if assignment.extract.kind not in ("omni", "channel", "blend"):
 					omni_spec = subsample.query.ExtractSpec(kind="omni")
 
 					try:

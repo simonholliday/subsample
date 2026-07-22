@@ -1051,10 +1051,16 @@ class ExtractSpec:
 	- ``side`` / ``depth`` / ``height`` first-order figure-eight dipoles
 	- ``left`` / ``right`` / ``front`` / ``back`` first-order cardioids
 	- ``channel`` (with channel_index) literal Nth input channel
+	- ``blend`` (with weights) a user-defined weighted sum to mono — one
+	  signed weight per input channel, normalised so the magnitudes sum to 1
+	  (a balance change keeps the level; a negative weight flips that channel's
+	  polarity).  Its own use case is blending a dual-mic capture (e.g. top and
+	  bottom snare mics) with the bottom mic's polarity flipped.
 	"""
 
 	kind:          str
-	channel_index: typing.Optional[int] = None
+	channel_index: typing.Optional[int]          = None
+	weights:       typing.Optional[tuple[float, ...]] = None
 
 
 # ---------------------------------------------------------------------------

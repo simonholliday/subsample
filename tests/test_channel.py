@@ -494,6 +494,61 @@ class TestBuildExtractMatrix:
 		with pytest.raises(ValueError, match="channel_index"):
 			subsample.channel.build_extract_matrix(_spec("channel"), 4, "pcm")
 
+	# -- blend (user-weighted sum to mono) --
+
+	def _blend (self, weights: tuple[float, ...]) -> subsample.query.ExtractSpec:
+		return subsample.query.ExtractSpec(kind="blend", weights=weights)
+
+	def test_blend_normalises_to_unit_magnitude_sum (self) -> None:
+		"""Weights scale so their magnitudes sum to 1, whatever the input scale."""
+		mat = subsample.channel.build_extract_matrix(self._blend((7.0, 3.0)), 2, "pcm")
+		numpy.testing.assert_allclose(mat, [[0.7, 0.3]])
+
+	def test_blend_negative_weight_flips_polarity (self) -> None:
+		"""A negative weight inverts that channel — top mic + phase-flipped bottom."""
+		mat = subsample.channel.build_extract_matrix(self._blend((0.7, -0.3)), 2, "pcm")
+		numpy.testing.assert_allclose(mat, [[0.7, -0.3]])
+
+	def test_blend_equal_is_fifty_fifty (self) -> None:
+		mat = subsample.channel.build_extract_matrix(self._blend((1.0, 1.0)), 2, "pcm")
+		numpy.testing.assert_allclose(mat, [[0.5, 0.5]])
+
+	def test_blend_applies_weights_to_channels (self) -> None:
+		"""Output = 0.7*ch1 + 0.3*ch2 (top + bottom mic)."""
+		audio = numpy.zeros((4, 2), dtype=numpy.float32)
+		audio[:, 0] = 2.0   # top mic
+		audio[:, 1] = 1.0   # bottom mic
+		mat = subsample.channel.build_extract_matrix(self._blend((0.7, 0.3)), 2, "pcm")
+		out = audio @ mat.T
+		numpy.testing.assert_allclose(out, numpy.full((4, 1), 0.7 * 2.0 + 0.3 * 1.0, dtype=numpy.float32))
+
+	def test_blend_balance_sweep_holds_level_on_correlated_input (self) -> None:
+		"""L1 normalisation keeps a mono (perfectly correlated) source at unit level
+		across a same-polarity balance sweep — the mix never needs re-touching."""
+		mono = numpy.ones((100, 2), dtype=numpy.float32)   # both channels identical
+		for w in ((0.9, 0.1), (0.7, 0.3), (0.5, 0.5), (0.2, 0.8)):
+			mat = subsample.channel.build_extract_matrix(self._blend(w), 2, "pcm")
+			out = mono @ mat.T
+			numpy.testing.assert_allclose(out, numpy.ones((100, 1), dtype=numpy.float32), rtol=1e-6)
+
+	def test_blend_is_format_agnostic_three_channels (self) -> None:
+		"""blend handles non-standard channel counts (bypasses the layout table)."""
+		mat = subsample.channel.build_extract_matrix(self._blend((1.0, 1.0, 2.0)), 3, "pcm")
+		numpy.testing.assert_allclose(mat, [[0.25, 0.25, 0.5]])
+
+	def test_blend_weight_count_mismatch_rejected (self) -> None:
+		"""Weight count must equal the input channel count (caught at map load)."""
+		with pytest.raises(ValueError, match="one weight per input channel"):
+			subsample.channel.build_extract_matrix(self._blend((0.7, 0.3)), 4, "pcm")
+
+	def test_blend_missing_weights_raises (self) -> None:
+		with pytest.raises(ValueError, match="missing weights"):
+			subsample.channel.build_extract_matrix(subsample.query.ExtractSpec(kind="blend"), 2, "pcm")
+
+	def test_blend_all_zero_rejected (self) -> None:
+		with pytest.raises(ValueError, match="cannot all be zero"):
+			subsample.channel.build_extract_matrix(self._blend((0.0, 0.0)), 2, "pcm")
+
 	# -- General errors --
 
 	def test_unknown_format_rejected (self) -> None:

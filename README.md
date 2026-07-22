@@ -468,7 +468,7 @@ when you want to try something the tutorial didn't show.
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Stereo position `-100` (hard left) to `100` (hard right), `0` = centre (default) - or a per-channel weight list for surround/asymmetric routing (`[50, 50]` = centre; ratios matter, not absolute values). Constant-power normalised at mix time. See Pan below |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
-| `extract` | no | Collapse a multi-channel sample to one channel at playback: `omni`, `left`, `right`, `front`, `back`, `side`, `depth`, `height`, or `channel.N` (see Channel extraction below) |
+| `extract` | no | Collapse a multi-channel sample to one channel at playback: `omni`, `left`, `right`, `front`, `back`, `side`, `depth`, `height`, `channel.N`, or `{blend: [w1, w2, ...]}` for a weighted mix to mono (see Channel extraction below) |
 | `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
 | `stack` | no | `true` lets this sound play together with other `stack: true` assignments on the same note and velocity, instead of being rejected as an overlap (see Stacking below). Default `false` |
 | `template` | no | Inherit fields from one or more named templates (see Templates below). The assignment's own fields override the template's; lists (`process`) and nested blocks (`select`) are replaced wholesale, not merged |
@@ -1658,6 +1658,7 @@ for mono, stereo, quad, 5.1, 7.1, and Ambisonic B-format inputs.
 | `front`    | forward cardioid                       | same as `omni` ⚠ | `(W+X)/√2`           |
 | `back`     | rear cardioid                          | rejected          | `(W-X)/√2`           |
 | `channel.N`| literal Nth input channel (1-indexed)  | -                 | -                    |
+| `{blend: [w1, w2, …]}` | your own weighted sum to mono (signed, auto-normalised) | `w1·L + w2·R` | raw channels |
 
 Surround (quad / 5.1 / 7.1) inputs are also supported; each pattern uses the
 channels that carry the requested spatial information (e.g. `front` on 5.1
@@ -1678,6 +1679,31 @@ extract.
 The `channel.N` form is the escape hatch when you really do want a literal
 channel pick (e.g. `extract: channel.2` for the second input channel only).
 N is 1-indexed and rejected if it exceeds the input's channel count.
+
+**Blending two mics into mono.** `extract: { blend: [w1, w2, ...] }` sums the
+input channels with your own weights - one per channel - instead of a fixed
+pattern. The weights are auto-normalised so their magnitudes add up to 1, which
+means changing the balance never changes the output level: you can dial the mix
+without re-touching your gain. A **negative** weight flips that channel's
+polarity.
+
+The reason this exists is a snare recorded with two mics - one above, one below -
+onto two channels of a single file. The two capsules face each other, so they
+are roughly 180° out of phase; summing them naively (`omni`) thins the body of
+the drum. Flip the bottom mic with a negative weight and set the balance to
+taste - more of the bottom mic brings up the snare wires:
+
+```yaml
+- name: Snare
+  channel: 10
+  notes: drum.snare_1
+  select:
+    where: { directory: snare }
+  extract: { blend: [0.7, -0.3] }   # 70% top mic + 30% bottom, bottom polarity flipped
+```
+
+Write the weights at any scale - `[7, -3]` and `[0.7, -0.3]` mean the same thing.
+The number of weights must match the sample's channel count, checked at map load.
 
 ---
 

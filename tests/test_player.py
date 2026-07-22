@@ -6323,6 +6323,41 @@ class TestParseExtract:
 		with pytest.raises(ValueError, match="kick"):
 			subsample.player._parse_extract("bogus", "kick")
 
+	# -- blend dict form --
+
+	def test_blend_dict_parses (self) -> None:
+		result = subsample.player._parse_extract({"blend": [0.7, -0.3]}, "snare")
+		assert result == subsample.query.ExtractSpec(kind="blend", weights=(0.7, -0.3))
+
+	def test_blend_integer_weights_coerced_to_float (self) -> None:
+		result = subsample.player._parse_extract({"blend": [7, 3]}, "snare")
+		assert result == subsample.query.ExtractSpec(kind="blend", weights=(7.0, 3.0))
+
+	def test_blend_empty_list_rejected (self) -> None:
+		with pytest.raises(ValueError, match="non-empty list"):
+			subsample.player._parse_extract({"blend": []}, "snare")
+
+	def test_blend_non_numeric_weight_rejected (self) -> None:
+		with pytest.raises(ValueError, match="finite numbers"):
+			subsample.player._parse_extract({"blend": [0.7, "x"]}, "snare")
+
+	def test_blend_bool_weight_rejected (self) -> None:
+		"""bool is an int subclass — must not slip through as 1/0."""
+		with pytest.raises(ValueError, match="finite numbers"):
+			subsample.player._parse_extract({"blend": [True, 0.3]}, "snare")
+
+	def test_blend_non_finite_weight_rejected (self) -> None:
+		with pytest.raises(ValueError, match="finite numbers"):
+			subsample.player._parse_extract({"blend": [float("inf"), 0.3]}, "snare")
+
+	def test_blend_all_zero_rejected (self) -> None:
+		with pytest.raises(ValueError, match="cannot all be zero"):
+			subsample.player._parse_extract({"blend": [0.0, 0.0]}, "snare")
+
+	def test_blend_unknown_key_rejected (self) -> None:
+		with pytest.raises(ValueError, match="unknown extract key"):
+			subsample.player._parse_extract({"blend": [1.0, 1.0], "normalise": False}, "snare")
+
 
 def _make_player_for_mix_matrix (output_channels: int = 2) -> subsample.player.MidiPlayer:
 	"""Construct a minimal MidiPlayer suitable for testing _get_mix_matrix."""
