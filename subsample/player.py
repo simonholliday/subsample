@@ -116,6 +116,24 @@ NoteMap = dict[
 
 
 @dataclasses.dataclass(frozen=True)
+class _Candidates:
+
+	"""One assignment's pre-resolved trigger pool.
+
+	``ids`` is the ranked list of sample ids (the pick draws an index into it).
+	``loudness`` holds the pool's per-sample levels normalised to [0, 1] (loudest
+	= 1.0, same order as ``ids``) for a ``spacing: loudness`` velocity pick, or
+	None when the pool cannot be loudness-spaced (fewer than two samples or a
+	single distinct level).  The two are bundled so the candidate-cache rebind
+	stays atomic — an in-flight trigger always sees a matched (ids, loudness)
+	pair, never new ids beside stale levels.
+	"""
+
+	ids:      list[int]
+	loudness: typing.Optional[list[float]]
+
+
+@dataclasses.dataclass(frozen=True)
 class ZoneTemplate:
 
 	"""A declared zone-tuned assignment.
@@ -195,6 +213,35 @@ class MidiMapResult:
 	zone_templates:   tuple[ZoneTemplate, ...] = ()
 
 
+def _loudness_positions (
+	records: list[subsample.library.SampleRecord],
+) -> typing.Optional[list[float]]:
+
+	"""Normalise a ranked pool's RMS levels to [0, 1] for loudness-spaced picks.
+
+	Returns one fraction per record (quietest -> 0.0, loudest -> 1.0), in the
+	same order as ``records``, so ``PickSpec.resolve_index`` can lay the pool
+	along the velocity axis by real dynamics.  Returns None when the pool has
+	fewer than two samples or a single distinct level — both cases where
+	proportional spacing is meaningless and resolve_index falls back to even
+	rank spacing.
+	"""
+
+	if len(records) < 2:
+		return None
+
+	levels = [float(record.level.rms) for record in records]
+	lo     = min(levels)
+	hi     = max(levels)
+
+	if hi <= lo:
+		return None
+
+	span = hi - lo
+
+	return [(level - lo) / span for level in levels]
+
+
 def _ranks_for (pick_spec: subsample.query.PickSpec, ranked_len: int) -> range:
 
 	"""Iterable of 1-indexed ranks this PickSpec might draw at trigger time.
@@ -239,7 +286,8 @@ def _format_pick_suffix (pick_spec: subsample.query.PickSpec) -> str:
 		# "any"; name the mode instead, with curve/spread when they are set.
 		curve = "" if pick_spec.curve == "linear" else f"/{pick_spec.curve}"
 		vary  = f" ±{pick_spec.variation // 2}" if pick_spec.variation else ""
-		return f" pick velocity{curve}{vary}"
+		space = " by-loudness" if pick_spec.spacing == "loudness" else ""
+		return f" pick velocity{curve}{vary}{space}"
 
 	lo, hi = pick_spec.lo, pick_spec.hi
 
@@ -3371,7 +3419,7 @@ class MidiPlayer:
 		# _rebuild_candidate_cache() on every re-evaluation.  Assignments whose
 		# select depends on asynchronously-baked variant state (quantized_beats
 		# / beat_match) are deliberately absent and resolved live instead.
-		self._candidate_cache: dict[int, list[int]] = {}
+		self._candidate_cache: dict[int, _Candidates] = {}
 
 		# Event emitter for integrations (Supervisor dashboard, etc.).
 		# Currently emits 'cc' on control_change messages.
@@ -5338,13 +5386,16 @@ class MidiPlayer:
 
 		vel_lo, vel_hi = assignment.velocity_trigger
 
-		candidates = self._candidate_cache.get(id(assignment))
+		cached = self._candidate_cache.get(id(assignment))
 
-		if candidates is not None:
-			if not candidates:
+		if cached is not None:
+			if not cached.ids:
 				return None
 
-			return candidates[pick_spec.resolve_index(len(candidates), velocity, vel_lo, vel_hi)]
+			index = pick_spec.resolve_index(
+				len(cached.ids), velocity, vel_lo, vel_hi, cached.loudness,
+			)
+			return cached.ids[index]
 
 		# Variant-dependent select — resolve live (see _rebuild_candidate_cache).
 		eff_similarity = self._effective_similarity_matrix
@@ -5367,7 +5418,10 @@ class MidiPlayer:
 			)
 
 			if ranked:
-				return ranked[pick_spec.resolve_index(len(ranked), velocity, vel_lo, vel_hi)].sample_id
+				index = pick_spec.resolve_index(
+					len(ranked), velocity, vel_lo, vel_hi, _loudness_positions(ranked),
+				)
+				return ranked[index].sample_id
 
 		return None
 
@@ -5383,7 +5437,8 @@ class MidiPlayer:
 		per-trigger query, sort, and ``directory:`` filesystem scan from the
 		rtmidi callback thread.
 
-		Stores variant-independent results (as sample ids) in
+		Stores variant-independent results (sample ids, plus the pool's
+		normalised levels for a loudness-spaced velocity pick) as _Candidates in
 		``self._candidate_cache`` via an atomic rebind.  Selects that order or
 		filter by quantized_beats / beat_match are left out of the cache —
 		their ranking changes as variants finish baking, so the trigger path
@@ -5404,7 +5459,7 @@ class MidiPlayer:
 		all_samples    = eff_library.samples()
 
 		ranked_by_assignment: dict[int, list[subsample.library.SampleRecord]] = {}
-		new_cache: dict[int, list[int]] = {}
+		new_cache: dict[int, _Candidates] = {}
 		seen: set[int] = set()
 
 		for entries in self._note_map.values():
@@ -5440,7 +5495,10 @@ class MidiPlayer:
 				# Variant-dependent selects re-rank as variants bake, so the
 				# trigger path must re-query them live — keep them uncached.
 				if not subsample.query.select_uses_variant_state(assignment.select):
-					new_cache[assignment_id] = [record.sample_id for record in ranked]
+					new_cache[assignment_id] = _Candidates(
+						ids=[record.sample_id for record in ranked],
+						loudness=_loudness_positions(ranked),
+					)
 
 		# Atomic dict rebind: in-flight rtmidi handlers see either the old or
 		# the new cache, never a half-built one.

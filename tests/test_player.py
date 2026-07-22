@@ -220,6 +220,14 @@ class TestFormatPickSuffix:
 	def test_open_lower_reads_from_one (self) -> None:
 		assert subsample.player._format_pick_suffix(subsample.query.PickSpec(None, 5)) == " pick 1-5"
 
+	def test_velocity_rank_spacing (self) -> None:
+		spec = subsample.query.PickSpec(None, None, "velocity", 0, "linear", True, "rank")
+		assert subsample.player._format_pick_suffix(spec) == " pick velocity"
+
+	def test_velocity_loudness_spacing (self) -> None:
+		spec = subsample.query.PickSpec(None, None, "velocity", 0, "linear", True, "loudness")
+		assert subsample.player._format_pick_suffix(spec) == " pick velocity by-loudness"
+
 
 # ---------------------------------------------------------------------------
 # list_midi_input_devices
@@ -7179,7 +7187,7 @@ class TestCandidateCache:
 
 		player, _lib = self._make_player(records, note_map)
 
-		assert player._candidate_cache[id(asgn)] == [1]
+		assert player._candidate_cache[id(asgn)].ids == [1]
 
 	def test_resolve_sample_id_uses_cache_without_querying (self) -> None:
 		"""_resolve_sample_id returns the cached pick and never calls the query engine."""
@@ -7203,7 +7211,7 @@ class TestCandidateCache:
 
 		player, lib = self._make_player(records, note_map)
 
-		assert player._candidate_cache[id(asgn)] == []
+		assert player._candidate_cache[id(asgn)].ids == []
 		assert player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 1), lib, velocity=64) is None
 
 	def test_range_pick_re_rolls_across_cached_list (self) -> None:
@@ -7214,7 +7222,7 @@ class TestCandidateCache:
 
 		player, lib = self._make_player(records, note_map)
 
-		assert set(player._candidate_cache[id(asgn)]) == {1, 2, 3}
+		assert set(player._candidate_cache[id(asgn)].ids) == {1, 2, 3}
 
 		drawn = {
 			player._resolve_sample_id(asgn, subsample.query.PickSpec(1, 3), lib, velocity=64)
@@ -7232,14 +7240,14 @@ class TestCandidateCache:
 			records.append(dataclasses.replace(rec, level=dataclasses.replace(rec.level, rms=rms)))
 		return records
 
-	def _velocity_assignment (self) -> subsample.query.Assignment:
+	def _velocity_assignment (self, spacing: str = "rank") -> subsample.query.Assignment:
 		"""An assignment ranking hat* quietest-first with a velocity pick."""
 		return subsample.query.Assignment(
 			name="Snare",
 			select=(subsample.query.SelectSpec(
 				where=subsample.query.WherePredicate(name_glob="hat*"),
 				order=(subsample.query.OrderClause(by="level", dir="asc"),),
-				pick=subsample.query.PickSpec(None, None, "velocity", 0, "linear", True),
+				pick=subsample.query.PickSpec(None, None, "velocity", 0, "linear", True, spacing),
 			),),
 		)
 
@@ -7253,7 +7261,7 @@ class TestCandidateCache:
 		player, lib = self._make_player(records, note_map)
 
 		# order: level asc → the cache is the quiet→loud id order.
-		assert player._candidate_cache[id(asgn)] == [1, 2, 3, 4, 5]
+		assert player._candidate_cache[id(asgn)].ids == [1, 2, 3, 4, 5]
 		assert player._resolve_sample_id(asgn, pick, lib, velocity=1) == 1     # quietest
 		assert player._resolve_sample_id(asgn, pick, lib, velocity=127) == 5   # loudest
 
@@ -7303,12 +7311,12 @@ class TestCandidateCache:
 		note_map = {(0, 42): [(asgn, subsample.query.PickSpec(1, 1))]}
 
 		player, lib = self._make_player(records, note_map)
-		assert set(player._candidate_cache[id(asgn)]) == {1}
+		assert set(player._candidate_cache[id(asgn)].ids) == {1}
 
 		lib.samples.return_value = records + [self._make_record("hat_b", 2)]
 		player.update_assignments()
 
-		assert set(player._candidate_cache[id(asgn)]) == {1, 2}
+		assert set(player._candidate_cache[id(asgn)].ids) == {1, 2}
 
 	def test_update_assignments_drops_evicted_sample (self) -> None:
 		"""When a sample leaves the library, the next rebuild removes it from
@@ -7318,12 +7326,56 @@ class TestCandidateCache:
 		note_map = {(0, 42): [(asgn, subsample.query.PickSpec(1, 1))]}
 
 		player, lib = self._make_player(records, note_map)
-		assert set(player._candidate_cache[id(asgn)]) == {1, 2}
+		assert set(player._candidate_cache[id(asgn)].ids) == {1, 2}
 
 		lib.samples.return_value = [records[0]]
 		player.update_assignments()
 
-		assert set(player._candidate_cache[id(asgn)]) == {1}
+		assert set(player._candidate_cache[id(asgn)].ids) == {1}
+
+	# --- loudness spacing (proportional velocity pick) ---
+
+	def test_loudness_positions_normalises_pool (self) -> None:
+		"""_loudness_positions maps the pool's rms to [0, 1] — quietest 0, loudest 1."""
+		positions = subsample.player._loudness_positions(self._leveled_records([0.1, 0.3, 0.5]))
+		assert positions == pytest.approx([0.0, 0.5, 1.0])
+
+	def test_loudness_positions_degenerate_returns_none (self) -> None:
+		"""A single sample or one distinct level can't be loudness-spaced — None."""
+		assert subsample.player._loudness_positions(self._leveled_records([0.2])) is None
+		assert subsample.player._loudness_positions(self._leveled_records([0.3, 0.3, 0.3])) is None
+
+	def test_loudness_spacing_lone_hit_owns_loud_end_e2e (self) -> None:
+		"""spacing: loudness — a firm hit resolves to the lone loud sample (Simon's case)."""
+		# 9 ghosts clustered quiet + 1 loud hit (id 10), quietest-first.
+		records = self._leveled_records([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 1.0])
+		asgn = self._velocity_assignment(spacing="loudness")
+		pick = asgn.select[0].pick
+		note_map = {(0, 38): [(asgn, pick)]}
+
+		player, lib = self._make_player(records, note_map)
+
+		# The cache carries the pool's normalised loudness for the loudness pick.
+		cached = player._candidate_cache[id(asgn)]
+		assert cached.loudness is not None
+		assert cached.loudness[0]  == pytest.approx(0.0)   # quietest ghost
+		assert cached.loudness[-1] == pytest.approx(1.0)   # the loud hit
+
+		# A firm hit lands on the loud sample (id 10) — rank spacing would not.
+		assert player._resolve_sample_id(asgn, pick, lib, velocity=110) == 10
+		assert player._resolve_sample_id(asgn, pick, lib, velocity=1)   <= 9   # soft → a ghost, not the hit
+
+	def test_rank_spacing_spreads_lone_hit_thin_e2e (self) -> None:
+		"""Contrast: default rank spacing gives the lone hit only the very top of the range."""
+		records = self._leveled_records([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 1.0])
+		asgn = self._velocity_assignment(spacing="rank")
+		pick = asgn.select[0].pick
+		note_map = {(0, 38): [(asgn, pick)]}
+
+		player, lib = self._make_player(records, note_map)
+
+		# A firm hit (velocity 110) still selects a ghost under even rank spacing.
+		assert player._resolve_sample_id(asgn, pick, lib, velocity=110) != 10
 
 
 class TestDurationBeatsPool:
@@ -7382,7 +7434,7 @@ class TestDurationBeatsPool:
 
 		player = self._make_player(records, note_map, target_bpm=120.0)
 
-		assert set(player._candidate_cache[id(asgn)]) == {1}
+		assert set(player._candidate_cache[id(asgn)].ids) == {1}
 
 	def test_pool_refilters_when_tempo_is_adopted (self) -> None:
 		# A 0.30 s sample is 0.30 beats at 60 BPM but 0.60 beats at 120 BPM, so a
@@ -7392,7 +7444,7 @@ class TestDurationBeatsPool:
 		note_map = _make_note_map(asgn, channel=9, notes=[42])
 
 		player = self._make_player(records, note_map, target_bpm=60.0, tempo_source="midi")
-		assert set(player._candidate_cache[id(asgn)]) == {1}
+		assert set(player._candidate_cache[id(asgn)].ids) == {1}
 
 		# Adopt a faster tempo from the clock: the same sample now runs longer
 		# than the threshold in beats and drops out of the pool.
@@ -7400,7 +7452,8 @@ class TestDurationBeatsPool:
 			player._clock_bpm = 120.0
 		player.update_assignments()
 
-		assert not player._candidate_cache.get(id(asgn))
+		cached = player._candidate_cache.get(id(asgn))
+		assert cached is None or not cached.ids
 
 
 class TestUsesBeatFilter:

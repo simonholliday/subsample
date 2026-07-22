@@ -1723,8 +1723,9 @@ class TestVelocityPick:
 		variation: int = 0,
 		curve: str = "linear",
 		ascending: bool = True,
+		spacing: str = "rank",
 	) -> subsample.query.PickSpec:
-		return subsample.query.PickSpec(None, None, "velocity", variation, curve, ascending)
+		return subsample.query.PickSpec(None, None, "velocity", variation, curve, ascending, spacing)
 
 	# --- resolve_index velocity math ---
 
@@ -1768,6 +1769,50 @@ class TestVelocityPick:
 			spec = self._vel(curve=curve)
 			assert spec.resolve_index(n, lo, lo, hi) == 0
 			assert spec.resolve_index(n, hi, lo, hi) == n - 1
+
+	# --- loudness spacing (proportional to level) ---
+
+	# 9 ghosts packed at the quiet end + 1 loud hit alone at the top — the pool
+	# Simon described.  positions are normalised levels in ranked (ascending) order.
+	_CLUSTERED = [0.00, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 1.00]
+
+	def test_loudness_spacing_lone_hit_owns_loud_end (self) -> None:
+		"""The lone hit owns a wide loud band; soft velocities stay on the ghosts.
+
+		The hit sits at 1.0 while the ghosts cluster below 0.07, so the Voronoi
+		boundary is near 0.535 — everything above it (velocity >~68) is the hit.
+		"""
+		spec = self._vel(spacing="loudness")
+		assert spec.resolve_index(9, 127, 0, 127, self._CLUSTERED) == 8   # hardest → the hit
+		assert spec.resolve_index(9, 90, 0, 127, self._CLUSTERED) == 8    # loud → still the hit
+		assert spec.resolve_index(9, 70, 0, 127, self._CLUSTERED) == 8    # past the cluster → the hit
+		assert spec.resolve_index(9, 1, 0, 127, self._CLUSTERED) < 8      # softest → a ghost, not the hit
+
+	def test_loudness_spacing_differs_from_rank (self) -> None:
+		"""Same pool, velocity 100: rank spacing picks a ghost, loudness picks the hit."""
+		rank = self._vel(spacing="rank").resolve_index(9, 100, 0, 127, self._CLUSTERED)
+		loud = self._vel(spacing="loudness").resolve_index(9, 100, 0, 127, self._CLUSTERED)
+		assert rank < 8      # rank puts a firm hit on a ghost (even spread)
+		assert loud == 8     # loudness puts it on the lone hit
+
+	def test_loudness_spacing_direction_agnostic (self) -> None:
+		"""positions carry the level direction, so order: loudest works without a flip."""
+		positions_desc = [1.00, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01, 0.00]
+		spec = self._vel(ascending=False, spacing="loudness")
+		assert spec.resolve_index(9, 127, 0, 127, positions_desc) == 0   # loudest is ranked[0]
+		assert spec.resolve_index(9, 1, 0, 127, positions_desc) >= 7     # quietest region → high ranks
+
+	def test_loudness_spacing_falls_back_without_positions (self) -> None:
+		"""spacing: loudness with no positions behaves exactly like rank spacing."""
+		loud = self._vel(spacing="loudness")
+		rank = self._vel(spacing="rank")
+		for v in (1, 40, 80, 127):
+			assert loud.resolve_index(10, v, 0, 127, None) == rank.resolve_index(10, v, 0, 127, None)
+
+	def test_loudness_spacing_ignored_on_length_mismatch (self) -> None:
+		"""A stale positions list of the wrong length is ignored — rank spacing is used."""
+		spec = self._vel(spacing="loudness")
+		assert spec.resolve_index(10, 127, 0, 127, [0.0, 0.5, 1.0]) == 9   # rank: hardest → last
 
 	# --- variation (stateless selection jitter) ---
 
@@ -1826,12 +1871,20 @@ class TestVelocityPick:
 		)
 		assert (p.mode, p.variation, p.curve) == ("velocity", 10, "logarithmic")
 
+	def test_parse_spacing (self) -> None:
+		"""spacing: loudness parses; default and shorthand stay rank."""
+		p = subsample.query._parse_pick({"mode": "velocity", "spacing": "loudness"}, "a")
+		assert p.spacing == "loudness"
+		assert subsample.query._parse_pick("velocity", "a").spacing == "rank"
+		assert subsample.query._parse_pick({"mode": "velocity"}, "a").spacing == "rank"
+
 	def test_parse_invalid_raises (self) -> None:
 		bad: list[typing.Any] = [
 			{"mode": "velocity", "curve": "bogus"},
 			{"mode": "velocity", "variation": -1},
 			{"mode": "velocity", "variation": 200},
 			{"mode": "velocity", "variation": True},
+			{"mode": "velocity", "spacing": "bogus"},
 			{"mode": "bogus"},
 			{"mode": "velocity", "foo": 1},
 			"bogus",

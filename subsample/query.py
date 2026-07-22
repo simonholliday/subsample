@@ -831,9 +831,11 @@ class PickSpec:
 	last available match rather than failing.
 
 	``pick: velocity`` (or the long form ``pick: {mode: velocity, variation,
-	curve}``) switches to velocity mode, which maps incoming MIDI velocity onto
-	the rank instead of drawing at random; it requires a level-based ``order:``
-	(``quietest`` or ``loudest``).  See the field comments and ``resolve_index``.
+	curve, spacing}``) switches to velocity mode, which maps incoming MIDI
+	velocity onto the rank instead of drawing at random; it requires a level-
+	based ``order:`` (``quietest`` or ``loudest``).  ``spacing: loudness`` makes
+	the mapping follow the samples' actual levels rather than their even rank
+	positions.  See the field comments and ``resolve_index``.
 	"""
 
 	lo: typing.Optional[int]
@@ -850,10 +852,19 @@ class PickSpec:
 	# tone, not level; ``curve`` reshapes the velocity → rank mapping;
 	# ``ascending`` records which way the level order runs (baked at parse time,
 	# since resolve_index sees only the list length, not its direction).
+	# ``spacing`` chooses how the pool lies along the velocity axis: "rank"
+	# (default) spreads samples evenly by sort position, so N samples each own
+	# 1/N of the range however their loudness clusters; "loudness" instead places
+	# each sample at its own level (normalised across the pool), so a lone hard
+	# hit among quiet ghosts owns the whole loud end while the ghosts resolve
+	# finely at the quiet end.  "loudness" needs the pool's per-sample levels at
+	# trigger time (passed to resolve_index); when they are absent or degenerate
+	# it falls back to "rank".
 	mode:      str  = "range"       # "range" | "velocity"
 	variation: int  = 0             # selection spread: total ± MIDI-velocity window
 	curve:     str  = "linear"      # "linear" | "logarithmic" | "exponential"
 	ascending: bool = True          # True when the level order is quietest-first
+	spacing:   str  = "rank"        # "rank" (even) | "loudness" (proportional to level)
 
 	def resolve_index (
 		self,
@@ -861,6 +872,7 @@ class PickSpec:
 		velocity:   typing.Optional[int] = None,
 		vel_lo:     int = 0,
 		vel_hi:     int = 127,
+		positions:  typing.Optional[list[float]] = None,
 	) -> int:
 
 		"""Return a 0-indexed rank into a ranked list of length ``ranked_len``.
@@ -881,6 +893,15 @@ class PickSpec:
 		samples.  ``velocity`` should be the RAW incoming velocity, not the
 		post-rescale gain velocity — the rescale compresses loudness, and using
 		it here would make the quiet end of the pool unreachable.
+
+		With ``spacing: loudness``, ``positions`` (one normalised level per
+		ranked sample, loudest = 1.0, in ranked order) replaces the even rank
+		scaling: the shaped velocity is matched to the nearest sample level, so
+		the layout follows the pool's actual dynamics.  ``positions`` already
+		encodes the level direction, so the ``ascending`` flip is skipped.  When
+		``positions`` is None or the wrong length (the variant-state slow path
+		may omit it, or the pool has a single distinct level) it falls back to
+		even rank spacing.
 		"""
 
 		if self.mode == "velocity":
@@ -898,6 +919,14 @@ class PickSpec:
 			frac = (v - vel_lo) / span
 
 			shaped = _apply_pick_curve(self.curve, frac)
+
+			# Loudness spacing: match the shaped velocity to the nearest actual
+			# sample level rather than an even rank slot.  ``positions`` carries
+			# the level direction, so there is no ascending flip here.
+			if self.spacing == "loudness" and positions is not None and len(positions) == ranked_len:
+				levels = positions
+				return min(range(ranked_len), key=lambda i: abs(levels[i] - shaped))
+
 			loud_index = int(round(shaped * (ranked_len - 1)))
 
 			return loud_index if self.ascending else (ranked_len - 1 - loud_index)
@@ -917,6 +946,12 @@ class PickSpec:
 # loud samples); "linear" is the identity.  The two curved forms are exact
 # inverses of one another.
 VALID_PICK_CURVES: frozenset[str] = frozenset({"linear", "logarithmic", "exponential"})
+
+# Velocity-pick spacing (PickSpec.spacing) — how the ranked pool is laid out
+# along the velocity axis.  "rank" spreads samples evenly by sort position;
+# "loudness" places each at its normalised level so the layout follows the
+# pool's real dynamics (see PickSpec and resolve_index).
+VALID_PICK_SPACINGS: frozenset[str] = frozenset({"rank", "loudness"})
 
 
 def _apply_pick_curve (curve: str, x: float) -> float:
@@ -2018,12 +2053,12 @@ def _parse_order (
 
 _VALID_PICK_OPERATORS: typing.Final[frozenset[str]] = frozenset({"gte", "lte", "gt", "lt", "eq"})
 
-_VALID_VELOCITY_PICK_KEYS: typing.Final[frozenset[str]] = frozenset({"mode", "variation", "curve"})
+_VALID_VELOCITY_PICK_KEYS: typing.Final[frozenset[str]] = frozenset({"mode", "variation", "curve", "spacing"})
 
 
 def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> PickSpec:
 
-	"""Parse the long form ``pick: {mode: velocity, variation, curve}``.
+	"""Parse the long form ``pick: {mode: velocity, variation, curve, spacing}``.
 
 	Reached from _parse_pick only when the pick dict carries a ``mode`` key (the
 	operator dict never does), so the two dict shapes never collide.  The
@@ -2081,7 +2116,15 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 			f"{curve!r}.  Valid curves: {', '.join(sorted(VALID_PICK_CURVES))}"
 		)
 
-	return PickSpec(None, None, "velocity", variation, curve, True)
+	spacing = str(raw.get("spacing", "rank")).strip().lower()
+
+	if spacing not in VALID_PICK_SPACINGS:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unknown pick 'spacing' "
+			f"{spacing!r}.  Valid spacings: {', '.join(sorted(VALID_PICK_SPACINGS))}"
+		)
+
+	return PickSpec(None, None, "velocity", variation, curve, True, spacing)
 
 
 def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
@@ -2095,7 +2138,7 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 	  - int n               → PickSpec(n, n)      (exact rank, n >= 1)
 	  - [lo, hi]            → PickSpec(lo, hi)    (random rank in range, both >= 1, lo <= hi)
 	  - [lo, null] / [null, hi] → open-ended range (None = best match / last match)
-	  - {mode: velocity, variation, curve} → velocity pick, long form (_parse_velocity_pick)
+	  - {mode: velocity, variation, curve, spacing} → velocity pick, long form (_parse_velocity_pick)
 	  - {gte, lte, gt, lt, eq: ...} → equivalent range; a lower-bound-only dict
 	    (gte / gt) leaves the upper bound open (hi=None)
 

@@ -988,6 +988,20 @@ pick: { mode: velocity, variation: 10, curve: logarithmic }
   `logarithmic` spreads gentle notes across more of the quiet samples - more
   distinct ghost-note tones at the bottom of the range; `exponential` favours
   finer resolution among the loud samples instead.
+- `spacing` (default `rank`) sets how the samples are laid out across the
+  velocity range. `rank` spreads them evenly by position - ten samples each own
+  about a tenth of the range whatever their actual level - which is right when
+  you record an even spread of strengths. `loudness` (`pick: { mode: velocity,
+  spacing: loudness }`) instead places each sample at its own measured level, so
+  the layout follows the real dynamics you captured. Record nine near-silent
+  ghosts and one hard hit and the difference is stark: `rank` gives the hard hit
+  only the top tenth of the range - firm notes still play ghosts - while
+  `loudness` lets the hard hit own the whole loud half and packs the ghosts into
+  the quiet end, so soft playing picks among the ghosts and anything firm snaps
+  to the hit. Reach for it when your takes are clustered or lopsided; keep the
+  default `rank` when they cover the range evenly. (Under `loudness` a lone
+  very-soft or very-loud sample sits in a proportionally tiny velocity slice, so
+  it takes an extreme note to reach - widen that end with `curve` if needed.)
 
 Unlike `pick: any`, the `order:` here is mandatory and load-bearing - it is what
 ranks the pool quiet-to-loud (`quietest` or `loudest`; either works). To lift or
