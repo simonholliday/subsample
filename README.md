@@ -2114,12 +2114,15 @@ time.
 ## Quick start
 
 ```bash
-# Install system dependencies (PortAudio + Rubber Band)
+# Install system dependencies. On Linux, PyAudio and python-rtmidi are compiled
+# from source, so they need a build toolchain and the PortAudio + ALSA/JACK
+# development headers; pyrubberband needs the Rubber Band CLI. A minimal install
+# (e.g. Ubuntu Server) has none of these by default.
 # Debian/Ubuntu:
-sudo apt install portaudio19-dev rubberband-cli
+sudo apt install build-essential pkg-config portaudio19-dev libasound2-dev libjack-jackd2-dev rubberband-cli
 # Fedora/RHEL:
-sudo dnf install portaudio-devel rubberband
-# macOS:
+sudo dnf install gcc-c++ make pkgconf-pkg-config portaudio-devel alsa-lib-devel jack-audio-connection-kit-devel rubberband
+# macOS (CoreAudio/CoreMIDI are built in; Xcode command-line tools provide the compiler):
 brew install portaudio rubberband
 
 # Install (directly from GitHub, or from a local clone with `pip install .`)
@@ -3104,7 +3107,9 @@ output device's bit depth.
 ## Requirements
 
 - Python 3.12+
+- A C/C++ build toolchain and `pkg-config` (Linux) - `apt install build-essential pkg-config` or `dnf install gcc-c++ make pkgconf-pkg-config`. PyAudio and python-rtmidi are compiled from source on Linux, and a minimal install (e.g. Ubuntu Server) ships none of this by default. macOS uses the Xcode command-line tools.
 - PortAudio (required by PyAudio - `apt install portaudio19-dev`, `dnf install portaudio-devel`, or `brew install portaudio`)
+- ALSA development headers (Linux, required by python-rtmidi for MIDI - `apt install libasound2-dev` or `dnf install alsa-lib-devel`). JACK headers are optional but recommended for low-latency use (`apt install libjack-jackd2-dev`, `dnf install jack-audio-connection-kit-devel`); macOS uses CoreMIDI and needs neither.
 - Rubber Band (required by pyrubberband - `apt install rubberband-cli`, `dnf install rubberband`, or `brew install rubberband`)
 
 **Windows users:** install and run Subsample inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)
