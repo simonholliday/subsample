@@ -2019,9 +2019,22 @@ it across two octaves introduces no measurable quality loss.
 ### Non-blocking capture
 
 The audio input thread does minimal work and returns immediately. Analysis runs
-in a separate auto-scaled worker pool, so back-to-back sounds are captured
-reliably even when spectral analysis is slow. This is critical for USB audio
-devices, which use isochronous transfers and are sensitive to timing jitter.
+in a separate worker pool, so back-to-back sounds are captured reliably even
+when spectral analysis is slow — critical for USB audio devices, which use
+isochronous transfers and are sensitive to timing jitter. The pool right-sizes
+itself to the moment: while the player is live it keeps to a small share of the
+cores so the real-time audio thread is never starved, while the one-off library
+scan at startup — before anything is playing — spreads across most of the cores
+in separate processes (leaving some headroom for the system), building a large
+library several times faster on a multi-core machine.
+
+### Leaves you headroom
+
+Background analysis deliberately runs on about three-quarters of the machine's
+cores rather than every last thread, so your system stays responsive — cooler
+and quieter too — while a large library rebuild or `import` works away in the
+background. It pulls back much further while the player is live, so playback is
+never starved.
 
 ### Professional gain staging
 
@@ -2124,6 +2137,18 @@ sudo apt install build-essential pkg-config portaudio19-dev libasound2-dev libja
 sudo dnf install gcc-c++ make pkgconf-pkg-config portaudio-devel alsa-lib-devel jack-audio-connection-kit-devel rubberband
 # macOS (CoreAudio/CoreMIDI are built in; Xcode command-line tools provide the compiler):
 brew install portaudio rubberband
+
+# Linux only: Subsample plays/records through PortAudio, whose JACK backend must
+# reach a running sound server at startup - otherwise PyAudio aborts with
+# `OSError: [Errno -9999] Unanticipated host error`, even if you never use JACK.
+# Desktop Linux already runs PipeWire; on a minimal/headless install (e.g.
+# Ubuntu Server) there is no audio server, so install and start one (PipeWire
+# recommended - it also provides the JACK layer PortAudio needs):
+sudo apt install pipewire pipewire-alsa pipewire-jack pipewire-pulse wireplumber
+systemctl --user enable --now pipewire pipewire-pulse wireplumber
+# Then launch Subsample under pw-jack (`pw-jack subsample`) for a clean start.
+# Plain `subsample` also works once PipeWire runs, but PortAudio's JACK probe
+# logs harmless `jack server is not running` warnings.
 
 # Install (directly from GitHub, or from a local clone with `pip install .`)
 pip install git+https://github.com/simonholliday/subsample.git
@@ -2932,7 +2957,9 @@ the same thing here as in a `beat_match`/`similarity` MIDI-map query.
 Import audio files from any source (SDR captures, commercial sample packs, field
 recordings) directly into the capture library, bypassing the detection pipeline.
 Files are silence-trimmed, safety-faded, re-encoded as standard PCM WAV, fully
-analyzed, and saved with sidecar JSON.
+analyzed, and saved with sidecar JSON. A large batch is fingerprinted across the
+machine's cores in parallel, so importing a big sample pack is many times faster
+than processing one file at a time.
 
 ```bash
 subsample import /path/to/samples/*.wav
@@ -3109,8 +3136,9 @@ output device's bit depth.
 - Python 3.12+
 - A C/C++ build toolchain and `pkg-config` (Linux) - `apt install build-essential pkg-config` or `dnf install gcc-c++ make pkgconf-pkg-config`. PyAudio and python-rtmidi are compiled from source on Linux, and a minimal install (e.g. Ubuntu Server) ships none of this by default. macOS uses the Xcode command-line tools.
 - PortAudio (required by PyAudio - `apt install portaudio19-dev`, `dnf install portaudio-devel`, or `brew install portaudio`)
-- ALSA development headers (Linux, required by python-rtmidi for MIDI - `apt install libasound2-dev` or `dnf install alsa-lib-devel`). JACK headers are optional but recommended for low-latency use (`apt install libjack-jackd2-dev`, `dnf install jack-audio-connection-kit-devel`); macOS uses CoreMIDI and needs neither.
+- ALSA development headers (Linux, required by python-rtmidi for MIDI - `apt install libasound2-dev` or `dnf install alsa-lib-devel`); macOS uses CoreMIDI and needs neither. The JACK dev headers (`libjack-jackd2-dev`, `dnf install jack-audio-connection-kit-devel`) are optional - only needed if you build against JACK; the JACK *runtime* PortAudio loads ships with PortAudio itself (see the sound-server bullet below).
 - Rubber Band (required by pyrubberband - `apt install rubberband-cli`, `dnf install rubberband`, or `brew install rubberband`)
+- **A running sound server (Linux).** PortAudio initialises its JACK backend at startup and aborts the whole process with `OSError: [Errno -9999] Unanticipated host error` if it cannot reach an audio server - *even if you never use JACK*, because `libportaudio` links JACK unconditionally. Desktop Linux already runs PipeWire; a minimal/headless/server install (e.g. Ubuntu Server) has none, so install and start one - PipeWire is recommended, as it also supplies the JACK layer PortAudio needs and fixes the ALSA default device: `sudo apt install pipewire pipewire-alsa pipewire-jack pipewire-pulse wireplumber` then `systemctl --user enable --now pipewire pipewire-pulse wireplumber` (add `sudo loginctl enable-linger "$USER"` for headless autostart). Once PipeWire is running, plain `subsample` works but PortAudio's JACK probe logs harmless `jack server is not running` warnings; launch under `pw-jack` (`pw-jack subsample`) for a clean startup that routes through PipeWire's JACK client instead. macOS uses CoreAudio and needs none of this.
 
 **Windows users:** install and run Subsample inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)
 (Windows Subsystem for Linux). This gives you a real Linux environment where

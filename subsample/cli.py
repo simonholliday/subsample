@@ -50,6 +50,7 @@ import subsample.detector
 import subsample.events
 import subsample.library
 import subsample.osc
+import subsample.parallelism
 import subsample.player
 import subsample.recorder
 import subsample.similarity
@@ -675,6 +676,7 @@ def _run_recorder (
 		cfg,
 		analysis_params,
 		on_complete=on_complete_callback,
+		reserve_for_player=cfg.player.enabled,
 	)
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
@@ -1226,6 +1228,13 @@ def _main_impl () -> None:
 	# Wire the default quantize grid so transform.quantize_resolution actually
 	# takes effect (it was documented but previously never read).
 	subsample.player.set_default_quantize_grid(cfg.transform.quantize_resolution)
+
+	# Pin BLAS to one thread process-wide.  Subsample parallelises across whole
+	# samples, so a multi-threaded math backend only oversubscribes the CPU and
+	# can jitter the real-time audio thread.  The background analysis workers
+	# reaffirm this in their own processes; setting it here also protects the
+	# player's audio callback.
+	subsample.parallelism.cap_blas_threads()
 
 	_log.info(
 		"Memory budget: instrument %.0f MB, transform %.0f MB, carrier %.0f MB, disk %.0f MB",

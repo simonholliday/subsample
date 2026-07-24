@@ -29,6 +29,7 @@ dependencies = [
 	"watchdog>=4.0",
 	"Pillow>=10.0",
 	"pymididefs>=0.2.5",
+	"threadpoolctl>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -85,6 +86,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["pythonosc", "pythonosc.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["threadpoolctl", "threadpoolctl.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

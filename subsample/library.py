@@ -24,6 +24,7 @@ ReferenceLibrary lookup is case-insensitive.
 import collections
 import concurrent.futures
 import dataclasses
+import functools
 import itertools
 import logging
 import os
@@ -39,6 +40,7 @@ import subsample.analysis
 import subsample.audio
 import subsample.cache
 import subsample.loopfind
+import subsample.parallelism
 
 
 _log = logging.getLogger(__name__)
@@ -737,32 +739,35 @@ def load_instrument_library (
 	if not audio_paths:
 		return lib
 
-	# Worker count: same formula as SampleProcessor — reserve 2 cores for
-	# audio threads, use half the remainder. At least 1 always.
-	n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
+	# This scan only ever runs at startup (or an offline rebuild from the
+	# command-line tools), before the player opens its audio stream, so it takes
+	# the whole machine for the fastest possible library — but never more workers
+	# than there are files to fingerprint.
+	n_workers = min(
+		subsample.parallelism.analysis_worker_count(player_active=False),
+		len(audio_paths),
+	)
 
 	_log.info(
 		"Loading %d instrument sample(s) from %s using %d worker(s)…",
 		len(audio_paths), directory, n_workers,
 	)
 
-	# Phase 1 — parallel: load each sample (sidecar regen + audio read) in
-	# its own worker.  Each file is fully independent so parallelism is
-	# safe.  Results are returned in submission order so Phase 2 can add
-	# records deterministically.
-	with concurrent.futures.ThreadPoolExecutor(
-		max_workers=n_workers,
-		thread_name_prefix="lib-loader",
-	) as executor:
-		futures = [
-			executor.submit(
-				_load_one_sample, path, load_audio, with_preview,
-				target_sample_rate,
-			)
-			for path in audio_paths
-		]
-		# Block until all workers finish; results arrive in submitted order.
-		raw_results = [f.result() for f in futures]
+	# Phase 1 — parallel: fingerprint each sample (sidecar regen + audio read) in
+	# its own worker.  map_analysis forks a GIL-free process pool at startup (the
+	# big speedup) and falls back to threads anywhere a thread is already running.
+	# Each file is independent; results come back in order so Phase 2 adds records
+	# deterministically.
+	raw_results = subsample.parallelism.map_analysis(
+		functools.partial(
+			_load_one_sample,
+			load_audio=load_audio,
+			with_preview=with_preview,
+			target_sample_rate=target_sample_rate,
+		),
+		audio_paths,
+		player_active=False,
+	)
 
 	# Phase 2 — sequential: construct SampleRecords and add to the library in
 	# sorted path order. allocate_id() is called here (not in workers) so

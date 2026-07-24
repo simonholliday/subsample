@@ -37,6 +37,7 @@ import subsample.analysis
 import subsample.cache
 import subsample.config
 import subsample.loopfind
+import subsample.parallelism
 import subsample.preview
 
 
@@ -170,6 +171,7 @@ class SampleProcessor:
 		analysis_params: subsample.analysis.AnalysisParams,
 		on_complete: typing.Optional[_OnCompleteCallback] = None,
 		warn_backlog: bool = True,
+		reserve_for_player: bool = False,
 	) -> None:
 
 		"""Start the worker pool and ensure the output directory exists.
@@ -185,6 +187,11 @@ class SampleProcessor:
 			warn_backlog:    When True (default), log a WARNING when 3+ segments
 			                 are in-flight. Set False for file-input mode where
 			                 faster-than-realtime enqueue is expected.
+			reserve_for_player: When True, the player is live alongside this
+			                 analyser, so it runs on only a small share of the
+			                 cores and leaves the rest for the real-time audio
+			                 thread. False (offline/bulk import, no player) keeps
+			                 the historical sizing.
 		"""
 
 		self._cfg             = cfg
@@ -196,7 +203,20 @@ class SampleProcessor:
 		output_dir.mkdir(parents=True, exist_ok=True)
 		self._output_dir = output_dir
 
-		self._n_workers = _compute_worker_count()
+		# With the player live, pull back to a small share of the cores so the
+		# real-time audio thread is never starved while new captures are still
+		# being fingerprinted; offline (bulk import, no player) keeps the
+		# historical sizing.
+		if reserve_for_player:
+			self._n_workers = subsample.parallelism.analysis_worker_count(player_active=True)
+		else:
+			self._n_workers = _compute_worker_count()
+
+		# Pin BLAS to one thread: analysis is NumPy-heavy, and letting the math
+		# backend open its own pool on these threads only oversubscribes the CPU
+		# and can jitter the audio thread.
+		subsample.parallelism.cap_blas_threads()
+
 		_log.debug("analysis: %d background worker(s)", self._n_workers)
 
 		self._executor = concurrent.futures.ThreadPoolExecutor(

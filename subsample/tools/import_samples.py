@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import functools
 import glob
 import logging
 import math
@@ -30,6 +31,7 @@ import subsample.analysis
 import subsample.audio
 import subsample.cache
 import subsample.config
+import subsample.parallelism
 import subsample.tools._shared
 
 
@@ -343,20 +345,37 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	print(f"Importing {len(paths)} file(s) to {target_dir}")
 
-	imported = 0
+	# Missing files are counted here; the rest fan out to the worker pool.
+	present: list[pathlib.Path] = []
 	skipped = 0
 
 	for filepath in paths:
 
-		if not filepath.exists():
+		if filepath.exists():
+			present.append(filepath)
+		else:
 			print(f"  {filepath.name}  (not found, skipping)", file=sys.stderr)
 			skipped += 1
-			continue
 
-		if _import_file(filepath, target_dir, args.force, float_ceiling, cfg.analysis):
-			imported += 1
-		else:
-			skipped += 1
+	# Fingerprinting each file is CPU-heavy and independent, so import fans out
+	# across the machine (offline — no player — so it takes the larger, offline
+	# share of the cores).  _import_file is self-contained: it writes its own WAV
+	# and sidecar and returns True on success.  Per-file progress lines may
+	# interleave under the pool, as expected for a parallel batch.
+	results = subsample.parallelism.map_analysis(
+		functools.partial(
+			_import_file,
+			target_dir=target_dir,
+			force=args.force,
+			float_ceiling_dbfs=float_ceiling,
+			rhythm_cfg=cfg.analysis,
+		),
+		present,
+		player_active=False,
+	)
+
+	imported = sum(1 for ok in results if ok)
+	skipped += sum(1 for ok in results if not ok)
 
 	print(f"Imported {imported} file(s), skipped {skipped}")
 
