@@ -183,6 +183,9 @@ class ZoneTemplate:
 	velocity_rescale_to: typing.Optional[tuple[int, int]]
 	stack:               bool                                = False
 	release:             typing.Optional[subsample.query.ReleaseSpec] = None
+	pan_spec:            typing.Optional[subsample.query.PanSpec]      = None
+	"""Random pan for the zone (see Assignment.pan_spec); copied verbatim into
+	every derived note so each strike draws its own position."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -641,6 +644,20 @@ def _build_energy_profile_resolver (
 	return _resolver
 
 
+def _pan_position_pair (position: float) -> list[float]:
+
+	"""Turn a stereo pan position into its two-channel weight pair.
+
+	``position`` runs -100 (hard left) … 0 (centre) … 100 (hard right).  The
+	returned ``[left, right]`` pair is un-normalised — constant-power
+	normalisation happens later in channel.build_mix_matrix.  Shared by the
+	fixed-pan parser and the per-note-on random draw so both derive weights the
+	same way.
+	"""
+
+	return [(100.0 - position) / 200.0, (100.0 + position) / 200.0]
+
+
 def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing.Optional[numpy.ndarray]:
 
 	"""Parse pan weights from YAML into a raw weight array.
@@ -688,7 +705,7 @@ def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing
 				f"between -100 (hard left) and 100 (hard right); got {weights_raw!r}"
 			)
 
-		weights_raw = [(100.0 - position) / 200.0, (100.0 + position) / 200.0]
+		weights_raw = _pan_position_pair(position)
 
 	if isinstance(weights_raw, str) or not hasattr(weights_raw, "__iter__"):
 		raise ValueError(
@@ -742,10 +759,31 @@ def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing
 	return weight_arr
 
 
+def _parse_pan (
+	raw: typing.Any,
+	assignment_name: str,
+) -> tuple[typing.Optional[numpy.ndarray], typing.Optional[subsample.query.PanSpec]]:
+
+	"""Parse the ``pan:`` field into either fixed weights or a random PanSpec.
+
+	A string (``any``) or mapping (``{gte, lte}`` / ``{position, variation}``) is
+	a random pan → returns ``(None, PanSpec)``.  A scalar position or a weight
+	list is a fixed pan → returns ``(weights, None)``.  Exactly one of the two is
+	ever non-None; a bool or other bad value falls through to the fixed parser's
+	existing rejection.
+	"""
+
+	if isinstance(raw, (str, dict)):
+		return None, subsample.query.parse_pan_spec(raw, assignment_name)
+
+	return _parse_pan_weights(raw, assignment_name), None
+
+
 def _parse_output_routing (
 	raw: typing.Any,
 	assignment_name: str,
 	pan_weights: typing.Optional[numpy.ndarray],
+	pan_spec: typing.Optional[subsample.query.PanSpec] = None,
 ) -> typing.Optional[tuple[int, ...]]:
 
 	"""Parse output routing from YAML into a 0-indexed channel tuple.
@@ -759,6 +797,8 @@ def _parse_output_routing (
 		raw:             Raw YAML value (list of ints, or None for default).
 		assignment_name: Name for error messages.
 		pan_weights:     Parsed pan weights (for length validation).
+		pan_spec:        Parsed random-pan spec — when set, output must list a
+		                 stereo pair (random pan targets 2 channels).
 
 	Returns:
 		Tuple of 0-indexed device channel indices, or None for default routing.
@@ -802,6 +842,12 @@ def _parse_output_routing (
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: output length ({len(channels)}) "
 			f"must match pan length ({len(pan_weights)})"
+		)
+
+	if pan_spec is not None and len(channels) != 2:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: random pan targets a stereo "
+			f"pair, so output must list exactly 2 channels (got {len(channels)})"
 		)
 
 	return tuple(ch - 1 for ch in channels)
@@ -2809,8 +2855,8 @@ def load_midi_map (
 				f"'gain' must be a finite number ({gain_raw!r})"
 			)
 
-		pan_weights    = _parse_pan_weights(assignment_raw.get("pan"), name)
-		output_routing = _parse_output_routing(assignment_raw.get("output"), name, pan_weights)
+		pan_weights, pan_spec = _parse_pan(assignment_raw.get("pan"), name)
+		output_routing = _parse_output_routing(assignment_raw.get("output"), name, pan_weights, pan_spec)
 		extract        = _parse_extract(assignment_raw.get("extract"), name)
 
 		velocity_trigger, velocity_rescale_to = _parse_velocity(
@@ -2904,6 +2950,7 @@ def load_midi_map (
 				velocity_rescale_to=velocity_rescale_to,
 				stack=stack,
 				release=release,
+				pan_spec=pan_spec,
 			))
 			continue
 
@@ -2920,6 +2967,7 @@ def load_midi_map (
 			release=release,
 			gain_db=gain_db,
 			pan_weights=pan_weights,
+			pan_spec=pan_spec,
 			output_routing=output_routing,
 			extract=extract,
 			segment_mode=segment_mode,
@@ -3704,7 +3752,12 @@ class MidiPlayer:
 			if asgn.mode != "one_shot":
 				line += f"  {asgn.mode}"
 
-			if asgn.pan_weights is not None:
+			if asgn.pan_spec is not None:
+				if (asgn.pan_spec.lo, asgn.pan_spec.hi) == (-100.0, 100.0):
+					line += "  pan=any"
+				else:
+					line += f"  pan=random[{asgn.pan_spec.lo:.0f}..{asgn.pan_spec.hi:.0f}]"
+			elif asgn.pan_weights is not None:
 				line += f"  pan=[{', '.join(f'{g:.0f}' for g in asgn.pan_weights)}]"
 			lines.append(line)
 
@@ -4983,6 +5036,15 @@ class MidiPlayer:
 		"""
 
 		pan_weights      = assignment.pan_weights
+
+		# Random pan: draw a fresh position for this note-on (held for the whole
+		# note, including any variant fallback below) and build its stereo pair.
+		# Quantize to integer positions so the mix-matrix cache stays bounded
+		# (≤201 keys per layout) instead of growing an entry per unique draw.
+		if assignment.pan_spec is not None:
+			position    = float(round(assignment.pan_spec.resolve()))
+			pan_weights = numpy.array(_pan_position_pair(position), dtype=numpy.float32)
+
 		output_routing   = assignment.output_routing
 		# Only one_shot ignores note-off; gated and (for now) loop both release.
 		one_shot         = (assignment.mode == "one_shot")
@@ -5392,6 +5454,7 @@ class MidiPlayer:
 					release             = template.release,
 					gain_db             = template.gain_db,
 					pan_weights         = template.pan_weights,
+					pan_spec            = template.pan_spec,
 					output_routing      = template.output_routing,
 					extract             = template.extract,
 					segment_mode        = template.segment_mode,

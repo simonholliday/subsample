@@ -1714,6 +1714,116 @@ class TestPickSpecResolve:
 		assert spec.resolve_index(2) == 1   # idx 1 = rank 2 = last
 
 
+class TestParsePanSpec:
+
+	"""subsample.query.parse_pan_spec — the random ``pan:`` forms."""
+
+	def test_any (self) -> None:
+		assert subsample.query.parse_pan_spec("any", "t") == subsample.query.PanSpec(-100.0, 100.0)
+
+	def test_any_case_and_whitespace (self) -> None:
+		assert subsample.query.parse_pan_spec("  ANY ", "t") == subsample.query.PanSpec(-100.0, 100.0)
+
+	def test_range_both_bounds (self) -> None:
+		assert subsample.query.parse_pan_spec({"gte": -50, "lte": 50}, "t") == subsample.query.PanSpec(-50.0, 50.0)
+
+	def test_range_open_upper (self) -> None:
+		assert subsample.query.parse_pan_spec({"gte": 10}, "t") == subsample.query.PanSpec(10.0, 100.0)
+
+	def test_range_open_lower (self) -> None:
+		assert subsample.query.parse_pan_spec({"lte": 0}, "t") == subsample.query.PanSpec(-100.0, 0.0)
+
+	def test_range_float_bounds (self) -> None:
+		assert subsample.query.parse_pan_spec({"gte": -12.5, "lte": 12.5}, "t") == subsample.query.PanSpec(-12.5, 12.5)
+
+	def test_sugar_position_variation (self) -> None:
+		# Centre -20 spread ±20 → [-40, 0].
+		assert subsample.query.parse_pan_spec({"position": -20, "variation": 40}, "t") == subsample.query.PanSpec(-40.0, 0.0)
+
+	def test_sugar_variation_clamps_at_edge (self) -> None:
+		# Centre -90 spread ±30 → lower edge clamps to -100.
+		assert subsample.query.parse_pan_spec({"position": -90, "variation": 60}, "t") == subsample.query.PanSpec(-100.0, -60.0)
+
+	def test_sugar_position_alone_is_fixed (self) -> None:
+		assert subsample.query.parse_pan_spec({"position": 25}, "t") == subsample.query.PanSpec(25.0, 25.0)
+
+	def test_empty_dict_rejected (self) -> None:
+		with pytest.raises(ValueError, match="pan: any"):
+			subsample.query.parse_pan_spec({}, "t")
+
+	def test_gte_greater_than_lte_rejected (self) -> None:
+		with pytest.raises(ValueError, match="<="):
+			subsample.query.parse_pan_spec({"gte": 50, "lte": -50}, "t")
+
+	def test_bounds_out_of_range_rejected (self) -> None:
+		with pytest.raises(ValueError, match="between -100"):
+			subsample.query.parse_pan_spec({"gte": -150}, "t")
+		with pytest.raises(ValueError, match="between -100"):
+			subsample.query.parse_pan_spec({"lte": 101}, "t")
+
+	def test_bool_operand_rejected (self) -> None:
+		with pytest.raises(ValueError, match="must be a number"):
+			subsample.query.parse_pan_spec({"gte": True}, "t")
+
+	def test_non_finite_operand_rejected (self) -> None:
+		with pytest.raises(ValueError, match="finite"):
+			subsample.query.parse_pan_spec({"gte": float("nan")}, "t")
+
+	def test_variation_without_position_rejected (self) -> None:
+		with pytest.raises(ValueError, match="needs a 'position'"):
+			subsample.query.parse_pan_spec({"variation": 20}, "t")
+
+	def test_variation_out_of_range_rejected (self) -> None:
+		with pytest.raises(ValueError, match="between 0 and 200"):
+			subsample.query.parse_pan_spec({"position": 0, "variation": 300}, "t")
+
+	def test_range_and_sugar_mix_rejected (self) -> None:
+		with pytest.raises(ValueError, match="cannot combine"):
+			subsample.query.parse_pan_spec({"gte": 0, "position": 0}, "t")
+
+	def test_unknown_string_rejected (self) -> None:
+		with pytest.raises(ValueError, match="must be 'any'"):
+			subsample.query.parse_pan_spec("centre", "t")
+
+	def test_unknown_key_strict_rejected (self) -> None:
+		with pytest.raises(ValueError, match="unknown random-pan key"):
+			subsample.query.parse_pan_spec({"gte": 0, "wobble": 1}, "t")
+
+	def test_unknown_key_lenient_ignored (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.setattr(subsample.query, "_STRICT_MODE", False)
+		# Unknown key ignored; the recognised gte still applies.
+		assert subsample.query.parse_pan_spec({"gte": 20, "wobble": 1}, "t") == subsample.query.PanSpec(20.0, 100.0)
+
+
+class TestPanSpecResolve:
+
+	"""PanSpec.resolve — the per-note-on draw."""
+
+	def test_draws_uniform_over_bounds (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		calls: list[tuple[float, float]] = []
+
+		def fake_uniform (lo: float, hi: float) -> float:
+			calls.append((lo, hi))
+			return lo
+
+		monkeypatch.setattr(subsample.query.random, "uniform", fake_uniform)
+
+		subsample.query.PanSpec(-30.0, 30.0).resolve()
+		assert calls == [(-30.0, 30.0)]
+
+	def test_fresh_draw_each_call (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		values = iter([10.0, -40.0])
+		monkeypatch.setattr(subsample.query.random, "uniform", lambda lo, hi: next(values))
+
+		spec = subsample.query.PanSpec(-100.0, 100.0)
+		assert spec.resolve() == 10.0
+		assert spec.resolve() == -40.0
+
+	def test_draws_within_bounds (self) -> None:
+		spec = subsample.query.PanSpec(-25.0, 25.0)
+		assert all(-25.0 <= spec.resolve() <= 25.0 for _ in range(200))
+
+
 class TestVelocityPick:
 
 	"""pick: velocity — map incoming MIDI velocity onto a level-ordered pool."""

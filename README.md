@@ -466,7 +466,7 @@ when you want to try something the tutorial didn't show.
 | `release` | no | Shape the note-off fade for a sustained voice (`mode: gated` or `loop`; ignored with a warning on `mode: one_shot`). A number of ms, `true` for an adaptive tail, `full` to play the remaining audio to its natural end with no fade (a loop rings out its real tail), or `{time, curve}` where `curve` is `cosine` (default) or `exponential`; `time` may be CC-bound. `mode: loop` defaults to the adaptive tail when unset. See Release below |
 | `silenced_by` | no | Choke: the note(s) whose arrival cuts this sound with a fast ~10 ms damp (a hi-hat choke). A note, a list of notes, or `self` (a re-strike stops the previous hit), and `self` may sit in a list. Overrides `release` and rings-out; not valid on `zone-tuned`. See Choke below |
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
-| `pan` | no | Stereo position `-100` (hard left) to `100` (hard right), `0` = centre (default) - or a per-channel weight list for surround/asymmetric routing (`[50, 50]` = centre; ratios matter, not absolute values). Constant-power normalised at mix time. See Pan below |
+| `pan` | no | Stereo position `-100` (hard left) to `100` (hard right), `0` = centre (default) - or a per-channel weight list for surround/asymmetric routing (`[50, 50]` = centre; ratios matter, not absolute values). Also `any` / a `{gte, lte}` range / `{position, variation}` for a fresh random position per note-on. Constant-power normalised at mix time. See Pan below |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
 | `extract` | no | Collapse a multi-channel sample to one channel at playback: `omni`, `left`, `right`, `front`, `back`, `side`, `depth`, `height`, `channel.N`, or `{blend: [w1, w2, ...]}` for a weighted mix to mono (see Channel extraction below) |
 | `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
@@ -1379,6 +1379,25 @@ count are automatically mapped to the output layout using ITU-R BS.775 downmix
 coefficients (surround to stereo, etc.) or conservative upmix (stereo to 5.1
 uses front pair only). Pan weights define a target layout - if the output has
 fewer channels, standard downmix is applied automatically.
+
+#### Random pan
+
+Instead of a fixed position, `pan` can draw a **fresh random position on every
+note-on** - each strike lands somewhere new in the field and holds there for
+that note. Three forms:
+
+```yaml
+pan: any                              # anywhere, hard left to hard right
+pan: { gte: -50, lte: 50 }            # within a range (omit an end to open it)
+pan: { position: -20, variation: 40 } # around a centre: -20, spread by ±20
+```
+
+Positions use the same `-100`…`100` axis as the fixed form, and the draw is
+always **constant-power** - only the position is randomised, never the channel
+levels, so a note is never louder or quieter for landing off-centre. It works on
+any output layout (the stereo position up/downmixes just like a fixed pan), and
+stacked layers on one note each draw independently. If you also set `output:` it
+must list exactly two channels.
 
 #### Output routing
 

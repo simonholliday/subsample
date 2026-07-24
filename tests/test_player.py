@@ -7912,3 +7912,186 @@ class TestParsePanWeights:
 		numpy.testing.assert_allclose(
 			assignment.pan_weights / numpy.sum(assignment.pan_weights), [0.75, 0.25],
 		)
+
+
+class TestParsePan:
+
+	"""subsample.player._parse_pan dispatches fixed weights vs a random PanSpec."""
+
+	def test_none (self) -> None:
+		assert subsample.player._parse_pan(None, "t") == (None, None)
+
+	def test_scalar_is_fixed (self) -> None:
+		weights, spec = subsample.player._parse_pan(30, "t")
+		assert spec is None and weights is not None
+
+	def test_list_is_fixed (self) -> None:
+		weights, spec = subsample.player._parse_pan([50, 50], "t")
+		assert spec is None and weights is not None
+
+	def test_any_is_random (self) -> None:
+		weights, spec = subsample.player._parse_pan("any", "t")
+		assert weights is None
+		assert spec == subsample.query.PanSpec(-100.0, 100.0)
+
+	def test_dict_is_random (self) -> None:
+		weights, spec = subsample.player._parse_pan({"gte": -50, "lte": 50}, "t")
+		assert weights is None
+		assert spec == subsample.query.PanSpec(-50.0, 50.0)
+
+	def test_bool_still_rejected (self) -> None:
+		"""`pan: true` must keep its existing rejection, not reroute as random."""
+		with pytest.raises(ValueError, match="position"):
+			subsample.player._parse_pan(True, "t")
+
+
+class TestPanPositionPair:
+
+	"""subsample.player._pan_position_pair — the shared position→weights formula."""
+
+	def test_endpoints_and_centre (self) -> None:
+		assert subsample.player._pan_position_pair(-100.0) == [1.0, 0.0]
+		assert subsample.player._pan_position_pair(0.0) == [0.5, 0.5]
+		assert subsample.player._pan_position_pair(100.0) == [0.0, 1.0]
+
+	def test_matches_scalar_pan_weights (self) -> None:
+		"""The fixed-pan parser derives the same pair (guards the refactor)."""
+		weights = subsample.player._parse_pan_weights(30, "t")
+		numpy.testing.assert_allclose(weights, subsample.player._pan_position_pair(30.0))
+
+
+class TestOutputRoutingRandomPan:
+
+	"""_parse_output_routing rejects non-stereo output combined with random pan."""
+
+	def test_random_pan_requires_stereo_output (self) -> None:
+		spec = subsample.query.PanSpec(-100.0, 100.0)
+		with pytest.raises(ValueError, match="stereo pair"):
+			subsample.player._parse_output_routing([1, 2, 3], "t", None, spec)
+		with pytest.raises(ValueError, match="stereo pair"):
+			subsample.player._parse_output_routing([1], "t", None, spec)
+
+	def test_random_pan_stereo_output_ok (self) -> None:
+		spec = subsample.query.PanSpec(-100.0, 100.0)
+		assert subsample.player._parse_output_routing([3, 4], "t", None, spec) == (2, 3)
+
+
+class TestRandomPanThroughTrigger:
+
+	"""_trigger_one draws a fresh pan position per note-on and builds its pair."""
+
+	def _pan_arg (self, assignment: subsample.query.Assignment) -> numpy.ndarray:
+		"""Drive _trigger_one via the base-variant path; return the pan_weights
+		handed to _get_mix_matrix."""
+		import mido
+
+		rendered = numpy.zeros((100, 2), dtype=numpy.float32)
+		record = unittest.mock.MagicMock()
+		record.audio          = numpy.zeros((100, 2), dtype=numpy.int16)
+		record.channel_format = "pcm"
+		record.name           = "pad"
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices      = []
+		player._voices_lock = threading.Lock()
+		player._resolve_sample_id.return_value = 1
+		player._effective_instrument_library.get.return_value = record
+		player._resolve_release.return_value = (0, 0, False)
+		player._resolve_loop.return_value    = None
+		player._append_voice = lambda *a, **k: None
+		player._select_segment.return_value  = (rendered, 0.5)
+		player._get_mix_matrix.return_value  = numpy.eye(2, dtype=numpy.float32)
+		player._render_float.return_value    = rendered
+
+		base = unittest.mock.MagicMock()
+		base.audio = rendered; base.level = 0.5; base.segment_bounds = None; base.duration = 1.0
+		player._effective_transform_manager.get_base.return_value = base
+
+		msg  = mido.Message("note_on", channel=0, note=48, velocity=100)
+		pick = subsample.query.PickSpec(1, 1)
+
+		subsample.player.MidiPlayer._trigger_one(player, msg, assignment, pick, 100)
+
+		# _get_mix_matrix(in_channels, pan_weights, output_routing, format, extract)
+		return player._get_mix_matrix.call_args[0][1]
+
+	def test_draws_and_builds_quantized_pair (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.setattr(subsample.query.random, "uniform", lambda lo, hi: 33.4)
+
+		asgn = subsample.query.Assignment(
+			name="P", select=(), mode="gated",
+			pan_spec=subsample.query.PanSpec(-100.0, 100.0),
+		)
+
+		# 33.4 quantizes to 33, then converts to the constant-power pair.
+		expected = numpy.array(subsample.player._pan_position_pair(33.0), dtype=numpy.float32)
+		numpy.testing.assert_allclose(self._pan_arg(asgn), expected)
+
+	def test_fresh_draw_per_note_on (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		values = iter([80.0, -80.0])
+		monkeypatch.setattr(subsample.query.random, "uniform", lambda lo, hi: next(values))
+
+		asgn = subsample.query.Assignment(
+			name="P", select=(), mode="gated",
+			pan_spec=subsample.query.PanSpec(-100.0, 100.0),
+		)
+
+		assert not numpy.allclose(self._pan_arg(asgn), self._pan_arg(asgn))
+
+	def test_fixed_pan_never_consults_rng (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		def boom (lo: float, hi: float) -> float:
+			raise AssertionError("RNG consulted for a fixed pan")
+
+		monkeypatch.setattr(subsample.query.random, "uniform", boom)
+
+		weights = subsample.player._parse_pan_weights(-50, "t")
+		asgn = subsample.query.Assignment(name="P", select=(), mode="gated", pan_weights=weights)
+
+		numpy.testing.assert_allclose(self._pan_arg(asgn), weights)   # must not raise
+
+
+class TestRandomPanLoad:
+
+	"""End-to-end: random pan through load_midi_map, including zone-tuned."""
+
+	def _load_one (self, tmp_path: pathlib.Path, pan_line: str) -> subsample.query.Assignment:
+		map_path = tmp_path / "map.yaml"
+		map_path.write_text(
+			"assignments:\n"
+			"  - name: Rnd\n"
+			"    channel: 10\n"
+			"    notes: 36\n"
+			f"    {pan_line}\n"
+			"    select:\n"
+			"      where: { name: x }\n"
+		)
+
+		note_map = subsample.player.load_midi_map(map_path, []).note_map
+		((assignment, _pick),) = note_map[(9, 36)]
+		return assignment
+
+	def test_pan_any_loads_as_spec (self, tmp_path: pathlib.Path) -> None:
+		assignment = self._load_one(tmp_path, "pan: any")
+		assert assignment.pan_weights is None
+		assert assignment.pan_spec == subsample.query.PanSpec(-100.0, 100.0)
+
+	def test_pan_range_loads_as_spec (self, tmp_path: pathlib.Path) -> None:
+		assignment = self._load_one(tmp_path, "pan: { gte: -30, lte: 30 }")
+		assert assignment.pan_spec == subsample.query.PanSpec(-30.0, 30.0)
+
+	def test_zone_tuned_carries_pan_spec (self, tmp_path: pathlib.Path) -> None:
+		map_path = tmp_path / "zone.yaml"
+		map_path.write_text(
+			"assignments:\n"
+			"  - name: Keys\n"
+			"    channel: 1\n"
+			"    notes: zone-tuned\n"
+			"    pan: any\n"
+			"    process: [{ repitch: true }]\n"
+			"    select:\n"
+			"      where: { pitched: true }\n"
+		)
+
+		result = subsample.player.load_midi_map(map_path, [])
+		assert len(result.zone_templates) == 1
+		assert result.zone_templates[0].pan_spec == subsample.query.PanSpec(-100.0, 100.0)

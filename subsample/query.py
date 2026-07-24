@@ -972,6 +972,39 @@ def _apply_pick_curve (curve: str, x: float) -> float:
 
 
 @dataclasses.dataclass(frozen=True)
+class PanSpec:
+
+	"""A random stereo pan position, drawn fresh on every note-on.
+
+	Parsed from the ``pan:`` field when it names a random form rather than a
+	fixed position or weight list: ``pan: any`` draws uniformly across the whole
+	field, ``pan: {gte: -50, lte: 50}`` draws within a range, and
+	``pan: {position: -20, variation: 40}`` draws around a centre.  The bounds are
+	*positions* on the mixer-familiar axis (-100 hard left … 0 centre … 100 hard
+	right); ``resolve`` draws one and the player turns it into a constant-power
+	stereo weight pair — so the pan is always constant-power and never randomises
+	channel levels independently.
+
+	Unlike PickSpec, the position axis is fixed (-100..100), so open range ends
+	resolve to the extremes at parse time: ``lo`` and ``hi`` are always concrete,
+	never a "None means the edge" sentinel.
+	"""
+
+	lo: float
+	hi: float
+
+	def resolve (self) -> float:
+
+		"""Draw one pan position, uniform in [lo, hi].
+
+		Called once per note-on (stateless, module ``random``) so every strike —
+		and every stacked layer — lands somewhere new and holds it for that note.
+		"""
+
+		return random.uniform(self.lo, self.hi)
+
+
+@dataclasses.dataclass(frozen=True)
 class SelectSpec:
 
 	"""Compiled selection criteria: filter → order → pick position.
@@ -1274,6 +1307,13 @@ class Assignment:
 	release:   typing.Optional[ReleaseSpec] = None
 	gain_db:   float              = 0.0
 	pan_weights:    typing.Optional[numpy.ndarray]  = None
+	"""Fixed pan as raw channel weights (constant-power normalised at mix time),
+	or None.  Mutually exclusive with ``pan_spec``: a random-pan assignment leaves
+	this None, so readers must check ``pan_spec`` first."""
+	pan_spec:       typing.Optional[PanSpec]        = None
+	"""Random pan — ``pan: any`` / range / position+variation.  The player draws a
+	fresh position per note-on and builds the weights then; mutually exclusive with
+	``pan_weights``."""
 	output_routing: typing.Optional[tuple[int, ...]] = None
 	extract:        typing.Optional[ExtractSpec]    = None
 	segment_mode:   typing.Union[str, int]             = ""
@@ -2341,6 +2381,159 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 		f"integer, a 2-element list, or an operator mapping "
 		f"(got {type(raw).__name__})"
 	)
+
+
+# Random-pan mapping keys: the two range operators plus the position/variation
+# sugar.  gt/lt/eq are deliberately absent — on a continuous position axis they
+# add nothing over gte/lte.
+_VALID_PAN_KEYS: typing.Final[frozenset[str]] = frozenset({"gte", "lte", "position", "variation"})
+
+
+def _pan_number (value: typing.Any, key: str, assignment_name: str) -> float:
+
+	"""Validate one random-pan operand — a finite number, never a bool."""
+
+	if isinstance(value, bool) or not isinstance(value, (int, float)):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan {key!r} must be a "
+			f"number (got {value!r})"
+		)
+
+	if not math.isfinite(value):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan {key!r} must be finite "
+			f"(got {value!r})"
+		)
+
+	return float(value)
+
+
+def parse_pan_spec (raw: typing.Any, assignment_name: str) -> PanSpec:
+
+	"""Parse a random ``pan:`` form into a PanSpec.
+
+	Only the random forms reach here — a string or a mapping.  Fixed positions
+	and explicit weight lists are handled by the player's ``_parse_pan_weights``.
+
+	Accepted forms (positions are -100 hard left … 0 centre … 100 hard right):
+	  - ``any``                         → the whole field, PanSpec(-100, 100)
+	  - ``{gte: lo, lte: hi}``          → a range; omit either end to open it to
+	                                      the extreme
+	  - ``{position: p, variation: v}`` → centre p spread by ±v/2, clamped to the
+	                                      edges
+
+	Every strike draws one position uniformly; the player converts it to a
+	constant-power stereo pair.
+	"""
+
+	if isinstance(raw, str):
+		if raw.strip().lower() == "any":
+			return PanSpec(-100.0, 100.0)
+
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan string must be 'any' "
+			f"(got {raw!r})"
+		)
+
+	if not isinstance(raw, dict):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: random pan must be 'any' or "
+			f"a mapping (got {type(raw).__name__})"
+		)
+
+	unknown = set(raw.keys()) - _VALID_PAN_KEYS
+
+	if unknown and _STRICT_MODE:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unknown random-pan key(s) "
+			f"{sorted(unknown)}.  Valid keys: {', '.join(sorted(_VALID_PAN_KEYS))}"
+		)
+	elif unknown:
+		_log.warning(
+			"MIDI map assignment %r: unknown random-pan key(s) %s ignored — valid "
+			"keys: %s",
+			assignment_name, sorted(unknown), ", ".join(sorted(_VALID_PAN_KEYS)),
+		)
+
+	# The range operators and the position/variation sugar are two ways to say
+	# the same thing; combining them has no single meaning, so reject it.
+	has_range = "gte" in raw or "lte" in raw
+	has_sugar = "position" in raw or "variation" in raw
+
+	if has_range and has_sugar:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: random pan cannot combine "
+			f"'gte'/'lte' with 'position'/'variation' — use one form"
+		)
+
+	# position/variation sugar: a centre spread by ± half the variation.  The
+	# spread clamps at the edges, so a wide variation near a wall simply fills to
+	# it rather than wrapping.
+	if has_sugar:
+		if "position" not in raw:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan 'variation' needs a "
+				f"'position' (got {raw!r})"
+			)
+
+		position = _pan_number(raw["position"], "position", assignment_name)
+
+		if not -100.0 <= position <= 100.0:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan 'position' must be "
+				f"between -100 (hard left) and 100 (hard right); got {position}"
+			)
+
+		variation = _pan_number(raw.get("variation", 0), "variation", assignment_name)
+
+		if not 0.0 <= variation <= 200.0:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan 'variation' must be "
+				f"between 0 and 200 (got {variation})"
+			)
+
+		return PanSpec(
+			max(-100.0, position - variation / 2.0),
+			min(100.0, position + variation / 2.0),
+		)
+
+	# An operator-less mapping has no bounds — reject it so `pan: {}` doesn't
+	# silently mean "any"; write `pan: any` for the whole field.
+	if not has_range:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: random-pan mapping must set "
+			f"'gte'/'lte' or 'position'/'variation'; use 'pan: any' for the whole "
+			f"field (got {raw!r})"
+		)
+
+	lo = -100.0
+	hi = 100.0
+
+	if "gte" in raw:
+		lo = _pan_number(raw["gte"], "gte", assignment_name)
+
+		if not -100.0 <= lo <= 100.0:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan 'gte' must be "
+				f"between -100 (hard left) and 100 (hard right); got {lo}"
+			)
+
+	if "lte" in raw:
+		hi = _pan_number(raw["lte"], "lte", assignment_name)
+
+		if not -100.0 <= hi <= 100.0:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pan 'lte' must be "
+				f"between -100 (hard left) and 100 (hard right); got {hi}"
+			)
+
+	if lo > hi:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pan 'gte' must be <= 'lte' "
+			f"(got gte={lo}, lte={hi})"
+		)
+
+	return PanSpec(lo, hi)
 
 
 def _parse_select_spec (
