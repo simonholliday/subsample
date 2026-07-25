@@ -83,15 +83,17 @@ def _pcm_float_to_int (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
 
 def _compute_worker_count () -> int:
 
-	"""Return the number of processing workers to use.
+	"""Return the number of processing workers for an offline capture session.
 
-	Reserves 2 cores for audio threads (recorder input + player callback),
-	then uses half the remainder — at least 1. Scales automatically from
-	a Raspberry Pi (1 worker) up to a workstation (many workers).
+	Defers to the shared policy in ``subsample.parallelism`` so all of
+	Subsample's analysis pools size themselves the same way — this used to be a
+	third, independent formula, and on a 22-core machine the three disagreed
+	(10 / 5 / 16 workers).  ``player_active=False`` because this branch is only
+	reached when no player is configured; the live path asks
+	``analysis_worker_count(player_active=True)`` directly.
 	"""
 
-	cpu_count = os.cpu_count() or 1
-	return max(1, (cpu_count - 2) // 2)
+	return subsample.parallelism.analysis_worker_count(player_active=False)
 
 
 # Callback type invoked after each recording is written and analyzed.

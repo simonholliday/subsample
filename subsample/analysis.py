@@ -115,7 +115,15 @@ warnings.filterwarnings("ignore", message="Empty filters detected in mel frequen
 # Bump this string whenever the analysis algorithm changes in a way that
 # would produce different results for the same audio. The cache module uses
 # it to detect stale sidecar files and trigger re-analysis.
-ANALYSIS_VERSION: str = "15"
+#
+# 16: spectral_flux is now computed on a dB-scaled spectrogram, so it no longer
+#     tracks recording level (and _FLUX_MIN was recalibrated for the new units).
+#     This bump also covers two earlier changes that altered stored values
+#     without one: the digital-silence spectral_flatness override (silence now
+#     reports 0.0, not 1.0) and the _run_pyin frame_length clamp, which moved
+#     dominant_pitch_hz for any sample shorter than n_fft (~46 ms at 44.1 kHz).
+#     Sidecars stamped "15" therefore span two generations; 16 re-analyses both.
+ANALYSIS_VERSION: str = "16"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -181,13 +189,19 @@ _N_MFCC: int = 13
 # onset; the tail is decay and room, which is less discriminative.
 _ONSET_DECAY_MS: float = 50.0
 
-# Spectral flux normalisation range. librosa.onset.onset_strength() output
-# is in arbitrary units (roughly proportional to mean absolute spectral
-# change per frame). Empirical range for typical audio:
-#   0.01 — near-static tone, barely changing spectrum
-#   5.0  — busy percussive audio with frequent large spectral jumps
-# Log normalisation spreads the useful range; values outside are clamped.
-_FLUX_MIN: float = 0.01
+# Spectral flux normalisation range.  Units are mean onset-strength per frame
+# over a dB-scaled spectrogram (see _compute_spectral_onset_features) — these
+# bounds do NOT apply to the linear-magnitude units used before that fix.
+# Measured anchors on reference material, all gain-invariant:
+#   0.001 — a decaying sine (kick), spectrum barely moving after the onset
+#   0.004 — a sustained tone
+#   0.28  — a single closed hi-hat
+#   2.4   — white noise
+#   5.1   — busy percussion, 24 hits with large spectral jumps
+# The floor sits below the quietest-moving real material so a kick and a drone
+# stay distinguishable instead of both clamping to 0.  Log normalisation
+# spreads the useful range; values outside are clamped.
+_FLUX_MIN: float = 0.0005
 _FLUX_MAX: float = 5.0
 
 # Crest factor normalisation range (linear ratio, NOT dB).
@@ -1998,9 +2012,14 @@ def _compute_spectral_onset_features (
 		(log_attack_time, spectral_flux), both in [0.0, 1.0].
 	"""
 
-	# Pass the pre-computed spectrogram directly so no STFT is re-run here.
-	# onset_strength expects a power spectrogram or mel spectrogram but accepts
-	# magnitude; it internally normalises anyway so the result is comparable.
+	# The two metrics want the spectrogram on different scales, so build the
+	# onset envelope twice from the SAME pre-computed STFT (no extra transform).
+	#
+	# Timing (below) reads the envelope's SHAPE through thresholds that are
+	# relative to its own peak, so the linear-magnitude envelope is already
+	# level-invariant and is the honest one to measure a physical attack on: in
+	# dB a gradual linear fade-in rises logarithmically, i.e. front-loaded, and
+	# a slow ramp would read as an instant attack.
 	onset_env = librosa.onset.onset_strength(
 		S=S_magnitude,
 		sr=params.sample_rate,
@@ -2021,7 +2040,30 @@ def _compute_spectral_onset_features (
 	log_attack_time = log_normalize(attack_seconds, _ATTACK_RELEASE_MIN_S, _ATTACK_RELEASE_MAX_S)
 
 	# --- mean spectral flux, log-normalised ---
-	spectral_flux = log_normalize(float(numpy.mean(onset_env)), _FLUX_MIN, _FLUX_MAX)
+	# Flux takes the envelope's MAGNITUDE, not just its shape, so it needs a
+	# dB-scaled spectrogram.  librosa only applies power_to_db on its own `y=`
+	# path (`if S is None: ... S = power_to_db(S)`) — a caller-supplied `S` is
+	# differenced as given, so the linear envelope above is proportional to
+	# signal amplitude.  Taking the mean of it made the same sound recorded
+	# 20 dB quieter score a completely different flux (measured: 0.76 → 0.02
+	# across a 40 dB sweep) while every other spectral dimension held steady —
+	# recording level leaking straight into the similarity fingerprint.
+	#
+	# ref=max makes the conversion scale-invariant (value and reference scale
+	# together), so a gain change becomes a constant offset that the
+	# frame-to-frame difference cancels exactly.
+	S_power   = S_magnitude ** 2
+	max_power = float(numpy.max(S_power))
+
+	if max_power <= 0.0:
+		return (log_attack_time, 0.0)
+
+	flux_env = librosa.onset.onset_strength(
+		S=librosa.power_to_db(S_power, ref=max_power),
+		sr=params.sample_rate,
+	)
+
+	spectral_flux = log_normalize(float(numpy.mean(flux_env)), _FLUX_MIN, _FLUX_MAX)
 
 	return (log_attack_time, spectral_flux)
 

@@ -411,6 +411,7 @@ def _reanalyze_and_save (
 	silent: bool = False,
 	channel_format: str = "pcm",
 	with_preview: bool = False,
+	audio_changed: bool = False,
 ) -> SampleAssets | None:
 
 	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
@@ -475,6 +476,17 @@ def _reanalyze_and_save (
 		mono = subsample.analysis.to_mono_float(
 			file_info.audio, file_info.bit_depth, channel_index=channel_index,
 		)
+
+		# A header-valid file with zero frames is not a sample.  Left in, it
+		# analysed "successfully" (duration 0, peak 0, tempo 0), got a sidecar
+		# that made it trusted forever, stayed selectable in the similarity and
+		# pick pools, and then failed every variant render.  The two sibling
+		# ingest paths — `subsample import` and the watcher — already reject it;
+		# rejecting here makes all three agree.
+		if len(mono) == 0:
+			_log.warning("Skipping %s — the file contains no audio frames", audio_path.name)
+			return None
+
 		params = subsample.analysis.compute_params(file_info.sample_rate)
 		duration = len(mono) / file_info.sample_rate
 
@@ -525,10 +537,15 @@ def _reanalyze_and_save (
 			# sample either — the sidecar is already saved; only the PNG
 			# is missing and will regenerate on a later pass.
 			_log.warning("Failed to render preview PNG %s: %s", png_path.name, exc)
-	else:
-		# Previews are off (or weren't computed) and the audio just changed:
+	elif audio_changed:
+		# Previews are off (or weren't computed) and the audio really did change:
 		# an existing PNG now depicts DIFFERENT audio.  Remove it rather than
 		# leave a misleading image — it regenerates when previews come back on.
+		#
+		# Gated on audio_changed because this also runs for an ANALYSIS_VERSION
+		# bump, where the bytes are identical and the PNG is still perfectly
+		# valid.  Deleting it there threw away a good preview and forced a full
+		# re-analysis of that sample on the next startup.
 		stale_png = audio_path.with_name(audio_path.name + PREVIEW_PNG_SUFFIX)
 		try:
 			stale_png.unlink(missing_ok=True)
@@ -637,6 +654,8 @@ def ensure_sample_assets (
 			audio_path,
 			channel_format    = prior_channel_format,
 			with_preview      = with_preview,
+			# The bytes really are different, so any existing PNG is stale.
+			audio_changed     = True,
 		)
 
 	if with_preview and "preview" not in payload:
@@ -697,7 +716,10 @@ def ensure_sample_assets (
 	return assets
 
 
-def load_sidecar (sidecar_path: pathlib.Path) -> SampleAssets | None:
+def load_sidecar (
+	sidecar_path: pathlib.Path,
+	with_preview: bool = False,
+) -> SampleAssets | None:
 
 	"""Load analysis results directly from a sidecar file without audio MD5 check.
 
@@ -710,6 +732,11 @@ def load_sidecar (sidecar_path: pathlib.Path) -> SampleAssets | None:
 
 	Args:
 		sidecar_path: Path to the .analysis.json sidecar file directly.
+		with_preview: Threaded to the re-analysis path so a version-stale sidecar
+		              regenerates its preview instead of silently losing it.  The
+		              watcher carries this setting and previously dropped it here,
+		              so a hot-loaded sample came back without the preview a
+		              startup-loaded one would have had.
 
 	Returns:
 		The SampleAssets dataclass on success (spectral, rhythm, pitch, timbre,
@@ -733,7 +760,11 @@ def load_sidecar (sidecar_path: pathlib.Path) -> SampleAssets | None:
 		audio_path = sidecar_path.parent / audio_name
 
 		if audio_path.exists():
-			return _reanalyze_and_save(audio_path, cached_version=cached_version)
+			return _reanalyze_and_save(
+				audio_path,
+				cached_version = cached_version,
+				with_preview   = with_preview,
+			)
 
 		_log.warning(
 			"Skipping %s (analysis version mismatch: %s → %s; audio file not found)",

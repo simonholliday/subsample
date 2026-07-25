@@ -436,7 +436,9 @@ analysis:
   # Tempo prior (initial guess) for beat detection in BPM. Biases the rhythm detection
   # but does not constrain it; librosa.beat.beat_track uses this as a starting point.
   # Set to the expected tempo of your source material for faster convergence.
-  # Range: 30–300 BPM. Ignored if tempo_min and tempo_max bracket the detected tempo.
+  # Range: 30–300 BPM. Always applied — it seeds librosa.beat.beat_track, whose output IS
+  # the reported tempo. tempo_min/tempo_max are a separate control, bounding the PLP pulse
+  # curve only; they do not constrain the tempo reported here or filtered on by where.tempo.
 
   tempo_min: 30.0
   # Minimum tempo (BPM) considered during beat detection.
@@ -502,7 +504,7 @@ analysis:
 # See midi-map-gm-drums.yaml for examples.
 
 # library:
-#   max_memory_mb: 100.0
+#   max_memory_mb: auto      # 60% of the global budget when unset (not a literal 100)
 #   # Maximum audio memory (MB) for in-memory library samples. When this
 #   # limit is exceeded, oldest samples are evicted (FIFO) to make room for new
 #   # ones — newest captures are always kept, oldest are dropped. WAV files on
@@ -544,7 +546,7 @@ analysis:
 # See the README's "Transforms" section for how the pipeline behaves.
 
 # transform:
-#   max_memory_mb: 50.0
+#   max_memory_mb: auto      # 35% of the global budget when unset (not a literal 50)
 #   # Memory budget (MB) for derivative audio.
 #   # Overrides the global max_memory_mb split for transform variants.
 #   # Eviction: parent-priority FIFO — all variants of the oldest parent are

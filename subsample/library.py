@@ -484,7 +484,10 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 	if not sidecar_paths:
 		return ReferenceLibrary([])
 
-	n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
+	# Shared policy, not a fourth hand-rolled formula.  These are sidecar reads
+	# (I/O plus an occasional re-analysis), so the offline share is right — this
+	# only ever runs at startup.
+	n_workers = subsample.parallelism.analysis_worker_count(player_active=False)
 
 	# Phase 1 — parallel: load each sidecar concurrently (may trigger
 	# re-analysis if the version is stale). Results are kept in sorted order
@@ -818,7 +821,7 @@ def load_instrument_library (
 		_log.warning(
 			"Instrument library: %d sample(s) totalling %.1f MB exceed the memory "
 			"limit of %.1f MB — %d were evicted (FIFO), so some are unavailable at "
-			"note-on.  Raise instrument.max_memory_mb to keep them all resident.",
+			"note-on.  Raise library.max_memory_mb to keep them all resident.",
 			loaded, total_audio_bytes / (1024 * 1024), lib._max_bytes / (1024 * 1024),
 			loaded - len(lib),
 		)

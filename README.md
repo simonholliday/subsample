@@ -1202,11 +1202,17 @@ The compressor and limiter share the same DSP back-end (Giannoulis et al.
 feed-forward design with soft knee and look-ahead). `compress: true` adapts to
 each sample automatically using the analysis data:
 
-- **threshold** - set 6 dB below the sample's peak level (always engages)
+- **threshold** - set 6 dB below the sample's peak level (always engages),
+  independent of how loud the sample was recorded
 - **attack** - slow for percussive samples (lets the transient punch through),
   fast for gradual onsets (no transient to protect)
 - **release** - short for quick-decay samples (recovers before the next hit),
   long for sustained sounds (avoids pumping)
+
+Explicit thresholds (`compress: { threshold: -30 }`, `gate: { threshold: -40 }`)
+are dBFS against the processing buffer, which every sample is normalised to
+before the chain runs - so a given number means the same depth below the peak
+for every sample, whatever its recording level.
 
 ```yaml
 process:
@@ -2050,10 +2056,17 @@ library several times faster on a multi-core machine.
 ### Leaves you headroom
 
 Background analysis deliberately runs on about three-quarters of the machine's
-cores rather than every last thread, so your system stays responsive — cooler
-and quieter too — while a large library rebuild or `import` works away in the
-background. It pulls back much further while the player is live, so playback is
-never starved.
+cores rather than every last thread, so your system stays responsive while a
+large library rebuild or `import` works away in the background. It pulls back
+much further while the player is live, so playback is never starved. The share
+is measured against the cores this process may actually use, so it does the
+right thing inside a container or under a CPU allowance rather than sizing
+itself to the whole host.
+
+Note that fewer workers does not mean a cooler machine: a modern CPU draws to
+its power limit whether the work is spread across four cores or forty, so the
+package temperature lands in much the same place either way. What you gain is
+headroom — the machine stays usable while it works.
 
 ### Professional gain staging
 
@@ -2216,8 +2229,11 @@ for a few seconds before listening for events.
 and channel count. Detected segments are saved to the output directory. The
 detector spends the first `detection.warmup_seconds` (default 1.0s) calibrating
 the ambient floor, so a hit inside that opening window is not captured - leave
-about a second of room tone at the start of an imported file, or set
-`detection.warmup_seconds: 0` if the file begins on a hit.
+about a second of room tone at the start of an imported file. Lowering
+`detection.warmup_seconds` shortens that window but cannot remove it: at least
+one chunk always goes to calibration, and if that chunk contains the hit it also
+seeds the ambient floor from it. For a file that begins exactly on a transient,
+pad the front with a moment of silence instead.
 
 ### Chopping long-decay takes
 
@@ -2310,7 +2326,7 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt. `subsample --list-devices` shows the names |
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
 | `recorder.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
-| `recorder.audio.channels` | `1` | 1 = mono, 2 = stereo. Omit (or set to `null`) to auto-detect from the selected device |
+| `recorder.audio.channels` | auto | 1 = mono, 2 = stereo. Omitted by default (and `null`) = auto-detect from the selected device |
 | `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
 | `recorder.audio.buffer_frames` | `512` | Frames per buffer read |
 | `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, ~40-60% smaller, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
@@ -2672,6 +2688,7 @@ declared as path-based `where: { reference: ... }` predicates in the MIDI map:
 
 ```yaml
 - name: Bass Drum
+  channel: 10
   notes: 36
   select:
     where:
@@ -2853,7 +2870,7 @@ Spectral metrics (all [0, 1]):
 - **log_attack** - 0 = instant spectral onset, 1 = very slow
 - **flux** - 0 = static spectrum, 1 = rapidly evolving
 - **rolloff** - 0 = energy concentrated low, 1 = energy extends to Nyquist
-- **slope** - 0 = flat spectrum, 1 = steeply tilted
+- **slope** - 0 = steeply bass-dominated, 0.5 = roughly flat, 1 = bright/treble-dominated
 
 Pitch data (raw values):
 - **pitch** - dominant fundamental frequency in Hz, or "none" for unpitched audio
@@ -3109,11 +3126,15 @@ needing to classify them first.
 ```
 SampleRecord added to library
     → TransformManager.on_sample_added()
-        → enqueue base variant (always)             ← float32 peak-normalised copy
-        → enqueue pitch variants (tonal only)       ← Rubber Band offline finer engine
-        → enqueue time-stretch (if BPM set + enough onsets) ← beat-quantized timemap_stretch
+        → enqueue base variant ONLY                 ← float32 peak-normalised copy
             → TransformProcessor worker pool
                 → TransformCache (parent-priority FIFO eviction, 50 MB default)
+
+MIDI map loaded / reloaded
+    → MidiPlayer.update_assignments()
+        → enqueue pitch variants (tonal only)       ← Rubber Band offline finer engine
+        → enqueue time-stretch (if BPM set + enough onsets) ← beat-quantized timemap_stretch
+            → (same worker pool and cache)
 ```
 
 The base variant (identity spec: no DSP) is produced for every sample -

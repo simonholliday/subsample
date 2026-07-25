@@ -98,7 +98,6 @@ class TestInstrumentWatcher:
 		directory: pathlib.Path,
 		callback: typing.Callable[[subsample.library.SampleRecord], None],
 		known_sidecars: typing.Optional[set[pathlib.Path]] = None,
-		known_audio: typing.Optional[set[pathlib.Path]] = None,
 	) -> subsample.watcher.InstrumentWatcher:
 
 		"""Construct a watcher with empty known sets by default."""
@@ -107,7 +106,6 @@ class TestInstrumentWatcher:
 			directory=directory,
 			known_sidecars=known_sidecars or set(),
 			on_sample_loaded=callback,
-			known_audio=known_audio,
 		)
 
 	def test_new_sample_triggers_callback (self, tmp_path: pathlib.Path) -> None:
@@ -148,7 +146,6 @@ class TestInstrumentWatcher:
 			tmp_path,
 			lambda _r: called.set(),
 			known_sidecars={sidecar_path.resolve()},
-			known_audio={wav_path.resolve()},
 		)
 		watcher.start()
 
@@ -258,7 +255,6 @@ class TestInstrumentWatcherAudioPath:
 		self,
 		directory: pathlib.Path,
 		callback: typing.Callable[[subsample.library.SampleRecord], None],
-		known_audio: typing.Optional[set[pathlib.Path]] = None,
 		with_preview: bool = False,
 	) -> subsample.watcher.InstrumentWatcher:
 
@@ -266,7 +262,6 @@ class TestInstrumentWatcherAudioPath:
 			directory=directory,
 			known_sidecars=set(),
 			on_sample_loaded=callback,
-			known_audio=known_audio,
 			with_preview=with_preview,
 		)
 
@@ -517,32 +512,72 @@ class TestInstrumentWatcherAudioPath:
 			assert len(received) == 1, f"Expected exactly 1 delivery, got {len(received)}"
 			assert received[0].name == "snare"
 
-	def test_known_audio_ignored (self, tmp_path: pathlib.Path) -> None:
+	def test_unchanged_startup_sample_is_not_reloaded (self, tmp_path: pathlib.Path) -> None:
 
-		"""Audio files listed in known_audio at construction time are silently skipped."""
+		"""A spurious event for an unchanged file does not re-load it.
+
+		The freshness gate, not a known-paths set, is what suppresses this: the
+		sidecar still matches the bytes, so there is nothing to do.
+		"""
 
 		originals = _fast_audio_timings()
 
 		wav_path = tmp_path / "kick.wav"
 		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
 
 		called = threading.Event()
-		watcher = self._make_watcher(
-			tmp_path,
-			lambda _r: called.set(),
-			known_audio={wav_path.resolve()},
-		)
+		watcher = self._make_watcher(tmp_path, lambda _r: called.set())
 		watcher.start()
 
 		try:
-			# Touch the file to fire a filesystem event.
+			# Touch the file to fire a filesystem event without changing it.
 			wav_path.write_bytes(wav_path.read_bytes())
-			triggered = called.wait(timeout=_TIMEOUT)
+			triggered = called.wait(timeout=_AUDIO_PATH_TIMEOUT / 3)
 		finally:
 			watcher.stop()
 			_restore_audio_timings(originals)
 
-		assert not triggered, "Callback fired for known audio file (should be skipped)"
+		assert not triggered, "unchanged sample was needlessly re-loaded"
+
+	def test_sample_updated_in_place_is_reloaded (self, tmp_path: pathlib.Path) -> None:
+		"""Overwriting an already-loaded sample re-analyses it.
+
+		Regression: the watcher used to drop every audio event whose path was in
+		its startup-loaded set, before the freshness gate could see it — so
+		re-exporting a sample over an existing one (a DAW render, an rsync, a
+		`.part` rename) silently kept the OLD audio and the OLD fingerprint for
+		the rest of the session.
+		"""
+
+		originals = _fast_audio_timings()
+
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path, n_frames=2048)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+
+		received: list[subsample.library.SampleRecord] = []
+		done = threading.Event()
+
+		def on_loaded (record: subsample.library.SampleRecord) -> None:
+			received.append(record)
+			done.set()
+
+		watcher = self._make_watcher(tmp_path, on_loaded)
+		watcher.start()
+
+		try:
+			# Replace it in place with genuinely different audio.
+			tests.helpers._make_wav(wav_path, n_frames=8192)
+			triggered = done.wait(timeout=_AUDIO_PATH_TIMEOUT)
+		finally:
+			watcher.stop()
+			_restore_audio_timings(originals)
+
+		assert triggered, "in-place update was never picked up"
+		assert received[0].audio is not None
+		# The reloaded record describes the NEW audio, not the old fingerprint.
+		assert received[0].audio.shape[0] > 4096
 
 	def test_non_audio_extension_ignored (self, tmp_path: pathlib.Path) -> None:
 
@@ -741,23 +776,21 @@ class TestInstrumentWatcherDeletion:
 			watcher._on_audio_file_deleted(tmp_path / "01.wav")   # must not raise
 		assert any("removing deleted sample" in r.message for r in caplog.records)
 
-	def test_deletion_forgets_known_path (self, tmp_path: pathlib.Path) -> None:
-		"""After removal the deleted path is discarded from the known sets, so a
+	def test_deletion_forgets_known_sidecar (self, tmp_path: pathlib.Path) -> None:
+		"""After removal the deleted sidecar is discarded from the known set, so a
 		later re-create at the same path reloads instead of being suppressed."""
 		audio = tmp_path / "01.wav"
 		sidecar = (audio.parent / (audio.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
 		watcher = subsample.watcher.InstrumentWatcher(
 			directory=tmp_path,
 			known_sidecars={sidecar},
-			known_audio={audio.resolve()},
 			on_sample_loaded=lambda record: None,
 			on_sample_removed=lambda path: None,
 		)
-		assert audio.resolve() in watcher._known_audio
+		assert sidecar in watcher._known_sidecars
 
 		watcher._on_audio_file_deleted(audio)
 
-		assert audio.resolve() not in watcher._known_audio
 		assert sidecar not in watcher._known_sidecars
 
 

@@ -333,8 +333,25 @@ def resolve_scalar (
 
 		return definitions.lookup(section, prefix, name, context)
 
-	# Verbatim int() coercion, but wrapped so a list/dict (TypeError) or a
-	# non-numeric string (a context-free ValueError) becomes one labelled
+	# bool is an int subclass, so `channel: yes` would otherwise resolve to 1 —
+	# the same silent coercion _load_definitions_file rejects explicitly on the
+	# definitions side ("x: true fails loudly instead of quietly becoming 1").
+	if isinstance(raw, bool):
+		raise ValueError(
+			f"{context}: expected a whole number or a definitions name, "
+			f"got the boolean {raw!r}"
+		)
+
+	# A float would truncate: `channel: 10.7` silently became channel 10, one
+	# away from what the user wrote and impossible to spot in a log line.  These
+	# are all MIDI channel / program numbers — whole numbers by definition.
+	if isinstance(raw, float) and not raw.is_integer():
+		raise ValueError(
+			f"{context}: expected a whole number, got {raw!r}"
+		)
+
+	# Otherwise the verbatim int() coercion, wrapped so a list/dict (TypeError)
+	# or a non-numeric string (a context-free ValueError) becomes one labelled
 	# ValueError — the callers below (program_channel, default_program,
 	# programs[].program) forward it to load_midi_map's ValueError contract.
 	try:

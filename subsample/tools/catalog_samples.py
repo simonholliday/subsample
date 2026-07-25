@@ -337,7 +337,7 @@ def _record_from_assets (
 	assets: subsample.cache.SampleAssets,
 ) -> subsample.library.SampleRecord:
 
-	"""Wrap one ensure_sample_assets tuple in a SampleRecord for similarity work.
+	"""Wrap one ensure_sample_assets result (a SampleAssets dataclass) in a SampleRecord for similarity work.
 
 	sample_id is just the load index (the similarity helpers return indices, not
 	ids) and audio is None — grouping and ordering read only the analysis fields

@@ -24,6 +24,7 @@ import numpy
 import pyaudio
 
 import subsample.config
+import subsample.parallelism
 
 
 _log = logging.getLogger(__name__)
@@ -107,10 +108,17 @@ def scale_float_to_ceiling (
 	``read_audio_file`` — so the audio they write and the sidecar they analyse
 	both describe the same, un-clipped signal.  Returns the array unchanged when
 	``ceiling_dbfs`` is None, the array is empty, or the peak already fits.
+
+	Non-finite samples are scrubbed first, matching ``read_audio_file``: a NaN
+	makes the peak probe NaN (so ``peak > ceiling`` is False and no scaling
+	happens at all) and an inf makes the gain zero, silencing the file.
 	"""
 
 	if ceiling_dbfs is None or data.size == 0:
 		return data
+
+	if not numpy.all(numpy.isfinite(data)):
+		data = numpy.nan_to_num(data, nan=0.0, posinf=1.0, neginf=-1.0)
 
 	peak = float(numpy.max(numpy.abs(data)))
 	ceiling_lin = 10.0 ** (ceiling_dbfs / 20.0)
@@ -241,6 +249,24 @@ def read_audio_file (
 			float_dtype = "float32" if subtype == "FLOAT" else "float64"
 			float_data, sample_rate = soundfile.read(str(path), dtype=float_dtype, always_2d=True)
 
+			# Scrub non-finite samples before anything reads them.  numpy.clip
+			# passes NaN straight through and .astype(int32) then maps it to
+			# INT32_MIN — a full-scale negative click on playback, from a file
+			# that merely had one bad sample.  ±inf is worse: it makes the peak
+			# probe below inf, so the ceiling gain is 0 and the whole file goes
+			# silent, then log10(0) raises inside the broad handler and the user
+			# is told their format is unsupported.  A NaN is silence and an inf
+			# is a rail, which is the closest honest reading of a corrupt sample.
+			if float_data.size and not numpy.all(numpy.isfinite(float_data)):
+				n_bad = int(numpy.count_nonzero(~numpy.isfinite(float_data)))
+				_log.warning(
+					"%s: %d non-finite sample(s) (NaN/inf) replaced with silence/full scale",
+					path.name, n_bad,
+				)
+				float_data = numpy.nan_to_num(
+					float_data, nan=0.0, posinf=1.0, neginf=-1.0,
+				)
+
 			# Clip-safe conversion: float/double have no hard 0 dBFS ceiling but the
 			# int32 array does.  When a ceiling is configured and this source exceeds
 			# it, scale the whole file down (one gain, so inter-hit dynamics survive)
@@ -339,11 +365,33 @@ def _suppress_c_stderr () -> typing.Generator[None, None, None]:
 
 def create_pyaudio () -> pyaudio.PyAudio:
 
-	"""Create a PyAudio instance, suppressing ALSA/JACK diagnostic noise."""
+	"""Create a PyAudio instance, suppressing ALSA/JACK diagnostic noise.
+
+	Raises:
+		OSError: If PortAudio cannot initialise — most often because no sound
+		         server is running.  Re-raised with that hint attached, since
+		         the underlying diagnostic goes to the fd 2 this suppresses.
+	"""
+
+	# PortAudio spawns its callback threads inside C, where
+	# threading.active_count() cannot see them, so tell the fork guard that
+	# forking is no longer safe from this process.
+	subsample.parallelism.note_native_subsystem_started()
 
 	with _pyaudio_init_lock:
-		with _suppress_c_stderr():
-			return pyaudio.PyAudio()
+		try:
+			with _suppress_c_stderr():
+				return pyaudio.PyAudio()
+
+		except OSError as exc:
+			# The ALSA/JACK line that says WHY went to the suppressed fd 2, so
+			# without this the user gets a bare "[Errno -9999] Unanticipated
+			# host error" and nothing to act on.
+			raise OSError(
+				f"Could not initialise the audio backend ({exc}).  Is a sound "
+				f"server running?  Subsample needs PipeWire, PulseAudio or JACK "
+				f"— on a headless box try `pw-jack subsample`."
+			) from exc
 
 
 def unpack_audio (raw_bytes: bytes, bit_depth: int, channels: int) -> numpy.ndarray:

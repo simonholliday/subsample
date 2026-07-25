@@ -235,7 +235,7 @@ def hf_shelf_correction (order: int, sample_rate: int) -> Biquad:
 		sample_rate: Hz.
 
 	Returns:
-		Biquad to apply to the X, Y, Z channels (ACN indices 1, 2, 3).
+		Biquad to apply to the three first-order channels (ACN indices 1=Y, 2=Z, 3=X).
 		Never apply to W — W has no directional bias and does not suffer
 		the same capsule-spacing attenuation.
 	"""

@@ -153,8 +153,9 @@ def _position_upmix (in_ch: int, out_ch: int) -> numpy.ndarray:
 	Each input channel routes to the output channel at the same SMPTE position
 	(FL->FL, BL->BL, ...), so a quad source (FL, FR, BL, BR) sends its rears to
 	the surround pair of a 5.1/7.1 output instead of landing on the centre and
-	the LFE (which raw index alignment does).  A mono/centre source with no
-	dedicated output centre spreads equal-power to the front L/R pair (matching
+	the LFE (which raw index alignment does).  A mono/centre source always spreads
+	equal-power to the front L/R pair — never onto a physical centre channel,
+	even when the output layout has one (matching
 	the documented `pan: [50, 50]` centre).  Positions absent from the output
 	layout are dropped; extra output channels stay silent.  Falls back to
 	conservative index alignment for any non-standard layout.

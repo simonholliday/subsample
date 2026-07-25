@@ -69,8 +69,10 @@ class InstrumentWatcher:
 	(debounced); audio file events wait for a sidecar grace period, then
 	check file-size stability before analyzing.
 
-	Files present in known_sidecars / known_audio at construction time are
-	silently ignored — they were already loaded at startup.
+	Sidecars present in known_sidecars at construction time are silently
+	ignored — they were already loaded at startup.  Audio files are NOT
+	filtered that way: an already-loaded path can still be overwritten in
+	place, and only the sidecar-freshness check can tell the difference.
 	"""
 
 	def __init__ (
@@ -79,7 +81,6 @@ class InstrumentWatcher:
 		known_sidecars: set[pathlib.Path],
 		on_sample_loaded: typing.Callable[[subsample.library.SampleRecord], None],
 		target_sample_rate: typing.Optional[int] = None,
-		known_audio: typing.Optional[set[pathlib.Path]] = None,
 		with_preview: bool = False,
 		on_sample_removed: typing.Optional[typing.Callable[[pathlib.Path], None]] = None,
 	) -> None:
@@ -101,17 +102,6 @@ class InstrumentWatcher:
 		# .preview.png — kept in step with the startup load so a sample dropped
 		# in later isn't missing the preview a startup-loaded one would have.
 		self._with_preview = with_preview
-
-		# Known audio paths — audio files already loaded at startup.
-		# Derived from known_sidecars by stripping the sidecar suffix when
-		# no explicit set is provided.
-		if known_audio is not None:
-			self._known_audio: set[pathlib.Path] = set(known_audio)
-		else:
-			self._known_audio = {
-				sc.parent / sc.name[: -len(subsample.cache.SIDECAR_SUFFIX)]
-				for sc in self._known_sidecars
-			}
 
 		# Active debounce timers keyed by resolved path.
 		# Protected by _lock — modified from the watchdog callback thread and
@@ -276,7 +266,10 @@ class InstrumentWatcher:
 		with self._lock:
 			self._timers.pop(sidecar_path, None)
 
-		result = subsample.cache.load_sidecar(sidecar_path)
+		# Pass the watcher's preview setting through: if this sidecar turns out to
+		# be version-stale, the re-analysis behind load_sidecar has to know to
+		# rebuild the preview, or a hot-loaded sample arrives without one.
+		result = subsample.cache.load_sidecar(sidecar_path, with_preview=self._with_preview)
 
 		if result is None:
 			self._schedule_retry(sidecar_path, attempt, reason="sidecar not readable")
@@ -394,7 +387,6 @@ class InstrumentWatcher:
 			resolved_audio = audio_path.resolve()
 			sidecar = (audio_path.parent / (audio_path.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
 			with self._lock:
-				self._known_audio.discard(resolved_audio)
 				self._known_sidecars.discard(sidecar)
 		except Exception:
 			_log.exception(
@@ -414,9 +406,18 @@ class InstrumentWatcher:
 
 		path = audio_path.resolve()
 
-		if path in self._known_audio:
-			return
-
+		# Deliberately NOT filtered against the startup-loaded paths.  Doing that
+		# dropped create/modify/moved-into-place events for every sample loaded at
+		# startup before they could reach the freshness gate in
+		# _check_sidecar_then_load — re-exporting a sample over an existing one
+		# (DAW, rsync, a `.part` rename) silently kept the old PCM and the old
+		# fingerprint for the rest of the session.
+		#
+		# The freshness gate is the correct filter and already does this job
+		# properly: an unchanged file still matches its sidecar and is skipped
+		# there, while a changed one no longer matches and reloads.  The cost of
+		# routing known paths through it is one MD5 per event on a file that is
+		# usually static.
 		with self._lock:
 			if self._stopped:
 				return

@@ -1565,7 +1565,12 @@ class TransformProcessor:
 			# peak, so using the live measurement is more accurate.
 			# TransformResult.level is recomputed after all steps, so
 			# _render_float() always applies the correct inverse gain.
-			actual_peak = float(numpy.max(numpy.abs(audio)))
+			# Guard the reduction on a non-empty buffer: numpy.max raises
+			# "zero-size array to reduction operation" on a zero-frame sample,
+			# which fired BEFORE the empty-buffer skip below could pass it
+			# through, killing the job and blacklisting the key permanently.
+			actual_peak = float(numpy.max(numpy.abs(audio))) if audio.shape[0] > 0 else 0.0
+
 			if actual_peak > 0.0:
 				audio = audio * (0.9 / actual_peak)
 
@@ -1628,7 +1633,14 @@ class TransformProcessor:
 			# at parse; only duplicate same-name steps could match twice.)
 			energy_profile: typing.Optional[GridEnergyProfile] = None
 
-			for step in spec.steps:
+			# Only describe a grid the render actually landed on.  Every quantize
+			# handler publishes segment bounds once it has snapped onsets, and
+			# every bail-out (source_bpm <= 0, amount <= 0, no beat map, too few
+			# onsets) returns before that — so bounds is the signal that the
+			# buffer really is grid-aligned.  Attaching a profile merely because
+			# the SPEC named a quantize step gave `order: beat_match` a
+			# grid-alignment score for an unquantized sample.
+			for step in spec.steps if segment_bounds is not None else ():
 				if isinstance(step, (TimeStretch, PadQuantize)):
 					energy_profile = _compute_grid_energy_profile(
 						audio, self._output_sample_rate,
@@ -2367,18 +2379,31 @@ def _mirror_attacks_if_reversed (
 	"""Mirror original-timeline attack positions when an earlier reverse in the
 	chain flipped the buffer.
 
-	A hit at original time t sits at (buffer_duration - t) after a reverse, so a
-	following quantize must slice there, not at t (which would land on silence).
-	With no reverse in the chain — the common case — the positions are returned
-	unchanged.
+	The quantize handlers read these as segment *starts* (and the first as the
+	crop point), so mirroring has to account for a hit occupying the span up to
+	the NEXT attack.  A hit starting at ``t[i]`` runs to ``t[i+1]``, so after the
+	flip it occupies ``(dur - t[i+1], dur - t[i])`` and its start is
+	``dur - t[i+1]`` — one position along, not ``dur - t[i]``.  The last original
+	hit runs to the end of the buffer, so it reverses to start at 0.
+
+	Mirroring each position in place instead (``dur - t`` for every t) shifted
+	every start one segment late and put the crop point after the whole reversed
+	body of the final hit, so ``[reverse, pad_quantize]`` discarded roughly half
+	the sample.  With no reverse in the chain — the common case — the positions
+	are returned unchanged.
 	"""
 
 	if not getattr(_segment_bounds_local, "reversed", False):
 		return tuple(attack_times)
 
+	if not attack_times:
+		return ()
+
 	buffer_dur = audio.shape[0] / sample_rate
 
-	return tuple(sorted(buffer_dur - t for t in attack_times))
+	# Drop the first attack (its mirror is the END of the reversed buffer, not a
+	# start) and prepend 0.0 for the final hit, which now begins at the origin.
+	return (0.0,) + tuple(sorted(buffer_dur - t for t in attack_times[1:]))
 
 
 # ---------------------------------------------------------------------------
@@ -2676,8 +2701,9 @@ def _compress (
 
 
 def _resolve_compress_params (
-	record: "subsample.library.SampleRecord",
-	step:   Compress,
+	record:      "subsample.library.SampleRecord",
+	step:        Compress,
+	buffer_peak: float,
 ) -> tuple[float, float, float]:
 
 	"""Resolve adaptive compression parameters from sample analysis data.
@@ -2686,17 +2712,26 @@ def _resolve_compress_params (
 	is None (user did not set it), compute from the sample's analysis.
 	If the step value is a float (user set it explicitly), use it as-is.
 
+	``buffer_peak`` is the peak of the buffer the handler is about to process,
+	NOT ``record.level.peak``: ``_execute`` peak-normalises every buffer before
+	the handler chain runs, so an analysis-derived threshold has to be expressed
+	in the normalised buffer's dB scale or the two disagree by however far the
+	capture sat below full scale.
+
 	Returns:
 		(threshold_db, attack_ms, release_ms) — all resolved to floats.
 	"""
 
-	# Threshold: 6 dB below the sample's peak level.  This ensures the
-	# compressor always engages on the top 6 dB of the signal's dynamic
-	# range, regardless of recording level.
+	# Threshold: 6 dB below the peak of the buffer being processed.  Measuring it
+	# on record.level.peak instead — the ORIGINAL capture, before _execute's
+	# normalise — made the engagement point track recording level: a hot capture
+	# compressed 6 dB down as documented, one 25 dB quieter compressed 31 dB down,
+	# i.e. barely at all.  The buffer's own peak keeps the documented "top 6 dB of
+	# the dynamic range" true for every sample.
 	if step.threshold_db is not None:
 		threshold_db = step.threshold_db
 	else:
-		peak_db = 20.0 * math.log10(record.level.peak + _COMPRESS_EPSILON)
+		peak_db = 20.0 * math.log10(buffer_peak + _COMPRESS_EPSILON)
 		threshold_db = peak_db - 6.0
 
 	# Attack: map from spectral.attack (0 = instant percussive, 1 = gradual).
@@ -2727,7 +2762,8 @@ def _apply_compress (
 
 	"""Dynamic range compressor — adapts to each sample when params are unset."""
 
-	threshold_db, attack_ms, release_ms = _resolve_compress_params(record, step)
+	buffer_peak = float(numpy.max(numpy.abs(audio))) if audio.size else 0.0
+	threshold_db, attack_ms, release_ms = _resolve_compress_params(record, step, buffer_peak)
 
 	return _compress(
 		audio, sample_rate,
@@ -2825,23 +2861,39 @@ _GATE_EPSILON: float = 1e-10
 
 
 def _resolve_gate_params (
-	record: "subsample.library.SampleRecord",
-	step:   Gate,
+	record:      "subsample.library.SampleRecord",
+	step:        Gate,
+	buffer_peak: float,
 ) -> tuple[float, float, float, float, float]:
 
 	"""Resolve adaptive gate parameters from sample analysis data.
 
 	For each Optional field: if None, compute from analysis; if set, use as-is.
 
+	``buffer_peak`` is the peak of the buffer about to be gated.  ``_execute``
+	peak-normalises before the handler chain, so the analysis noise floor — which
+	describes the original capture — has to be scaled into the buffer's dB scale
+	before it can be used as a threshold.
+
 	Returns:
 		(threshold_db, attack_ms, release_ms, hold_ms, lookahead_ms).
 	"""
 
-	# Threshold: 6 dB above the noise floor.
+	# Threshold: 6 dB above the noise floor — but the noise floor was measured on
+	# the ORIGINAL capture while this runs on a buffer _execute has already
+	# peak-normalised, so scale it by the same gain the normalise applied.
+	# Without that, the threshold slid further below the buffer with every dB the
+	# capture sat under full scale (43 dB down for a hot take, 68 dB for a quiet
+	# one), so `gate: true` quietly became a no-op on quiet recordings.
 	if step.threshold_db is not None:
 		threshold_db = step.threshold_db
 	else:
-		floor = record.level.noise_floor
+		normalise_gain = (
+			buffer_peak / record.level.peak
+			if record.level.peak > 0.0 and buffer_peak > 0.0
+			else 1.0
+		)
+		floor = record.level.noise_floor * normalise_gain
 		threshold_db = 20.0 * math.log10(floor + _GATE_EPSILON) + 6.0
 
 	# Attack: percussive → fast gate open (1 ms), sustained → slower (5 ms).
@@ -2887,7 +2939,10 @@ def _apply_gate (
 	compressor but with binary gain (open = 1.0, closed = 0.0).
 	"""
 
-	threshold_db, attack_ms, release_ms, hold_ms, lookahead_ms = _resolve_gate_params(record, step)
+	buffer_peak = float(numpy.max(numpy.abs(audio))) if audio.size else 0.0
+	threshold_db, attack_ms, release_ms, hold_ms, lookahead_ms = _resolve_gate_params(
+		record, step, buffer_peak,
+	)
 
 	n_frames, n_channels = audio.shape
 

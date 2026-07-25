@@ -658,6 +658,25 @@ def _pan_position_pair (position: float) -> list[float]:
 	return [(100.0 - position) / 200.0, (100.0 + position) / 200.0]
 
 
+def _format_pan_weights (pan_weights: numpy.ndarray) -> str:
+
+	"""Render parsed pan weights for the startup assignment listing.
+
+	A scalar ``pan:`` is stored as the normalised pair from
+	``_pan_position_pair``, so printing the raw numbers rounded to whole units
+	showed every position as 0/1 — and centre as ``[0, 0]``, indistinguishable
+	from the all-zero weights that mean "this note will be silent".  Recover the
+	position for any pair that sums to 1 and show it the way the user wrote it;
+	fall back to the weight list (adaptive precision) for everything else.
+	"""
+
+	if len(pan_weights) == 2 and math.isclose(float(numpy.sum(pan_weights)), 1.0, rel_tol=1e-6):
+		position = (float(pan_weights[1]) - float(pan_weights[0])) * 100.0
+		return f"{position:+.0f}"
+
+	return f"[{', '.join(f'{g:g}' for g in pan_weights)}]"
+
+
 def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing.Optional[numpy.ndarray]:
 
 	"""Parse pan weights from YAML into a raw weight array.
@@ -826,7 +845,10 @@ def _parse_output_routing (
 		)
 
 	for ch in channels:
-		if not isinstance(ch, int) or ch < 1:
+		# bool is an int subclass, and `True < 1` is False, so `output: [yes, 2]`
+		# would otherwise load as device channels 1 and 2.  Reject it the way
+		# pan, gain, notes, silenced_by and pick all do.
+		if isinstance(ch, bool) or not isinstance(ch, int) or ch < 1:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: output channels must be "
 				f"positive integers (1-indexed), got {ch!r}"
@@ -986,6 +1008,13 @@ def _parse_extract (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 _RELEASE_INNER_KEYS:        typing.Final[frozenset[str]] = frozenset({"time", "curve"})
 _RELEASE_CC_SHORTHAND_KEYS: typing.Final[frozenset[str]] = frozenset({"cc", "channel", "min", "max", "default", "curve"})
 
+# Knob span for a cc-bound `release:` when the map gives no explicit min/max.
+# CcBinding's own 0.0-1.0 default is meant for normalised processor parameters;
+# release time is in milliseconds, where that span is a click rather than a
+# release.  0 ms … 1 s covers the musically useful range of a release knob.
+_RELEASE_CC_DEFAULT_MIN_MS: typing.Final[float] = 0.0
+_RELEASE_CC_DEFAULT_MAX_MS: typing.Final[float] = 1000.0
+
 
 def _parse_release (
 	raw: typing.Any,
@@ -1087,6 +1116,19 @@ def _parse_release_time (
 	"""Parse a release ``time`` — a non-negative ms scalar or a ``{cc: ...}`` map."""
 
 	if isinstance(raw, dict) and "cc" in raw:
+		# Sweep unknown keys here too.  The `release: {cc: ...}` shorthand is
+		# swept by _parse_release, but the nested `release: {time: {cc: ...}}`
+		# form reaches this parser directly, so a typo like `minn:` was silently
+		# discarded and the knob kept a default floor of 0 ms.
+		unknown = set(raw) - _RELEASE_CC_SHORTHAND_KEYS
+
+		if unknown:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: unknown release time "
+				f"key(s) {sorted(unknown)}.  Valid keys: "
+				f"{sorted(_RELEASE_CC_SHORTHAND_KEYS)}."
+			)
+
 		# Re-raise numeric-coercion errors with the assignment name and offending
 		# mapping, matching _parse_velocity_range / the sibling gain parse.
 		cc_context = f"MIDI map assignment {assignment_name!r}: release time"
@@ -1100,14 +1142,38 @@ def _parse_release_time (
 				)
 				if "channel" in raw else None
 			)
-			min_val    = float(raw.get("min", 0.0))
-			max_val    = float(raw.get("max", 1.0))
+			# CcBinding's 0.0-1.0 defaults suit the normalised processor params it
+			# was built for, but a release time is in MILLISECONDS: falling back to
+			# them mapped the whole knob onto 0-1 ms — a ~24-frame fade, i.e. an
+			# audible click, and worse than the 10 ms a user gets by writing
+			# nothing.  Default to a musically useful span instead; an explicit
+			# min/max still wins.
+			min_val    = float(raw.get("min", _RELEASE_CC_DEFAULT_MIN_MS))
+			max_val    = float(raw.get("max", _RELEASE_CC_DEFAULT_MAX_MS))
 			default    = float(raw["default"]) if "default" in raw else None
 		except (TypeError, ValueError) as exc:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: malformed release time "
 				f"cc mapping {raw!r} — {exc}"
 			) from exc
+
+		# Same finiteness contract as the scalar branch below: .inf/.nan would
+		# otherwise reach note-on and crash round() in _resolve_release, where
+		# _safe_handle_message swallows it and every note goes silently missing.
+		for label, value in (("min", min_val), ("max", max_val)) + (
+			(("default", default),) if default is not None else ()
+		):
+			if not math.isfinite(value) or value < 0.0:
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: release time "
+					f"{label} {value} must be a finite value >= 0 ms"
+				)
+
+		if min_val > max_val:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: release time min "
+				f"({min_val}) must be <= max ({max_val})"
+			)
 
 		if not (0 <= cc_num <= 127):
 			raise ValueError(
@@ -1357,14 +1423,18 @@ def _parse_velocity_range (
 			f"must be a 2-element list [lo, hi], got {raw!r}"
 		)
 
-	try:
-		lo = int(raw[0])
-		hi = int(raw[1])
-	except (TypeError, ValueError) as exc:
-		raise ValueError(
-			f"MIDI map assignment {assignment_name!r}: velocity {field_label} "
-			f"values must be integers, got {raw!r} ({exc})"
-		) from exc
+	# Require real ints rather than coercing: int() would silently truncate
+	# `velocity: [0.9, 63.9]` to (0, 63), shifting which sample a velocity picks,
+	# and would accept a YAML boolean as 0/1.
+	for bound in raw:
+		if isinstance(bound, bool) or not isinstance(bound, int):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: velocity {field_label} "
+				f"values must be integers, got {raw!r}"
+			)
+
+	lo = int(raw[0])
+	hi = int(raw[1])
 
 	if not (0 <= lo <= 127 and 0 <= hi <= 127):
 		raise ValueError(
@@ -1728,6 +1798,16 @@ def _parse_single_note (
 
 	if namespaces is None:
 		namespaces = _SYMBOL_NAMESPACES
+
+	# YAML `yes`/`no` parse to True/False and bool is an int subclass, so reject
+	# before the int check or `notes: [kick, yes]` silently maps note 1.  Guarding
+	# here covers every caller — the list branch, the zone-tuned `range:`, and
+	# `silenced_by` — rather than only the ones that remembered to check.
+	if isinstance(item, bool):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: note value {item!r} is a "
+			f"boolean, not a note"
+		)
 
 	if isinstance(item, int):
 		if not 0 <= item <= 127:
@@ -2742,14 +2822,27 @@ def load_midi_map (
 			raise ValueError(f"MIDI map assignment {name!r}: missing 'channel'")
 
 		try:
-			mido_channel = subsample.definitions.resolve_scalar(
+			channel_number = subsample.definitions.resolve_scalar(
 				definitions, "channels", channel_raw, "'channel'",
-			) - 1
+			)
 		except (TypeError, ValueError) as exc:
 			raise ValueError(
 				f"MIDI map assignment {name!r} (#{assignment_index}): "
 				f"invalid 'channel' value {channel_raw!r} — {exc}"
 			) from exc
+
+		# Reject out-of-range channels at load, exactly as program_channel does
+		# above.  mido only ever delivers channels 0-15, so a 0, a 17+ or a
+		# negative here produces an assignment that can never fire — total
+		# silence with no diagnostic, and 1-vs-0-indexing is the classic MIDI
+		# slip.  (Definitions names resolve to 1-16 by construction.)
+		if not (1 <= channel_number <= 16):
+			raise ValueError(
+				f"MIDI map assignment {name!r}: channel must be 1-16 "
+				f"(got {channel_raw!r})"
+			)
+
+		mido_channel = channel_number - 1
 
 		notes_raw = assignment_raw.get("notes")
 
@@ -2863,7 +2956,17 @@ def load_midi_map (
 			assignment_raw.get("velocity"), name,
 		)
 
-		stack = bool(assignment_raw.get("stack", False))
+		# Require a real bool: `bool(raw)` on a string made `stack: "false"` mean
+		# True, and every other boolean-ish field in this loader validates its type.
+		stack_raw = assignment_raw.get("stack", False)
+
+		if not isinstance(stack_raw, bool):
+			raise ValueError(
+				f"MIDI map assignment {name!r}: stack must be true or false "
+				f"(got {stack_raw!r})"
+			)
+
+		stack = stack_raw
 
 		silenced_by = _parse_silenced_by(assignment_raw.get("silenced_by"), name, note_namespaces)
 
@@ -3616,7 +3719,11 @@ class MidiPlayer:
 			typing.Optional[tuple[float, ...]],
 			typing.Optional[tuple[int, ...]],
 			str,
-			typing.Optional[tuple[str, typing.Optional[int]]],
+			# The whole ExtractSpec, not a hand-picked field tuple: it is a frozen
+			# dataclass of hashable fields, and spelling the fields out is what
+			# previously left `weights` out of the key and collided two different
+			# `extract: {blend: ...}` assignments.
+			typing.Optional[subsample.query.ExtractSpec],
 		]
 		self._mix_matrix_cache: dict[_MixCacheKey, numpy.ndarray] = {}
 		self._mix_matrix_lock:  threading.Lock                    = threading.Lock()
@@ -3758,7 +3865,7 @@ class MidiPlayer:
 				else:
 					line += f"  pan=random[{asgn.pan_spec.lo:.0f}..{asgn.pan_spec.hi:.0f}]"
 			elif asgn.pan_weights is not None:
-				line += f"  pan=[{', '.join(f'{g:.0f}' for g in asgn.pan_weights)}]"
+				line += f"  pan={_format_pan_weights(asgn.pan_weights)}"
 			lines.append(line)
 
 		total_notes  = len(self._note_map)
@@ -3975,6 +4082,12 @@ class MidiPlayer:
 			# assignment would expose.  Virtual ports are server destinations
 			# external apps connect to; they require ``virtual=True`` and do
 			# not appear in ``get_input_names()``.
+			#
+			# rtmidi runs its input callback on a thread created in C, invisible
+			# to threading.active_count(), so tell the fork guard that a forked
+			# analysis pool is no longer safe from this process.
+			subsample.parallelism.note_native_subsystem_started()
+
 			if self._virtual_midi_port is not None:
 				port_label = self._virtual_midi_port
 				port = mido.open_input(
@@ -4592,13 +4705,20 @@ class MidiPlayer:
 			# stop a mode: loop voice looping forever if its note-off is ever lost,
 			# but the MIDI spec distinguishes them and so do we.  A separate
 			# _voices_lock section (never nested under _state_lock).
+			# Both are Channel Mode messages, so they act only on voices playing
+			# on the message's own channel — a DAW's transport-stop All Notes Off
+			# on channel 1 must not mute the drum loops on channel 10.  This
+			# matches every other kill path (_release_held, _choke_voices).
 			if msg.control == 120:
-				# All Sound Off: emergency mute — fast-declick EVERY voice,
-				# including one_shots (a ringing one_shot open hi-hat must stop),
-				# overriding each voice's own release / release: full / loop tail
-				# with the fixed ~10 ms fade, exactly like a choke.
+				# All Sound Off: emergency mute — fast-declick every voice on this
+				# channel, including one_shots (a ringing one_shot open hi-hat must
+				# stop), overriding each voice's own release / release: full / loop
+				# tail with the fixed ~10 ms fade, exactly like a choke.
 				with self._voices_lock:
 					for voice in self._voices:
+						if voice.channel != msg.channel:
+							continue
+
 						voice.looping        = False
 						voice.release_to_end = False
 						if voice.fade_pos == 0:
@@ -4607,11 +4727,15 @@ class MidiPlayer:
 						voice.releasing = True
 
 			elif msg.control == 123:
-				# All Notes Off: like a note-off for every held note — stop looping
-				# and fade (unless release: full rings it out).  one_shots ignore
-				# note-off, so they play on; CC120 above is the hard mute.
+				# All Notes Off: like a note-off for every held note on this
+				# channel — stop looping and fade (unless release: full rings it
+				# out).  one_shots ignore note-off, so they play on; CC120 above is
+				# the hard mute.
 				with self._voices_lock:
 					for voice in self._voices:
+						if voice.channel != msg.channel:
+							continue
+
 						if not voice.one_shot:
 							voice.looping = False
 							if not voice.release_to_end:
@@ -6281,7 +6405,12 @@ class MidiPlayer:
 			tuple(pan_weights.tolist()) if pan_weights is not None else None,
 			output_routing,
 			channel_format,
-			(extract.kind, extract.channel_index) if extract is not None else None,
+			# ExtractSpec is a frozen dataclass of hashable fields, so it keys the
+			# cache directly.  Spelling the fields out by hand is what previously
+			# dropped `weights`, collapsing two different `extract: {blend: [...]}`
+			# assignments — a summed mic pair and a polarity-flipped one — onto a
+			# single entry, so whichever loaded first played for both.
+			extract,
 		)
 
 		with self._mix_matrix_lock:
@@ -6406,26 +6535,41 @@ class MidiPlayer:
 			norm_gain = 1.0
 
 		gain_linear = 10.0 ** (gain_db / 20.0) if gain_db != 0.0 else 1.0
-		raw_gain = norm_gain * vel_scale * gain_linear
 
 		# Anti-clip ceiling from the TRUE peak of the buffer being rendered, not
 		# the mono-mean level.peak: an anti-phase mic pair or a heavily widened
 		# stereo stem can peak well above its mono downmix, so level.peak would
 		# under-protect and let the voice render far past full scale into the
-		# limiter (audible distortion).  Also accounts for the worst-case row sum
-		# of the mix matrix (e.g. a 5.1→stereo downmix sums FL + 0.707*FC + …).
+		# limiter (audible distortion).
 		buffer_peak = float(numpy.max(numpy.abs(audio))) if audio.size else 0.0
 		max_row_sum = float(numpy.max(numpy.sum(numpy.abs(mix_matrix), axis=1)))
 
-		if buffer_peak > 0.0 and max_row_sum > 0.0:
-			final_gain = min(raw_gain, 1.0 / (buffer_peak * max_row_sum))
-		else:
-			final_gain = raw_gain
+		# Floor the row-sum term at 1.0.  A constant-power pan's worst row sum
+		# swings between 0.707 (centre, energy split across the pair) and 1.0
+		# (hard over, all of it in one channel), so folding it in raw would make
+		# the ceiling — and with it the voice's level — track pan position, which
+		# is exactly what `pan: any` must not do.  Row sums ABOVE 1.0 are real
+		# summing (a 5.1→stereo downmix adds FL + 0.707*FC + …) and still tighten
+		# it.  Constant power means constant total energy, not constant peak: a
+		# hard-panned note legitimately peaks 3 dB above a centred one.
+		row_bound = max(max_row_sum, 1.0)
+
+		# Clamp the NORMALISATION gain, not the final gain.  Clamping after
+		# velocity capped every loud note at the same ceiling, collapsing the top
+		# of the velocity curve (a peaky one-shot lost 17-37 steps) and making
+		# `gain:` inert.  Applied here, a full-velocity note with no gain offset
+		# still lands at or below full scale — the same guarantee as before —
+		# while velocity scales cleanly beneath it and a deliberate `gain: +6`
+		# can push into the mix-bus soft limiter, which is what it is for.
+		if buffer_peak > 0.0:
+			norm_gain = min(norm_gain, 1.0 / (buffer_peak * row_bound))
+
+		final_gain = norm_gain * vel_scale * gain_linear
 
 		_log.debug(
-			"gain: norm=%.3f  vel_scale=%.3f  gain_db=%.1f  raw=%.3f  final=%.3f  (rms=%.4f buf_peak=%.4f)",
-			norm_gain, vel_scale, gain_db, raw_gain, final_gain,
-			level.rms, buffer_peak,
+			"gain: norm=%.3f  vel_scale=%.3f  gain_db=%.1f  final=%.3f  (rms=%.4f buf_peak=%.4f row_bound=%.3f)",
+			norm_gain, vel_scale, gain_db, final_gain,
+			level.rms, buffer_peak, row_bound,
 		)
 
 		gained = audio * final_gain

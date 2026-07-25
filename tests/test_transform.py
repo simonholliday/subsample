@@ -2,6 +2,7 @@
 
 import dataclasses
 import hashlib
+import math
 import pathlib
 import unittest.mock
 import tempfile
@@ -1942,25 +1943,40 @@ class TestCompressAdaptive:
 		level = subsample.analysis.LevelResult(peak=peak, rms=rms)
 		return dataclasses.replace(record, spectral=spectral, level=level)
 
-	def test_auto_threshold_adapts_to_peak (self) -> None:
-		"""Auto threshold is relative to the sample's peak — different peaks → different thresholds."""
-		loud = self._record_with(peak=0.9)   # ~ -0.9 dBFS
-		quiet = self._record_with(peak=0.1)  # ~ -20 dBFS
+	def test_auto_threshold_is_six_db_below_the_buffer_peak (self) -> None:
+		"""Auto threshold sits 6 dB below the peak of the buffer being processed."""
+		record = self._record_with(peak=0.9)
+		step   = subsample.transform.Compress()  # all auto
 
-		audio = numpy.full((2000, 1), 0.5, dtype=numpy.float32)
-		step = subsample.transform.Compress()  # all auto
+		for buffer_peak in (0.9, 0.5, 0.25):
+			threshold, _, _ = subsample.transform._resolve_compress_params(
+				record, step, buffer_peak,
+			)
+			expected = 20.0 * math.log10(buffer_peak + 1e-10) - 6.0
+			assert abs(threshold - expected) < 0.01
 
-		t_loud, _, _ = subsample.transform._resolve_compress_params(loud, step)
-		t_quiet, _, _ = subsample.transform._resolve_compress_params(quiet, step)
+	def test_auto_threshold_does_not_track_capture_level (self) -> None:
+		"""Recording level must not change where the compressor engages.
 
-		# Loud sample should have a higher (less negative) threshold.
-		assert t_loud > t_quiet
-		# Both should be 6 dB below their respective peaks.
-		import math
-		expected_loud = 20.0 * math.log10(0.9 + 1e-10) - 6.0
-		expected_quiet = 20.0 * math.log10(0.1 + 1e-10) - 6.0
-		assert abs(t_loud - expected_loud) < 0.01
-		assert abs(t_quiet - expected_quiet) < 0.01
+		_execute peak-normalises every buffer to 0.9 before the handler chain, so
+		deriving the threshold from record.level.peak (the ORIGINAL capture) made
+		the engagement point slide with how loud the room was: 6 dB below peak for
+		a hot take, 31 dB below for one captured 25 dB quieter — i.e. barely
+		compressing at all.  Same normalised buffer → same threshold, always.
+		"""
+		step        = subsample.transform.Compress()  # all auto
+		buffer_peak = 0.9                             # what _execute always hands the handler
+
+		thresholds = [
+			subsample.transform._resolve_compress_params(
+				self._record_with(peak=capture_peak), step, buffer_peak,
+			)[0]
+			for capture_peak in (0.9, 0.5, 0.3, 0.12, 0.05)
+		]
+
+		assert max(thresholds) - min(thresholds) < 0.01
+		# And it is the documented 6 dB below the buffer, not some other constant.
+		assert abs(thresholds[0] - (20.0 * math.log10(0.9 + 1e-10) - 6.0)) < 0.01
 
 	def test_auto_attack_percussive_vs_gradual (self) -> None:
 		"""Percussive sample (low spectral.attack) → slow compressor attack."""
@@ -1969,8 +1985,8 @@ class TestCompressAdaptive:
 
 		step = subsample.transform.Compress()
 
-		_, a_perc, _ = subsample.transform._resolve_compress_params(percussive, step)
-		_, a_grad, _ = subsample.transform._resolve_compress_params(gradual, step)
+		_, a_perc, _ = subsample.transform._resolve_compress_params(percussive, step, 0.9)
+		_, a_grad, _ = subsample.transform._resolve_compress_params(gradual, step, 0.9)
 
 		# Percussive → slow attack (lets transient through).
 		assert a_perc > a_grad
@@ -1984,8 +2000,8 @@ class TestCompressAdaptive:
 
 		step = subsample.transform.Compress()
 
-		_, _, r_short = subsample.transform._resolve_compress_params(short, step)
-		_, _, r_long = subsample.transform._resolve_compress_params(long, step)
+		_, _, r_short = subsample.transform._resolve_compress_params(short, step, 0.9)
+		_, _, r_long = subsample.transform._resolve_compress_params(long, step, 0.9)
 
 		assert r_short < r_long
 		assert abs(r_short - 30.0) < 0.01   # 30 + 270*0 = 30
@@ -1996,7 +2012,7 @@ class TestCompressAdaptive:
 		record = self._record_with(peak=0.5, attack=0.8, release=0.5)
 		step = subsample.transform.Compress(threshold_db=-18.0)  # explicit threshold only
 
-		t, a, r = subsample.transform._resolve_compress_params(record, step)
+		t, a, r = subsample.transform._resolve_compress_params(record, step, 0.9)
 
 		# Threshold: explicit → -18.0.
 		assert t == -18.0
@@ -2010,7 +2026,7 @@ class TestCompressAdaptive:
 		record = self._record_with(peak=0.1, attack=0.0, release=0.0)
 		step = subsample.transform.Compress(threshold_db=-12.0, attack_ms=5.0, release_ms=50.0)
 
-		t, a, r = subsample.transform._resolve_compress_params(record, step)
+		t, a, r = subsample.transform._resolve_compress_params(record, step, 0.9)
 
 		assert t == -12.0
 		assert a == 5.0
@@ -2728,26 +2744,61 @@ class TestGate:
 		assert numpy.max(numpy.abs(result)) < 0.00005
 
 	def test_auto_threshold_from_noise_floor (self) -> None:
-		"""Auto threshold is derived from noise_floor + 6 dB."""
+		"""Auto threshold is noise_floor + 6 dB, scaled into the normalised buffer.
+
+		The noise floor describes the ORIGINAL capture, but _execute peak-normalises
+		before the handler runs, so the floor is scaled by the same gain first.
+		"""
 		record = _make_record(sample_id=1)
-		# Override the level to have a known noise_floor.
 		record = dataclasses.replace(record, level=subsample.analysis.LevelResult(
 			peak=0.8, rms=0.3, crest_factor=2.67, crest_factor_db=8.5, noise_floor=0.01,
 		))
 
 		step = subsample.transform.Gate()  # all auto
-		threshold, attack, release, hold, lookahead = subsample.transform._resolve_gate_params(record, step)
+		threshold, attack, release, hold, lookahead = subsample.transform._resolve_gate_params(record, step, 0.9)
 
-		# noise_floor = 0.01 → -40 dBFS → threshold = -34 dBFS
-		import math
-		expected = 20.0 * math.log10(0.01 + 1e-10) + 6.0
+		# _execute scales the buffer by 0.9/0.8, so the floor rides up with it.
+		scaled_floor = 0.01 * (0.9 / 0.8)
+		expected     = 20.0 * math.log10(scaled_floor + 1e-10) + 6.0
 		assert abs(threshold - expected) < 0.1
+
+	def test_auto_threshold_does_not_track_capture_level (self) -> None:
+		"""Gating depth must not depend on how loud the sample was recorded.
+
+		Deriving the threshold from the raw noise floor slid it further below the
+		normalised buffer with every dB the capture sat under full scale (43 dB
+		down for a hot take, 68 dB for a quiet one), so `gate: true` quietly
+		became a no-op on quiet recordings.  Same signal-to-noise ratio → same
+		threshold, whatever the absolute level.
+		"""
+		step        = subsample.transform.Gate()  # all auto
+		buffer_peak = 0.9
+
+		thresholds = []
+
+		for capture_peak in (0.9, 0.5, 0.3, 0.12, 0.05):
+			record = dataclasses.replace(
+				_make_record(sample_id=1),
+				level = subsample.analysis.LevelResult(
+					peak            = capture_peak,
+					rms             = capture_peak / 3.0,
+					crest_factor    = 3.0,
+					crest_factor_db = 9.5,
+					# Same 300:1 signal-to-noise ratio at every capture level.
+					noise_floor     = capture_peak / 300.0,
+				),
+			)
+			thresholds.append(
+				subsample.transform._resolve_gate_params(record, step, buffer_peak)[0]
+			)
+
+		assert max(thresholds) - min(thresholds) < 0.01
 
 	def test_explicit_overrides_auto (self) -> None:
 		"""Explicit params take precedence over auto values."""
 		record = _make_record(sample_id=1)
 		step = subsample.transform.Gate(threshold_db=-30.0, attack_ms=2.0, release_ms=50.0, hold_ms=25.0, lookahead_ms=1.0)
-		threshold, attack, release, hold, lookahead = subsample.transform._resolve_gate_params(record, step)
+		threshold, attack, release, hold, lookahead = subsample.transform._resolve_gate_params(record, step, 0.9)
 
 		assert threshold == -30.0
 		assert attack == 2.0
@@ -4310,8 +4361,8 @@ class TestReviewRegressions:
 
 		step = subsample.transform.Gate()  # all auto
 
-		_, a_perc, _, _, _ = subsample.transform._resolve_gate_params(percussive, step)
-		_, a_grad, _, _, _ = subsample.transform._resolve_gate_params(gradual, step)
+		_, a_perc, _, _, _ = subsample.transform._resolve_gate_params(percussive, step, 0.9)
+		_, a_grad, _, _, _ = subsample.transform._resolve_gate_params(gradual, step, 0.9)
 
 		assert a_perc < a_grad
 		assert a_perc == pytest.approx(1.0)
@@ -4432,3 +4483,100 @@ class TestReviewRegressions:
 		result = subsample.transform._apply_pitch(audio, 44100, record, step)
 
 		assert result is audio   # identity passthrough, pyrubberband not invoked
+
+
+class TestReverseThenQuantize:
+
+	"""`reverse` followed by a quantize step must keep the whole sample.
+
+	_mirror_attacks_if_reversed mapped every attack in place (dur - t), but the
+	quantize handlers read those positions as segment STARTS and the first as a
+	crop point.  After a flip, a hit's audio runs UP TO its mirrored marker, so
+	every start landed one segment late and the crop discarded the entire
+	reversed body of the final hit — roughly half the sample, silently.
+	"""
+
+	def _two_hit_buffer (self, sr: int = 44100, duration: float = 2.0) -> numpy.ndarray:
+		n   = int(sr * duration)
+		buf = numpy.zeros(n, dtype=numpy.float32)
+
+		for onset in (0.10, 1.10):
+			start  = int(onset * sr)
+			length = min(8000, n - start)
+			decay  = numpy.exp(-numpy.arange(length) / 2000.0)
+			tone   = numpy.sin(2.0 * numpy.pi * 200.0 * numpy.arange(length) / sr)
+			buf[start : start + length] += (decay * tone).astype(numpy.float32)
+
+		return buf.reshape(-1, 1)
+
+	def _record (self, duration: float = 2.0) -> typing.Any:
+		return dataclasses.replace(
+			_make_record(sample_id=1),
+			rhythm = dataclasses.replace(
+				_make_record(sample_id=1).rhythm,
+				attack_times = (0.10, 1.10),
+				tempo_bpm    = 60.0,
+			),
+			duration = duration,
+		)
+
+	def _run (self, steps: list[typing.Any]) -> numpy.ndarray:
+		# _execute resets both thread-local flags per job; mirror that here so
+		# the reverse flag cannot leak between cases (it is a TOGGLE).
+		subsample.transform._segment_bounds_local.bounds   = None
+		subsample.transform._segment_bounds_local.reversed = False
+
+		audio = self._two_hit_buffer()
+
+		for step in steps:
+			handler = subsample.transform.TransformProcessor._HANDLERS[type(step)]
+			audio   = handler(audio, 44100, self._record(), step)
+
+		return audio
+
+	def _energy (self, audio: numpy.ndarray) -> float:
+		return float(numpy.sum(audio.astype(numpy.float64) ** 2))
+
+	def test_reverse_then_pad_quantize_keeps_the_whole_sample (self) -> None:
+		reference = self._energy(self._run([
+			subsample.transform.PadQuantize(target_bpm=120.0, resolution=16, amount=1.0),
+		]))
+		reversed_first = self._energy(self._run([
+			subsample.transform.Reverse(),
+			subsample.transform.PadQuantize(target_bpm=120.0, resolution=16, amount=1.0),
+		]))
+
+		# Used to retain ~50% — one of the two hits was discarded entirely.
+		assert reversed_first > reference * 0.95
+
+	def test_reverse_then_pad_quantize_keeps_both_hits (self) -> None:
+		"""Count transients directly, not just total energy."""
+
+		out = self._run([
+			subsample.transform.Reverse(),
+			subsample.transform.PadQuantize(target_bpm=120.0, resolution=16, amount=1.0),
+		])
+
+		envelope = numpy.abs(out.ravel())
+		window   = 512
+		peaks    = numpy.array([
+			envelope[i : i + window].max()
+			for i in range(0, len(envelope) - window, window)
+		])
+		above    = peaks > 0.25 * peaks.max()
+		hits     = int(numpy.sum(above[1:] & ~above[:-1])) + int(above[0])
+
+		assert hits == 2
+
+	def test_quantize_then_reverse_is_unaffected (self) -> None:
+		"""The already-working order must not regress."""
+
+		reference = self._energy(self._run([
+			subsample.transform.PadQuantize(target_bpm=120.0, resolution=16, amount=1.0),
+		]))
+		reversed_last = self._energy(self._run([
+			subsample.transform.PadQuantize(target_bpm=120.0, resolution=16, amount=1.0),
+			subsample.transform.Reverse(),
+		]))
+
+		assert reversed_last == pytest.approx(reference, rel=0.01)

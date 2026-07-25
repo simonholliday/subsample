@@ -8,6 +8,7 @@ import wave
 
 import numpy
 import pytest
+import soundfile
 
 import subsample.audio
 import subsample.config
@@ -959,3 +960,60 @@ class TestConfiguredFloatImportCeiling:
 		info = subsample.audio.read_audio_file(path)
 
 		assert info.audio.max() == numpy.iinfo(numpy.int32).max
+
+
+class TestNonFiniteFloatSamples:
+
+	"""A float source containing NaN or inf must not become a full-scale click.
+
+	numpy.clip passes NaN straight through and .astype(int32) maps it to
+	INT32_MIN — a full-scale negative impulse from one bad sample.  An inf was
+	worse: it made the ceiling probe inf, so the gain came out 0, the whole file
+	went silent, and log10(0) then raised inside the broad handler, which told
+	the user their format was unsupported.
+	"""
+
+	def _write_float_wav (self, path: pathlib.Path, values: list[float]) -> None:
+		soundfile.write(str(path), numpy.array(values, dtype=numpy.float32), 48000, subtype="FLOAT")
+
+	def test_nan_becomes_silence_not_a_full_scale_click (self, tmp_path: pathlib.Path) -> None:
+		path = tmp_path / "nan.wav"
+		self._write_float_wav(path, [0.5, float("nan"), -0.5])
+
+		subsample.audio.set_float_import_ceiling(-1.0)
+		audio = subsample.audio.read_audio_file(path).audio.ravel()
+
+		assert audio[1] == 0
+		assert numpy.iinfo(numpy.int32).min not in audio
+
+	def test_inf_does_not_silence_the_file_or_misreport_the_format (self, tmp_path: pathlib.Path) -> None:
+		path = tmp_path / "inf.wav"
+		self._write_float_wav(path, [0.5, float("inf"), -0.5])
+
+		subsample.audio.set_float_import_ceiling(-1.0)
+		audio = subsample.audio.read_audio_file(path).audio.ravel()
+
+		# The finite samples survive with their relative levels intact.
+		assert audio[0] > 0 and audio[2] < 0
+		assert abs(int(audio[0])) == abs(int(audio[2]))
+
+	def test_nan_handled_with_the_ceiling_disabled_too (self, tmp_path: pathlib.Path) -> None:
+		path = tmp_path / "nan_noceiling.wav"
+		self._write_float_wav(path, [0.5, float("nan"), -0.5])
+
+		subsample.audio.set_float_import_ceiling(None)
+		try:
+			audio = subsample.audio.read_audio_file(path).audio.ravel()
+		finally:
+			subsample.audio.set_float_import_ceiling(-1.0)
+
+		assert audio[1] == 0
+
+	def test_scale_float_to_ceiling_scrubs_non_finite (self) -> None:
+		"""The exported helper the import tool uses has the same contract."""
+
+		data   = numpy.array([[0.5], [float("nan")], [2.0]], dtype=numpy.float32)
+		scaled = subsample.audio.scale_float_to_ceiling(data, -1.0)
+
+		assert numpy.all(numpy.isfinite(scaled))
+		assert float(numpy.max(numpy.abs(scaled))) <= 10.0 ** (-1.0 / 20.0) + 1e-6

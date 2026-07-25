@@ -6,12 +6,15 @@ rhythm, pitch, timbre, level, and band energy analysis. Incoming samples are
 mapped to MIDI notes via a composable select/process pipeline: select filters,
 orders, and picks samples by any combination of analysis metadata; process
 declares per-assignment audio transforms (20 processors including repitch,
-beat-quantize, pad-quantize, gate, compress, filter, distort, bit-depth
+stretch_quantize, pad_quantize, gate, compress, filter, distort, bit_depth
 reduction, radio transmission/reception, frequency shift, tuning wobble,
-reshape, vocoder, and more). Tonal samples are pitch-shifted across the full assigned note range;
-samples with sufficient rhythmic content are beat-quantized and time-stretched
-to a target tempo. All variants are produced in the background using Rubber
-Band's offline finer engine for highest quality. Captured samples are stored
+reshape, vocoder, and more). Tonal samples are pitch-shifted across the full
+assigned note range, and a `stretch_quantize` or `pad_quantize` step snaps a
+rhythmic sample's hits to the beat grid at the session tempo — always because a
+MIDI-map assignment asked for it, never automatically. All variants are produced
+in the background using Rubber Band's offline finer engine for highest quality.
+Playback pans per note-on, optionally at a random position drawn per strike.
+Captured samples are stored
 as uncompressed WAV by default; flipping `audio_format: flac` writes lossless
 FLAC instead (~40-60% smaller at 16/24-bit). First-order ambisonic capture
 is supported for tetrahedral mics (e.g. Rode NT-SF1) and pre-encoded FuMA/AmbiX

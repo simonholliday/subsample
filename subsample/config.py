@@ -440,7 +440,7 @@ class TransformConfig:
 
 	max_disk_mb: float = 500.0
 	"""Maximum disk space (MB) for cached variant files.  0 = disabled.
-	Oldest files (by modification time) are evicted when the budget is
+	Least-recently-used files are evicted (a cache read touches mtime, so recently played variants survive) when the budget is
 	exceeded.  At 44100 Hz float32 stereo, 500 MB ≈ 1500 seconds."""
 
 	carrier_memory_mb: float = 10.0
@@ -700,6 +700,13 @@ def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
 	except yaml.YAMLError as exc:
 		raise ValueError(f"Config file {path} contains invalid YAML: {exc}") from exc
 
+	# An empty file, or one whose every line is commented out, parses as None.
+	# That means "no overrides", not "malformed" — commenting the whole file out
+	# to fall back to defaults is a normal debugging move, and the project's own
+	# shipped default is mostly comments.  A non-None non-mapping is still an error.
+	if data is None:
+		return {}
+
 	if not isinstance(data, dict):
 		raise ValueError(f"Config file {path} must contain a YAML mapping at top level")
 
@@ -708,7 +715,7 @@ def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
 
 def _require (section: dict[str, typing.Any], key: str, section_name: str) -> typing.Any:
 
-	"""Return section[key], raising a clear ValueError if the key is absent."""
+	"""Return section[key], raising a clear ValueError if it is absent or empty."""
 
 	if key not in section:
 		raise ValueError(
@@ -716,7 +723,47 @@ def _require (section: dict[str, typing.Any], key: str, section_name: str) -> ty
 			f"Check your config.yaml against config.yaml.default."
 		)
 
+	# A key written with no value (`filename_format:`) parses as None, and the
+	# string keys then coerced it to the literal "None" — which sent every
+	# capture to a file called None.wav, each overwriting the last.  A required
+	# key with no value is always a mistake, so say so rather than inventing one.
+	if section[key] is None:
+		raise ValueError(
+			f"Config key '{section_name}.{key}' is present but has no value. "
+			f"Give it a value, or remove the line to use the default."
+		)
+
 	return section[key]
+
+
+def _require_bool (
+	section:      typing.Mapping[str, typing.Any],
+	key:          str,
+	default:      bool,
+	section_name: str,
+) -> bool:
+
+	"""Return an optional boolean config value, rejecting non-boolean YAML.
+
+	``bool(value)`` accepted anything truthy, so a quoted YAML boolean —
+	``enabled: "false"``, ``watch: "no"`` — silently meant True, inverting the
+	setting.  Quoting a boolean is a common editor habit and the failure is
+	invisible.  Unquoted ``true``/``false``/``yes``/``no`` still parse to real
+	bools in YAML and are accepted exactly as before.
+	"""
+
+	if key not in section or section[key] is None:
+		return default
+
+	value = section[key]
+
+	if not isinstance(value, bool):
+		raise ValueError(
+			f"Config key '{section_name}.{key}' must be true or false "
+			f'(got {value!r}) — remove the quotes if you wrote "true" or "false".'
+		)
+
+	return value
 
 
 class _KeyTracker (dict[str, typing.Any]):
@@ -770,6 +817,17 @@ def _section (
 	"""
 
 	value = container.get(key, {})
+
+	# A section header with every child commented out parses as None.  _deep_merge
+	# already preserves the defaults for sections that ship UNcommented in
+	# config.yaml.default, but only four of them do — the other seven (osc,
+	# supervisor, library, similarity, transform, tempo, ambisonic) ship
+	# commented, so `osc:` with its children commented reached here as None and
+	# hard-failed startup while blaming the user's indentation.  Commenting a
+	# subsystem's settings out but keeping the header is the natural way to
+	# disable it, and it means "no overrides".
+	if value is None:
+		value = {}
 
 	if not isinstance(value, dict):
 		raise ValueError(
@@ -988,8 +1046,8 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	recorder = RecorderConfig(
 		audio=audio,
 		buffer=buffer,
-		enabled=bool(recorder_raw.get("enabled", True)),
-		previews=bool(recorder_raw.get("previews", True)),
+		enabled=_require_bool(recorder_raw, "enabled", True, "recorder"),
+		previews=_require_bool(recorder_raw, "previews", True, "recorder"),
 		directory=str(_require(recorder_raw, "directory", "recorder")),
 		filename_format=str(_require(recorder_raw, "filename_format", "recorder")),
 	)
@@ -1104,15 +1162,15 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			channels=int(player_audio_raw["channels"]) if player_audio_raw.get("channels") is not None else None,
 			buffer_frames=player_buffer_frames,
 		),
-		enabled=bool(player_raw.get("enabled", False)),
+		enabled=_require_bool(player_raw, "enabled", False, "player"),
 		midi_device=player_midi_device,
 		virtual_midi_port=player_virtual_midi_port,
 		max_polyphony=player_max_polyphony,
 		limiter_threshold_db=player_limiter_threshold_db,
 		limiter_ceiling_db=player_limiter_ceiling_db,
 		midi_map=player_midi_map,
-		watch_midi_map=bool(player_raw.get("watch_midi_map", False)),
-		strict_midi_map=bool(player_raw.get("strict_midi_map", True)),
+		watch_midi_map=_require_bool(player_raw, "watch_midi_map", False, "player"),
+		strict_midi_map=_require_bool(player_raw, "strict_midi_map", True, "player"),
 	)
 
 	if player.audio.channels is not None and player.audio.channels <= 0:
@@ -1164,8 +1222,6 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			"detection.retrigger_threshold_db must be > 0 (a positive dB rise over the "
 			f"decaying tail); got {detection.retrigger_threshold_db}"
 		)
-	if detection.fade_out_ms < 0:
-		raise ValueError(f"detection.fade_out_ms must be >= 0 (got {detection.fade_out_ms})")
 
 	analysis = AnalysisConfig(
 		start_bpm=float(analysis_raw.get("start_bpm", 120.0)),
@@ -1188,7 +1244,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	library = LibraryConfig(
 		max_memory_mb=float(library_raw.get("max_memory_mb", 100.0)),
 		directory=str(library_raw.get("directory", "samples/captures")),
-		watch=bool(library_raw.get("watch", False)),
+		watch=_require_bool(library_raw, "watch", False, "library"),
 	)
 
 	similarity_raw  = _section(raw, "similarity", trackers)
@@ -1242,7 +1298,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	transform = TransformConfig(
 		max_memory_mb       = float(transform_raw.get("max_memory_mb", 50.0)),
-		auto_pitch          = bool(transform_raw.get("auto_pitch",     True)),
+		auto_pitch          = _require_bool(transform_raw, "auto_pitch", True, "transform"),
 		quantize_resolution = quantize_resolution,
 		variant_cache_dir   = str(transform_raw.get("variant_cache_dir", "samples/variant-cache") or ""),
 		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),
@@ -1322,10 +1378,10 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	# --- OSC ---
 	osc_raw         = _section(raw, "osc", trackers)
 	osc = OscConfig(
-		enabled=bool(osc_raw.get("enabled", False)),
+		enabled=_require_bool(osc_raw, "enabled", False, "osc"),
 		send_host=str(osc_raw.get("send_host", "127.0.0.1")),
 		send_port=int(osc_raw.get("send_port", 9000)),
-		receive_enabled=bool(osc_raw.get("receive_enabled", False)),
+		receive_enabled=_require_bool(osc_raw, "receive_enabled", False, "osc"),
 		receive_port=int(osc_raw.get("receive_port", 9002)),
 		receive_host=str(osc_raw.get("receive_host", "127.0.0.1")),
 	)
@@ -1333,7 +1389,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 	# --- Supervisor ---
 	supervisor_raw  = _section(raw, "supervisor", trackers)
 	supervisor = SupervisorConfig(
-		enabled=bool(supervisor_raw.get("enabled", False)),
+		enabled=_require_bool(supervisor_raw, "enabled", False, "supervisor"),
 		port=int(supervisor_raw.get("port", 9003)),
 	)
 

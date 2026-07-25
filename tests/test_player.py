@@ -12,6 +12,7 @@ import mido
 import numpy
 import pytest
 
+import subsample.analysis
 import subsample.bank
 import subsample.config
 import subsample.library
@@ -8095,3 +8096,249 @@ class TestRandomPanLoad:
 		result = subsample.player.load_midi_map(map_path, [])
 		assert len(result.zone_templates) == 1
 		assert result.zone_templates[0].pan_spec == subsample.query.PanSpec(-100.0, 100.0)
+
+
+class TestGainStaging:
+
+	"""Regression tests for _render_float's gain staging.
+
+	The anti-clip ceiling used to be applied to the FINAL gain, after velocity
+	and gain_db had been folded in.  Because base variants are peak-normalised,
+	that ceiling is effectively a per-voice constant, so every loud note landed
+	on it: the top of the velocity curve flattened, `gain:` stopped doing
+	anything, and — because the ceiling's max_row_sum term varies with pan
+	position — a note's level tracked where it was panned, breaking the
+	constant-power guarantee `pan: any` is built on.
+	"""
+
+	def _decaying_hit (self, decay: float = 45.0, n: int = 24000) -> numpy.ndarray:
+		"""A peak-normalised one-shot, exactly as _execute leaves a base variant."""
+		t   = numpy.arange(n) / 48000.0
+		sig = (numpy.exp(-t * decay) * numpy.sin(2.0 * numpy.pi * 180.0 * t)).astype(numpy.float32)
+		sig *= 0.9 / float(numpy.max(numpy.abs(sig)))
+		return sig.reshape(-1, 1)
+
+	def _rendered_peak (
+		self,
+		player:   subsample.player.MidiPlayer,
+		audio:    numpy.ndarray,
+		position: float,
+		velocity: int,
+		gain_db:  float = 0.0,
+	) -> float:
+		rms    = float(numpy.sqrt(numpy.mean(audio.astype(numpy.float64) ** 2)))
+		level  = subsample.analysis.LevelResult(peak=0.9, rms=rms)
+		pan    = numpy.array(subsample.player._pan_position_pair(position), dtype=numpy.float32)
+		matrix = player._get_mix_matrix(1, pan, None, "pcm", None)
+		return float(numpy.max(numpy.abs(player._render_float(audio, level, velocity, matrix, gain_db))))
+
+	def test_velocity_stays_responsive_at_the_top_of_its_range (self) -> None:
+		"""Every velocity step changes the level — none collapse onto the ceiling."""
+
+		player = _make_player_for_mix_matrix()
+		audio  = self._decaying_hit()
+
+		peaks = [self._rendered_peak(player, audio, 0.0, v) for v in range(64, 128, 4)]
+
+		for lower, higher in zip(peaks, peaks[1:]):
+			assert higher > lower, "velocity response flattened — the ceiling is binding"
+
+	def test_velocity_is_responsive_when_panned_hard (self) -> None:
+		"""Hard-panned notes keep their dynamics too (the worst case for the ceiling)."""
+
+		player = _make_player_for_mix_matrix()
+		audio  = self._decaying_hit()
+
+		peaks = [self._rendered_peak(player, audio, -100.0, v) for v in range(64, 128, 4)]
+
+		for lower, higher in zip(peaks, peaks[1:]):
+			assert higher > lower
+
+	def test_pan_position_does_not_change_output_power (self) -> None:
+		"""Constant power: total energy is identical wherever the note is panned.
+
+		This is what README's random-pan section promises — "a note is never
+		louder or quieter for landing off-centre".
+		"""
+
+		player = _make_player_for_mix_matrix()
+		audio  = self._decaying_hit()
+		level  = subsample.analysis.LevelResult(
+			peak = 0.9,
+			rms  = float(numpy.sqrt(numpy.mean(audio.astype(numpy.float64) ** 2))),
+		)
+
+		powers = []
+
+		for position in (-100.0, -50.0, -25.0, 0.0, 25.0, 50.0, 100.0):
+			pan    = numpy.array(subsample.player._pan_position_pair(position), dtype=numpy.float32)
+			matrix = player._get_mix_matrix(1, pan, None, "pcm", None)
+			out    = player._render_float(audio, level, 127, matrix, 0.0)
+			powers.append(float(numpy.sum(out.astype(numpy.float64) ** 2)))
+
+		assert max(powers) / min(powers) < 1.01, "level tracked pan position"
+
+	def test_gain_db_still_raises_the_level (self) -> None:
+		"""A positive gain: offset is audible rather than being clamped away."""
+
+		player = _make_player_for_mix_matrix()
+		audio  = self._decaying_hit()
+
+		flat  = self._rendered_peak(player, audio, 0.0, 127, gain_db=0.0)
+		up_6  = self._rendered_peak(player, audio, 0.0, 127, gain_db=6.0)
+
+		assert up_6 > flat * 1.5
+
+	def test_full_velocity_does_not_clip_without_a_gain_offset (self) -> None:
+		"""The anti-clip guarantee still holds where it is supposed to."""
+
+		player = _make_player_for_mix_matrix()
+
+		for decay in (6.0, 20.0, 45.0):
+			audio = self._decaying_hit(decay=decay)
+
+			for position in (0.0, -100.0, 100.0):
+				assert self._rendered_peak(player, audio, position, 127) <= 1.0 + 1e-6
+
+
+class TestExtractBlendCacheKey:
+
+	"""The mix-matrix cache must distinguish two different `extract: blend` specs."""
+
+	def test_blend_weights_are_part_of_the_cache_key (self) -> None:
+		"""A summed mic pair and a polarity-flipped one get different matrices.
+
+		The key used to spell out (kind, channel_index) by hand, omitting
+		`weights`, so both blends collapsed onto one entry and whichever
+		assignment loaded first played for both — silently cancelling a
+		top/bottom snare pair.
+		"""
+
+		player     = _make_player_for_mix_matrix()
+		summed     = subsample.query.ExtractSpec(kind="blend", weights=(1.0,  1.0))
+		difference = subsample.query.ExtractSpec(kind="blend", weights=(1.0, -1.0))
+
+		matrix_sum  = player._get_mix_matrix(2, None, None, "pcm", summed)
+		matrix_diff = player._get_mix_matrix(2, None, None, "pcm", difference)
+
+		assert not numpy.allclose(matrix_sum, matrix_diff)
+		# The difference blend really does invert the second input channel.
+		assert numpy.sign(matrix_diff[0, 0]) != numpy.sign(matrix_diff[0, 1])
+
+	def test_same_blend_still_shares_one_cache_entry (self) -> None:
+		"""Identical specs must still hit the cache — the key is not over-specific."""
+
+		player = _make_player_for_mix_matrix()
+		spec_a = subsample.query.ExtractSpec(kind="blend", weights=(1.0, -1.0))
+		spec_b = subsample.query.ExtractSpec(kind="blend", weights=(1.0, -1.0))
+
+		assert player._get_mix_matrix(2, None, None, "pcm", spec_a) is \
+		       player._get_mix_matrix(2, None, None, "pcm", spec_b)
+
+
+class TestAssignmentChannelBounds:
+
+	"""`channel:` must be rejected outside 1-16, as `program_channel:` already is.
+
+	mido only ever delivers channels 0-15, so an out-of-range value produced an
+	assignment that could never fire — total silence with no diagnostic, from
+	the classic 1-vs-0-indexing slip.
+	"""
+
+	def _load (self, tmp_path: pathlib.Path, channel: typing.Any) -> subsample.player.MidiMapResult:
+		path = tmp_path / "map.yaml"
+		path.write_text(
+			"assignments:\n"
+			"  - name: a\n"
+			f"    channel: {channel}\n"
+			"    notes: [60]\n"
+			"    select: {where: {name: kick}}\n"
+		)
+		return subsample.player.load_midi_map(path, [], strict=True)
+
+	@pytest.mark.parametrize("channel", [0, 17, 99, -3])
+	def test_out_of_range_channel_rejected (self, tmp_path: pathlib.Path, channel: int) -> None:
+		with pytest.raises(ValueError, match="channel must be 1-16"):
+			self._load(tmp_path, channel)
+
+	@pytest.mark.parametrize("channel,expected", [(1, 0), (10, 9), (16, 15)])
+	def test_valid_channel_maps_to_zero_indexed (
+		self, tmp_path: pathlib.Path, channel: int, expected: int,
+	) -> None:
+		result = self._load(tmp_path, channel)
+		assert sorted(result.note_map.keys()) == [(expected, 60)]
+
+	def test_fractional_channel_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""10.7 used to truncate to channel 10 — one away from what was written."""
+		with pytest.raises(ValueError, match="whole number"):
+			self._load(tmp_path, 10.7)
+
+	def test_boolean_channel_rejected (self, tmp_path: pathlib.Path) -> None:
+		"""YAML `yes` is a bool, and bool is an int subclass — it became channel 1."""
+		with pytest.raises(ValueError, match="boolean"):
+			self._load(tmp_path, "yes")
+
+
+class TestFormatPanWeights:
+
+	"""The startup listing must render a scalar pan legibly.
+
+	Since the scalar-position sugar landed, pan_weights holds a NORMALISED pair,
+	so printing it rounded to whole units showed every position as 0/1 — and
+	centre as [0, 0], which is exactly what the loader warns about as "all pan
+	weights are zero — note will be silent".
+	"""
+
+	@pytest.mark.parametrize("position", [-100.0, -50.0, -30.0, 0.0, 30.0, 50.0, 100.0])
+	def test_scalar_pan_round_trips_to_its_position (self, position: float) -> None:
+		weights = subsample.player._parse_pan_weights(position, "t")
+		assert weights is not None
+		assert subsample.player._format_pan_weights(weights) == f"{position:+.0f}"
+
+	def test_centre_is_not_rendered_as_all_zero_weights (self) -> None:
+		weights = subsample.player._parse_pan_weights(0, "t")
+		assert weights is not None
+		assert subsample.player._format_pan_weights(weights) == "+0"
+
+	def test_weight_list_still_shown_as_a_list (self) -> None:
+		weights = subsample.player._parse_pan_weights([50, 87], "t")
+		assert weights is not None
+		assert subsample.player._format_pan_weights(weights) == "[50, 87]"
+
+
+class TestCcPanicIsChannelScoped:
+
+	"""CC120/123 are Channel Mode messages — they act on their own channel only.
+
+	Both branches used to sweep every voice, so a DAW's transport-stop All Notes
+	Off on channel 1 also muted the drum loops on channel 10.
+	"""
+
+	def _player_with_voices (self) -> subsample.player.MidiPlayer:
+		player = _make_player_for_mix_matrix()
+		audio  = numpy.zeros((256, 2), dtype=numpy.float32)
+
+		for channel in (0, 9):
+			player._voices.append(subsample.player._Voice(
+				audio=audio, note=60, channel=channel,
+			))
+
+		return player
+
+	def test_all_notes_off_spares_other_channels (self) -> None:
+		player = self._player_with_voices()
+
+		player._handle_message(mido.Message("control_change", channel=0, control=123, value=0))
+
+		by_channel = {v.channel: v for v in player._voices}
+		assert by_channel[0].releasing is True
+		assert by_channel[9].releasing is False, "channel 10 was muted by a channel 1 panic"
+
+	def test_all_sound_off_spares_other_channels (self) -> None:
+		player = self._player_with_voices()
+
+		player._handle_message(mido.Message("control_change", channel=0, control=120, value=0))
+
+		by_channel = {v.channel: v for v in player._voices}
+		assert by_channel[0].releasing is True
+		assert by_channel[9].releasing is False

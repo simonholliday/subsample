@@ -61,7 +61,9 @@ class RankedMatch:
 
 	Fields:
 		sample_id: Session-unique ID of the instrument sample.
-		score:     Cosine similarity in [0.0, 1.0].
+		score:     Cosine similarity, normally in [0.0, 1.0] — the signed MFCC
+		           groups can push it slightly negative for very dissimilar timbres,
+		           so rank by descending score rather than assuming that range.
 	"""
 
 	sample_id: int
@@ -75,9 +77,9 @@ class SimilarityScore:
 
 	Fields:
 		name:  Reference sample name (original casing from filename stem).
-		score: Cosine similarity in [0.0, 1.0].
+		score: Cosine similarity, normally in [0.0, 1.0].
 		       1.0 = identical composite fingerprint.
-		       0.0 = maximally dissimilar (orthogonal fingerprints).
+		       0.0 = orthogonal fingerprints; slightly negative values are possible where the signed MFCC groups anti-correlate.
 	"""
 
 	name:  str
@@ -250,10 +252,17 @@ class SimilarityMatrix:
 					for j in range(len(ref_names))
 				}
 
-			# Build each reference's ranked list via argsort descending
+			# Build each reference's ranked list via argsort descending.
+			# kind="stable" matters: the default introsort breaks ties in an
+			# arbitrary order, while the incremental add() path uses
+			# bisect.insort and keeps insertion order.  Exact ties are ordinary
+			# (a duplicate import, the same kit loaded twice, near-identical
+			# takes), so without this the same library ranked differently
+			# depending on whether it was loaded at startup or accumulated live —
+			# and `order: similarity` + `pick: 1` picked a different sample.
 			for j, ref_name in enumerate(ref_names):
 				col   = scores_matrix[:, j]
-				order = numpy.argsort(-col)
+				order = numpy.argsort(-col, kind="stable")
 				self._rankings[ref_name] = [
 					RankedMatch(
 						sample_id = records[int(k)].sample_id,

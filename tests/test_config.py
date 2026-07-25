@@ -1540,3 +1540,75 @@ class TestRenamedKeyMigrations:
 				  audio:
 				    chunk_size: 512
 			""")
+
+
+class TestEmptyAndCommentedValues:
+
+	"""A key with no value, or a section with everything commented out.
+
+	Both are ordinary things to type, and both used to go wrong silently or
+	misleadingly: a bare `filename_format:` became the literal string "None" so
+	every capture overwrote samples/captures/None.wav, and a section header
+	whose children were all commented out hard-failed startup while blaming the
+	user's indentation.
+	"""
+
+	def test_required_key_with_no_value_is_rejected (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / "config.yaml").write_text("recorder:\n  filename_format:\n")
+
+		with pytest.raises(ValueError, match="present but has no value"):
+			subsample.config.load_config(None)
+
+	def test_commented_out_section_falls_back_to_defaults (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""Only four sections ship uncommented, so this hit the other seven."""
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / "config.yaml").write_text("osc:\n  # enabled: true\n  # send_port: 9000\n")
+
+		cfg = subsample.config.load_config(None)
+
+		assert cfg.osc.enabled is False
+
+	def test_empty_config_file_means_no_overrides (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / "config.yaml").write_text("")
+
+		assert subsample.config.load_config(None).recorder.enabled is True
+
+	def test_fully_commented_config_file_means_no_overrides (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""Commenting the whole file out to fall back to defaults is a normal move."""
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / "config.yaml").write_text("# player:\n#   enabled: true\n")
+
+		assert subsample.config.load_config(None).player.enabled is False
+
+
+class TestBooleanKeysRejectNonBooleans:
+
+	"""`bool(value)` accepted anything truthy, so a QUOTED YAML boolean inverted
+	the setting: `enabled: "false"` meant True."""
+
+	@pytest.mark.parametrize("section,key,value", [
+		("player",   "enabled", '"false"'),
+		("library",  "watch",   "'no'"),
+		("recorder", "enabled", '"off"'),
+	])
+	def test_quoted_boolean_rejected (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		section: str, key: str, value: str,
+	) -> None:
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / "config.yaml").write_text(f"{section}:\n  {key}: {value}\n")
+
+		with pytest.raises(ValueError, match="must be true or false"):
+			subsample.config.load_config(None)
+
+	@pytest.mark.parametrize("literal,expected", [("true", True), ("yes", True), ("false", False), ("no", False)])
+	def test_unquoted_yaml_booleans_still_work (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		literal: str, expected: bool,
+	) -> None:
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / "config.yaml").write_text(f"player:\n  enabled: {literal}\n")
+
+		assert subsample.config.load_config(None).player.enabled is expected

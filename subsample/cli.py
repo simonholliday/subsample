@@ -1170,6 +1170,13 @@ def main () -> None:
 			# devnull so interpreter shutdown doesn't raise a second time.
 			os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 			raise SystemExit(0)
+		except KeyboardInterrupt:
+			# The tools run long batches (`subsample import` over a sample pack,
+			# `subsample catalog` over an un-analysed library), so Ctrl+C here is
+			# routine.  Report it the way the main app does instead of unwinding a
+			# concurrent.futures traceback into the user's terminal.
+			print("\nInterrupted.", file=sys.stderr)
+			raise SystemExit(130)
 
 	_main_impl()
 
@@ -1284,7 +1291,18 @@ def _main_impl () -> None:
 		# at each source's native format.  Clarify so a 32-bit float source
 		# isn't mistaken for "24-bit" because that's what the config says.
 		print("File input mode: reading each file at its native sample rate, bit depth, channel count.")
-		if _process_input_files(args.files, cfg) == 0:
+
+		# File-input mode returns before the thread wait loop that owns the app's
+		# KeyboardInterrupt handling, so Ctrl+C here surfaced as a raw traceback.
+		# It is the mode most likely to be interrupted — a long field recording
+		# can take minutes — so give it the same clean exit the live app gets.
+		try:
+			processed = _process_input_files(args.files, cfg)
+		except KeyboardInterrupt:
+			print("\nInterrupted.", file=sys.stderr)
+			raise SystemExit(130) from None
+
+		if processed == 0:
 			# Every input was missing or unreadable — exit non-zero so a script
 			# or pipeline sees the failure instead of a misleading success.
 			_log.error("No input files could be processed.")
@@ -1586,12 +1604,6 @@ def _main_impl () -> None:
 					if (fp := r.filepath) is not None
 				}
 
-				known_au = {
-					fp.resolve()
-					for r in _bank.instrument_library.samples()
-					if (fp := r.filepath) is not None
-				}
-
 				def _make_bank_callback (b: subsample.bank.Bank) -> typing.Callable[[subsample.library.SampleRecord], None]:
 					def cb (record: subsample.library.SampleRecord) -> None:
 						_log.info("Watcher [%s]: new sample — %s (%.2fs)", b.name, record.name, record.duration)
@@ -1613,7 +1625,6 @@ def _main_impl () -> None:
 					known_sidecars=known_sc,
 					on_sample_loaded=_make_bank_callback(_bank),
 					target_sample_rate=output_sample_rate,
-					known_audio=known_au,
 					with_preview=cfg.recorder.previews,
 					on_sample_removed=_make_bank_removal_callback(_bank),
 				)
@@ -1625,12 +1636,6 @@ def _main_impl () -> None:
 		else:
 			known_sidecars: set[pathlib.Path] = {
 				(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
-				for r in instrument_library.samples()
-				if (fp := r.filepath) is not None
-			}
-
-			known_audio_paths: set[pathlib.Path] = {
-				fp.resolve()
 				for r in instrument_library.samples()
 				if (fp := r.filepath) is not None
 			}
@@ -1650,7 +1655,6 @@ def _main_impl () -> None:
 				known_sidecars=known_sidecars,
 				on_sample_loaded=_on_watched_sample,
 				target_sample_rate=output_sample_rate,
-				known_audio=known_audio_paths,
 				with_preview=cfg.recorder.previews,
 				on_sample_removed=_on_watched_sample_removed,
 			)
@@ -1748,6 +1752,24 @@ def _main_impl () -> None:
 					"MIDI map reload: could not load new path references — "
 					"affected selects may match nothing: %s", exc,
 				)
+
+			# Re-run the extract compatibility check that startup does.  Without
+			# it, a live edit introducing `extract: depth` on a stereo pool (or
+			# `extract: channel.9` on a 2-channel sample) reloads "successfully"
+			# and then raises inside build_extract_matrix on EVERY note-on, where
+			# _safe_handle_message swallows it into a log line — the assignment
+			# just goes silent.  Rejecting the reload keeps the working map live,
+			# which is the same trade the parse-time failure above makes.
+			try:
+				subsample.player._validate_assignment_extracts(
+					result.note_map, instrument_library,
+				)
+			except ValueError as exc:
+				_log.error(
+					"MIDI map reload failed extract validation — keeping current "
+					"map: %s", exc,
+				)
+				return
 
 			# reload_midi_map runs update_assignments() against the new map
 			# and rolls back to the previous map + zone templates on any

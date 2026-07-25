@@ -120,9 +120,14 @@ def _dbfs (value: float) -> str:
 
 def _resolve_subtype (info: soundfile._SoundFileInfo) -> str:
 
-	"""Pick a PCM subtype that preserves the source bit depth.
+	"""Pick a PCM subtype for the imported copy.
 
-	Falls back to PCM_16 for compressed or exotic formats.
+	Integer-PCM sources keep their exact depth.  Float and double sources have
+	no integer depth to preserve, so they are written at 24-bit — the highest
+	depth every supported container holds, and enough that a float stem
+	rendered out of a DAW is not audibly degraded on the way in.  (16-bit was
+	the historical choice and cost ~8 bits of resolution silently.)  Anything
+	else — compressed or exotic — falls back to 16-bit.
 	"""
 
 	sub = str(info.subtype)
@@ -130,8 +135,29 @@ def _resolve_subtype (info: soundfile._SoundFileInfo) -> str:
 	if sub in ("PCM_16", "PCM_24", "PCM_32"):
 		return sub
 
-	# Float sources get written as 16-bit PCM (the pipeline's native depth)
+	if sub in ("FLOAT", "DOUBLE"):
+		return "PCM_24"
+
 	return "PCM_16"
+
+
+def _existing_target (target_dir: pathlib.Path, stem: str) -> typing.Optional[pathlib.Path]:
+
+	"""Return an already-imported file with this stem, in either container.
+
+	Import writes ``.wav`` or ``.flac`` depending on ``audio_format`` and the
+	source depth, so "have I already imported this?" has to consider both —
+	otherwise switching audio_format silently re-imports the whole library
+	under the other extension.
+	"""
+
+	for extension in (".wav", ".flac"):
+		candidate = target_dir / (stem + extension)
+
+		if candidate.exists():
+			return candidate
+
+	return None
 
 
 def _import_file (
@@ -140,6 +166,7 @@ def _import_file (
 	force: bool,
 	float_ceiling_dbfs: typing.Optional[float],
 	rhythm_cfg: subsample.config.AnalysisConfig,
+	audio_format: str = "wav",
 ) -> bool:
 
 	"""Import a single audio file into the target directory.
@@ -148,12 +175,18 @@ def _import_file (
 	and analysing it, so the written PCM does not clip and its sidecar describes
 	the same signal (None disables, matching the config default of -1 dBFS).
 
+	``audio_format`` is ``recorder.audio.audio_format`` — the same setting that
+	governs live capture, which both its config docstring and the shipped
+	config.yaml.default describe as covering captured *and imported* samples.
+	A 32-bit source falls back to WAV per file, as FLAC cannot hold PCM_32.
+
 	Returns True if the file was imported, False if skipped or failed.
 	"""
 
-	target_path = target_dir / (filepath.stem + ".wav")
-
-	if target_path.exists() and not force:
+	# main() claims target names before fanning out, so this guard normally never
+	# fires under the pool — it stays for direct callers and as a belt-and-braces
+	# check on a single-file import.
+	if not force and _existing_target(target_dir, filepath.stem) is not None:
 		print(f"  {filepath.name}  (skipped, already exists)")
 		return False
 
@@ -216,10 +249,23 @@ def _import_file (
 	# version + MD5 forever and never re-analyse (permanently unloopable).
 	loop = subsample.cache.compute_loop(mono, samplerate, result, pitch, level, duration)
 
-	# Write as standard PCM WAV, then hash it immediately — pairing the analysis
-	# above with an MD5 taken after a possible concurrent overwrite of the target
-	# would write a sidecar that never self-heals.
+	# Pick the container now that the source depth is known, then hash the file
+	# immediately — pairing the analysis above with an MD5 taken after a possible
+	# concurrent overwrite of the target would write a sidecar that never
+	# self-heals.  FLAC's stable subtypes stop at 24-bit, so a 32-bit source
+	# falls back to WAV per file, exactly as live capture does.
 	subtype = _resolve_subtype(info)
+
+	if audio_format == "flac" and subtype != "PCM_32":
+		target_path = target_dir / (filepath.stem + ".flac")
+	else:
+		if audio_format == "flac":
+			_log.info(
+				"%s: audio_format=flac cannot hold 32-bit; wrote .wav instead "
+				"to preserve full precision", filepath.name,
+			)
+
+		target_path = target_dir / (filepath.stem + ".wav")
 
 	try:
 		soundfile.write(str(target_path), faded, samplerate, subtype=subtype)
@@ -345,17 +391,45 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	print(f"Importing {len(paths)} file(s) to {target_dir}")
 
-	# Missing files are counted here; the rest fan out to the worker pool.
+	# Resolve every target path HERE, in the parent, before anything fans out.
+	# _import_file's own "already exists" guard is evaluated per worker, so under
+	# the pool two inputs sharing a stem (packA/kick.wav + packB/kick.wav) both
+	# passed it before either had written — every worker then wrote the same
+	# target, the last one won, and the run reported them all as imported.
+	# Claiming targets up front restores the serial behaviour: one file wins the
+	# name, the rest are skipped and counted, and the summary tells the truth.
 	present: list[pathlib.Path] = []
 	skipped = 0
+	claimed: dict[str, pathlib.Path] = {}
 
 	for filepath in paths:
 
-		if filepath.exists():
-			present.append(filepath)
-		else:
+		if not filepath.exists():
 			print(f"  {filepath.name}  (not found, skipping)", file=sys.stderr)
 			skipped += 1
+			continue
+
+		# Claim by stem, not by full target path: the container extension is
+		# decided per file inside the worker (FLAC cannot hold 32-bit), but two
+		# sources sharing a stem collide whichever container they land in.
+		if filepath.stem in claimed:
+			print(
+				f"  {filepath.name}  (skipped, {claimed[filepath.stem].name} already "
+				f"claims the name {filepath.stem!r} in this batch)",
+				file=sys.stderr,
+			)
+			skipped += 1
+			continue
+
+		existing = _existing_target(target_dir, filepath.stem)
+
+		if existing is not None and not args.force:
+			print(f"  {filepath.name}  (skipped, already exists)")
+			skipped += 1
+			continue
+
+		claimed[filepath.stem] = filepath
+		present.append(filepath)
 
 	# Fingerprinting each file is CPU-heavy and independent, so import fans out
 	# across the machine (offline — no player — so it takes the larger, offline
@@ -369,6 +443,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 			force=args.force,
 			float_ceiling_dbfs=float_ceiling,
 			rhythm_cfg=cfg.analysis,
+			audio_format=cfg.recorder.audio.audio_format,
 		),
 		present,
 		player_active=False,

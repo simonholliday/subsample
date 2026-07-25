@@ -959,3 +959,51 @@ class TestSimilarityOrder:
 
 		pos = {idx: i for i, idx in enumerate(order)}
 		assert abs(pos[0] - pos[2]) == 1   # the two identical records are neighbours
+
+
+class TestTieOrderingIsStable:
+
+	"""bulk_add and incremental add must agree when scores tie exactly.
+
+	numpy.argsort defaults to introsort, which is NOT stable, while add() uses
+	bisect.insort and preserves insertion order.  Exact ties are ordinary — a
+	duplicate import, the same kit loaded twice — so the two population paths
+	ranked the same library differently, and `order: similarity` + `pick: 1`
+	picked a different sample depending on how the library was built.
+	"""
+
+	def test_bulk_add_matches_incremental_add_on_exact_ties (self) -> None:
+		reference = _make_record("REF", _make_spectral())
+		library   = subsample.library.ReferenceLibrary([reference])
+		cfg       = subsample.config.SimilarityConfig()
+
+		# Every record identical → every score ties exactly.
+		records = [
+			dataclasses.replace(reference, sample_id=100 + i, name=f"s{i}")
+			for i in range(12)
+		]
+
+		bulk = subsample.similarity.SimilarityMatrix(library, cfg)
+		bulk.bulk_add(records)
+
+		incremental = subsample.similarity.SimilarityMatrix(library, cfg)
+		for record in records:
+			incremental.add(record)
+
+		assert [m.sample_id for m in bulk.get_matches("REF")] == \
+		       [m.sample_id for m in incremental.get_matches("REF")]
+
+	def test_bulk_add_preserves_input_order_on_ties (self) -> None:
+		"""Insertion order is the documented tie-break, so pin it directly."""
+
+		reference = _make_record("REF", _make_spectral())
+		library   = subsample.library.ReferenceLibrary([reference])
+		records   = [
+			dataclasses.replace(reference, sample_id=200 + i, name=f"t{i}")
+			for i in range(8)
+		]
+
+		matrix = subsample.similarity.SimilarityMatrix(library, subsample.config.SimilarityConfig())
+		matrix.bulk_add(records)
+
+		assert [m.sample_id for m in matrix.get_matches("REF")] == [200 + i for i in range(8)]
