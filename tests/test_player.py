@@ -5986,8 +5986,12 @@ class TestRulesLockSerialisation:
 			threads = [threading.Thread(target=run) for _ in range(4)]
 			for t in threads:
 				t.start()
+			# Bounded join: an unbounded one turns a lock REGRESSION — exactly what
+			# this test exists to catch — into a wedged CI run rather than a failure.
 			for t in threads:
-				t.join()
+				t.join(timeout=10.0)
+
+			assert not any(t.is_alive() for t in threads), "rule-set serialisation deadlocked"
 
 		assert max_inside == 1, f"re-evaluations interleaved ({max_inside} concurrent)"
 

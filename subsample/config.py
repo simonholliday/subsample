@@ -9,6 +9,7 @@ mypy coverage.
 
 import dataclasses
 import logging
+import math
 import os
 import pathlib
 import typing
@@ -283,6 +284,22 @@ class DetectionConfig:
 	"""Length of a half-cosine fade applied to each segment's trailing edge, in
 	milliseconds.  Masks a cut taken mid-tail or at the next hit so it never clicks.
 	0.0 (default) keeps the historical ~2 ms declick (trim_post_ms)."""
+
+	min_peak_db: typing.Optional[float] = None
+	"""Absolute floor, in dBFS, that a finished segment's peak must reach to be kept.
+
+	Every other detection threshold is RELATIVE — dB over the tracked ambient, or
+	over the decaying tail — which is what lets the detector work in any room, but
+	also means it cannot tell a quiet room's noise from a quiet sound.  In a quiet
+	room the chunk-to-chunk wobble of the noise floor can satisfy a small
+	threshold_db or retrigger_threshold_db on nothing but air, producing a segment
+	of pure room tone that is then written, analysed and added to the library.
+
+	This is the absolute backstop for that: a segment peaking below this level is
+	discarded rather than saved.  Judge it against the peak of your quietest
+	WANTED hit, with headroom — a value above that silently drops real material.
+	Typical: -50 to -40 dBFS for close-miked percussion.  None (default) disables
+	the check, keeping every segment the detector emits."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1178,6 +1195,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 
 	release_threshold_raw = detection_raw.get("release_threshold_db", None)
 	retrigger_threshold_raw = detection_raw.get("retrigger_threshold_db", None)
+	min_peak_raw = detection_raw.get("min_peak_db", None)
 
 	detection = DetectionConfig(
 		threshold_db=float(_require(detection_raw, "threshold_db", "detection")),
@@ -1193,6 +1211,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			None if retrigger_threshold_raw is None else float(retrigger_threshold_raw)
 		),
 		fade_out_ms=float(detection_raw.get("fade_out_ms", 0.0)),
+		min_peak_db=(None if min_peak_raw is None else float(min_peak_raw)),
 	)
 
 	if not (0.0 < detection.floor_adaptation <= 1.0):
@@ -1221,6 +1240,17 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		raise ValueError(
 			"detection.retrigger_threshold_db must be > 0 (a positive dB rise over the "
 			f"decaying tail); got {detection.retrigger_threshold_db}"
+		)
+	# Reject >= 0 rather than clamping: 0 dBFS is full scale, so any such value
+	# discards every segment — a silent, total failure of capture that would look
+	# like a broken detector.  NaN fails the comparison and lands here too.
+	if detection.min_peak_db is not None and not (
+		math.isfinite(detection.min_peak_db) and detection.min_peak_db < 0.0
+	):
+		raise ValueError(
+			"detection.min_peak_db must be a finite negative dBFS level (0 dBFS is "
+			"full scale, so a value at or above it would discard every recording); "
+			f"got {detection.min_peak_db}"
 		)
 
 	analysis = AnalysisConfig(

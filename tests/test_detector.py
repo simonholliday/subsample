@@ -8,6 +8,7 @@ import pytest
 import subsample.buffer
 import subsample.config
 import subsample.detector
+import subsample.trim
 
 
 def _make_detection_config (
@@ -672,3 +673,200 @@ class TestFinalize:
 		)
 
 		assert detector.finalize(current_frame=500) is None
+
+
+def _noise_chunk (n: int = 100, rms: float = 100.0, seed: int = 0) -> numpy.ndarray:
+
+	"""Return a deterministic Gaussian-noise chunk scaled to approximately `rms`.
+
+	Noise, not a constant.  The whole point of the ambient PEAK EMA is that a noise
+	chunk's peak sits a crest factor above its RMS — a relationship a constant chunk
+	(peak == RMS) cannot express, which is why the rest of this module's helpers
+	cannot exercise it.
+	"""
+
+	rng = numpy.random.default_rng(seed)
+	raw = rng.standard_normal(n)
+	raw *= rms / float(numpy.sqrt(numpy.mean(raw ** 2)))
+
+	return numpy.round(raw).astype(numpy.int16)
+
+
+class TestAmbientPeak:
+
+	"""The ambient PEAK EMA tracked alongside the ambient RMS EMA.
+
+	It exists so the LEADING trim gate can be compared against per-sample
+	magnitudes in the same domain.  See TestFalseTriggerHeadIsTrimmed for the
+	defect that motivated it.
+	"""
+
+	def test_peak_ema_rises_above_rms_ema_for_noise (self) -> None:
+
+		"""For noise-like ambient the two EMAs must diverge by the crest factor."""
+
+		detector = _make_detector(threshold_db=40.0, sample_rate=1000, chunk_size=100)
+
+		frame = 100
+		for seed in range(12):
+			detector.process_chunk(_noise_chunk(rms=100.0, seed=seed), current_frame=frame)
+			frame += 100
+
+		assert detector.ambient_peak > detector.ambient_rms
+		# Gaussian noise over 100 samples peaks ~2.5-3.5 sigma: 8-11 dB of crest.
+		crest_db = 20.0 * numpy.log10(detector.ambient_peak / detector.ambient_rms)
+		assert 5.0 < crest_db < 15.0
+
+	def test_constant_chunk_keeps_peak_equal_to_rms (self) -> None:
+
+		"""A constant chunk has peak == RMS, so the attack gate is unchanged from
+		the historical RMS-derived behaviour.  This is what makes the tracking a
+		pure refinement rather than a re-tuning of every existing configuration."""
+
+		detector = _make_detector(threshold_db=20.0, sample_rate=1000, chunk_size=100)
+		detector.process_chunk(_loud_chunk(amplitude=100), current_frame=100)
+
+		assert detector.ambient_peak == pytest.approx(detector.ambient_rms)
+		assert detector.attack_amplitude_threshold == pytest.approx(
+			100.0 * 10.0 ** (20.0 / 20.0)
+		)
+
+	def test_attack_gate_is_derived_from_the_peak_ema (self) -> None:
+
+		"""The gate is ambient_peak x 10^(threshold_db/20) — not ambient_rms."""
+
+		detector = _make_detector(threshold_db=12.0, sample_rate=1000, chunk_size=100)
+
+		frame = 100
+		for seed in range(12):
+			detector.process_chunk(_noise_chunk(rms=100.0, seed=seed), current_frame=frame)
+			frame += 100
+
+		assert detector.attack_amplitude_threshold == pytest.approx(
+			detector.ambient_peak * 10.0 ** (12.0 / 20.0)
+		)
+		assert detector.attack_amplitude_threshold > detector.ambient_rms * 10.0 ** (12.0 / 20.0)
+
+	def test_attack_gate_still_dominates_tail_gate_under_noise (self) -> None:
+
+		"""The documented invariant (attack >= tail, so the trimmed onset can never
+		precede the tail end) must survive the two gates living in different
+		domains — it holds because ambient_peak >= ambient_rms and the open
+		threshold is above the close threshold."""
+
+		detector = _make_detector(
+			threshold_db=20.0, release_threshold_db=3.0,
+			sample_rate=1000, chunk_size=100,
+		)
+
+		frame = 100
+		for seed in range(12):
+			detector.process_chunk(_noise_chunk(rms=100.0, seed=seed), current_frame=frame)
+			frame += 100
+
+		assert detector.attack_amplitude_threshold > detector.tail_amplitude_threshold
+
+	def test_ema_pair_stays_in_lockstep_when_ambient_moves (self) -> None:
+
+		"""Both EMAs must advance from the same chunks under the same seeding, or
+		ambient_peak could fall below ambient_rms and invert the gate invariant."""
+
+		detector = _make_detector(
+			threshold_db=40.0, floor_adaptation=0.5, sample_rate=1000, chunk_size=100,
+		)
+
+		frame = 100
+		for seed in range(20):
+			# Ambient level steps up and down; peak must shadow rms throughout.
+			level = 40.0 if seed % 2 else 400.0
+			detector.process_chunk(_noise_chunk(rms=level, seed=seed), current_frame=frame)
+			frame += 100
+			assert detector.ambient_peak >= detector.ambient_rms
+
+
+class TestFalseTriggerHeadIsTrimmed:
+
+	"""Regression for the 2026-07-25 snare captures.
+
+	In a quiet room the noise floor's chunk-to-chunk wobble can clear a small
+	threshold_db, opening a recording on room tone tens of milliseconds before the
+	real strike.  When the strike then lands inside hold_seconds the segment is not
+	discarded, it is merely prepended with a silent head — and the leading trim,
+	the thing that should remove it, could not: an RMS-derived gate compared against
+	per-sample magnitudes sits a crest factor too low and finds "signal" in the
+	noise at sample 0.
+
+	The precondition is exact: an RMS-derived gate fails only when threshold_db is
+	BELOW the ambient's crest factor, because the gate then lands under the noise's
+	own peaks.  The captures that exposed this ran threshold_db 9 against room tone
+	with ~9-13 dB of crest.  These tests therefore use a threshold_db under the
+	crest of the noise they generate — at 12 dB or more the old gate happened to
+	clear the noise and the defect is invisible, which is why it survived so long.
+	"""
+
+	# Below the ~9-11 dB crest of the Gaussian ambient these tests build.
+	_THRESHOLD_DB: float = 6.0
+
+	@staticmethod
+	def _segment_with_room_tone_head () -> tuple[numpy.ndarray, int]:
+
+		"""Return (segment, head_samples): room tone, then a loud hit decaying."""
+
+		head = _noise_chunk(n=600, rms=100.0, seed=7)
+		hit = _noise_chunk(n=900, rms=20000.0, seed=8)
+		# Decay the hit so the tail edge behaves like real material.
+		hit = (hit * numpy.linspace(1.0, 0.05, hit.size)).astype(numpy.int16)
+
+		return numpy.concatenate([head, hit]).reshape(-1, 1), head.size
+
+	def test_room_tone_head_is_trimmed_by_the_peak_derived_gate (self) -> None:
+
+		"""The onset lands at the hit, not in the noise that preceded it."""
+
+		detector = _make_detector(
+			threshold_db=self._THRESHOLD_DB, sample_rate=1000, chunk_size=100,
+		)
+
+		frame = 100
+		for seed in range(12):
+			detector.process_chunk(_noise_chunk(rms=100.0, seed=seed), current_frame=frame)
+			frame += 100
+
+		segment, head_samples = self._segment_with_room_tone_head()
+
+		trimmed = subsample.trim.trim_silence(
+			segment,
+			detector.tail_amplitude_threshold,
+			lead_amplitude_threshold=detector.attack_amplitude_threshold,
+		)
+
+		# The head is gone: what remains cannot be longer than the hit itself.
+		assert trimmed.shape[0] <= segment.shape[0] - head_samples
+		# And nothing of the hit was lost — the peak survives intact.
+		assert numpy.max(numpy.abs(trimmed)) == numpy.max(numpy.abs(segment))
+
+	def test_an_rms_derived_gate_would_have_kept_the_head (self) -> None:
+
+		"""Pins the actual cause.  Had the gate stayed in the RMS domain the same
+		segment would keep its room-tone head, so this is the difference the peak
+		EMA makes — not an artefact of the test's thresholds."""
+
+		detector = _make_detector(
+			threshold_db=self._THRESHOLD_DB, sample_rate=1000, chunk_size=100,
+		)
+
+		frame = 100
+		for seed in range(12):
+			detector.process_chunk(_noise_chunk(rms=100.0, seed=seed), current_frame=frame)
+			frame += 100
+
+		segment, head_samples = self._segment_with_room_tone_head()
+		rms_derived_gate = detector.ambient_rms * 10.0 ** (self._THRESHOLD_DB / 20.0)
+
+		trimmed = subsample.trim.trim_silence(
+			segment,
+			detector.tail_amplitude_threshold,
+			lead_amplitude_threshold=rms_derived_gate,
+		)
+
+		assert trimmed.shape[0] > segment.shape[0] - head_samples

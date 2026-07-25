@@ -427,6 +427,18 @@ detection:
   # (via retrigger_threshold_db) so it never clicks. 0.0 (default) keeps the tiny
   # ~2 ms declick. Typical for long-decay material: 20–50 ms.
 
+  # min_peak_db: null
+  # Absolute floor (dBFS) a finished recording's peak must reach to be KEPT.
+  # Every threshold above is RELATIVE — "louder than the room by N dB" — which is
+  # what lets detection work in any room, but also means it cannot tell a quiet
+  # room's noise from a quiet sound. In a quiet room the background level wobbles
+  # by several dB on its own, so a small threshold_db or retrigger_threshold_db
+  # can fire on nothing but air, and you get a file of pure room tone.
+  # This is the absolute backstop for that: anything peaking below this level is
+  # thrown away instead of saved. Set it against the peak of your QUIETEST wanted
+  # hit, with headroom — set it too high and you silently lose real material.
+  # Typical: -50 to -40 dBFS for close-miked percussion. null (default) = off.
+
 # ---------------------------------------------------------------------------
 # analysis — rhythm and pitch analysis parameters
 # ---------------------------------------------------------------------------

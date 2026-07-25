@@ -2,6 +2,7 @@
 
 import dataclasses
 import logging
+import math
 import pathlib
 import sys
 import textwrap
@@ -1053,3 +1054,115 @@ class TestPrintBanner:
 		assert "48000 Hz" in line          # player output
 		assert "trigger ≥" in line     # recorder capture-only field
 		assert "||" in line                # two segments joined
+
+
+class TestMinPeakDiscard:
+
+	"""detection.min_peak_db drops a segment whose peak never reaches the floor.
+
+	Regression for the 2026-07-25 snare captures, where a spurious retrigger on the
+	noise floor emitted 0.117 s of pure room tone that was then written, analysed,
+	previewed and added to the library.  Nothing downstream rejected it: trim_silence
+	returns its input unchanged when no sample meets the tail threshold, so the junk
+	was actively preserved rather than discarded.
+	"""
+
+	@staticmethod
+	def _emit (
+		amplitude: int, min_peak_db: typing.Optional[float],
+	) -> typing.Optional[numpy.ndarray]:
+
+		"""Build a one-segment stream at `amplitude` and return the trimmed result."""
+
+		cfg = dataclasses.replace(_make_detection_cfg(), min_peak_db=min_peak_db)
+		buf, detector = _make_buffer_and_detector(
+			sample_rate=1000, chunk_size=100, max_seconds=10, detection_cfg=cfg,
+		)
+
+		for value, count in [(10, 5), (amplitude, 4), (10, 8)]:
+			for _ in range(count):
+				chunk = numpy.full((100, 1), value, dtype=numpy.int16)
+				result = subsample.cli._process_chunk(chunk, buf, detector, cfg, 1000)
+				if result is not None:
+					return result
+
+		return None
+
+	def test_quiet_segment_is_discarded (self) -> None:
+
+		"""int16 amplitude 400 is about -38 dBFS, under a -30 dBFS floor."""
+
+		assert self._emit(400, min_peak_db=-30.0) is None
+
+	def test_loud_segment_survives_the_same_floor (self) -> None:
+
+		"""Pins that the floor rejects on LEVEL, not on some incidental property of
+		the quiet stream — the identical path at a higher amplitude must pass."""
+
+		result = self._emit(20000, min_peak_db=-30.0)
+
+		assert result is not None
+		assert result.size > 0
+
+	def test_disabled_by_default_keeps_the_quiet_segment (self) -> None:
+
+		"""None means no gate, so existing configs are untouched by this feature."""
+
+		assert self._emit(400, min_peak_db=None) is not None
+
+
+class TestPeakDbfs:
+
+	"""_peak_dbfs — full scale from the array's own dtype.
+
+	Reading full scale from the dtype is what makes an absolute dBFS threshold mean
+	the same thing at every bit depth; a raw sample count would make min_peak_db
+	silently 48 dB stricter on 24-bit capture than on 16-bit.
+	"""
+
+	def test_full_scale_int16_is_zero_dbfs (self) -> None:
+		audio = numpy.full((10, 1), numpy.iinfo(numpy.int16).max, dtype=numpy.int16)
+
+		assert subsample.cli._peak_dbfs(audio) == pytest.approx(0.0)
+
+	def test_half_scale_is_about_minus_six_dbfs (self) -> None:
+		audio = numpy.full((10, 1), numpy.iinfo(numpy.int16).max // 2, dtype=numpy.int16)
+
+		assert subsample.cli._peak_dbfs(audio) == pytest.approx(-6.02, abs=0.01)
+
+	def test_same_level_reads_the_same_at_int16_and_int32 (self) -> None:
+
+		"""The property the whole helper exists for."""
+
+		as_16 = numpy.full((10, 1), numpy.iinfo(numpy.int16).max // 4, dtype=numpy.int16)
+		as_32 = numpy.full((10, 1), numpy.iinfo(numpy.int32).max // 4, dtype=numpy.int32)
+
+		assert subsample.cli._peak_dbfs(as_16) == pytest.approx(
+			subsample.cli._peak_dbfs(as_32), abs=0.01,
+		)
+
+	def test_digital_silence_is_negative_infinity (self) -> None:
+
+		"""So it compares below every finite threshold without a special case."""
+
+		audio = numpy.zeros((10, 1), dtype=numpy.int16)
+
+		assert subsample.cli._peak_dbfs(audio) == -math.inf
+
+	def test_int32_minimum_does_not_overflow (self) -> None:
+
+		"""abs(INT32_MIN) is not representable in int32; taking it in float64 is
+		what keeps this from wrapping to a negative magnitude."""
+
+		audio = numpy.full((10, 1), numpy.iinfo(numpy.int32).min, dtype=numpy.int32)
+
+		assert subsample.cli._peak_dbfs(audio) == pytest.approx(0.0, abs=0.01)
+
+	def test_float_audio_uses_unit_full_scale (self) -> None:
+
+		"""Capture is always integer PCM, but the helper stays total rather than
+		raising ValueError from numpy.iinfo deep inside the capture loop."""
+
+		audio = numpy.full((10, 1), 0.5, dtype=numpy.float32)
+
+		assert subsample.cli._peak_dbfs(audio) == pytest.approx(-6.02, abs=0.01)

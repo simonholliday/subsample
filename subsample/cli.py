@@ -29,6 +29,7 @@ import dataclasses
 import datetime
 import importlib
 import logging
+import math
 import os
 import pathlib
 import shutil
@@ -324,7 +325,12 @@ def _build_trimmed_segment (
 	"""Read [start_frame, end_frame] from the buffer and trim both edges.
 
 	Shared by the per-chunk completion path and the end-of-file flush so both
-	produce identically-trimmed segments.
+	produce identically-trimmed segments — and, being the single choke point every
+	captured segment passes through, the place the detection.min_peak_db floor is
+	enforced.
+
+	Returns None when the segment trims away to nothing, or when its peak falls
+	below detection.min_peak_db.  Both callers already treat None as "no segment".
 	"""
 
 	pre = round(detection_cfg.trim_pre_ms / 1000.0 * sample_rate)
@@ -346,7 +352,48 @@ def _build_trimmed_segment (
 		lead_amplitude_threshold=detector.attack_amplitude_threshold,
 	)
 
-	return trimmed if trimmed.size > 0 else None
+	if trimmed.size == 0:
+		return None
+
+	if detection_cfg.min_peak_db is not None:
+		peak_dbfs = _peak_dbfs(trimmed)
+		if peak_dbfs < detection_cfg.min_peak_db:
+			_log.info(
+				"Discarded segment: peak %.1f dBFS is below detection.min_peak_db "
+				"(%.1f dBFS) — noise, not a hit",
+				peak_dbfs, detection_cfg.min_peak_db,
+			)
+			return None
+
+	return trimmed
+
+
+def _peak_dbfs (audio: numpy.ndarray) -> float:
+
+	"""Peak level of a captured segment, in dBFS.
+
+	Full scale comes from the array's own dtype, so the value means the same thing
+	for 16- and 24/32-bit capture — unlike a raw sample count, which would make any
+	absolute threshold silently bit-depth dependent.  Digital silence returns -inf,
+	which compares below every finite threshold.
+
+	Capture is always integer PCM (see _AUDIO_DTYPE); a float dtype is treated as
+	the conventional +/-1.0 full scale rather than raising, so this stays total.
+
+	The abs() runs in float64 because int32 cannot represent abs(INT32_MIN), which
+	appears in 24-bit left-shifted and native 32-bit audio.
+	"""
+
+	full_scale = (
+		float(numpy.iinfo(audio.dtype).max)
+		if numpy.issubdtype(audio.dtype, numpy.integer) else 1.0
+	)
+	peak = float(numpy.max(numpy.abs(audio.astype(numpy.float64))))
+
+	if peak <= 0.0:
+		return -math.inf
+
+	return 20.0 * math.log10(peak / full_scale)
 
 
 def _process_chunk (

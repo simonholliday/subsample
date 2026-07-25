@@ -656,8 +656,11 @@ class TestSimilarityMatrix:
 		t2 = threading.Thread(target=reader)
 		t1.start()
 		t2.start()
-		t1.join()
-		t2.join()
+		# Bounded: a locking regression here should FAIL, not hang the suite.
+		t1.join(timeout=10.0)
+		t2.join(timeout=10.0)
+
+		assert not t1.is_alive() and not t2.is_alive(), "matrix access deadlocked"
 		assert errors == []
 
 

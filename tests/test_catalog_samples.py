@@ -10,8 +10,10 @@ import typing
 
 import pytest
 
+import subsample.audio
 import subsample.cache
 import subsample.config
+import subsample.library
 
 import tests.helpers
 
@@ -21,6 +23,32 @@ import subsample.tools.catalog_samples
 # Short alias — the tool was a standalone script before subsample.tools existed,
 # and every test below refers to it by its old bare module name.
 catalog_samples = subsample.tools.catalog_samples
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tool_config (tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> typing.Iterator[None]:
+
+	"""Keep catalog_samples.main() from reading — or leaking — real config.
+
+	main() calls _shared.load_config_and_wire(None), which discovers config.yaml
+	in the CURRENT DIRECTORY and then sets two process-wide globals
+	(cache._ANALYSIS_CONFIG, audio._FLOAT_IMPORT_CEILING_DBFS).  Without this
+	fixture the repo's own gitignored config.yaml was picked up — which is how a
+	stale one once broke 29 of these tests — and the globals it installed leaked
+	into every later test in the session.  chdir somewhere empty, and restore
+	both globals afterwards.
+	"""
+
+	monkeypatch.chdir(tmp_path)
+
+	saved_analysis = subsample.cache._ANALYSIS_CONFIG
+	saved_ceiling  = subsample.audio._FLOAT_IMPORT_CEILING_DBFS
+
+	try:
+		yield
+	finally:
+		subsample.cache._ANALYSIS_CONFIG = saved_analysis
+		subsample.audio._FLOAT_IMPORT_CEILING_DBFS = saved_ceiling
 
 
 def _fix_sidecar_md5 (wav_path: pathlib.Path, sidecar_path: pathlib.Path) -> None:

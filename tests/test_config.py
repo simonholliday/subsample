@@ -1612,3 +1612,64 @@ class TestBooleanKeysRejectNonBooleans:
 		(tmp_path / "config.yaml").write_text(f"player:\n  enabled: {literal}\n")
 
 		assert subsample.config.load_config(None).player.enabled is expected
+
+
+class TestMinPeakDb:
+
+	"""detection.min_peak_db — the one ABSOLUTE gate among relative thresholds.
+
+	Every other detection threshold is dB over a tracked floor, which is what lets
+	the detector work in any room but also means it cannot distinguish a quiet
+	room's noise from a quiet sound.  This key is the backstop, so its validation
+	has to be strict: a value that silently discards everything is worse than a
+	load error.
+	"""
+
+	def test_defaults_to_none (self, tmp_path: pathlib.Path) -> None:
+
+		"""Absent means disabled — every segment the detector emits is kept, which
+		is the behaviour every existing config relies on."""
+
+		cfg = _load_with(tmp_path)
+
+		assert cfg.detection.min_peak_db is None
+
+	def test_negative_dbfs_is_accepted (self, tmp_path: pathlib.Path) -> None:
+
+		"""A level below full scale is the only meaningful kind of value."""
+
+		cfg = _load_with(tmp_path, detection={"min_peak_db": -45.0})
+
+		assert cfg.detection.min_peak_db == -45.0
+
+	def test_integer_is_coerced_to_float (self, tmp_path: pathlib.Path) -> None:
+
+		"""`min_peak_db: -45` is the natural thing to type and must not be a type
+		error downstream."""
+
+		cfg = _load_with(tmp_path, detection={"min_peak_db": -45})
+
+		assert cfg.detection.min_peak_db == pytest.approx(-45.0)
+
+	@pytest.mark.parametrize("value", [0.0, 3.0, float("nan"), float("inf"), float("-inf")])
+	def test_non_negative_or_non_finite_raises (
+		self, tmp_path: pathlib.Path, value: float,
+	) -> None:
+
+		"""0 dBFS is full scale, so any value at or above it discards every
+		recording — a total capture failure that would look like a broken
+		detector.  Fail the load instead.  NaN fails the comparison and lands
+		here too; -inf would disable the gate while appearing to set it."""
+
+		with pytest.raises(ValueError, match="min_peak_db"):
+			_load_with(tmp_path, detection={"min_peak_db": value})
+
+	@pytest.mark.parametrize("value", [True, False])
+	def test_boolean_raises (self, tmp_path: pathlib.Path, value: bool) -> None:
+
+		"""`min_peak_db: yes` parses as a bool in YAML; float(True) is 1.0 and
+		float(False) is 0.0, so both fail the negativity check rather than
+		silently configuring a nonsense gate."""
+
+		with pytest.raises(ValueError, match="min_peak_db"):
+			_load_with(tmp_path, detection={"min_peak_db": value})

@@ -5,6 +5,15 @@ noise floor. A signal triggers recording when it exceeds the ambient floor
 by the configured SNR threshold. A "hold time" prevents premature cutoff
 during brief pauses in the signal.
 
+A parallel EMA of each background chunk's PEAK sample is tracked alongside the
+RMS one. The trigger tests are RMS-vs-RMS and use the former; the per-sample trim
+gates handed to ``trim_silence`` need the latter, because comparing a per-sample
+magnitude against an RMS-derived level is short by the material's crest factor.
+
+Every threshold here is relative to that tracked floor, which is what makes the
+detector work in any room — but also means it cannot, on its own, tell a quiet
+room's noise from a quiet sound. ``detection.min_peak_db`` is the absolute gate.
+
 By default one SNR threshold governs both the start and the end of a recording.
 An optional lower ``release_threshold_db`` decouples them (a Schmitt-trigger
 hysteresis pair): the recording still starts on the loud ``threshold_db``
@@ -40,9 +49,18 @@ import subsample.config
 _log = logging.getLogger(__name__)
 
 
-# Minimum ambient RMS before threshold comparisons are meaningful.
-# Prevents division-by-zero and spurious triggers in near-silence.
-_AMBIENT_FLOOR: float = 1e-6
+# Divide-by-zero guard for the level ratios below — nothing more.  Levels in this
+# module are raw integer PCM units, so this sits roughly 210 dB below full scale
+# for int16 input and 246 dB below for int32: far under a single LSB, and so only
+# ever reached by exact digital silence.
+#
+# It is NOT a perceptual floor and cannot prevent a trigger on room tone.  Every
+# threshold here is RELATIVE — dB over the tracked ambient, or over the decaying
+# tail — so in a quiet room the natural chunk-to-chunk wobble of the noise floor
+# can satisfy a small threshold_db or retrigger_threshold_db on nothing but air.
+# detection.min_peak_db is the absolute gate that discards what slips through;
+# see cli._build_trimmed_segment.
+_RMS_EPSILON: float = 1e-6
 
 
 # EMA smoothing for the decaying-tail follower used by re-trigger detection.
@@ -136,6 +154,7 @@ class LevelDetector:
 
 		self._state: DetectorState = DetectorState.WARMUP
 		self._ambient_rms: float = 0.0
+		self._ambient_peak: float = 0.0
 		self._hold_chunks_remaining: int = 0
 		self._recording_start_frame: int = 0
 
@@ -180,6 +199,20 @@ class LevelDetector:
 		return self._ambient_rms
 
 	@property
+	def ambient_peak (self) -> float:
+
+		"""Current ambient PEAK estimate — the EMA of background chunks' peak sample.
+
+		Tracked from exactly the same chunks as ambient_rms, with the same alpha and
+		the same seeding, so the two stay in step and ambient_peak >= ambient_rms
+		always (peak >= RMS holds within every chunk, and an EMA preserves the
+		ordering).  It exists because trim_silence gates PER SAMPLE — see
+		attack_amplitude_threshold for why an RMS-derived gate is the wrong domain.
+		"""
+
+		return self._ambient_peak
+
+	@property
 	def tail_amplitude_threshold (self) -> float:
 
 		"""Per-sample amplitude gate for the TRAILING (tail) edge of trim_silence.
@@ -189,9 +222,15 @@ class LevelDetector:
 		The single source of truth for the tail so the trimmer cannot re-cut a
 		decayed tail back up to a louder level than the detector ended on (which
 		would undo the whole point of a decoupled release threshold).
+
+		Deliberately stays in the RMS domain, unlike attack_amplitude_threshold.
+		Being short by the material's crest factor makes this gate CONSERVATIVE —
+		it keeps more tail than nominal, which is the direction a release threshold
+		is trying to go anyway.  The same shortfall on the attack edge is a defect,
+		because there it keeps room tone rather than signal.
 		"""
 
-		ambient = max(self._ambient_rms, _AMBIENT_FLOOR)
+		ambient = max(self._ambient_rms, _RMS_EPSILON)
 		return float(ambient * (10.0 ** (self._close_threshold_db / 20.0)))
 
 	@property
@@ -200,14 +239,26 @@ class LevelDetector:
 		"""Per-sample amplitude gate for the LEADING (attack) edge of trim_silence.
 
 		Built from threshold_db (the START/open trigger level) and the floored
-		ambient — deliberately INDEPENDENT of release_threshold_db.  The attack edge
-		must trim tight to the transient regardless of how low the tail threshold is
-		set: a low release preserves a long decay, but it must not drag low-level
-		room tone into the front of the next sample.  Always >= tail_amplitude_
-		threshold (snr >= release), so the trimmed onset never precedes the tail end.
+		ambient PEAK — deliberately INDEPENDENT of release_threshold_db.  The attack
+		edge must trim tight to the transient regardless of how low the tail
+		threshold is set: a low release preserves a long decay, but it must not drag
+		low-level room tone into the front of the next sample.
+
+		The ambient PEAK — not the RMS — is the right reference because trim_silence
+		compares PER SAMPLE.  Room tone measured at -97 dBFS RMS peaks near -84 dBFS
+		(a ~13 dB crest factor is typical of noise), so an RMS-derived gate sits a
+		crest factor too low, finds "signal" in the noise from the very first sample,
+		and leaves the head of a false trigger untrimmed.  Comparing peak against
+		peak removes that domain mismatch, so this gate can actually do its job as
+		the second line of defence behind the trigger thresholds.
+
+		Always >= tail_amplitude_threshold: ambient_peak >= ambient_rms and
+		threshold_db >= the close threshold, so the trimmed onset never precedes the
+		tail end.  A hit too quiet to reach this gate at all is not mis-anchored —
+		trim_silence falls back to the tail onset in that case.
 		"""
 
-		ambient = max(self._ambient_rms, _AMBIENT_FLOOR)
+		ambient = max(self._ambient_peak, _RMS_EPSILON)
 		return float(ambient * (10.0 ** (self._cfg.threshold_db / 20.0)))
 
 	def process_chunk (
@@ -237,7 +288,7 @@ class LevelDetector:
 		# into the noise floor before its own SNR test (which would deflate the
 		# measured SNR and miss sharp hits).  RECORDING never updates ambient.
 		if self._state == DetectorState.WARMUP:
-			self._update_ambient(chunk_rms)
+			self._update_ambient(chunk_rms, _compute_peak(chunk))
 			return self._handle_warmup()
 
 		if self._state == DetectorState.IDLE:
@@ -277,7 +328,8 @@ class LevelDetector:
 		The SNR test runs against the ambient floor as measured *before* this
 		chunk.  Only a non-triggering (genuinely background) chunk then updates
 		the ambient EMA — a trigger is excluded so the transient never raises
-		the floor it is being compared against.
+		the floor it is being compared against.  The chunk's peak is measured only
+		on that non-triggering path, since the ambient EMAs are the sole consumer.
 		"""
 
 		if self._exceeds_threshold(chunk_rms):
@@ -291,7 +343,7 @@ class LevelDetector:
 			self._tail_follower = chunk_rms
 			return None
 
-		self._update_ambient(chunk_rms)
+		self._update_ambient(chunk_rms, _compute_peak(chunk))
 		return None
 
 	def _handle_recording (
@@ -371,19 +423,26 @@ class LevelDetector:
 
 	# --- Helpers ---
 
-	def _update_ambient (self, chunk_rms: float) -> None:
+	def _update_ambient (self, chunk_rms: float, chunk_peak: float) -> None:
 
-		"""Update the ambient EMA with the current chunk RMS.
+		"""Update the ambient RMS and PEAK EMAs with the current chunk.
 
-		During WARMUP the EMA is seeded directly to avoid a long ramp from zero.
+		During WARMUP the EMAs are seeded directly to avoid a long ramp from zero.
+
+		Both are advanced together, from the same chunk, under the same seeding
+		test — that lockstep is what guarantees ambient_peak >= ambient_rms, and
+		hence attack_amplitude_threshold >= tail_amplitude_threshold.  Splitting
+		them into separate update paths would break that invariant.
 		"""
 
-		if self._ambient_rms < _AMBIENT_FLOOR:
-			# Seed the EMA on the first meaningful chunk rather than smoothing from zero
-			self._ambient_rms = max(chunk_rms, _AMBIENT_FLOOR)
+		if self._ambient_rms < _RMS_EPSILON:
+			# Seed the EMAs on the first meaningful chunk rather than smoothing from zero
+			self._ambient_rms = max(chunk_rms, _RMS_EPSILON)
+			self._ambient_peak = max(chunk_peak, _RMS_EPSILON)
 		else:
 			alpha = self._cfg.floor_adaptation
 			self._ambient_rms = alpha * chunk_rms + (1.0 - alpha) * self._ambient_rms
+			self._ambient_peak = alpha * chunk_peak + (1.0 - alpha) * self._ambient_peak
 
 	def _onset_offset (self, chunk: numpy.ndarray) -> int:
 
@@ -422,10 +481,10 @@ class LevelDetector:
 		False without a special case at each call site.
 		"""
 
-		if chunk_rms <= _AMBIENT_FLOOR:
+		if chunk_rms <= _RMS_EPSILON:
 			return -math.inf
 
-		ambient = max(self._ambient_rms, _AMBIENT_FLOOR)
+		ambient = max(self._ambient_rms, _RMS_EPSILON)
 		return 20.0 * math.log10(chunk_rms / ambient)
 
 	def _exceeds_threshold (self, chunk_rms: float) -> bool:
@@ -455,7 +514,7 @@ class LevelDetector:
 		if self._retrigger_ratio is None:
 			return False
 
-		follower = max(self._tail_follower, _AMBIENT_FLOOR)
+		follower = max(self._tail_follower, _RMS_EPSILON)
 		return chunk_rms >= follower * self._retrigger_ratio
 
 	def _update_follower (self, chunk_rms: float) -> None:
@@ -466,8 +525,8 @@ class LevelDetector:
 		avoid a ramp from zero.
 		"""
 
-		if self._tail_follower < _AMBIENT_FLOOR:
-			self._tail_follower = max(chunk_rms, _AMBIENT_FLOOR)
+		if self._tail_follower < _RMS_EPSILON:
+			self._tail_follower = max(chunk_rms, _RMS_EPSILON)
 		else:
 			alpha = _TAIL_FOLLOWER_ALPHA
 			self._tail_follower = alpha * chunk_rms + (1.0 - alpha) * self._tail_follower
@@ -486,3 +545,21 @@ def _compute_rms (chunk: numpy.ndarray) -> float:
 
 	samples = chunk.astype(numpy.float32)
 	return float(numpy.sqrt(numpy.mean(samples ** 2)))
+
+
+def _compute_peak (chunk: numpy.ndarray) -> float:
+
+	"""Peak absolute sample value in an audio chunk.
+
+	float64 here, where _compute_rms uses float32, because this value scales a
+	gate that is then compared PER SAMPLE against the same audio in float64 (see
+	trim_silence): int32 magnitudes near 2**31 exceed float32's 23-bit mantissa,
+	and rounding the gate up could exclude samples it should have kept.  The abs()
+	is taken in float64 for the further reason that int32 cannot represent
+	abs(INT32_MIN), which appears in 24-bit left-shifted and native 32-bit audio.
+	"""
+
+	if chunk.size == 0:
+		return 0.0
+
+	return float(numpy.max(numpy.abs(chunk.astype(numpy.float64))))

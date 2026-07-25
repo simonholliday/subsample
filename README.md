@@ -2271,6 +2271,41 @@ transient a moment later - breath before a flute note, mallet contact before a
 bowl) can read its own transient as a new hit and split one gesture into two; if
 that happens, raise `hold_seconds` so it spans the attack.
 
+### Rejecting recordings of nothing
+
+Every threshold above is **relative** - "louder than the room by N dB". That is
+what lets detection work in any room without recalibration, but it also means
+detection cannot, on its own, tell a quiet room's noise from a quiet sound.
+
+A room's background level is not steady; it wobbles by several dB moment to
+moment. So in a *quiet* room - a good preamp and a noise floor near -100 dBFS -
+a small `threshold_db` can be cleared by nothing but air, and a small
+`retrigger_threshold_db` can fire on the noise a tail has decayed into. You get
+a file containing no sound at all, or a real hit with a silent head in front of
+it. Counter-intuitively, the quieter the room, the easier this is to provoke.
+
+Two settings guard against it:
+
+```yaml
+detection:
+  threshold_db: 12.0             # comfortably above the room's own wobble
+  retrigger_threshold_db: 15.0   # a real strike, not a fluctuation in the tail
+  min_peak_db: -45.0             # and throw away anything that peaks below this
+```
+
+Keep the relative thresholds above the background's natural variation - that is
+the actual fix, and `12` / `15` are good starting points. A value near `9` sits
+*inside* the wobble of a quiet room.
+
+`min_peak_db` is then the absolute backstop for whatever still slips through:
+a finished recording peaking below this level is discarded rather than saved,
+analysed and added to your library. Judge it against the peak of your quietest
+**wanted** hit and leave headroom - set it too high and you will silently lose
+real material. For close-miked percussion, -50 to -40 dBFS is typical. It is off
+by default, because the right value depends entirely on how you are recording.
+
+If real hits go missing, `min_peak_db` is the first thing to lower or unset.
+
 ## Configuration
 
 Subsample ships its defaults built in and deep-merges your `config.yaml` on
@@ -2314,7 +2349,8 @@ The most common overrides:
 - **First run:** set `recorder.audio.device` (your microphone) and `recorder.directory`
 - **For MIDI playback:** set `player.enabled: true`, `player.midi_device` or `player.virtual_midi_port`, and `player.audio.device`
 - **If you hear clipping:** raise `player.max_polyphony`; the `limiter_threshold_db` and `limiter_ceiling_db` defaults protect against distortion automatically
-- **If recordings miss quiet sounds or trigger on noise:** tune `detection.threshold_db`
+- **If recordings miss quiet sounds:** lower `detection.threshold_db`
+- **If recordings trigger on noise, or arrive empty:** raise `detection.threshold_db` and `detection.retrigger_threshold_db`, then set `detection.min_peak_db` as a backstop - see [Rejecting recordings of nothing](#rejecting-recordings-of-nothing)
 
 Everything else - chunk sizes, buffer lengths, transform settings, similarity
 weights - is optional and rarely needs changing.
@@ -2356,6 +2392,7 @@ weights - is optional and rarely needs changing.
 | `detection.release_threshold_db` | `null` | Separate CLOSE threshold (dB above ambient) for ending a recording. Lower than `threshold_db` so a long decay rings out toward silence instead of being cut short; the recording still starts on the louder attack. `null` reuses `threshold_db`. See [Chopping long-decay takes](#chopping-long-decay-takes) |
 | `detection.retrigger_threshold_db` | `null` | While recording, a rise of this many dB over the decaying tail ends the current sample and starts the next - so spaced hits whose tails never fully fade are still separated. `null` disables. Pair with `release_threshold_db`. Assumes each attack lands within `max(hold_seconds, 0.1s)`; raise `hold_seconds` for slow/two-stage attacks or they over-split |
 | `detection.fade_out_ms` | `0.0` | Smooth fade (ms) on each sample's trailing edge, masking a cut taken mid-decay or at the next hit. `0.0` keeps the ~2 ms declick |
+| `detection.min_peak_db` | `null` | Absolute floor (dBFS) a recording's peak must reach to be kept - the backstop against a trigger on room tone, since every other threshold is relative to the room. Judge it against your quietest wanted hit. `null` disables. See [Rejecting recordings of nothing](#rejecting-recordings-of-nothing) |
 | `recorder.directory` | `samples/captures` | Where recordings are saved (also the default `library.directory`, so captures join the playable library) |
 | `recorder.filename_format` | `%Y-%m-%d_%H-%M-%S-%3f` | strftime format for filenames (`%3f` = 3-digit milliseconds) |
 | `analysis.start_bpm` | `120.0` | Tempo prior for beat detection (BPM) |
