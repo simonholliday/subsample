@@ -396,6 +396,89 @@ def _peak_dbfs (audio: numpy.ndarray) -> float:
 	return 20.0 * math.log10(peak / full_scale)
 
 
+def _preload_midi_map (
+	cfg: subsample.config.Config,
+) -> typing.Optional[subsample.player.MidiMapResult]:
+
+	"""Load the configured MIDI map early, so bank definitions are known.
+
+	Returns None when there is nothing to load — no player, or no map named.
+	Raises SystemExit(1), after logging a tracebackless reason, when a map IS
+	named but cannot be loaded.
+
+	Fatal, and fatal HERE.  An enabled player cannot run without its map, and
+	this is the earliest point the failure is knowable — everything after it (the
+	library load, which can take a minute over thousands of samples; the
+	transform queue; the watchers) is wasted work.  Warning and carrying on used
+	to defer the failure to MidiMapWatcher.start(), where it surfaced as a raw
+	inotify FileNotFoundError naming neither the config key nor the path, long
+	after the banner had printed that same bad path as though all were well.
+
+	Treating a pre-load failure as real is safe despite passing no reference
+	names: an unrecognised reference only WARNS and skips its assignment (see
+	load_midi_map), so a map that loads against the real library also loads here.
+	Anything that raises is a missing file, malformed YAML, or a schema error the
+	later load would hit too.
+	"""
+
+	if not cfg.player.enabled or cfg.player.midi_map is None:
+		return None
+
+	path = pathlib.Path(cfg.player.midi_map)
+
+	try:
+		return subsample.player.load_midi_map(path, [], strict=cfg.player.strict_midi_map)
+
+	except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+		_log.error("Cannot load the MIDI map: %s", exc)
+
+		if not path.exists():
+			# The resolved path is the whole diagnosis for the commonest mistake:
+			# copying the bundled `subsample/data/…` prefix onto a project-local
+			# map, which then resolves under a package directory that is not there.
+			_log.error(
+				"player.midi_map = %r — looked for it at %s.  Relative paths "
+				"resolve from the current directory, not from inside the package "
+				"(only the maps that ship with Subsample live under subsample/data/).",
+				cfg.player.midi_map, path.resolve(),
+			)
+		else:
+			_log.error("player.midi_map = %r (%s)", cfg.player.midi_map, path.resolve())
+
+		raise SystemExit(1)
+
+
+def _start_watcher (watcher: typing.Any, description: str) -> bool:
+
+	"""Start a filesystem watcher, degrading to a warning if it cannot start.
+
+	Watching is a convenience — hot-reloading edited maps and picking up new
+	samples — so losing it must never stop the app from playing.  Left
+	unguarded, watchdog raises straight out of the startup path: an exhausted
+	inotify watch limit (``/proc/sys/fs/inotify/max_user_watches``, a common
+	limit to hit on Linux with several directories watched) or a directory
+	removed between the check and the call would kill a fully-loaded session
+	with a traceback pointing into watchdog internals.
+
+	Returns True when the watcher started and the caller should register it for
+	shutdown.  A watcher that failed to start must NOT be registered: watchdog's
+	stop()/join() on an observer whose thread never ran raises in turn, during
+	teardown, where it is even less welcome.
+	"""
+
+	try:
+		watcher.start()
+	except OSError as exc:
+		_log.warning(
+			"Could not start the %s watcher (%s) — continuing without it.  "
+			"Edits will not be picked up until restart.",
+			description, exc,
+		)
+		return False
+
+	return True
+
+
 def _process_chunk (
 	chunk: numpy.ndarray,
 	buf: subsample.buffer.CircularBuffer,
@@ -1365,17 +1448,12 @@ def _main_impl () -> None:
 	default_bank: typing.Optional[int] = None
 	preloaded_midi_map_result: typing.Optional[subsample.player.MidiMapResult] = None
 
-	if cfg.player.enabled and cfg.player.midi_map is not None:
-		_midi_map_path = pathlib.Path(cfg.player.midi_map)
-		try:
-			preloaded_midi_map_result = subsample.player.load_midi_map(
-				_midi_map_path, [], strict=cfg.player.strict_midi_map,
-			)
-			bank_definitions = preloaded_midi_map_result.bank_definitions
-			bank_channel = preloaded_midi_map_result.bank_channel
-			default_bank = preloaded_midi_map_result.default_bank
-		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
-			_log.warning("Could not pre-load MIDI map for bank detection: %s", exc)
+	preloaded_midi_map_result = _preload_midi_map(cfg)
+
+	if preloaded_midi_map_result is not None:
+		bank_definitions = preloaded_midi_map_result.bank_definitions
+		bank_channel = preloaded_midi_map_result.bank_channel
+		default_bank = preloaded_midi_map_result.default_bank
 
 	# Now that bank detection has run, print the startup summary (multi-bank mode
 	# reports per-program pools rather than the ignored library.directory).
@@ -1675,9 +1753,9 @@ def _main_impl () -> None:
 					with_preview=cfg.recorder.previews,
 					on_sample_removed=_make_bank_removal_callback(_bank),
 				)
-				watcher.start()
-				instrument_watchers.append(watcher)
-				print(f"  Watcher      : monitoring {_bank.directory} ({_bank.name!r})")
+				if _start_watcher(watcher, f"sample directory {_bank.name!r}"):
+					instrument_watchers.append(watcher)
+					print(f"  Watcher      : monitoring {_bank.directory} ({_bank.name!r})")
 
 		# Single-directory mode.
 		else:
@@ -1705,9 +1783,9 @@ def _main_impl () -> None:
 				with_preview=cfg.recorder.previews,
 				on_sample_removed=_on_watched_sample_removed,
 			)
-			watcher.start()
-			instrument_watchers.append(watcher)
-			print(f"  Watcher      : monitoring {cfg.library.directory} for new samples")
+			if _start_watcher(watcher, "sample directory"):
+				instrument_watchers.append(watcher)
+				print(f"  Watcher      : monitoring {cfg.library.directory} for new samples")
 
 	# --- MIDI map file watcher ---
 	# Monitors the MIDI map YAML file for changes so assignments can be
@@ -1836,8 +1914,10 @@ def _main_impl () -> None:
 			path=_midi_map_watch_path,
 			on_changed=_on_midi_map_changed,
 		)
-		midi_map_watcher.start()
-		print(f"  MIDI map     : watching {cfg.player.midi_map} for changes")
+		if _start_watcher(midi_map_watcher, "MIDI map"):
+			print(f"  MIDI map     : watching {cfg.player.midi_map} for changes")
+		else:
+			midi_map_watcher = None
 
 	# --- OSC receiver ---
 	# Listens for /sample/import messages and triggers file import.

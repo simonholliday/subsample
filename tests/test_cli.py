@@ -1166,3 +1166,201 @@ class TestPeakDbfs:
 		audio = numpy.full((10, 1), 0.5, dtype=numpy.float32)
 
 		assert subsample.cli._peak_dbfs(audio) == pytest.approx(-6.02, abs=0.01)
+
+
+def _cfg_with_map (
+	midi_map: typing.Optional[str], player_enabled: bool = True,
+) -> subsample.config.Config:
+
+	"""Return a config naming `midi_map`, built from the shipped defaults."""
+
+	cfg = subsample.config.load_config(subsample.config._locate_default_config())
+	player = dataclasses.replace(cfg.player, enabled=player_enabled, midi_map=midi_map)
+
+	return dataclasses.replace(cfg, player=player)
+
+
+class TestPreloadMidiMap:
+
+	"""_preload_midi_map fails the whole run, early and legibly, on a bad map.
+
+	This used to be a WARNING that let startup continue.  The player then had no
+	map, but nothing stopped: the banner printed the bad path as though all were
+	well, the full sample library loaded (a minute, over thousands of samples),
+	and the run finally died inside watchdog with a raw inotify FileNotFoundError
+	that named neither the config key nor the path it had tried.
+	"""
+
+	@staticmethod
+	def _write_map (tmp_path: pathlib.Path, body: str) -> pathlib.Path:
+		path = tmp_path / "map.yaml"
+		path.write_text(body, encoding="utf-8")
+		return path
+
+	def test_missing_file_exits_nonzero (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		monkeypatch.chdir(tmp_path)
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli._preload_midi_map(_cfg_with_map("no/such/map.yaml"))
+
+		assert excinfo.value.code == 1
+
+	def test_missing_file_reports_the_resolved_path (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""The absolute path is the whole diagnosis for the commonest mistake —
+		copying the bundled `subsample/data/…` prefix onto a project-local map,
+		which resolves under a package directory that does not exist."""
+
+		monkeypatch.chdir(tmp_path)
+		caplog.set_level(logging.ERROR, logger="subsample.cli")
+
+		with pytest.raises(SystemExit):
+			subsample.cli._preload_midi_map(_cfg_with_map("subsample/data/mine.yaml"))
+
+		logged = caplog.text
+		assert "player.midi_map" in logged
+		assert str(tmp_path / "subsample/data/mine.yaml") in logged
+
+	def test_malformed_yaml_exits_nonzero (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A YAMLError is not a ValueError, so it needs its own catch — and its
+		message carries the line and column, which must survive to the log."""
+
+		path = self._write_map(tmp_path, "assignments:\n  - name: X\n   channel: 10\n")
+		caplog.set_level(logging.ERROR, logger="subsample.cli")
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli._preload_midi_map(_cfg_with_map(str(path)))
+
+		assert excinfo.value.code == 1
+		assert "line 3" in caplog.text
+
+	def test_schema_error_exits_nonzero (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A map that parses as YAML but is invalid must fail here too, not at
+		the later load — by which point the library has already been read."""
+
+		path = self._write_map(tmp_path, textwrap.dedent("""\
+			assignments:
+			  - name: Snares
+			    channel: 10
+			    notes: drum.snare_1
+			    select:
+			      pick: velocity
+			"""))
+		caplog.set_level(logging.ERROR, logger="subsample.cli")
+
+		with pytest.raises(SystemExit):
+			subsample.cli._preload_midi_map(_cfg_with_map(str(path)))
+
+		assert "order" in caplog.text
+
+	def test_valid_map_returns_its_result (self, tmp_path: pathlib.Path) -> None:
+
+		"""The success path is unchanged — bank detection still gets its result."""
+
+		path = self._write_map(tmp_path, textwrap.dedent("""\
+			assignments:
+			  - name: Snares
+			    channel: 10
+			    notes: drum.snare_1
+			    select:
+			      order: quietest
+			      pick: velocity
+			"""))
+
+		result = subsample.cli._preload_midi_map(_cfg_with_map(str(path)))
+
+		assert result is not None
+		assert (9, 38) in result.note_map
+
+	def test_disabled_player_does_not_load_or_exit (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""A stale midi_map path under `player.enabled: false` must not stop a
+		recorder-only session — nothing is going to read that map."""
+
+		monkeypatch.chdir(tmp_path)
+
+		assert subsample.cli._preload_midi_map(
+			_cfg_with_map("no/such/map.yaml", player_enabled=False),
+		) is None
+
+	def test_no_map_configured_returns_none (self) -> None:
+
+		assert subsample.cli._preload_midi_map(_cfg_with_map(None)) is None
+
+
+class TestStartWatcher:
+
+	"""Watching is a convenience; failing to start one must not stop playback.
+
+	Unguarded, watchdog raises straight out of startup — an exhausted inotify
+	watch limit is a routine Linux failure — and kills a fully-loaded session.
+	"""
+
+	class _Watcher:
+
+		"""Minimal stand-in for InstrumentWatcher / MidiMapWatcher."""
+
+		def __init__ (self, error: typing.Optional[Exception] = None) -> None:
+			self.error = error
+			self.started = False
+
+		def start (self) -> None:
+			if self.error is not None:
+				raise self.error
+			self.started = True
+
+	def test_returns_true_when_started (self) -> None:
+		watcher = self._Watcher()
+
+		assert subsample.cli._start_watcher(watcher, "sample directory") is True
+		assert watcher.started is True
+
+	def test_returns_false_and_warns_on_oserror (
+		self, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""False is the contract that keeps a dead watcher out of the shutdown
+		list — stop()/join() on an observer whose thread never ran raises in
+		turn, during teardown, where it is even less welcome."""
+
+		caplog.set_level(logging.WARNING, logger="subsample.cli")
+		watcher = self._Watcher(FileNotFoundError(2, "No such file or directory"))
+
+		assert subsample.cli._start_watcher(watcher, "MIDI map") is False
+		assert "MIDI map" in caplog.text
+		assert "continuing without it" in caplog.text
+
+	def test_inotify_limit_is_survivable (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""ENOSPC from inotify means "watch limit reached", not "disk full" —
+		common on Linux with several directories watched, and no reason to
+		refuse to play."""
+
+		caplog.set_level(logging.WARNING, logger="subsample.cli")
+		watcher = self._Watcher(OSError(28, "No space left on device"))
+
+		assert subsample.cli._start_watcher(watcher, "sample directory") is False
+
+	def test_non_oserror_still_propagates (self) -> None:
+
+		"""Only filesystem/OS failures are tolerated.  A TypeError here would be
+		a bug in our own wiring, and must not be swallowed as "no watcher"."""
+
+		watcher = self._Watcher(TypeError("bad wiring"))
+
+		with pytest.raises(TypeError):
+			subsample.cli._start_watcher(watcher, "sample directory")

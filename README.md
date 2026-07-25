@@ -2348,6 +2348,7 @@ The most common overrides:
 
 - **First run:** set `recorder.audio.device` (your microphone) and `recorder.directory`
 - **For MIDI playback:** set `player.enabled: true`, `player.midi_device` or `player.virtual_midi_port`, and `player.audio.device`
+- **If startup stops with `Cannot load the MIDI map`:** with the player enabled, a map that is missing or invalid is fatal - it is reported in the first second rather than after the sample library has loaded. `player.midi_map` resolves from the directory you launched in, and the logged absolute path shows exactly where it looked; only the maps that ship with Subsample live under `subsample/data/`
 - **If you hear clipping:** raise `player.max_polyphony`; the `limiter_threshold_db` and `limiter_ceiling_db` defaults protect against distortion automatically
 - **If recordings miss quiet sounds:** lower `detection.threshold_db`
 - **If recordings trigger on noise, or arrive empty:** raise `detection.threshold_db` and `detection.retrigger_threshold_db`, then set `detection.min_peak_db` as a backstop - see [Rejecting recordings of nothing](#rejecting-recordings-of-nothing)
