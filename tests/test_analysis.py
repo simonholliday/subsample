@@ -2083,3 +2083,200 @@ class TestTinyInputDegrades:
 		result = subsample.analysis.analyze(audio, params, 16)
 
 		assert result == subsample.analysis._EMPTY_ANALYSIS_RESULT
+
+
+class TestComputeImpact:
+
+	"""_compute_impact locates the onset of the sample's LOUDEST event.
+
+	For most percussion that is ~0 — the hit is the first thing in the file.  It
+	is non-zero for a sound whose musical moment arrives after a quieter
+	preparatory noise: a hi-hat pedal close (foot, then the cymbals meet ~40 ms
+	later), a shaker pulled back before the downbeat.
+	"""
+
+	SR = 48000
+
+	@staticmethod
+	def _burst (n: int, peak: float, decay: float, seed: int) -> numpy.ndarray:
+		"""Deterministic noise burst with a short rise then a decay.
+
+		The 1 ms rise matters: a burst starting at full amplitude on sample 0 has
+		no foot to find, so the envelope's own noise decides where the transient
+		"begins" and the detector has nothing real to lock onto.  Struck sounds
+		always have a rise, however brief.
+		"""
+		rng = numpy.random.default_rng(seed)
+		env = numpy.exp(-numpy.arange(n) / decay)
+		rise = min(48, n)                                   # ~1 ms at 48 kHz
+		env[:rise] *= numpy.linspace(0.0, 1.0, rise)
+		return (rng.standard_normal(n) * env * peak).astype(numpy.float32)
+
+	def _gesture (
+		self, pre_peak: float, hit_at_s: float, hit_peak: float = 0.7,
+	) -> numpy.ndarray:
+		"""Quiet preparatory noise, then the real hit at hit_at_s."""
+		buf = numpy.zeros(int(1.1 * self.SR), dtype=numpy.float32)
+		pre = self._burst(int(0.14 * self.SR), pre_peak, 0.035 * self.SR, seed=1)
+		hit = self._burst(int(0.60 * self.SR), hit_peak, 0.100 * self.SR, seed=2)
+		buf[int(0.05 * self.SR):int(0.05 * self.SR) + pre.size] += pre
+		buf[int(hit_at_s * self.SR):int(hit_at_s * self.SR) + hit.size] += hit
+		return buf
+
+	def test_hit_at_the_start_reports_zero (self) -> None:
+
+		"""The overwhelmingly common case: a struck drum.  0.0 and None together
+		mean "nothing to trigger early for"."""
+
+		buf = numpy.zeros(int(0.5 * self.SR), dtype=numpy.float32)
+		hit = self._burst(int(0.4 * self.SR), 0.7, 0.05 * self.SR, seed=3)
+		buf[:hit.size] += hit
+
+		impact, pre_db = subsample.analysis._compute_impact(buf, self.SR)
+
+		assert impact < 0.002
+		assert pre_db is None or pre_db < 0.0
+
+	def test_late_hit_is_found (self) -> None:
+
+		"""The shaker / pedal-close case — the whole point of the field."""
+
+		impact, pre_db = subsample.analysis._compute_impact(
+			self._gesture(pre_peak=0.05, hit_at_s=0.200), self.SR,
+		)
+
+		assert impact == pytest.approx(0.200, abs=0.003)
+		assert pre_db is not None
+		assert pre_db < -10.0
+
+	@pytest.mark.parametrize("hit_at", [0.090, 0.160, 0.200, 0.240])
+	def test_accurate_across_gap_lengths (self, hit_at: float) -> None:
+
+		"""Within a few ms wherever the hit lands — the value is a trigger offset,
+		so a systematic error would show up as a timing error in the sequencer."""
+
+		impact, _ = subsample.analysis._compute_impact(
+			self._gesture(pre_peak=0.05, hit_at_s=hit_at), self.SR,
+		)
+
+		assert impact == pytest.approx(hit_at, abs=0.004)
+
+	@pytest.mark.parametrize("pre_peak", [0.02, 0.05, 0.12, 0.25])
+	def test_result_does_not_move_with_the_pre_stroke_level (
+		self, pre_peak: float,
+	) -> None:
+
+		"""How loud the preparation is must not shift where the impact is found.
+		Ranking candidate onsets by surrounding energy DID drift this way, which
+		is why the detector anchors on the envelope peak instead."""
+
+		impact, _ = subsample.analysis._compute_impact(
+			self._gesture(pre_peak=pre_peak, hit_at_s=0.200), self.SR,
+		)
+
+		assert impact == pytest.approx(0.200, abs=0.004)
+
+	def test_does_not_depend_on_onset_detection (self) -> None:
+
+		"""Regression for the failure that chose this design.  librosa's onset
+		detection can miss a transient at the very start of a buffer: on real
+		captures it put a ride take's first attack 779 ms in (peak at 1.4 ms) and
+		an open hi-hat take's 15.8 SECONDS in.  _compute_impact never consults
+		onset_times, so a buffer that opens on its loudest moment still reports
+		~0 no matter what onset_detect would have said."""
+
+		buf = numpy.zeros(int(2.0 * self.SR), dtype=numpy.float32)
+		strike = self._burst(int(1.9 * self.SR), 0.9, 0.35 * self.SR, seed=4)
+		buf[:strike.size] += strike
+		# A later, quieter event — the kind onset_detect latches onto instead.
+		later = self._burst(int(0.2 * self.SR), 0.15, 0.05 * self.SR, seed=5)
+		buf[int(0.8 * self.SR):int(0.8 * self.SR) + later.size] += later
+
+		impact, _ = subsample.analysis._compute_impact(buf, self.SR)
+
+		assert impact < 0.005
+
+	def test_silence_reports_no_impact (self) -> None:
+
+		impact, pre_db = subsample.analysis._compute_impact(
+			numpy.zeros(int(0.5 * self.SR), dtype=numpy.float32), self.SR,
+		)
+
+		assert impact == 0.0
+		assert pre_db is None
+
+	def test_audio_shorter_than_the_envelope_window (self) -> None:
+
+		"""Fewer samples than one 32-sample window — must not raise."""
+
+		impact, pre_db = subsample.analysis._compute_impact(
+			numpy.ones(8, dtype=numpy.float32), self.SR,
+		)
+
+		assert impact == 0.0
+		assert pre_db is None
+
+	def test_pre_level_is_relative_not_absolute (self) -> None:
+
+		"""The field is a RATIO, so halving the whole recording's level must not
+		change it — otherwise it would report recording gain, not gesture shape."""
+
+		quiet = self._gesture(pre_peak=0.05, hit_at_s=0.200, hit_peak=0.7)
+		loud  = quiet * 0.25
+
+		_, quiet_db = subsample.analysis._compute_impact(quiet, self.SR)
+		_, loud_db  = subsample.analysis._compute_impact(loud, self.SR)
+
+		assert quiet_db is not None and loud_db is not None
+		assert quiet_db == pytest.approx(loud_db, abs=0.5)
+
+	def test_backtrack_is_bounded (self) -> None:
+
+		"""In a take holding several hits, the search must find the loudest hit's
+		OWN foot, not reach back through silence into an earlier one."""
+
+		buf = numpy.zeros(int(3.0 * self.SR), dtype=numpy.float32)
+		first  = self._burst(int(0.3 * self.SR), 0.3, 0.05 * self.SR, seed=6)
+		second = self._burst(int(0.3 * self.SR), 0.9, 0.05 * self.SR, seed=7)
+		buf[int(0.2 * self.SR):int(0.2 * self.SR) + first.size] += first
+		buf[int(2.0 * self.SR):int(2.0 * self.SR) + second.size] += second
+
+		impact, _ = subsample.analysis._compute_impact(buf, self.SR)
+
+		assert impact == pytest.approx(2.0, abs=0.01)
+
+
+class TestImpactInRhythmResult:
+
+	"""The values reach RhythmResult, and survive the sidecar round trip."""
+
+	def test_analyze_rhythm_populates_the_fields (self) -> None:
+
+		sr = 48000
+		rng = numpy.random.default_rng(11)
+		buf = numpy.zeros(int(1.0 * sr), dtype=numpy.float32)
+		hit = (rng.standard_normal(int(0.5 * sr))
+		       * numpy.exp(-numpy.arange(int(0.5 * sr)) / (0.08 * sr)) * 0.8).astype(numpy.float32)
+		buf[int(0.15 * sr):int(0.15 * sr) + hit.size] += hit
+
+		rhythm = subsample.analysis.analyze_rhythm(
+			buf, subsample.analysis.compute_params(sr), subsample.config.AnalysisConfig(),
+		)
+
+		assert rhythm.impact_time == pytest.approx(0.15, abs=0.005)
+		assert rhythm.impact_pre_level_db is not None
+
+	def test_short_audio_returns_the_neutral_default (self) -> None:
+
+		"""Audio too short for rhythm analysis bails early; the defaults must
+		read as "no offset" rather than leaving the field undefined."""
+
+		sr = 48000
+		params = subsample.analysis.compute_params(sr)
+		rhythm = subsample.analysis.analyze_rhythm(
+			numpy.zeros(params.n_fft // 2, dtype=numpy.float32),
+			params, subsample.config.AnalysisConfig(),
+		)
+
+		assert rhythm.impact_time == 0.0
+		assert rhythm.impact_pre_level_db is None

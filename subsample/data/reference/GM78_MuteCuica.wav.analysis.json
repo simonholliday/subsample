@@ -1,5 +1,5 @@
 {
-  "analysis_version": "16",
+  "analysis_version": "17",
   "audio_md5": "58abe84341d648e5f7bfc6163b637550",
   "sample_rate": 44100,
   "bit_depth": 16,
@@ -156,7 +156,9 @@
       0.6561451247165533,
       0.8837414965986394
     ],
-    "onset_count": 7
+    "onset_count": 7,
+    "impact_time": 0.005714285714285714,
+    "impact_pre_level_db": -15.3175803874962
   },
   "pitch": {
     "dominant_pitch_hz": 611.2849112674766,

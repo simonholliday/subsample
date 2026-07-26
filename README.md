@@ -2963,7 +2963,35 @@ is eligible for:
   seamlessly (no clean loop point was found)
 
 All three columns run exactly the tests the player runs, so the catalog shows
-the selection pool a MIDI map would draw from. All seven inputs to the pitched
+the selection pool a MIDI map would draw from.
+
+Two further columns describe *when the sound actually happens*:
+
+- **impact_ms** - how far into the file the loudest event begins. For a struck
+  drum this is `0.0`: the hit is the first thing in the file. It is only
+  non-zero for sounds with a preparatory noise in front of the musical moment -
+  a hi-hat pedal close (the foot hits the pedal, then the cymbals meet ~40 ms
+  later), a shaker pulled back before the downbeat, a tambourine drawn off the
+  palm before the strike, a guiro whose loudest ridge arrives after the scrape
+  starts
+- **impact_pre_db** - the level of everything before that moment, relative to
+  the sample's own peak. Blank when there is nothing before it. Around -20 dB
+  means a genuinely quieter preparation; **near 0 dB is a warning** that the
+  file holds several comparable events (a loop, a long take) and `impact_ms` is
+  simply pointing at whichever was loudest, not measuring a pre-stroke
+
+The pair is intended for a sequencer that wants a note's transient to land *on*
+the beat: trigger the note `impact_ms` early and the hit arrives on time with
+the preparation intact. Subsample's own playback does not use it - a voice
+still starts at the beginning of the sample - so nothing changes in how your kit
+sounds. The values also ride in each sample's `.analysis.json` sidecar as
+`rhythm.impact_time` (in **seconds**) and `rhythm.impact_pre_level_db`, so any
+tool that can read the sidecar can use them without going through the catalog.
+
+Because the offset comes from how a sound was *performed* rather than from what
+kind of sound it is, it varies hit to hit: across one set of pedal-close
+captures the median was 42 ms but the middle half spanned 6-55 ms. Treat it as
+a per-sample value; an average over a folder would mis-time most of them. All seven inputs to the pitched
 test are included as columns (`pitch_hz`, `voiced_fraction`,
 `voiced_frame_count`, `pitch_confidence`, `pitch_stability_st`,
 `harmonic_ratio`, `duration_s`), so a sample that unexpectedly fails can be

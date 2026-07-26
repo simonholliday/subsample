@@ -916,6 +916,8 @@ def _serialize (
 		"onset_times":     list(rhythm.onset_times),
 		"attack_times":    list(rhythm.attack_times),
 		"onset_count":     rhythm.onset_count,
+		"impact_time":     rhythm.impact_time,
+		"impact_pre_level_db": rhythm.impact_pre_level_db,
 	}
 
 	payload: dict[str, typing.Any] = {
@@ -990,6 +992,15 @@ def _deserialize_rhythm (data: dict[str, typing.Any]) -> subsample.analysis.Rhyt
 		onset_times      = tuple(float(t) for t in data.get("onset_times", [])),
 		attack_times     = tuple(float(t) for t in data.get("attack_times", [])),
 		onset_count      = int(data.get("onset_count", 0)),
+		# Absent in sidecars written before ANALYSIS_VERSION 17.  0.0 / None is
+		# the same answer as "this sample starts on its transient", which is the
+		# safe reading — and the version bump rewrites them all anyway, so the
+		# default is a transitional courtesy rather than a lasting behaviour.
+		impact_time      = float(data.get("impact_time", 0.0)),
+		impact_pre_level_db = (
+			None if data.get("impact_pre_level_db") is None
+			else float(data["impact_pre_level_db"])
+		),
 	)
 
 

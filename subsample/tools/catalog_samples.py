@@ -97,6 +97,7 @@ _NEAR_SILENT_PEAK: typing.Final[float] = 0.004   # linear peak <  this (~-48 dBF
 _BASE_COLUMNS: tuple[str, ...] = (
 	"name", "path", "duration_s", "channel_format",
 	"pitched", "quantizable", "loopable", "loop_ms", "attack_count",
+	"impact_ms", "impact_pre_db",
 	"pitch_note", "pitch_hz", "pitch_confidence", "pitch_stability_st",
 	"voiced_fraction", "voiced_frame_count", "harmonic_ratio",
 	"tempo_bpm", "onset_count", "beat_count",
@@ -249,6 +250,13 @@ def _row (
 		# audio search found no clean junction (fail-musical).
 		"loop_ms":            f"{(loop.end - loop.start) / params.sample_rate * 1000.0:.0f}" if loop is not None else "",
 		"attack_count":       str(len(attack_times)),
+		# Where the loudest event actually starts.  ~0 for a struck drum; tens of
+		# ms for a sound with a preparatory noise in front of it (a hi-hat pedal
+		# close, a shaker's pre-pull).  impact_pre_db is blank when there is no
+		# pre-impact region — read a value near 0 dB as "the loudest event is not
+		# the first one", so impact_ms is not measuring a pre-stroke.
+		"impact_ms":          f"{rhythm.impact_time * 1000.0:.1f}",
+		"impact_pre_db":      _fmt(rhythm.impact_pre_level_db) if rhythm.impact_pre_level_db is not None else "",
 
 		"pitch_note":         _pitch_note(pitch.dominant_pitch_hz),
 		"pitch_hz":           _fmt(pitch.dominant_pitch_hz) if pitch.dominant_pitch_hz > 0.0 else "",
