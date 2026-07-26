@@ -327,15 +327,24 @@ may change, but you never have to rewrite the YAML.
   notes: 36
   select:
     where:
-      reference: samples/reference/GM36_BassDrum1.wav
+      reference: GM36_BassDrum1
 ```
 
-`reference` points at a reference sample by path. subsample ships (and
-`subsample --init` scaffolds into `samples/reference/`) a precomputed
-fingerprint sidecar for each General MIDI sound - the `.analysis.json` files
-only, no audio - so the path above resolves from its fingerprint even though no
-WAV sits beside it. The library's samples are ranked against that reference by
-a 58-dimensional spectral/rhythmic fingerprint; the top-ranked match plays.
+`reference` **names** a reference sample. Subsample ships a precomputed
+fingerprint for each General MIDI sound - the `.analysis.json` files only, no
+audio, since the fingerprint *is* the reference - and the name above resolves
+from that built-in set on any machine where Subsample is installed. Nothing is
+copied into your project, and the map stays portable: it can live on a shared
+drive, be used by several projects, and still find its references.
+
+You can also point `reference` at a file (`reference: my-refs/kick.wav`), which
+resolves relative to the map file like every other path. Use that for your own
+reference material; use the name form for the built-in GM set. To match against
+a different reference set entirely, point `library.reference_directory` at it -
+its names then replace the built-in ones.
+
+The library's samples are ranked against that reference by a 58-dimensional
+spectral/rhythmic fingerprint; the top-ranked match plays.
 (When `reference` is set and no `order` is given,
 `order: [{ by: similarity, dir: desc }]` is assumed - see
 [Implicit defaults](#implicit-defaults) further down.)
@@ -452,12 +461,34 @@ when you want to try something the tutorial didn't show.
 
 ---
 
+### Map-level fields
+
+A map can set a default channel once, at the top level, instead of repeating it
+on every assignment:
+
+```yaml
+channel: 10          # every assignment below plays on channel 10
+
+assignments:
+  - name: HH Closed
+    notes: drum.hi_hat_closed    # no channel needed
+```
+
+This is what makes a map portable. A directory of samples with its own map at
+the top is a self-contained **sample set** you can copy between projects - and
+because the channel is stated in one place, a project can play the set on
+whatever channel it likes. An assignment may still declare its own `channel:`
+when one entry belongs somewhere else; that always wins.
+
+The top-level `channel:` accepts a `definitions:` name (`channel: my.kit`) just
+as the per-assignment field does.
+
 ### Assignment fields
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | yes | Label shown in logs |
-| `channel` | yes | MIDI channel 1-16 (standard numbering) |
+| `channel` | no | MIDI channel 1-16 (standard numbering). Omit to inherit the map's top-level `channel:`; required only when the map has no default, or when this one entry sits on a different channel from the rest |
 | `notes` | yes | Single note, list, range, or `zone-tuned` for auto-derived keyboard layout (see Note syntax + Zone-tuned below) |
 | `select` | yes | Which sample to play (see Select below) |
 | `process` | no | How to present it (see Process below) |
@@ -596,13 +627,13 @@ any note form works, including your own names from a mounted definitions file
   channel: 10
   notes: drum.hi_hat_open
   silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_pedal]
-  select: [ where: { reference: samples/reference/GM46_OpenHiHat.wav } ]
+  select: [ where: { reference: GM46_OpenHiHat } ]
 
 - name: Ride
   channel: 10
   notes: drum.ride
   silenced_by: self          # one physical cymbal - a new hit damps the last
-  select: [ where: { reference: samples/reference/GM51_RideCymbal1.wav } ]
+  select: [ where: { reference: GM51_RideCymbal1 } ]
 ```
 
 - The value is a single note, a list of notes, or `self` - and `self` can sit in
@@ -817,7 +848,7 @@ is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
 | `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
 | `loopable` | bool | `true` = has a steady sustaining region (tonal or textural) worth looping while a key is held; `false` = does not. A coarse candidate flag over existing analysis - see the loopable column of `subsample catalog` to preview which samples pass |
-| `reference` | path | Similarity match against a reference sample (path to WAV) |
+| `reference` | name or path | Similarity match against a reference sample. A **name** (`GM36_BassDrum1`) resolves from the built-in GM fingerprints, or from `library.reference_directory` when set - nothing is copied into your project and the map stays portable. A **path** (`my-refs/kick.wav`, relative to the map file) uses your own reference material |
 | `name` | string / list / dict | Filename stem match. Four forms — see below. Legacy: a path-like scalar value (containing `/` or starting with `.`) is still auto-detected as a `path:` |
 | `path` | path | Match a specific WAV file at this path (relative paths resolved against the MIDI map's directory). Preferred over `name:` for file references |
 | `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Programs vs directory predicate](#programs-vs-directory-predicate)) |
@@ -1068,7 +1099,7 @@ result wins:
 ```yaml
 select:
   - where: { name: my-favourite-kick }                               # try specific sample first
-  - where: { reference: samples/reference/GM36_BassDrum1.wav }       # fall back to similarity match
+  - where: { reference: GM36_BassDrum1 }       # fall back to similarity match
 ```
 
 #### Legacy `order_by:` syntax
@@ -1104,7 +1135,7 @@ on the same `select` entry is an error.
 # GM kicks - ranked by similarity to a kick reference
 select:
   where:
-    reference: samples/reference/GM36_BassDrum1.wav
+    reference: GM36_BassDrum1
   order:
     - { by: similarity, dir: desc }
 
@@ -1260,7 +1291,7 @@ process:
   - transient: { gain: -3 }                 # tame transients by 3 dB
   - pad_quantize: { tempo: 120, grid: 8 }   # silence-pad onsets to eighth-note grid
   - vocoder: { carrier: reference }           # cross-synthesise with this note's reference
-  - vocoder: { carrier: samples/reference/GM36_BassDrum1.wav, bands: 16, depth: 0.8 }
+  - vocoder: { carrier: carriers/vowel-ah.wav, bands: 16, depth: 0.8 }
 ```
 
 `bit_depth` and `distort: { mode: bit_crush }` share the same quantizer, but
@@ -1658,7 +1689,7 @@ both outputs.
   channel: 10
   notes: drum.kick_1
   select:
-    where: { reference: samples/reference/GM36_BassDrum1.wav }
+    where: { reference: GM36_BassDrum1 }
   extract: omni     # collapse to centred mono, distributed equally to all outputs
 ```
 
@@ -1787,6 +1818,94 @@ rhythmic fingerprints reflect the sound-field sum rather than a
 directionally biased mix. Pad-quantize and beat-quantize work on
 ambisonic samples using Rubber Band's phase-coherent multichannel engine
 - inter-channel relationships survive time-stretching within tolerance.
+
+### Sample sets - one folder, one map, reusable
+
+A **sample set** is a directory of samples with a MIDI map at the top of it:
+
+```
+Home Kit 2026-07/
+  midi-map.yaml        <- the map
+  snare_muffled_1/
+  hh_closed_mid/
+  hh_open_mid/
+```
+
+Nothing declares that this is a set - it just is one, because the map's
+`directory:` predicates resolve relative to the map file and its `reference:`
+predicates name built-in fingerprints rather than pointing at a project. So the
+folder is self-contained: copy it anywhere, share it between projects, keep it
+on a network drive, and it still works.
+
+Give the map a top-level `channel:` and the set becomes portable in the other
+sense too - a project can play it on whatever channel it likes without editing
+it.
+
+A set may hold **several maps**, exposing different mappings over the same
+samples - a full kit and a stripped one, say. `midi-map.yaml` is the expected
+name but nothing requires it; you reference a set by naming the map file you
+want:
+
+```
+Home Kit 2026-07/
+  midi-map.yaml        <- the full kit
+  minimal.yaml         <- kick and snare only
+```
+
+### Ensembles - several sample sets at once
+
+An **ensemble** binds sets to MIDI channels so they all play together. It is
+not a new kind of file: any map may declare a `maps:` block, and may carry its
+own `assignments:` alongside.
+
+```yaml
+# ensemble.yaml
+maps:
+  - "/mnt/shared/Home Kit 2026-07/midi-map.yaml"       # keeps its own channel
+  - { channel: 11, map: "/mnt/shared/vocals/live.yaml" }
+  - { channel: 12, map: "/mnt/shared/effects/midi-map.yaml" }
+```
+
+Point `player.midi_map` at that file and all three sets are live at once, each
+on its own channel. Only the samples those sets name are loaded - set
+`library.directory: null` and nothing else is read at all.
+
+An entry is either a bare path (the set plays on the channel its own map
+declares) or a mapping with `channel:` and `map:`. A bound `channel:` replaces
+the set's top-level default. An assignment that names its **own** `channel:`
+still wins - that is how one map deliberately spans several channels - and the
+binding logs a warning when it finds one, since it will not move those entries.
+
+The same thing can be written straight into `config.yaml` when you would rather
+not keep a separate file:
+
+```yaml
+player:
+  midi_maps:
+    10: "/mnt/shared/Home Kit 2026-07/midi-map.yaml"
+    11: "/mnt/shared/vocals/live.yaml"
+```
+
+`midi_map` and `midi_maps` are mutually exclusive. Both forms go through the
+same loader, so identical bindings give identical results. Prefer the
+ensemble file when you want to name channels from a `definitions:` vocabulary
+(`channel: my.kit`) or to reload while running - `definitions:` is a map-level
+feature `config.yaml` cannot see, and `config.yaml` is not watched for changes.
+
+Rules worth knowing:
+
+- **Flat, one level.** A map included via `maps:` may not declare `maps:` of its
+  own. Same rule as `map:` presets, and it means there are no cycles to worry
+  about.
+- **One (channel, note) per set.** If two sets claim the same channel and note,
+  the load fails naming both - a silent merge would fabricate a
+  velocity-switched note out of two unrelated sets.
+- **No `programs:` inside an included set.** Program switching holds one active
+  bank for the whole player, so per-channel switching is not expressible. Use it
+  in the ensemble itself, or load the set on its own.
+- **Only the ensemble file is watched.** Editing an included set takes effect
+  on restart. (And a set on a network drive will not be watched at all - see
+  [Live-coding](#live-coding-the-midi-map).)
 
 ### Programs - switching instrument sets via MIDI
 
@@ -2371,7 +2490,8 @@ weights - is optional and rarely needs changing.
 | `recorder.previews` | `true` | Emit a `.preview.png` thumbnail sidecar (1024x256, ~15-25 KB) and embed a compact `preview` data block in `.analysis.json` so the Supervisor dashboard can render a scalable SVG on demand. See [Sample previews](#sample-previews) |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
-| `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit |
+| `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit. May be an ensemble - a map declaring a `maps:` block that binds several sample sets to channels. See [Ensembles](#ensembles---several-sample-sets-at-once) |
+| `player.midi_maps` | `none` | Sample sets to play at once, keyed by MIDI channel (`10: "kit/midi-map.yaml"`). The config shorthand for an ensemble; mutually exclusive with `midi_map` |
 | `player.max_polyphony` | `8` | Headroom divisor, not a voice cap: per-voice gain = 1/max\_polyphony, so this many voices at full velocity sum to full scale. Voices are never cut off. Raise if clipping; lower for louder individual voices |
 | `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched. `0.0` disables the limiter |
 | `player.limiter_ceiling_db` | `-0.1` | Maximum output level (dBFS) the limiter allows; must exceed threshold (ignored when the limiter is disabled) |
@@ -2400,7 +2520,7 @@ weights - is optional and rarely needs changing.
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `library.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
-| `library.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Overridden by `programs:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
+| `library.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Set to `null` to load nothing in bulk and take every sample from the MIDI map's own `directory:`/`path:` predicates instead - what a project assembled from shared sample sets wants. Overridden by `programs:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
 | `library.watch` | `false` | Monitor `library.directory` (or each program directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio. Watches the top level of each directory only - drop new files there, not into subdirectories (see Watching for new samples) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
@@ -2705,6 +2825,12 @@ You can edit the MIDI routing map while the player is running and have changes
 take effect immediately - no restart required. Set `player.watch_midi_map: true`
 and point `player.midi_map` at your working copy:
 
+Two limits worth knowing up front: only the file `player.midi_map` names is
+watched, so editing a set an ensemble *includes* needs a restart; and watching
+relies on filesystem notifications, which do not cross machines - a sample set on
+a network drive edited from another machine generates no events at all. Both are
+fine for pre-built sets, which do not change while you play.
+
 ```yaml
 player:
   enabled: true
@@ -2730,7 +2856,7 @@ declared as path-based `where: { reference: ... }` predicates in the MIDI map:
   notes: 36
   select:
     where:
-      reference: samples/reference/GM36_BassDrum1.wav
+      reference: GM36_BassDrum1
 ```
 
 During player startup, each path-based reference is loaded from its sidecar and
@@ -2744,11 +2870,13 @@ library, it is also removed from the ranked lists.
 
 Reference lookups are case-insensitive.
 
-The GM drum references placed in your project by `subsample --init` are
-sidecar files only - the acoustic fingerprints derived from the FluidR3_GM
-SoundFont (MIT licence; see `samples/reference/CREDITS.md`). No audio is
-distributed: the fingerprint is all the similarity engine needs, so the kit
-matches against them without any reference WAVs on disk.
+The GM drum references bundled with Subsample are sidecar files only - the
+acoustic fingerprints derived from the FluidR3_GM SoundFont (MIT licence; see
+`CREDITS.md` beside them in the package). No audio is distributed: the
+fingerprint is all the similarity engine needs, so the kit matches against them
+without any reference WAVs on disk. They are not copied into your project -
+`subsample --init` leaves them in the package and the scaffolded map names them,
+so the map works unchanged wherever you move it.
 
 ## Virtual MIDI
 

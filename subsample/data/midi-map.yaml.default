@@ -176,7 +176,24 @@
 #       notes: drum.snare
 #       select: { pick: any, where: { directory: Snare } }
 #
-#   # 8. Programs - switch instrument sets live via MIDI Program Change.
+#   # 8. A default channel for the whole map.  `channel:` is a TOP-LEVEL
+#   #    section: every assignment inherits it, so you state the channel
+#   #    once instead of on every entry.  An assignment may still name its
+#   #    own `channel:` when it belongs somewhere else - that always wins,
+#   #    which is how the ACTIVE block below puts drums on 10 and a pitched
+#   #    keyboard on 1 from a single map.
+#   #
+#   #    It is also what makes a map portable: a directory of samples with
+#   #    its own map at the top is a self-contained SAMPLE SET you can copy
+#   #    between projects, and because the channel lives in one place a
+#   #    project can play that set on whichever channel it likes.
+#   channel: 10
+#   assignments:
+#     - name: Kick
+#       notes: drum.kick            # no channel - inherits 10
+#       select: { pick: any, where: { directory: Kick } }
+#
+#   # 9. Programs - switch instrument sets live via MIDI Program Change.
 #   #    `programs:` is a TOP-LEVEL section.  Each entry has a name, an
 #   #    optional `program` number (0-127, defaults to its position), and
 #   #    EXACTLY ONE of:

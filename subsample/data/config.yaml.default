@@ -281,7 +281,31 @@ player:
   #                               Edit and point midi_map at it to build your
   #                               own.
   #
+  # The map may also be an ENSEMBLE — one declaring a `maps:` block that
+  # binds several sample sets to MIDI channels so they all play at once.
+  # Mutually exclusive with midi_maps below.
+  #
   # See the README's "MIDI map" section for the full format reference.
+
+  # midi_maps:
+  #   10: "/mnt/shared/Home Kit 2026-07/midi-map.yaml"
+  #   11: "/mnt/shared/vocals/live.yaml"
+  #   12: "/mnt/shared/effects/midi-map.yaml"
+  # Sample sets to play simultaneously, keyed by MIDI channel (1–16).  A SAMPLE
+  # SET is a directory of samples with a MIDI map at the top of it: because the
+  # map resolves its `directory:` predicates relative to itself and NAMES its
+  # references rather than pointing at them, the folder is self-contained and
+  # can be shared between projects or kept on a network drive.
+  #
+  # This is the config shorthand for an ensemble file, for a project that
+  # would rather keep its channel assignments here.  Both go through the same
+  # loader, so identical bindings give identical results.  Prefer an ensemble
+  # file when you want to name channels from a `definitions:` vocabulary
+  # (`channel: my.kit`) or to reload while running — `definitions:` is a
+  # map-level feature this file cannot see, and config.yaml is not watched.
+  #
+  # Mutually exclusive with midi_map above.  Pair with `library.directory: null`
+  # to load ONLY the samples these sets name.
 
   # watch_midi_map: false
   # When true, monitor the midi_map file at runtime for changes and reload
@@ -506,9 +530,15 @@ analysis:
 #   # for drum-heavy libraries; decrease for pitched instrument libraries.
 #   # Range: 0.0-2.0. Set to 0.0 to disable.
 
-# Reference samples (the sounds each MIDI note should resemble) are declared
-# as path-based predicates in the MIDI map, not here:
-#   where: { reference: samples/reference/GM36_BassDrum1.wav }
+# Reference samples (the sounds each MIDI note should resemble) are declared in
+# the MIDI map, not here:
+#   where: { reference: GM36_BassDrum1 }
+# That NAMES one of the General MIDI fingerprints bundled with Subsample, so it
+# resolves on any machine with Subsample installed — nothing is copied into your
+# project and the map stays portable.  Set library.reference_directory below to
+# match against your own reference set instead.
+# A path still works too (where: { reference: my-refs/kick.wav }, resolved
+# relative to the map file) for your own reference material.
 # Samples can also be selected by name (where: { name: my-kick } matches the
 # filename stem) or by exact file (where: { path: kicks/my-kick.wav }).
 # If a WAV file is referenced but has no .analysis.json sidecar, Subsample
@@ -535,6 +565,24 @@ analysis:
 #   # (recorder.directory), so every new capture joins the playable library
 #   # and the library persists and grows across sessions.  Point it
 #   # somewhere else to play one collection while recording into another.
+#   #
+#   # Set to null to load NOTHING in bulk.  Every sample then comes from the
+#   # MIDI map's own `directory:`/`path:` predicates instead — which is what a
+#   # project assembled from shared sample sets wants: each set declares the
+#   # samples it needs, so there is no reason to walk a capture tree of
+#   # thousands of unrelated ones (and the sets may live outside the project
+#   # entirely, on a shared drive).  Also disables `watch` below, which then
+#   # has nothing to watch.
+#
+#   reference_directory: null
+#   # Directory of reference fingerprints that a MIDI map can NAME in a
+#   # `where: { reference: ... }` predicate.
+#   # null (default) uses the General MIDI set bundled with Subsample, so a map
+#   # can write `reference: GM46_OpenHiHat` and resolve it anywhere Subsample is
+#   # installed — with no path into any particular project.  That is what lets a
+#   # sample set live on a shared drive and still be usable by several projects.
+#   # Set it to match against your own reference set instead; its names then
+#   # replace the built-in ones.  Path-based references in a map are unaffected.
 #
 #   watch: false
 #   # When true, monitor library.directory at runtime for new audio files

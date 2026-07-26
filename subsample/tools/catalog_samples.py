@@ -595,6 +595,19 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		directory = args.directory
 	else:
 		assert cfg is not None
+
+		# library.directory may be null — a project assembled from shared sample
+		# sets loads only what its MIDI maps name, so there is no single tree to
+		# catalogue.  Say which directory to pass rather than failing on None.
+		if cfg.library.directory is None:
+			print(
+				"library.directory is null, so there is no default directory to "
+				"catalogue — pass one explicitly, e.g. "
+				"`subsample catalog path/to/samples`.",
+				file=sys.stderr,
+			)
+			return 1
+
 		directory = pathlib.Path(cfg.library.directory)
 
 	if not directory.is_dir():

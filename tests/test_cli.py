@@ -536,10 +536,16 @@ class TestInitConfig:
 		assert (tmp_path / "midi-map.yaml").is_file()
 		assert (tmp_path / ".gitignore").read_text() == "samples/variant-cache/\n"
 		assert (tmp_path / "samples" / "captures").is_dir()
-		assert (tmp_path / "samples" / "reference" / "CREDITS.md").is_file()
-		sidecars = list((tmp_path / "samples" / "reference").glob("*.analysis.json"))
-		assert len(sidecars) >= 40
-		assert "Created a Subsample project" in capsys.readouterr().out
+
+		# References are NOT scaffolded any more: the kit map names them rather
+		# than pointing at a path, so they resolve from the installed package.
+		# Copying them would make the scaffolded map depend on the copy, which
+		# is exactly what stops a map being shareable between projects.
+		assert not (tmp_path / "samples" / "reference").exists()
+
+		out = capsys.readouterr().out
+		assert "Created a Subsample project" in out
+		assert "built in" in out
 
 	def test_scaffolded_config_wires_gm_map_and_keeps_defaults (
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
@@ -659,14 +665,24 @@ class TestInitConfig:
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 	) -> None:
 		"""The product guarantee: both scaffolded maps load, and the GM kit's
-		path-based references resolve from the scaffolded sidecars alone (no
-		WAV audio is shipped — the fingerprint is the reference)."""
+		NAMED references resolve from the packaged fingerprints alone — nothing
+		was copied into the project, and no WAV audio is shipped (the
+		fingerprint is the reference).
+
+		This is what makes a map shareable: it names references the installed
+		package guarantees instead of pointing into one project's tree."""
 
 		monkeypatch.chdir(tmp_path)
 
 		subsample.cli._init_config()
 
-		gm = subsample.player.load_midi_map(tmp_path / "midi-map-gm-drums.yaml", [])
+		reference_library = subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		)
+
+		gm = subsample.player.load_midi_map(
+			tmp_path / "midi-map-gm-drums.yaml", reference_library.names(),
+		)
 		assert len(gm.note_map) > 0
 
 		template = subsample.player.load_midi_map(tmp_path / "midi-map.yaml", [])
@@ -678,6 +694,7 @@ class TestInitConfig:
 
 		subsample.player._resolve_path_references(
 			gm.note_map, [matrix], instrument_lib, with_preview=False,
+			reference_library=reference_library,
 		)
 
 		assert matrix.add_reference.call_count >= 40
@@ -1204,7 +1221,7 @@ class TestPreloadMidiMap:
 		monkeypatch.chdir(tmp_path)
 
 		with pytest.raises(SystemExit) as excinfo:
-			subsample.cli._preload_midi_map(_cfg_with_map("no/such/map.yaml"))
+			subsample.cli._preload_midi_map(_cfg_with_map("no/such/map.yaml"), [])
 
 		assert excinfo.value.code == 1
 
@@ -1221,7 +1238,7 @@ class TestPreloadMidiMap:
 		caplog.set_level(logging.ERROR, logger="subsample.cli")
 
 		with pytest.raises(SystemExit):
-			subsample.cli._preload_midi_map(_cfg_with_map("subsample/data/mine.yaml"))
+			subsample.cli._preload_midi_map(_cfg_with_map("subsample/data/mine.yaml"), [])
 
 		logged = caplog.text
 		assert "player.midi_map" in logged
@@ -1238,7 +1255,7 @@ class TestPreloadMidiMap:
 		caplog.set_level(logging.ERROR, logger="subsample.cli")
 
 		with pytest.raises(SystemExit) as excinfo:
-			subsample.cli._preload_midi_map(_cfg_with_map(str(path)))
+			subsample.cli._preload_midi_map(_cfg_with_map(str(path)), [])
 
 		assert excinfo.value.code == 1
 		assert "line 3" in caplog.text
@@ -1261,7 +1278,7 @@ class TestPreloadMidiMap:
 		caplog.set_level(logging.ERROR, logger="subsample.cli")
 
 		with pytest.raises(SystemExit):
-			subsample.cli._preload_midi_map(_cfg_with_map(str(path)))
+			subsample.cli._preload_midi_map(_cfg_with_map(str(path)), [])
 
 		assert "order" in caplog.text
 
@@ -1279,7 +1296,7 @@ class TestPreloadMidiMap:
 			      pick: velocity
 			"""))
 
-		result = subsample.cli._preload_midi_map(_cfg_with_map(str(path)))
+		result = subsample.cli._preload_midi_map(_cfg_with_map(str(path)), [])
 
 		assert result is not None
 		assert (9, 38) in result.note_map
@@ -1294,12 +1311,12 @@ class TestPreloadMidiMap:
 		monkeypatch.chdir(tmp_path)
 
 		assert subsample.cli._preload_midi_map(
-			_cfg_with_map("no/such/map.yaml", player_enabled=False),
+			_cfg_with_map("no/such/map.yaml", player_enabled=False), [],
 		) is None
 
 	def test_no_map_configured_returns_none (self) -> None:
 
-		assert subsample.cli._preload_midi_map(_cfg_with_map(None)) is None
+		assert subsample.cli._preload_midi_map(_cfg_with_map(None), []) is None
 
 
 class TestStartWatcher:
@@ -1364,3 +1381,159 @@ class TestStartWatcher:
 
 		with pytest.raises(TypeError):
 			subsample.cli._start_watcher(watcher, "sample directory")
+
+
+class TestReferenceDirectoryResolution:
+
+	"""_reference_directory picks the packaged set unless overridden.
+
+	Bundling the default is the point: a map naming `reference: GM36_BassDrum1`
+	resolves on any machine with Subsample installed, so a sample set shared
+	between projects needs no path into any one of them.
+	"""
+
+	@staticmethod
+	def _cfg (reference_directory: typing.Optional[str]) -> subsample.config.Config:
+		cfg = subsample.config.load_config(subsample.config._locate_default_config())
+		library = dataclasses.replace(cfg.library, reference_directory=reference_directory)
+
+		return dataclasses.replace(cfg, library=library)
+
+	def test_defaults_to_the_packaged_set (self) -> None:
+		resolved = subsample.cli._reference_directory(self._cfg(None))
+
+		assert resolved == subsample.config.data_dir() / "reference"
+		assert resolved.is_dir()
+
+	def test_packaged_set_actually_loads (self) -> None:
+
+		"""The guarantee behind the default — if this set ever failed to load,
+		every named reference in every shipped map would silently vanish."""
+
+		library = subsample.library.load_reference_library(
+			subsample.cli._reference_directory(self._cfg(None)),
+		)
+
+		assert len(library) >= 40
+		assert library.get("GM42_ClosedHiHat") is not None
+
+	def test_config_value_overrides (self) -> None:
+		assert subsample.cli._reference_directory(self._cfg("my/refs")) == pathlib.Path("my/refs")
+
+
+class TestLoadPlayerRules:
+
+	"""_load_player_rules — the one place that decides which surface is in use.
+
+	Startup pre-loads the rules for bank detection and the player thread reuses
+	that result, so both must resolve identically; routing in two places would
+	let them disagree about what is being played.
+	"""
+
+	_SET = """channel: {channel}
+assignments:
+  - name: Hit
+    notes: {note}
+    select:
+      where: {{ reference: BD0025 }}
+"""
+
+	@classmethod
+	def _write_set (cls, path: pathlib.Path, channel: int, note: int) -> pathlib.Path:
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_text(cls._SET.format(channel=channel, note=note), encoding="utf-8")
+		return path
+
+	@staticmethod
+	def _cfg (**player: typing.Any) -> subsample.config.Config:
+		cfg = subsample.config.load_config(subsample.config._locate_default_config())
+
+		return dataclasses.replace(
+			cfg, player=dataclasses.replace(cfg.player, enabled=True, **player),
+		)
+
+	def test_plain_map (self, tmp_path: pathlib.Path) -> None:
+		path = self._write_set(tmp_path / "kit.yaml", channel=10, note=42)
+
+		result = subsample.cli._load_player_rules(
+			self._cfg(midi_map=str(path)), ["BD0025"],
+		)
+
+		assert (9, 42) in result.note_map
+
+	def test_ensemble_file_is_detected_and_merged (self, tmp_path: pathlib.Path) -> None:
+
+		"""player.midi_map may name an ensemble; nothing in config says so, and
+		nothing should have to."""
+
+		self._write_set(tmp_path / "setA" / "midi-map.yaml", channel=10, note=42)
+		self._write_set(tmp_path / "setB" / "kit.yaml", channel=10, note=38)
+		ensemble = tmp_path / "ensemble.yaml"
+		ensemble.write_text(
+			"maps:\n  - setA/midi-map.yaml\n  - { channel: 12, map: setB/kit.yaml }\n",
+			encoding="utf-8",
+		)
+
+		result = subsample.cli._load_player_rules(
+			self._cfg(midi_map=str(ensemble)), ["BD0025"],
+		)
+
+		assert (9, 42) in result.note_map
+		assert (11, 38) in result.note_map
+
+	def test_config_midi_maps_binds_channels (self, tmp_path: pathlib.Path) -> None:
+		a = self._write_set(tmp_path / "setA" / "midi-map.yaml", channel=10, note=42)
+		b = self._write_set(tmp_path / "setB" / "kit.yaml", channel=10, note=38)
+
+		result = subsample.cli._load_player_rules(
+			self._cfg(midi_map=None, midi_maps={10: str(a), 12: str(b)}), ["BD0025"],
+		)
+
+		assert (9, 42) in result.note_map
+		assert (11, 38) in result.note_map
+
+	def test_both_surfaces_agree (self, tmp_path: pathlib.Path) -> None:
+
+		"""The property that keeps the two entry points from drifting."""
+
+		a = self._write_set(tmp_path / "setA" / "midi-map.yaml", channel=10, note=42)
+		b = self._write_set(tmp_path / "setB" / "kit.yaml", channel=10, note=38)
+		ensemble = tmp_path / "ensemble.yaml"
+		ensemble.write_text(
+			f"maps:\n  - {{ channel: 10, map: {a} }}\n  - {{ channel: 12, map: {b} }}\n",
+			encoding="utf-8",
+		)
+
+		from_file = subsample.cli._load_player_rules(
+			self._cfg(midi_map=str(ensemble)), ["BD0025"],
+		)
+		from_config = subsample.cli._load_player_rules(
+			self._cfg(midi_map=None, midi_maps={10: str(a), 12: str(b)}), ["BD0025"],
+		)
+
+		assert set(from_file.note_map) == set(from_config.note_map)
+
+	def test_preload_uses_the_real_reference_names (self, tmp_path: pathlib.Path) -> None:
+
+		"""_start_player REUSES the pre-loaded result rather than parsing again,
+		so pre-loading against an empty name list would silently hand it an empty
+		note map for any map that names its references."""
+
+		path = tmp_path / "kit.yaml"
+		path.write_text("""channel: 10
+assignments:
+  - name: Hat
+    notes: 42
+    select:
+      where: { reference: GM42_ClosedHiHat }
+""", encoding="utf-8")
+
+		names = subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		).names()
+
+		with_names = subsample.cli._preload_midi_map(self._cfg(midi_map=str(path)), names)
+		without    = subsample.cli._preload_midi_map(self._cfg(midi_map=str(path)), [])
+
+		assert with_names is not None and (9, 42) in with_names.note_map
+		assert without is not None and without.note_map == {}

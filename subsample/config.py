@@ -222,7 +222,30 @@ class PlayerConfig:
 	trigger which samples. Required when the player is enabled — without
 	it the player will not start. `subsample --init` scaffolds two maps and
 	wires in midi-map-gm-drums.yaml (a complete GM percussion kit); the
-	template it copies to midi-map.yaml documents the full format."""
+	template it copies to midi-map.yaml documents the full format.
+
+	The map may itself be an ensemble — one declaring a `maps:` block that
+	binds several sample sets to channels.  Mutually exclusive with midi_maps
+	below."""
+
+	midi_maps: typing.Optional[dict[int, str]] = None
+	"""Sample sets to play simultaneously, keyed by MIDI channel (1-16).
+
+	    midi_maps:
+	      10: "//server/samples/Home Kit 2026-07/midi-map.yaml"
+	      11: "//server/samples/vocals/live.yaml"
+
+	The shorthand for an ensemble, for a project that wants its channel
+	assignments in one place with the rest of its configuration.  It produces
+	exactly the same result as an ensemble file declaring the same `maps:`
+	block, and goes through the same loader.
+
+	Use an ensemble file instead when you want the bindings to name channels
+	from a `definitions:` vocabulary (`channel: my.kit`), or to be reloaded
+	while running — `definitions:` is a map-level feature this config cannot
+	see, and config.yaml is not watched for changes.
+
+	Mutually exclusive with midi_map; setting both is a load error."""
 
 	watch_midi_map: bool = False
 	"""When True, monitor the midi_map file at runtime for changes and
@@ -362,13 +385,19 @@ class LibraryConfig:
 	room. Only in-memory audio is removed; WAV files on disk are never deleted.
 	At 44100 Hz 16-bit mono, 100 MB ≈ 19 minutes of audio."""
 
-	directory: str = "samples/captures"
+	directory: typing.Optional[str] = "samples/captures"
 	"""Path to the directory of instrument samples to load at startup.
 	Subsample walks this directory recursively, so samples can be organised
 	into subdirectories (e.g. `kicks/`, `snares/`) however suits the user.
 	Each sample is identified by its audio file; matching `.analysis.json`
 	and `.preview.png` sidecars are regenerated on startup if missing, and
-	any orphaned sidecars are deleted automatically."""
+	any orphaned sidecars are deleted automatically.
+
+	None loads nothing in bulk: every sample then comes from the MIDI map's own
+	`directory:`/`path:` predicates instead.  That is what a project assembled
+	from shared sample sets wants — each set declares the samples it needs, so
+	walking a whole capture tree of unrelated material is pure cost.  It also
+	disables the `watch` option below, which has nothing to watch."""
 
 	watch: bool = False
 	"""When True, monitor library.directory at runtime for new audio
@@ -391,6 +420,20 @@ class LibraryConfig:
 	application.
 
 	Requires library.directory to be set and player.enabled to be True."""
+
+	reference_directory: typing.Optional[str] = None
+	"""Directory of reference fingerprints that MIDI maps can name in a
+	``where: { reference: … }`` predicate.
+
+	None (default) uses the General MIDI set bundled with the package, so a map
+	can write ``reference: GM46_OpenHiHat`` and resolve it anywhere Subsample is
+	installed — with no path into any particular project.  That is what lets a
+	sample set live on a shared drive and still be used by several projects:
+	a path-based reference would have to point into one project's tree.
+
+	Set it to use your own reference set instead.  Path-based references
+	(``reference: some/dir/kick.wav``) are unaffected and continue to resolve
+	relative to the MIDI map file."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -728,6 +771,62 @@ def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
 		raise ValueError(f"Config file {path} must contain a YAML mapping at top level")
 
 	return data
+
+
+def _parse_midi_maps (
+	raw: typing.Any,
+) -> typing.Optional[dict[int, str]]:
+
+	"""Validate ``player.midi_maps`` — a channel → sample-set-map mapping.
+
+	Returns None when absent.  Every key must be a MIDI channel as musicians
+	count them (1-16), matching the ``channels`` convention shared with the
+	sequencer, and every value a path.
+
+	Channels are checked here rather than at load so a typo'd 0 or 17 fails with
+	the config line in view, instead of producing a set that can never be
+	triggered.  A YAML bool is an int subclass, so `true:` would otherwise pass
+	as channel 1.
+	"""
+
+	if raw is None:
+		return None
+
+	if not isinstance(raw, dict):
+		raise ValueError(
+			f"player.midi_maps must be a mapping of MIDI channel to map path "
+			f"(got {type(raw).__name__})"
+		)
+
+	parsed: dict[int, str] = {}
+
+	for channel, map_path in raw.items():
+		if isinstance(channel, bool) or not isinstance(channel, int):
+			raise ValueError(
+				f"player.midi_maps key {channel!r} is not a MIDI channel — keys "
+				f"must be whole numbers 1-16"
+			)
+
+		if not (1 <= channel <= 16):
+			raise ValueError(
+				f"player.midi_maps channel must be 1-16 (got {channel})"
+			)
+
+		if not isinstance(map_path, str) or not map_path.strip():
+			raise ValueError(
+				f"player.midi_maps[{channel}] must be a non-empty path to a "
+				f"mapper file (got {map_path!r})"
+			)
+
+		parsed[channel] = map_path
+
+	if not parsed:
+		raise ValueError(
+			"player.midi_maps is empty — remove it, or list at least one "
+			"channel and the sample set map it should play"
+		)
+
+	return parsed
 
 
 def _require (section: dict[str, typing.Any], key: str, section_name: str) -> typing.Any:
@@ -1098,6 +1197,18 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 			"Check your config.yaml."
 		)
 
+	player_midi_maps = _parse_midi_maps(player_raw.get("midi_maps"))
+
+	# Both would leave "which rules are live?" ambiguous, and quietly preferring
+	# one would make the other's edits look like they had no effect.
+	if player_midi_map is not None and player_midi_maps is not None:
+		raise ValueError(
+			"player.midi_map and player.midi_maps are mutually exclusive — "
+			"midi_maps already binds every set to a channel.  To add rules of "
+			"your own alongside them, put the maps: block in an ensemble file "
+			"with its own assignments: and point midi_map at that instead."
+		)
+
 	player_bit_depth_raw = player_audio_raw.get("bit_depth")
 	player_bit_depth: typing.Optional[int] = (
 		int(player_bit_depth_raw) if player_bit_depth_raw is not None else None
@@ -1186,6 +1297,7 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		limiter_threshold_db=player_limiter_threshold_db,
 		limiter_ceiling_db=player_limiter_ceiling_db,
 		midi_map=player_midi_map,
+		midi_maps=player_midi_maps,
 		watch_midi_map=_require_bool(player_raw, "watch_midi_map", False, "player"),
 		strict_midi_map=_require_bool(player_raw, "strict_midi_map", True, "player"),
 	)
@@ -1271,10 +1383,17 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		)
 
 	library_raw  = _section(raw, "library", trackers)
+	reference_directory_raw = library_raw.get("reference_directory", None)
+	# Sentinel, not `.get(key, default)`: an explicit `directory: null` must mean
+	# "load nothing", which is different from the key being absent.
+	directory_raw = library_raw.get("directory", "samples/captures")
 	library = LibraryConfig(
 		max_memory_mb=float(library_raw.get("max_memory_mb", 100.0)),
-		directory=str(library_raw.get("directory", "samples/captures")),
+		directory=(None if directory_raw is None else str(directory_raw)),
 		watch=_require_bool(library_raw, "watch", False, "library"),
+		reference_directory=(
+			None if reference_directory_raw is None else str(reference_directory_raw)
+		),
 	)
 
 	similarity_raw  = _section(raw, "similarity", trackers)

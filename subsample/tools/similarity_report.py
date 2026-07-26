@@ -77,6 +77,16 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		print("No reference samples found — nothing to compare against.", file=sys.stderr)
 		return 1
 
+	# library.directory may be null — a project assembled from shared sample sets
+	# loads only what its MIDI maps name, so there is no single tree to rank.
+	if cfg.library.directory is None:
+		print(
+			"library.directory is null, so there are no instrument samples to "
+			"rank — set it to the directory you want to report on.",
+			file=sys.stderr,
+		)
+		return 1
+
 	max_instrument_bytes = int(cfg.library.max_memory_mb * 1024 * 1024)
 	instrument_library = subsample.library.load_instrument_library(
 		pathlib.Path(cfg.library.directory),

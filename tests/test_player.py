@@ -14,6 +14,7 @@ import pytest
 
 import subsample.analysis
 import subsample.bank
+import subsample.ensemble
 import subsample.config
 import subsample.library
 import subsample.loopfind
@@ -8346,3 +8347,559 @@ class TestCcPanicIsChannelScoped:
 		by_channel = {v.channel: v for v in player._voices}
 		assert by_channel[0].releasing is True
 		assert by_channel[9].releasing is False
+
+
+class TestMapLevelChannelDefault:
+
+	"""A top-level ``channel:`` every assignment inherits.
+
+	This is what makes a self-contained sample set portable: it states its
+	channel once, so a project can bind the whole set elsewhere without editing
+	it.  Repeating the channel on every entry — the only option before — hard
+	wired a set to one channel.
+	"""
+
+	@staticmethod
+	def _write_map (tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		path = tmp_path / "set-map.yaml"
+		path.write_text(content, encoding="utf-8")
+		return path
+
+	_ASSIGNMENT = """
+    notes: 48
+    select:
+      where: { reference: BD0025 }
+"""
+
+	def test_assignment_inherits_the_map_default (self, tmp_path: pathlib.Path) -> None:
+
+		path = self._write_map(tmp_path, "channel: 10\nassignments:\n  - name: Kit" + self._ASSIGNMENT)
+
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		assert (9, 48) in note_map        # user-facing 10 → mido 9
+
+	def test_explicit_assignment_channel_wins (self, tmp_path: pathlib.Path) -> None:
+
+		"""One entry sitting apart from the rest is a deliberate statement, so it
+		outranks the map default — that is how a map spans several channels."""
+
+		path = self._write_map(tmp_path, "channel: 10\nassignments:\n  - name: Kit\n    channel: 3" + self._ASSIGNMENT)
+
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		assert (2, 48) in note_map
+		assert (9, 48) not in note_map
+
+	def test_no_channel_anywhere_names_both_remedies (self, tmp_path: pathlib.Path) -> None:
+
+		"""The error has to say more than "missing channel" now that there are
+		two places to put one."""
+
+		path = self._write_map(tmp_path, "assignments:\n  - name: Kit" + self._ASSIGNMENT)
+
+		with pytest.raises(ValueError, match="top-level"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_definitions_name_resolves_at_map_level (self, tmp_path: pathlib.Path) -> None:
+
+		"""The map default goes through the same definitions namespace as the
+		per-assignment value, so a project vocabulary works in both places."""
+
+		(tmp_path / "project.yaml").write_text("channels:\n  kit: 7\n", encoding="utf-8")
+		path = self._write_map(
+			tmp_path,
+			"definitions: { my: project.yaml }\nchannel: my.kit\nassignments:\n  - name: Kit" + self._ASSIGNMENT,
+		)
+
+		note_map = subsample.player.load_midi_map(path, ["BD0025"]).note_map
+
+		assert (6, 48) in note_map
+
+	@pytest.mark.parametrize("value", [0, 17, -1])
+	def test_out_of_range_map_default_is_rejected (
+		self, tmp_path: pathlib.Path, value: int,
+	) -> None:
+
+		"""Same 1-16 gate as the per-assignment path: mido only ever delivers
+		0-15, so anything else is an assignment that can never fire."""
+
+		path = self._write_map(tmp_path, f"channel: {value}\nassignments:\n  - name: Kit" + self._ASSIGNMENT)
+
+		with pytest.raises(ValueError, match="1-16"):
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+
+class TestChannelOverride:
+
+	"""``channel_override`` binds a whole sample set to a channel at load time.
+
+	The mechanism the ensemble feature is built on: rather than remapping a
+	parsed note map afterwards, the binding is applied while parsing, so it is
+	simply a higher-priority default.
+	"""
+
+	@staticmethod
+	def _write_map (tmp_path: pathlib.Path, content: str) -> pathlib.Path:
+		path = tmp_path / "set-map.yaml"
+		path.write_text(content, encoding="utf-8")
+		return path
+
+	_ASSIGNMENT = """
+    notes: 48
+    select:
+      where: { reference: BD0025 }
+"""
+
+	def test_override_replaces_the_map_default (self, tmp_path: pathlib.Path) -> None:
+
+		path = self._write_map(tmp_path, "channel: 10\nassignments:\n  - name: Kit" + self._ASSIGNMENT)
+
+		note_map = subsample.player.load_midi_map(
+			path, ["BD0025"], channel_override=12,
+		).note_map
+
+		assert (11, 48) in note_map
+		assert (9, 48) not in note_map
+
+	def test_override_supplies_a_channel_when_the_map_has_none (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+
+		"""A set written with no channel at all is bindable anywhere — the point
+		of the whole exercise."""
+
+		path = self._write_map(tmp_path, "assignments:\n  - name: Kit" + self._ASSIGNMENT)
+
+		note_map = subsample.player.load_midi_map(
+			path, ["BD0025"], channel_override=5,
+		).note_map
+
+		assert (4, 48) in note_map
+
+	def test_explicit_assignment_channel_survives_the_override (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""Documented precedence — but a binding that silently does nothing is
+		baffling, so it must say so, once, naming the count."""
+
+		caplog.set_level(logging.WARNING, logger="subsample.player")
+		path = self._write_map(
+			tmp_path, "channel: 10\nassignments:\n  - name: Kit\n    channel: 3" + self._ASSIGNMENT,
+		)
+
+		note_map = subsample.player.load_midi_map(
+			path, ["BD0025"], channel_override=12,
+		).note_map
+
+		assert (2, 48) in note_map
+		assert "bound to channel 12" in caplog.text
+		assert "1 assignment(s)" in caplog.text
+
+	def test_no_warning_when_nothing_is_pinned (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A cleanly-written set binds silently — the warning must not become
+		noise that trains people to ignore it."""
+
+		caplog.set_level(logging.WARNING, logger="subsample.player")
+		path = self._write_map(tmp_path, "channel: 10\nassignments:\n  - name: Kit" + self._ASSIGNMENT)
+
+		subsample.player.load_midi_map(path, ["BD0025"], channel_override=12)
+
+		assert "bound to channel" not in caplog.text
+
+	@pytest.mark.parametrize("value", [0, 17])
+	def test_out_of_range_override_is_rejected (
+		self, tmp_path: pathlib.Path, value: int,
+	) -> None:
+
+		path = self._write_map(tmp_path, "channel: 10\nassignments:\n  - name: Kit" + self._ASSIGNMENT)
+
+		with pytest.raises(ValueError, match="channel_override"):
+			subsample.player.load_midi_map(path, ["BD0025"], channel_override=value)
+
+
+class TestShippedGmMapUsesTheDefault:
+
+	"""The shipped GM kit is the reference example of the feature."""
+
+	def test_gm_map_has_no_per_assignment_channels (self) -> None:
+
+		"""47 repetitions replaced by one line.  If a future edit reintroduces
+		them the map stops being bindable, silently — hence the tripwire."""
+
+		text = (subsample.config.data_dir() / "midi-map-gm-drums.yaml").read_text(encoding="utf-8")
+
+		assert "\nchannel: 10\n" in text
+		assert "    channel:" not in text
+
+	def test_gm_map_rebinds_wholesale (self) -> None:
+
+		path  = subsample.config.data_dir() / "midi-map-gm-drums.yaml"
+		# The map names its references, so it needs the packaged names to resolve.
+		names = subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		).names()
+
+		default = subsample.player.load_midi_map(path, names)
+		bound   = subsample.player.load_midi_map(path, names, channel_override=12)
+
+		assert {c for c, _ in default.note_map} == {9}
+		assert {c for c, _ in bound.note_map} == {11}
+		assert len(bound.note_map) == len(default.note_map)
+
+
+class TestNamedReferences:
+
+	"""``reference: GM46_OpenHiHat`` — a reference named, not pointed at.
+
+	This is what makes a sample set shareable.  A path-based reference has to
+	reach into one particular project's tree, so a set living on a shared drive
+	(or copied between projects) could not use references at all.  A named one
+	resolves from the reference library wherever Subsample is installed.
+	"""
+
+	@staticmethod
+	def _reference_library () -> subsample.library.ReferenceLibrary:
+		return subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		)
+
+	@staticmethod
+	def _write_map (tmp_path: pathlib.Path, reference: str) -> pathlib.Path:
+		path = tmp_path / "set-map.yaml"
+		path.write_text(
+			"channel: 10\n"
+			"assignments:\n"
+			"  - name: Hat\n"
+			"    notes: 42\n"
+			"    select:\n"
+			f"      where: {{ reference: {reference} }}\n",
+			encoding="utf-8",
+		)
+		return path
+
+	def test_named_reference_resolves (self, tmp_path: pathlib.Path) -> None:
+
+		"""Previously this warned and dropped the assignment, because the app
+		built an EMPTY reference library and no name could ever validate."""
+
+		path = self._write_map(tmp_path, "GM42_ClosedHiHat")
+
+		result = subsample.player.load_midi_map(path, self._reference_library().names())
+
+		assert (9, 42) in result.note_map
+
+	def test_named_reference_is_added_to_the_matrix (self, tmp_path: pathlib.Path) -> None:
+
+		reference_library = self._reference_library()
+		path = self._write_map(tmp_path, "GM42_ClosedHiHat")
+		result = subsample.player.load_midi_map(path, reference_library.names())
+
+		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		instrument_lib.samples.return_value = []
+
+		subsample.player._resolve_path_references(
+			result.note_map, [matrix], instrument_lib, with_preview=False,
+			reference_library=reference_library,
+		)
+
+		assert matrix.add_reference.call_count == 1
+		assert matrix.add_reference.call_args[0][0].name == "GM42_ClosedHiHat"
+
+	def test_only_named_references_are_added (self, tmp_path: pathlib.Path) -> None:
+
+		"""Not the whole library.  add_reference scores its argument against
+		every instrument, so adding all 47 would make a map that names one pay
+		for the other 46."""
+
+		reference_library = self._reference_library()
+		assert len(reference_library) > 40           # the cost being avoided
+
+		path = self._write_map(tmp_path, "GM42_ClosedHiHat")
+		result = subsample.player.load_midi_map(path, reference_library.names())
+
+		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		instrument_lib.samples.return_value = []
+
+		subsample.player._resolve_path_references(
+			result.note_map, [matrix], instrument_lib, with_preview=False,
+			reference_library=reference_library,
+		)
+
+		assert matrix.add_reference.call_count == 1
+
+	def test_lookup_is_case_insensitive (self, tmp_path: pathlib.Path) -> None:
+
+		reference_library = self._reference_library()
+		path = self._write_map(tmp_path, "gm42_closedhihat")
+		result = subsample.player.load_midi_map(path, reference_library.names())
+
+		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		instrument_lib.samples.return_value = []
+
+		subsample.player._resolve_path_references(
+			result.note_map, [matrix], instrument_lib, with_preview=False,
+			reference_library=reference_library,
+		)
+
+		assert matrix.add_reference.call_count == 1
+
+	def test_unknown_name_still_warns_and_skips (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A typo must not silently map a note to the wrong pool."""
+
+		caplog.set_level(logging.WARNING, logger="subsample.player")
+		path = self._write_map(tmp_path, "GM42_ClosedHiHatt")
+
+		result = subsample.player.load_midi_map(path, self._reference_library().names())
+
+		assert result.note_map == {}
+		assert "not in reference library" in caplog.text
+
+	def test_path_form_still_works (self, tmp_path: pathlib.Path) -> None:
+
+		"""Naming is additive — a project pointing at its own reference file is
+		unaffected, and needs no entry in the reference library."""
+
+		path = self._write_map(tmp_path, "./my-own-kick.wav")
+
+		result = subsample.player.load_midi_map(path, [])
+
+		assert (9, 42) in result.note_map
+
+	def test_no_reference_library_skips_named_lookup (self, tmp_path: pathlib.Path) -> None:
+
+		"""_resolve_path_references must stay callable without one — the name was
+		already validated at parse time, so there is nothing to re-report."""
+
+		reference_library = self._reference_library()
+		path = self._write_map(tmp_path, "GM42_ClosedHiHat")
+		result = subsample.player.load_midi_map(path, reference_library.names())
+
+		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		instrument_lib.samples.return_value = []
+
+		subsample.player._resolve_path_references(
+			result.note_map, [matrix], instrument_lib, with_preview=False,
+		)
+
+		assert matrix.add_reference.call_count == 0
+
+
+class TestEnsemble:
+
+	"""``maps:`` — several sample sets live at once, each on its own channel.
+
+	Contrast with ``programs:``, which also loads several maps but as a SWITCH:
+	one active at a time via Program Change.  An ensemble has every set
+	playable simultaneously, separated by channel.
+	"""
+
+	_SET = """channel: {channel}
+assignments:
+  - name: {name}
+    notes: {note}
+    select:
+      where: {{ reference: BD0025 }}
+"""
+
+	@classmethod
+	def _write_set (
+		cls, directory: pathlib.Path, filename: str, channel: int, note: int,
+		name: str = "Hit",
+	) -> pathlib.Path:
+		directory.mkdir(parents=True, exist_ok=True)
+		path = directory / filename
+		path.write_text(cls._SET.format(channel=channel, note=note, name=name), encoding="utf-8")
+		return path
+
+	@staticmethod
+	def _write_ensemble (tmp_path: pathlib.Path, body: str) -> pathlib.Path:
+		path = tmp_path / "ensemble.yaml"
+		path.write_text(body, encoding="utf-8")
+		return path
+
+	def test_two_sets_merge_onto_their_own_channels (self, tmp_path: pathlib.Path) -> None:
+
+		self._write_set(tmp_path / "setA", "midi-map.yaml", channel=10, note=42)
+		self._write_set(tmp_path / "setB", "kit.yaml", channel=10, note=38)
+		ensemble = self._write_ensemble(tmp_path, """
+maps:
+  - setA/midi-map.yaml
+  - { channel: 12, map: setB/kit.yaml }
+""")
+
+		result = subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+		assert (9, 42) in result.note_map       # setA keeps its own channel 10
+		assert (11, 38) in result.note_map      # setB bound to 12, overriding its 10
+		assert (9, 38) not in result.note_map
+
+	def test_any_filename_is_a_valid_set_map (self, tmp_path: pathlib.Path) -> None:
+
+		"""`midi-map.yaml` is a convention, not a requirement — a set may expose
+		several mappings over the same samples and you pick one by naming it."""
+
+		self._write_set(tmp_path / "set", "sparse.yaml", channel=1, note=60)
+		ensemble = self._write_ensemble(tmp_path, "maps:\n  - set/sparse.yaml\n")
+
+		result = subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+		assert (0, 60) in result.note_map
+
+	def test_ensemble_may_carry_its_own_assignments (self, tmp_path: pathlib.Path) -> None:
+
+		"""An ensemble is an ordinary map that happens to include others, so it
+		can add a couple of entries of its own without a second file."""
+
+		self._write_set(tmp_path / "setA", "midi-map.yaml", channel=10, note=42)
+		ensemble = self._write_ensemble(tmp_path, """
+channel: 5
+maps:
+  - setA/midi-map.yaml
+assignments:
+  - name: Extra
+    notes: 64
+    select:
+      where: { reference: BD0025 }
+""")
+
+		result = subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+		assert (9, 42) in result.note_map      # from the set
+		assert (4, 64) in result.note_map      # the ensemble's own
+
+	def test_channel_note_collision_names_both_maps (self, tmp_path: pathlib.Path) -> None:
+
+		"""Two sets on one (channel, note) must be an ERROR, not a merge: the
+		value is a list of velocity layers, so appending would fabricate a
+		velocity-switched note out of two unrelated sets — audible, and wrong."""
+
+		self._write_set(tmp_path / "setA", "midi-map.yaml", channel=10, note=42)
+		self._write_set(tmp_path / "setB", "kit.yaml", channel=10, note=42)
+		ensemble = self._write_ensemble(tmp_path, """
+maps:
+  - setA/midi-map.yaml
+  - setB/kit.yaml
+""")
+
+		with pytest.raises(ValueError, match="claimed by both"):
+			subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+	def test_nested_ensemble_is_rejected (self, tmp_path: pathlib.Path) -> None:
+
+		"""One level only, mirroring the existing rule for `map:` presets.  No
+		recursion means no cycle detection."""
+
+		self._write_set(tmp_path / "setA", "midi-map.yaml", channel=10, note=42)
+		inner = tmp_path / "inner.yaml"
+		inner.write_text("maps:\n  - setA/midi-map.yaml\n", encoding="utf-8")
+		ensemble = self._write_ensemble(tmp_path, "maps:\n  - inner.yaml\n")
+
+		with pytest.raises(ValueError, match="flat, one level only"):
+			subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+	def test_programs_inside_an_included_set_is_rejected (self, tmp_path: pathlib.Path) -> None:
+
+		"""Per-channel program switching is not expressible — the bank machinery
+		holds one active bank for the whole player.  Rejecting is honest;
+		ignoring would leave a set that appears to switch and never does."""
+
+		set_dir = tmp_path / "setA"
+		set_dir.mkdir()
+		(set_dir / "midi-map.yaml").write_text("""channel: 10
+programs:
+  - name: A
+    directory: pool
+assignments:
+  - name: Hit
+    notes: 42
+    select:
+      where: { reference: BD0025 }
+""", encoding="utf-8")
+		ensemble = self._write_ensemble(tmp_path, "maps:\n  - setA/midi-map.yaml\n")
+
+		with pytest.raises(ValueError, match="programs:"):
+			subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+	def test_include_paths_resolve_against_the_ensemble (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""Same rule as every other path in a map, and what lets an ensemble
+		and the sets it names travel together.  Run from elsewhere to prove it
+		is not accidentally resolving against the working directory."""
+
+		self._write_set(tmp_path / "sets" / "setA", "midi-map.yaml", channel=10, note=42)
+		ensemble = tmp_path / "sets" / "ensemble.yaml"
+		ensemble.write_text("maps:\n  - setA/midi-map.yaml\n", encoding="utf-8")
+
+		monkeypatch.chdir(tmp_path.parent)
+
+		result = subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+		assert (9, 42) in result.note_map
+
+	def test_missing_included_map_is_reported (self, tmp_path: pathlib.Path) -> None:
+
+		ensemble = self._write_ensemble(tmp_path, "maps:\n  - nope/missing.yaml\n")
+
+		with pytest.raises(FileNotFoundError, match="missing.yaml"):
+			subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+	def test_config_form_matches_the_file_form (self, tmp_path: pathlib.Path) -> None:
+
+		"""player.midi_maps: and an ensemble file declaring the same bindings
+		must produce identical rules — they share one loader precisely so the two
+		surfaces cannot drift."""
+
+		a = self._write_set(tmp_path / "setA", "midi-map.yaml", channel=10, note=42)
+		b = self._write_set(tmp_path / "setB", "kit.yaml", channel=10, note=38)
+		ensemble = self._write_ensemble(tmp_path, """
+maps:
+  - { channel: 10, map: setA/midi-map.yaml }
+  - { channel: 12, map: setB/kit.yaml }
+""")
+
+		from_file = subsample.player.load_ensemble(ensemble, ["BD0025"])
+		from_config = subsample.player.load_ensemble(
+			None, ["BD0025"],
+			includes=[
+				subsample.ensemble.MapInclude(map_path=str(a), channel=10),
+				subsample.ensemble.MapInclude(map_path=str(b), channel=12),
+			],
+		)
+
+		assert set(from_file.note_map) == set(from_config.note_map)
+
+	def test_is_ensemble_detects_the_maps_block (self, tmp_path: pathlib.Path) -> None:
+
+		plain = self._write_set(tmp_path, "plain.yaml", channel=10, note=42)
+		ensemble = self._write_ensemble(tmp_path, "maps:\n  - plain.yaml\n")
+
+		assert subsample.player.is_ensemble(ensemble) is True
+		assert subsample.player.is_ensemble(plain) is False
+
+	def test_is_ensemble_is_a_routing_question_not_validation (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+
+		"""A missing or malformed file answers False and leaves the real loader
+		to report it properly — otherwise routing would raise before the code
+		that produces a good error message ever ran."""
+
+		broken = tmp_path / "broken.yaml"
+		broken.write_text("maps:\n  - [\n", encoding="utf-8")
+
+		assert subsample.player.is_ensemble(tmp_path / "absent.yaml") is False
+		assert subsample.player.is_ensemble(broken) is False

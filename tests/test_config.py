@@ -1673,3 +1673,175 @@ class TestMinPeakDb:
 
 		with pytest.raises(ValueError, match="min_peak_db"):
 			_load_with(tmp_path, detection={"min_peak_db": value})
+
+
+class TestReferenceDirectory:
+
+	"""library.reference_directory — where named `reference:` predicates resolve.
+
+	Defaulting to the packaged set is what lets a MIDI map name a reference
+	instead of pointing at one, and that is what makes a sample set shareable:
+	a path-based reference has to reach into one project's tree, so a set on a
+	shared drive could not use references at all.
+	"""
+
+	def test_defaults_to_none (self, tmp_path: pathlib.Path) -> None:
+
+		cfg = _load_with(tmp_path)
+
+		assert cfg.library.reference_directory is None
+
+	def test_custom_directory_is_kept (self, tmp_path: pathlib.Path) -> None:
+
+		cfg = _load_with(tmp_path)
+		cfg_file = tmp_path / "config.yaml"
+		data = yaml.safe_load(cfg_file.read_text())
+		data["library"] = {"reference_directory": "my/refs"}
+		cfg_file.write_text(yaml.safe_dump(data))
+
+		cfg = subsample.config.load_config(cfg_file)
+
+		assert cfg.library.reference_directory == "my/refs"
+
+
+class TestNullableLibraryDirectory:
+
+	"""library.directory: null — load nothing in bulk.
+
+	A project assembled from shared sample sets wants exactly the samples its
+	MIDI maps name.  Walking a capture tree of thousands of unrelated samples is
+	pure cost, and the tree may not even contain the sets (they can live on a
+	shared drive, outside the project entirely).
+	"""
+
+	def test_defaults_to_captures (self, tmp_path: pathlib.Path) -> None:
+
+		"""The simple case is untouched — an absent key still means the capture
+		directory, so a user who never thinks about this sees no change."""
+
+		cfg = _load_with(tmp_path)
+
+		assert cfg.library.directory == "samples/captures"
+
+	def test_explicit_null_is_kept (self, tmp_path: pathlib.Path) -> None:
+
+		"""`directory: null` must survive as None.  Reading it through
+		`.get(key, default)` would turn an explicit null back into the default
+		and silently bulk-load anyway."""
+
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml.safe_dump({
+			"recorder": {
+				"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1, "buffer_frames": 512},
+				"buffer": {"max_seconds": 60},
+				"directory": "samples/captures",
+			},
+			"detection": {
+				"threshold_db": 12.0, "hold_seconds": 0.5,
+				"warmup_seconds": 1.0, "floor_adaptation": 0.1,
+			},
+			"library": {"directory": None},
+		}))
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.library.directory is None
+
+	def test_custom_directory_still_works (self, tmp_path: pathlib.Path) -> None:
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml.safe_dump({
+			"recorder": {
+				"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1, "buffer_frames": 512},
+				"buffer": {"max_seconds": 60},
+				"directory": "samples/captures",
+			},
+			"detection": {
+				"threshold_db": 12.0, "hold_seconds": 0.5,
+				"warmup_seconds": 1.0, "floor_adaptation": 0.1,
+			},
+			"library": {"directory": "/shared/sets"},
+		}))
+
+		cfg = subsample.config.load_config(config_file)
+
+		assert cfg.library.directory == "/shared/sets"
+
+
+class TestMidiMaps:
+
+	"""player.midi_maps — sample sets bound to channels in config.yaml.
+
+	The shorthand for an ensemble, for a project that keeps its channel
+	assignments beside the rest of its configuration.
+	"""
+
+	@staticmethod
+	def _load (tmp_path: pathlib.Path, player: dict) -> subsample.config.Config:
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(yaml.safe_dump({
+			"recorder": {
+				"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1, "buffer_frames": 512},
+				"buffer": {"max_seconds": 60},
+				"directory": "samples/captures",
+			},
+			"detection": {
+				"threshold_db": 12.0, "hold_seconds": 0.5,
+				"warmup_seconds": 1.0, "floor_adaptation": 0.1,
+			},
+			"player": player,
+		}))
+		return subsample.config.load_config(config_file)
+
+	def test_defaults_to_none (self, tmp_path: pathlib.Path) -> None:
+		assert _load_with(tmp_path).player.midi_maps is None
+
+	def test_channel_to_path_mapping (self, tmp_path: pathlib.Path) -> None:
+		cfg = self._load(tmp_path, {"midi_maps": {10: "a/midi-map.yaml", 11: "b/kit.yaml"}})
+
+		assert cfg.player.midi_maps == {10: "a/midi-map.yaml", 11: "b/kit.yaml"}
+
+	def test_mutually_exclusive_with_midi_map (self, tmp_path: pathlib.Path) -> None:
+
+		"""Both would leave "which rules are live?" ambiguous, and quietly
+		preferring one would make the other's edits look ineffective."""
+
+		with pytest.raises(ValueError, match="mutually exclusive"):
+			self._load(tmp_path, {
+				"midi_map": "one.yaml",
+				"midi_maps": {10: "a/midi-map.yaml"},
+			})
+
+	@pytest.mark.parametrize("channel", [0, 17, -1])
+	def test_out_of_range_channel_rejected (
+		self, tmp_path: pathlib.Path, channel: int,
+	) -> None:
+
+		"""Caught here, with the config line in view, rather than producing a set
+		that can never be triggered."""
+
+		with pytest.raises(ValueError, match="1-16"):
+			self._load(tmp_path, {"midi_maps": {channel: "a/midi-map.yaml"}})
+
+	def test_boolean_key_rejected (self, tmp_path: pathlib.Path) -> None:
+
+		"""A YAML bool is an int subclass, so `true:` would otherwise pass as
+		channel 1."""
+
+		with pytest.raises(ValueError, match="not a MIDI channel"):
+			self._load(tmp_path, {"midi_maps": {True: "a/midi-map.yaml"}})
+
+	def test_non_string_path_rejected (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="non-empty path"):
+			self._load(tmp_path, {"midi_maps": {10: 42}})
+
+	def test_empty_mapping_rejected (self, tmp_path: pathlib.Path) -> None:
+
+		"""An empty block reads as "sets are configured" while configuring none —
+		the player would start silent with nothing to explain it."""
+
+		with pytest.raises(ValueError, match="is empty"):
+			self._load(tmp_path, {"midi_maps": {}})
+
+	def test_non_mapping_rejected (self, tmp_path: pathlib.Path) -> None:
+		with pytest.raises(ValueError, match="must be a mapping"):
+			self._load(tmp_path, {"midi_maps": ["a/midi-map.yaml"]})

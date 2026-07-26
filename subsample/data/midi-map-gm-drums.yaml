@@ -56,6 +56,11 @@
 #
 # ===================================================================
 
+# Every assignment below plays on channel 10 (the GM percussion channel).
+# Declared once here rather than repeated on each entry; an assignment may
+# still name its own `channel:` to sit somewhere else.
+channel: 10
+
 assignments:
 
   # =================================================================
@@ -63,11 +68,10 @@ assignments:
   # =================================================================
 
   - name: Kick 2 (Acoustic Bass Drum)
-    channel: 10
     notes: drum.kick_2
     select:
       where:
-        reference: samples/reference/GM35_AcousticBassDrum.wav
+        reference: GM35_AcousticBassDrum
       order: [{ by: similarity, dir: desc }]
       # Uncomment to play a different sample on every hit, drawn at random
       # from the top N similarity matches.  Adds natural variation so
@@ -82,11 +86,10 @@ assignments:
       - compress: { ratio: 6, attack: 15 }
 
   - name: Kick 1 (Bass Drum 1)
-    channel: 10
     notes: drum.kick_1
     select:
       where:
-        reference: samples/reference/GM36_BassDrum1.wav
+        reference: GM36_BassDrum1
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 30 }
@@ -99,11 +102,10 @@ assignments:
   # =================================================================
 
   - name: Side Stick
-    channel: 10
     notes: drum.side_stick
     select:
       where:
-        reference: samples/reference/GM37_SideStick.wav
+        reference: GM37_SideStick
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -112,11 +114,10 @@ assignments:
     pan: [55, 45]
 
   - name: Snare 1 (Acoustic Snare)
-    channel: 10
     notes: drum.snare_1
     select:
       where:
-        reference: samples/reference/GM38_AcousticSnare.wav
+        reference: GM38_AcousticSnare
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 80 }
@@ -124,22 +125,20 @@ assignments:
     pan: [55, 45]
 
   - name: Hand Clap
-    channel: 10
     notes: drum.hand_clap
     select:
       where:
-        reference: samples/reference/GM39_HandClap.wav
+        reference: GM39_HandClap
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
       - compress: { ratio: 4, attack: 3 }
 
   - name: Snare 2 (Electric Snare)
-    channel: 10
     notes: drum.snare_2
     select:
       where:
-        reference: samples/reference/GM40_ElectricSnare.wav
+        reference: GM40_ElectricSnare
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
@@ -152,11 +151,10 @@ assignments:
   # =================================================================
 
   - name: Low Floor Tom
-    channel: 10
     notes: drum.low_floor_tom
     select:
       where:
-        reference: samples/reference/GM41_LowFloorTom.wav
+        reference: GM41_LowFloorTom
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 50 }
@@ -165,11 +163,10 @@ assignments:
     pan: [25, 75]
 
   - name: High Floor Tom
-    channel: 10
     notes: drum.high_floor_tom
     select:
       where:
-        reference: samples/reference/GM43_HighFloorTom.wav
+        reference: GM43_HighFloorTom
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 60 }
@@ -178,11 +175,10 @@ assignments:
     pan: [30, 70]
 
   - name: Low Tom
-    channel: 10
     notes: drum.low_tom
     select:
       where:
-        reference: samples/reference/GM45_LowTom.wav
+        reference: GM45_LowTom
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 70 }
@@ -191,11 +187,10 @@ assignments:
     pan: [35, 65]
 
   - name: Low Mid Tom
-    channel: 10
     notes: drum.low_mid_tom
     select:
       where:
-        reference: samples/reference/GM47_LowMidTom.wav
+        reference: GM47_LowMidTom
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 80 }
@@ -204,11 +199,10 @@ assignments:
     pan: [40, 60]
 
   - name: Hi Mid Tom
-    channel: 10
     notes: drum.high_mid_tom
     select:
       where:
-        reference: samples/reference/GM48_HiMidTom.wav
+        reference: GM48_HiMidTom
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 90 }
@@ -217,11 +211,10 @@ assignments:
     pan: [60, 40]
 
   - name: High Tom
-    channel: 10
     notes: drum.high_tom
     select:
       where:
-        reference: samples/reference/GM50_HighTom.wav
+        reference: GM50_HighTom
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
@@ -235,12 +228,11 @@ assignments:
   # =================================================================
 
   - name: Closed Hi-Hat
-    channel: 10
     notes: drum.hi_hat_closed
     silenced_by: [self, drum.hi_hat_open, drum.hi_hat_pedal]
     select:
       where:
-        reference: samples/reference/GM42_ClosedHiHat.wav
+        reference: GM42_ClosedHiHat
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
@@ -249,12 +241,11 @@ assignments:
     pan: [80, 20]
 
   - name: Pedal Hi-Hat
-    channel: 10
     notes: drum.hi_hat_pedal
     silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_open]
     select:
       where:
-        reference: samples/reference/GM44_PedalHiHat.wav
+        reference: GM44_PedalHiHat
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
@@ -263,12 +254,11 @@ assignments:
     pan: [80, 20]
 
   - name: Open Hi-Hat
-    channel: 10
     notes: drum.hi_hat_open
     silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_pedal]
     select:
       where:
-        reference: samples/reference/GM46_OpenHiHat.wav
+        reference: GM46_OpenHiHat
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
@@ -282,12 +272,11 @@ assignments:
   # =================================================================
 
   - name: Crash Cymbal 1
-    channel: 10
     notes: drum.crash_1
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM49_CrashCymbal1.wav
+        reference: GM49_CrashCymbal1
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -295,12 +284,11 @@ assignments:
     pan: [70, 30]
 
   - name: Splash Cymbal
-    channel: 10
     notes: drum.splash_cymbal
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM55_SplashCymbal.wav
+        reference: GM55_SplashCymbal
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -308,12 +296,11 @@ assignments:
     pan: [65, 35]
 
   - name: Crash Cymbal 2
-    channel: 10
     notes: drum.crash_2
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM57_CrashCymbal2.wav
+        reference: GM57_CrashCymbal2
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -321,12 +308,11 @@ assignments:
     pan: [30, 70]
 
   - name: Chinese Cymbal
-    channel: 10
     notes: drum.chinese_cymbal
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM52_ChineseCymbal.wav
+        reference: GM52_ChineseCymbal
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -339,12 +325,11 @@ assignments:
   # =================================================================
 
   - name: Ride Cymbal 1
-    channel: 10
     notes: drum.ride_1
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM51_RideCymbal1.wav
+        reference: GM51_RideCymbal1
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -352,12 +337,11 @@ assignments:
     pan: [25, 75]
 
   - name: Ride Bell
-    channel: 10
     notes: drum.ride_bell
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM53_RideBell.wav
+        reference: GM53_RideBell
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -365,12 +349,11 @@ assignments:
     pan: [25, 75]
 
   - name: Ride Cymbal 2
-    channel: 10
     notes: drum.ride_2
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM59_RideCymbal2.wav
+        reference: GM59_RideCymbal2
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -383,11 +366,10 @@ assignments:
   # =================================================================
 
   - name: Tambourine
-    channel: 10
     notes: drum.tambourine
     select:
       where:
-        reference: samples/reference/GM54_Tambourine.wav
+        reference: GM54_Tambourine
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 400 }
@@ -395,11 +377,10 @@ assignments:
     pan: [70, 30]
 
   - name: Cowbell
-    channel: 10
     notes: drum.cowbell
     select:
       where:
-        reference: samples/reference/GM56_Cowbell.wav
+        reference: GM56_Cowbell
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -409,12 +390,11 @@ assignments:
     pan: [40, 60]
 
   - name: Vibraslap
-    channel: 10
     notes: drum.vibraslap
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM58_Vibraslap.wav
+        reference: GM58_Vibraslap
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
@@ -427,11 +407,10 @@ assignments:
   # =================================================================
 
   - name: High Bongo
-    channel: 10
     notes: drum.high_bongo
     select:
       where:
-        reference: samples/reference/GM60_HiBongo.wav
+        reference: GM60_HiBongo
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
@@ -441,11 +420,10 @@ assignments:
     pan: [55, 45]
 
   - name: Low Bongo
-    channel: 10
     notes: drum.low_bongo
     select:
       where:
-        reference: samples/reference/GM61_LowBongo.wav
+        reference: GM61_LowBongo
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
@@ -460,11 +438,10 @@ assignments:
   # =================================================================
 
   - name: Mute Hi Conga
-    channel: 10
     notes: drum.mute_high_conga
     select:
       where:
-        reference: samples/reference/GM62_MuteHiConga.wav
+        reference: GM62_MuteHiConga
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
@@ -474,11 +451,10 @@ assignments:
     pan: [55, 45]
 
   - name: Open Hi Conga
-    channel: 10
     notes: drum.open_high_conga
     select:
       where:
-        reference: samples/reference/GM63_OpenHiConga.wav
+        reference: GM63_OpenHiConga
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
@@ -488,11 +464,10 @@ assignments:
     pan: [55, 45]
 
   - name: Low Conga
-    channel: 10
     notes: drum.low_conga
     select:
       where:
-        reference: samples/reference/GM64_LowConga.wav
+        reference: GM64_LowConga
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 80 }
@@ -507,11 +482,10 @@ assignments:
   # =================================================================
 
   - name: High Timbale
-    channel: 10
     notes: drum.high_timbale
     select:
       where:
-        reference: samples/reference/GM65_HighTimbale.wav
+        reference: GM65_HighTimbale
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
@@ -521,11 +495,10 @@ assignments:
     pan: [60, 40]
 
   - name: Low Timbale
-    channel: 10
     notes: drum.low_timbale
     select:
       where:
-        reference: samples/reference/GM66_LowTimbale.wav
+        reference: GM66_LowTimbale
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 100 }
@@ -540,11 +513,10 @@ assignments:
   # =================================================================
 
   - name: High Agogo
-    channel: 10
     notes: drum.high_agogo
     select:
       where:
-        reference: samples/reference/GM67_HighAgogo.wav
+        reference: GM67_HighAgogo
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
@@ -554,11 +526,10 @@ assignments:
     pan: [60, 40]
 
   - name: Low Agogo
-    channel: 10
     notes: drum.low_agogo
     select:
       where:
-        reference: samples/reference/GM68_LowAgogo.wav
+        reference: GM68_LowAgogo
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -573,11 +544,10 @@ assignments:
   # =================================================================
 
   - name: Cabasa
-    channel: 10
     notes: drum.cabasa
     select:
       where:
-        reference: samples/reference/GM69_Cabasa.wav
+        reference: GM69_Cabasa
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
@@ -585,11 +555,10 @@ assignments:
     pan: [65, 35]
 
   - name: Maracas
-    channel: 10
     notes: drum.maracas
     select:
       where:
-        reference: samples/reference/GM70_Maracas.wav
+        reference: GM70_Maracas
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
@@ -602,11 +571,10 @@ assignments:
   # =================================================================
 
   - name: Short Whistle
-    channel: 10
     notes: drum.short_whistle
     select:
       where:
-        reference: samples/reference/GM71_ShortWhistle.wav
+        reference: GM71_ShortWhistle
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
@@ -614,11 +582,10 @@ assignments:
     gain: -4.0
 
   - name: Long Whistle
-    channel: 10
     notes: drum.long_whistle
     select:
       where:
-        reference: samples/reference/GM72_LongWhistle.wav
+        reference: GM72_LongWhistle
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
@@ -631,11 +598,10 @@ assignments:
   # =================================================================
 
   - name: Short Guiro
-    channel: 10
     notes: drum.short_guiro
     select:
       where:
-        reference: samples/reference/GM73_ShortGuiro.wav
+        reference: GM73_ShortGuiro
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -644,11 +610,10 @@ assignments:
     pan: [45, 55]
 
   - name: Long Guiro
-    channel: 10
     notes: drum.long_guiro
     select:
       where:
-        reference: samples/reference/GM74_LongGuiro.wav
+        reference: GM74_LongGuiro
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -662,11 +627,10 @@ assignments:
   # =================================================================
 
   - name: Claves
-    channel: 10
     notes: drum.claves
     select:
       where:
-        reference: samples/reference/GM75_Claves.wav
+        reference: GM75_Claves
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 500 }
@@ -680,11 +644,10 @@ assignments:
   # =================================================================
 
   - name: Hi Wood Block
-    channel: 10
     notes: drum.high_woodblock
     select:
       where:
-        reference: samples/reference/GM76_HiWoodBlock.wav
+        reference: GM76_HiWoodBlock
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 300 }
@@ -694,11 +657,10 @@ assignments:
     pan: [55, 45]
 
   - name: Low Wood Block
-    channel: 10
     notes: drum.low_woodblock
     select:
       where:
-        reference: samples/reference/GM77_LowWoodBlock.wav
+        reference: GM77_LowWoodBlock
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 200 }
@@ -713,11 +675,10 @@ assignments:
   # =================================================================
 
   - name: Mute Cuica
-    channel: 10
     notes: drum.mute_cuica
     select:
       where:
-        reference: samples/reference/GM78_MuteCuica.wav
+        reference: GM78_MuteCuica
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
@@ -726,11 +687,10 @@ assignments:
     pan: [45, 55]
 
   - name: Open Cuica
-    channel: 10
     notes: drum.open_cuica
     select:
       where:
-        reference: samples/reference/GM79_OpenCuica.wav
+        reference: GM79_OpenCuica
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 150 }
@@ -744,12 +704,11 @@ assignments:
   # =================================================================
 
   - name: Mute Triangle
-    channel: 10
     notes: drum.mute_triangle
     silenced_by: self
     select:
       where:
-        reference: samples/reference/GM80_MuteTriangle.wav
+        reference: GM80_MuteTriangle
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 1000 }
@@ -757,12 +716,11 @@ assignments:
     pan: [60, 40]
 
   - name: Open Triangle
-    channel: 10
     notes: drum.open_triangle
     silenced_by: [self, drum.mute_triangle]
     select:
       where:
-        reference: samples/reference/GM81_OpenTriangle.wav
+        reference: GM81_OpenTriangle
       order: [{ by: similarity, dir: desc }]
     process:
       - filter_high: { freq: 1000 }

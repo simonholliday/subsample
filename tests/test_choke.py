@@ -453,8 +453,14 @@ assignments:
 		# Regression guard on the shipped kit: load the real GM drums map and
 		# assert its choke groups compile as intended (a typo'd drum symbol or an
 		# asymmetric hat group would fail here).
+		# The map names its references (`reference: GM42_ClosedHiHat`), so it needs
+		# the packaged reference names to resolve — without them every assignment
+		# is skipped and the choke table comes back empty.
 		gm_map = subsample.config.data_dir() / "midi-map-gm-drums.yaml"
-		note_map = subsample.player.load_midi_map(gm_map, []).note_map
+		reference_names = subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		).names()
+		note_map = subsample.player.load_midi_map(gm_map, reference_names).note_map
 		cm = subsample.player._build_choke_map(note_map)
 
 		hats = frozenset({(9, 42), (9, 44), (9, 46)})

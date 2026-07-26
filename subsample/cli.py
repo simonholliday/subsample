@@ -46,6 +46,7 @@ import subsample.audio
 import subsample.bank
 import subsample.cache
 import subsample.buffer
+import subsample.ensemble
 import subsample.config
 import subsample.detector
 import subsample.events
@@ -236,16 +237,16 @@ def _init_config () -> None:
 		)
 		raise SystemExit(1)
 
-	reference_sources = sorted((data / "reference").glob("*.analysis.json"))
-	reference_sources.append(data / "reference" / "CREDITS.md")
-
+	# The GM reference fingerprints are NOT copied.  They ship with the package
+	# and the kit map names them (`reference: GM36_BassDrum1`) rather than
+	# pointing at a path, so a scaffolded project needs no copy of them — and a
+	# map written this way stays portable, which is what lets a sample set be
+	# shared between projects or live on a drive shared between machines.
+	# Point library.reference_directory at your own set to override them.
 	copies = [
 		(data / "midi-map-gm-drums.yaml", cwd / "midi-map-gm-drums.yaml"),
 		(data / "midi-map.yaml.default", cwd / "midi-map.yaml"),
 	]
-	copies.extend(
-		(src, cwd / "samples" / "reference" / src.name) for src in reference_sources
-	)
 
 	# .gitignore is deliberately NOT a conflict target: a real project may well
 	# have one already (a GitHub-initialised repo does), and ignore files are
@@ -265,7 +266,6 @@ def _init_config () -> None:
 		raise SystemExit(1)
 
 	(cwd / "samples" / "captures").mkdir(parents=True, exist_ok=True)
-	(cwd / "samples" / "reference").mkdir(parents=True, exist_ok=True)
 
 	# The scaffolded config is the documented defaults with exactly one edit:
 	# the GM kit map wired in (player stays disabled — the user flips
@@ -300,13 +300,16 @@ def _init_config () -> None:
 	else:
 		gitignore.write_text(ignore_line + "\n", encoding="utf-8")
 
-	n_refs = len(reference_sources) - 1  # excluding CREDITS.md
+	n_refs = len(sorted((data / "reference").glob("*.analysis.json")))
 	print(f"Created a Subsample project in {cwd}:")
 	print("  config.yaml              every setting documented; the GM kit map is pre-wired")
 	print("  midi-map-gm-drums.yaml   instant GM drum kit — plays your closest-matching samples")
 	print("  midi-map.yaml            a commented template for building your own map")
-	print(f"  samples/reference/       {n_refs} GM reference fingerprints the kit matches against")
 	print("  samples/captures/        recordings land here, and the library loads from here")
+	print()
+	print(f"The {n_refs} GM reference fingerprints the kit matches against are built in — the")
+	print("map names them, so nothing was copied and the map stays portable.  Set")
+	print("library.reference_directory to match against your own references instead.")
 	print()
 	print("Next: connect a microphone and run `subsample` to start capturing sounds.")
 	print("To play the kit, set player.enabled: true in config.yaml (plus your MIDI")
@@ -396,8 +399,27 @@ def _peak_dbfs (audio: numpy.ndarray) -> float:
 	return 20.0 * math.log10(peak / full_scale)
 
 
+def _reference_directory (cfg: subsample.config.Config) -> pathlib.Path:
+
+	"""Resolve which directory reference fingerprints are loaded from.
+
+	``library.reference_directory`` when set, otherwise the set bundled with the
+	package.  Bundling the default is the whole point: a map that names
+	``reference: GM46_OpenHiHat`` resolves on any machine with Subsample
+	installed, so a sample set shared between projects — or living on a drive
+	shared between machines — can use references without pointing into one
+	project's directory tree.
+	"""
+
+	if cfg.library.reference_directory is not None:
+		return pathlib.Path(cfg.library.reference_directory)
+
+	return subsample.config.data_dir() / "reference"
+
+
 def _preload_midi_map (
-	cfg: subsample.config.Config,
+	cfg:             subsample.config.Config,
+	reference_names: list[str],
 ) -> typing.Optional[subsample.player.MidiMapResult]:
 
 	"""Load the configured MIDI map early, so bank definitions are known.
@@ -414,25 +436,31 @@ def _preload_midi_map (
 	inotify FileNotFoundError naming neither the config key nor the path, long
 	after the banner had printed that same bad path as though all were well.
 
-	Treating a pre-load failure as real is safe despite passing no reference
-	names: an unrecognised reference only WARNS and skips its assignment (see
-	load_midi_map), so a map that loads against the real library also loads here.
-	Anything that raises is a missing file, malformed YAML, or a schema error the
-	later load would hit too.
+	The reference names must be the REAL ones: a map naming a reference it cannot
+	resolve has that assignment skipped with a warning, so pre-loading against an
+	empty list would silently produce an empty note map — and _start_player reuses
+	this result rather than parsing again.  The reference library is loaded before
+	this runs, so the real names are available.
+
+	Anything that raises here is a missing file, malformed YAML, or a schema error
+	the later load would hit too.
 	"""
 
-	if not cfg.player.enabled or cfg.player.midi_map is None:
+	if not cfg.player.enabled:
 		return None
 
-	path = pathlib.Path(cfg.player.midi_map)
+	if cfg.player.midi_map is None and cfg.player.midi_maps is None:
+		return None
+
+	path = pathlib.Path(cfg.player.midi_map) if cfg.player.midi_map is not None else None
 
 	try:
-		return subsample.player.load_midi_map(path, [], strict=cfg.player.strict_midi_map)
+		return _load_player_rules(cfg, reference_names)
 
 	except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
 		_log.error("Cannot load the MIDI map: %s", exc)
 
-		if not path.exists():
+		if path is not None and not path.exists():
 			# The resolved path is the whole diagnosis for the commonest mistake:
 			# copying the bundled `subsample/data/…` prefix onto a project-local
 			# map, which then resolves under a package directory that is not there.
@@ -442,10 +470,56 @@ def _preload_midi_map (
 				"(only the maps that ship with Subsample live under subsample/data/).",
 				cfg.player.midi_map, path.resolve(),
 			)
-		else:
+		elif path is not None:
 			_log.error("player.midi_map = %r (%s)", cfg.player.midi_map, path.resolve())
 
 		raise SystemExit(1)
+
+
+def _load_player_rules (
+	cfg:             subsample.config.Config,
+	reference_names: list[str],
+) -> subsample.player.MidiMapResult:
+
+	"""Load the player's rules from whichever of the three surfaces is in use.
+
+	One place decides, so the startup pre-load and the player thread can never
+	disagree about what is being played:
+
+	  - ``player.midi_maps:``      several sample sets bound to channels in the
+	                               config; assembled into an ensemble here.
+	  - ``player.midi_map:`` with a ``maps:`` block — an ensemble file, which
+	                               may also carry assignments of its own.
+	  - ``player.midi_map:`` plain a single map, the original behaviour.
+
+	The config and ensemble-file forms run through the same merge, so they
+	produce identical rules for the same set of bindings.
+	"""
+
+	strict = cfg.player.strict_midi_map
+
+	if cfg.player.midi_maps is not None:
+		includes = [
+			subsample.ensemble.MapInclude(
+				# Relative paths resolve from the working directory here, not
+				# from a map file — config.yaml is what named them.
+				map_path=str(pathlib.Path(map_path).resolve()),
+				channel=channel,
+			)
+			for channel, map_path in sorted(cfg.player.midi_maps.items())
+		]
+
+		return subsample.player.load_ensemble(
+			None, reference_names, strict=strict, includes=includes,
+		)
+
+	assert cfg.player.midi_map is not None
+	path = pathlib.Path(cfg.player.midi_map)
+
+	if subsample.player.is_ensemble(path):
+		return subsample.player.load_ensemble(path, reference_names, strict=strict)
+
+	return subsample.player.load_midi_map(path, reference_names, strict=strict)
 
 
 def _start_watcher (watcher: typing.Any, description: str) -> bool:
@@ -921,7 +995,14 @@ def _load_bank (
 		)
 
 	# Similarity matrix (per-bank — rankings are relative to each bank's samples).
-	similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
+	# Constructed with NO references preloaded, on purpose: every reference the
+	# matrix holds costs a score against every instrument sample added later, so
+	# seeding the whole reference library would make a map naming one reference
+	# pay for all of them.  _resolve_path_references adds exactly the ones this
+	# map names, path-based and named alike.
+	similarity_matrix = subsample.similarity.SimilarityMatrix(
+		subsample.library.ReferenceLibrary([]), cfg.similarity,
+	)
 	if len(instrument_library) > 0:
 		similarity_matrix.bulk_add(instrument_library.samples())
 
@@ -976,6 +1057,7 @@ def _load_bank (
 			preset_result.note_map, [similarity_matrix], instrument_library,
 			target_sample_rate=output_sample_rate,
 			with_preview=cfg.recorder.previews,
+			reference_library=reference_library,
 		)
 		subsample.player._validate_assignment_extracts(preset_result.note_map, instrument_library)
 		if len(preset_result.note_map) == 0:
@@ -1082,34 +1164,26 @@ def _start_player (
 
 	# Load the MIDI routing map.  Requires an explicit path in config —
 	# no hidden fallback.  A new user must set player.midi_map to get output.
-	if cfg.player.midi_map is None:
+	if cfg.player.midi_map is None and cfg.player.midi_maps is None:
 		print(
 			"Player enabled but no MIDI map configured — "
 			"set player.midi_map in config.yaml "
 			"(e.g. midi_map: \"./midi-map-gm-drums.yaml\"; "
-			"`subsample --init` scaffolds a project with that map wired in).",
+			"`subsample --init` scaffolds a project with that map wired in), "
+			"or player.midi_maps to bind several sample sets to channels.",
 			file=sys.stderr,
 		)
-		_log.warning("player.midi_map is not set — player will not start")
+		_log.warning("neither player.midi_map nor player.midi_maps is set — player will not start")
 		return
 
-	_midi_map_path = pathlib.Path(cfg.player.midi_map)
-
-	# Reuse the parse done at startup for bank detection — the parser is
-	# pure and the reference list it sees is the same here as there
-	# (path-based references go to similarity matrices, not the reference
-	# library, so reference_library.names() stays empty across the two
-	# call sites).  Saves the second parse and the duplicate INFO logs it
-	# emits for similarity auto-injection.
+	# Reuse the parse done at startup for bank detection: the parser is pure and
+	# it saw the same reference names, so a second parse would only duplicate the
+	# work and its INFO logs.
 	if preloaded_midi_map_result is not None:
 		midi_map_result = preloaded_midi_map_result
 	else:
 		try:
-			midi_map_result = subsample.player.load_midi_map(
-				_midi_map_path,
-				reference_library.names(),
-				strict=cfg.player.strict_midi_map,
-			)
+			midi_map_result = _load_player_rules(cfg, reference_library.names())
 		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
 			# yaml.YAMLError (a plain indentation typo in a hand-edited map) is
 			# the commonest live-coding failure and is NOT a ValueError — catch
@@ -1146,6 +1220,7 @@ def _start_player (
 			midi_map, matrices, instrument_library,
 			target_sample_rate=effective_output_sr,
 			with_preview=cfg.recorder.previews,
+			reference_library=reference_library,
 		)
 
 		# Validate `extract:` directives now that all candidate samples are
@@ -1393,10 +1468,16 @@ def _main_impl () -> None:
 		except ImportError:
 			_log.warning("OSC enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
 
-	# Reference library starts empty.  Path-based references declared in
-	# the MIDI map are loaded later by _resolve_path_references() during
-	# player startup, which adds them to the similarity matrix dynamically.
-	reference_library = subsample.library.ReferenceLibrary([])
+	# Reference fingerprints a map can name rather than point at.  Defaults to
+	# the set bundled with the package, so `reference: GM46_OpenHiHat` resolves
+	# anywhere Subsample is installed — which is what lets a sample set on a
+	# shared drive use references at all, since a path-based one would have to
+	# reach into some particular project's tree.  Path-based references still
+	# work and are loaded later by _resolve_path_references() during player
+	# startup, which adds them to the similarity matrices dynamically.
+	reference_library = subsample.library.load_reference_library(
+		_reference_directory(cfg),
+	)
 
 	# Process any input files through the detection pipeline, then exit.
 	# Segments are written to the output directory and analysed; the recursive
@@ -1448,7 +1529,7 @@ def _main_impl () -> None:
 	default_bank: typing.Optional[int] = None
 	preloaded_midi_map_result: typing.Optional[subsample.player.MidiMapResult] = None
 
-	preloaded_midi_map_result = _preload_midi_map(cfg)
+	preloaded_midi_map_result = _preload_midi_map(cfg, reference_library.names())
 
 	if preloaded_midi_map_result is not None:
 		bank_definitions = preloaded_midi_map_result.bank_definitions
@@ -1540,7 +1621,14 @@ def _main_impl () -> None:
 	else:
 		# Create instrument library. PCM audio is only needed when the player is
 		# active — skipping it saves memory when player is disabled.
-		if cfg.player.enabled:
+		#
+		# A null library.directory means "load nothing in bulk": every sample
+		# then arrives through the MIDI map's own `directory:`/`path:` predicates
+		# during player startup (_resolve_path_references).  That is what a
+		# project made of shared sample sets wants — the sets say what they need,
+		# so there is no reason to walk a whole capture tree that may hold
+		# thousands of unrelated samples.
+		if cfg.player.enabled and cfg.library.directory is not None:
 			instrument_library = subsample.library.load_instrument_library(
 				pathlib.Path(cfg.library.directory),
 				max_instrument_bytes,
@@ -1559,11 +1647,26 @@ def _main_impl () -> None:
 		else:
 			instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
 
-		# Build the similarity matrix.  It starts empty; path-based references
-		# from the MIDI map are added dynamically during player startup via
-		# _resolve_path_references().
+			if cfg.player.enabled:
+				# Say so explicitly.  An empty library here is a configuration
+				# choice, but an empty library at the END of startup means every
+				# note is silent, and "0 samples" with no explanation is the
+				# hardest kind of silence to diagnose.
+				print("  Instruments  : library.directory is null — loading only what the MIDI map names")
+				_log.info(
+					"library.directory is null: the instrument library starts empty and is "
+					"populated from the MIDI map's directory:/path: predicates",
+				)
+
+		# Build the similarity matrix.  It starts with NO references; the ones the
+		# MIDI map actually uses — path-based or named — are added during player
+		# startup via _resolve_path_references().  See the note at the bank
+		# construction site for why preloading the whole reference library would
+		# be a real cost rather than a convenience.
 		if cfg.player.enabled:
-			similarity_matrix = subsample.similarity.SimilarityMatrix(reference_library, cfg.similarity)
+			similarity_matrix = subsample.similarity.SimilarityMatrix(
+				subsample.library.ReferenceLibrary([]), cfg.similarity,
+			)
 			if len(instrument_library) > 0:
 				similarity_matrix.bulk_add(instrument_library.samples())
 			print(f"  Similarity   : {similarity_matrix}")
@@ -1716,7 +1819,11 @@ def _main_impl () -> None:
 	# new samples into the playback pipeline.
 	instrument_watchers: list[subsample.watcher.InstrumentWatcher] = []
 
-	if cfg.library.watch and cfg.player.enabled:
+	# A null library.directory has nothing to watch — the samples come from the
+	# MIDI map's own predicates, and those directories are not watched (a set on
+	# a shared drive would not deliver events anyway; inotify only sees writes
+	# made through the local mount by this machine).
+	if cfg.library.watch and cfg.player.enabled and cfg.library.directory is not None:
 
 		# Multi-bank mode: one watcher per bank directory.
 		if bank_manager is not None:
@@ -1792,6 +1899,25 @@ def _main_impl () -> None:
 	# reloaded without restarting — enables live-coding of sample routing.
 	midi_map_watcher: typing.Optional[subsample.watcher.MidiMapWatcher] = None
 
+	# Only the file named by player.midi_map is watched.  An ensemble's INCLUDED
+	# sets are not — editing one takes effect on restart.  Say so rather than
+	# leaving the user to wonder why their edit did nothing; multi-file reload is
+	# a follow-up, and for a set on a shared drive it could not work anyway
+	# (inotify only sees writes made through the local mount by this machine).
+	if cfg.player.watch_midi_map and cfg.player.enabled:
+		if cfg.player.midi_maps is not None:
+			_log.warning(
+				"watch_midi_map is on, but player.midi_maps names the sets in "
+				"config.yaml, which is not watched — edits to a set need a restart",
+			)
+		elif cfg.player.midi_map is not None and subsample.player.is_ensemble(
+			pathlib.Path(cfg.player.midi_map),
+		):
+			_log.info(
+				"Watching the ensemble %s; edits to the sets it includes need "
+				"a restart", cfg.player.midi_map,
+			)
+
 	if (
 		cfg.player.watch_midi_map
 		and cfg.player.midi_map is not None
@@ -1825,10 +1951,10 @@ def _main_impl () -> None:
 			assert reference_library is not None
 
 			try:
-				result = subsample.player.load_midi_map(
-					path, reference_library.names(),
-					strict=cfg.player.strict_midi_map,
-				)
+				# Reload through the same resolver startup used, so editing a
+				# ensemble re-merges every set it includes rather than
+				# reloading the ensemble file's own assignments alone.
+				result = _load_player_rules(cfg, reference_library.names())
 			except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
 				_log.warning(
 					"MIDI map reload failed at parse time — keeping current "
@@ -1871,6 +1997,7 @@ def _main_impl () -> None:
 					result.note_map, reload_matrices, instrument_library,
 					target_sample_rate=reload_sr,
 					with_preview=cfg.recorder.previews,
+					reference_library=reference_library,
 				)
 			except Exception as exc:
 				_log.warning(
@@ -2119,8 +2246,15 @@ def _print_banner (cfg: subsample.config.Config, multi_bank: bool = False) -> No
 		out_ch  = cfg.player.audio.channels if cfg.player.audio.channels is not None else 2
 		map_str = cfg.player.midi_map if cfg.player.midi_map is not None else "(no map)"
 		# Multi-bank mode ignores library.directory — each program supplies its own
-		# pool, so naming a single directory would mislead.
-		source = "per-program pools" if multi_bank else str(cfg.library.directory)
+		# pool, so naming a single directory would mislead.  A null directory is
+		# the same situation for a different reason: the MIDI map's own
+		# predicates supply the samples.
+		if multi_bank:
+			source = "per-program pools"
+		elif cfg.library.directory is None:
+			source = "MIDI map directories"
+		else:
+			source = str(cfg.library.directory)
 		segments.append(
 			f"out {out_rate} Hz  {out_bits}-bit  {out_ch}ch  |  "
 			f"map {map_str}  |  ← {source}"

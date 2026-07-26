@@ -69,6 +69,7 @@ import subsample.audio
 import subsample.bank
 import subsample.channel
 import subsample.cache
+import subsample.ensemble
 import subsample.config
 import subsample.definitions
 import subsample.events
@@ -2201,15 +2202,23 @@ def _resolve_path_references (
 	target_sample_rate: typing.Optional[int] = None,
 	*,
 	with_preview: bool,
+	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None,
 ) -> None:
 
-	"""Load path-based references, instruments, and directory samples from the MIDI map.
+	"""Load references, instruments, and directory samples named by the MIDI map.
 
 	Scans all assignments in the note map for:
 	  - Path-based references → loaded and added to similarity matrices
+	  - NAMED references → looked up in reference_library and added to the
+	    matrices, so a map can write ``reference: GM46_OpenHiHat`` and resolve it
+	    without a path into any particular project
 	  - Path-based instruments → loaded and added to instrument library
 	  - Directory predicates → all audio under the directory (recursively) is
 	    loaded into the instrument library
+
+	Only the references a map actually names are added.  Scoring a reference
+	against every instrument is not free, so adding the whole library would make
+	a map that uses none pay for all of them.
 
 	Directory predicates use the same audio-first, recursive walk as the main
 	instrument-library loader so the two paths see the same set of files —
@@ -2224,10 +2233,17 @@ def _resolve_path_references (
 		with_preview:        Threaded from ``cfg.recorder.previews``; controls
 		                     whether missing PNG sidecars are regenerated for
 		                     samples loaded through this path.
+		reference_library:   Loaded reference fingerprints, for resolving NAMED
+		                     reference predicates.  None skips them (they were
+		                     already reported at parse time by load_midi_map,
+		                     which validates every name against this same list).
 	"""
 
-	# Collect unique paths for references, instruments, and directories
+	# Collect unique paths for references, instruments, and directories.
+	# ref_names holds the other kind of reference — a NAME looked up in the
+	# loaded reference library rather than a path on disk.
 	ref_paths: set[str] = set()
+	ref_names: set[str] = set()
 	inst_paths: set[str] = set()
 	dir_paths: set[str] = set()
 
@@ -2249,8 +2265,11 @@ def _resolve_path_references (
 			# to carry a path/directory predicate as its last.
 			for select_spec in assignment.select:
 				ref = select_spec.where.reference
-				if ref is not None and subsample.query.is_path_like(ref):
-					ref_paths.add(ref)
+				if ref is not None:
+					if subsample.query.is_path_like(ref):
+						ref_paths.add(ref)
+					else:
+						ref_names.add(ref)
 
 				name_path = select_spec.where.name_path
 				if name_path is not None:
@@ -2323,6 +2342,28 @@ def _resolve_path_references (
 			matrix.add_reference(record, instruments)
 
 		_log.debug("Added path-based reference from %s", path)
+
+	# Named references — resolved from the loaded reference library rather than
+	# from disk, so a map shared between projects needs no path.  A name absent
+	# from the library already produced a WARNING and had its assignment skipped
+	# in load_midi_map, so there is nothing to report again here.
+	if reference_library is not None and ref_names:
+		instruments = instrument_lib.samples()
+		added = 0
+
+		for ref_name in sorted(ref_names):
+			record = reference_library.get(ref_name)   # case-insensitive
+
+			if record is None:
+				continue
+
+			for matrix in matrices:
+				matrix.add_reference(record, instruments)
+
+			added += 1
+
+		if added > 0:
+			_log.info("Added %d named reference(s) from the reference library", added)
 
 	# Load path-based instruments and add to library
 	for inst_path in inst_paths:
@@ -2602,7 +2643,7 @@ def _resolve_assignment_inheritance (
 # is selected by a Program Change, not by MIDI Bank Select).
 _VALID_MAP_KEYS: typing.Final[frozenset[str]] = frozenset({
 	"definitions", "programs", "program_channel", "default_program", "assignments",
-	"templates",
+	"templates", "channel", "maps",
 })
 
 # Every key a single assignment mapping may carry.  A typo (`mdoe:`, `realease:`,
@@ -2621,6 +2662,7 @@ def load_midi_map (
 	path: pathlib.Path,
 	reference_names: list[str],
 	strict: bool = True,
+	channel_override: typing.Optional[int] = None,
 ) -> MidiMapResult:
 
 	"""Load a MIDI routing map from a YAML file.
@@ -2628,6 +2670,11 @@ def load_midi_map (
 	Parses the assignments list using the select/process pipeline format
 	and returns a MidiMapResult containing the note map, any bank
 	definitions, and the bank channel.
+
+	A map may declare a top-level ``channel:`` that every assignment inherits, so
+	a self-contained sample set states its channel once instead of repeating it
+	on every entry.  An assignment may still name its own ``channel:`` to sit
+	somewhere else — that is how one map deliberately spans several channels.
 
 	Each assignment declares:
 	  select:   Which sample to play — filter predicates, ordering, pick position.
@@ -2670,6 +2717,13 @@ def load_midi_map (
 		strict:           When True (default), unknown where-predicate keys and
 		                  unknown processor names raise ValueError at parse time.
 		                  When False, they are logged as warnings and ignored.
+		channel_override: User-facing channel (1-16) that replaces the map's own
+		                  top-level default, so a caller can bind a sample set to
+		                  a channel without editing it.  An assignment's explicit
+		                  ``channel:`` still wins; one WARNING names the map when
+		                  any does, since the binding silently not moving those
+		                  entries would be baffling.  None leaves the map's own
+		                  default in force.
 
 	Returns:
 		MidiMapResult containing the NoteMap, bank definitions, and bank channel.
@@ -2721,6 +2775,38 @@ def load_midi_map (
 		**_SYMBOL_NAMESPACES, **definitions.note_namespaces(),
 	}
 
+	# Map-level default channel.  Resolved through the same definitions namespace
+	# and the same 1-16 check the per-assignment parser applies below, so a name
+	# works in both places and the two can never disagree about what is valid.
+	# channel_override (a caller binding this map to a channel) replaces it.
+	raw_default_channel = raw.get("channel")
+	default_channel: typing.Optional[int] = None
+
+	if raw_default_channel is not None:
+		default_channel = subsample.definitions.resolve_scalar(
+			definitions, "channels", raw_default_channel,
+			f"MIDI map {path} top-level 'channel'",
+		)
+
+		if not (1 <= default_channel <= 16):
+			raise ValueError(
+				f"MIDI map {path}: top-level channel must be 1-16 "
+				f"(got {raw_default_channel!r})"
+			)
+
+	if channel_override is not None:
+		if not (1 <= channel_override <= 16):
+			raise ValueError(
+				f"MIDI map {path}: channel_override must be 1-16 "
+				f"(got {channel_override})"
+			)
+
+		default_channel = channel_override
+
+	# Counted while parsing so the binding can report, once, that some entries
+	# will not move — see the warning after the assignment loop.
+	explicit_channel_count = 0
+
 	# Parse optional program definitions — switchable sample libraries, each
 	# selected live by a MIDI Program Change on `program_channel`.
 	bank_definitions = subsample.bank.parse_banks(raw.get("programs"), definitions)
@@ -2768,8 +2854,12 @@ def load_midi_map (
 	# reuse the top-level assignments against their swapped pool).  When
 	# every program is a `map:` preset, each supplies its own assignments,
 	# so the top-level block is optional and a missing one is not a warning.
+	# An ensemble is the same situation for the same reason: the sets it
+	# includes bring the assignments, and most ensembles add none of their own.
 	directory_programs = [d.name for d in bank_definitions if d.directory is not None]
-	needs_top_assignments = (not bank_definitions) or bool(directory_programs)
+	needs_top_assignments = (
+		(not bank_definitions) or bool(directory_programs)
+	) and raw.get("maps") is None
 
 	if "assignments" not in raw:
 		if needs_top_assignments and directory_programs:
@@ -2815,27 +2905,41 @@ def load_midi_map (
 					f"{sorted(_VALID_ASSIGNMENT_KEYS)}."
 				)
 
-		# Channel: user-facing 1-16 → mido 0-indexed.
+		# Channel: user-facing 1-16 → mido 0-indexed.  An explicit value here is a
+		# deliberate statement that this entry sits apart from the rest of the
+		# map, so it outranks both the map default and any binding override.
 		channel_raw = assignment_raw.get("channel")
 
 		if channel_raw is None:
-			raise ValueError(f"MIDI map assignment {name!r}: missing 'channel'")
+			if default_channel is None:
+				raise ValueError(
+					f"MIDI map assignment {name!r}: no 'channel'.  Give the "
+					f"assignment its own 'channel:', or set a top-level "
+					f"'channel:' in {path.name} for every assignment to inherit."
+				)
 
-		try:
-			channel_number = subsample.definitions.resolve_scalar(
-				definitions, "channels", channel_raw, "'channel'",
-			)
-		except (TypeError, ValueError) as exc:
-			raise ValueError(
-				f"MIDI map assignment {name!r} (#{assignment_index}): "
-				f"invalid 'channel' value {channel_raw!r} — {exc}"
-			) from exc
+			channel_number = default_channel
+
+		else:
+			explicit_channel_count += 1
+
+			try:
+				channel_number = subsample.definitions.resolve_scalar(
+					definitions, "channels", channel_raw, "'channel'",
+				)
+			except (TypeError, ValueError) as exc:
+				raise ValueError(
+					f"MIDI map assignment {name!r} (#{assignment_index}): "
+					f"invalid 'channel' value {channel_raw!r} — {exc}"
+				) from exc
 
 		# Reject out-of-range channels at load, exactly as program_channel does
 		# above.  mido only ever delivers channels 0-15, so a 0, a 17+ or a
 		# negative here produces an assignment that can never fire — total
 		# silence with no diagnostic, and 1-vs-0-indexing is the classic MIDI
-		# slip.  (Definitions names resolve to 1-16 by construction.)
+		# slip.  (Definitions names resolve to 1-16 by construction.)  Only
+		# reachable via an explicit value: the map default and channel_override
+		# are both range-checked before the loop.
 		if not (1 <= channel_number <= 16):
 			raise ValueError(
 				f"MIDI map assignment {name!r}: channel must be 1-16 "
@@ -3123,6 +3227,19 @@ def load_midi_map (
 	_validate_zone_assignments(zone_templates, manual_channels)
 	_validate_choke_targets(note_map)
 
+	# A caller bound this map to a channel, but some entries name their own and
+	# so will not move.  That is the documented precedence (an explicit channel
+	# is a deliberate statement), but a binding that silently does nothing is
+	# baffling, and the usual cause is a map written before top-level `channel:`
+	# existed — one line here, not one per assignment.
+	if channel_override is not None and explicit_channel_count > 0:
+		_log.warning(
+			"MIDI map %s is bound to channel %d, but %d assignment(s) declare "
+			"their own 'channel:' and will stay where they are.  Remove those "
+			"and set a top-level 'channel:' to make the whole map bindable.",
+			path, channel_override, explicit_channel_count,
+		)
+
 	_log.info(
 		"MIDI map loaded from %s: %d note(s) across %d assignment(s)%s%s",
 		path,
@@ -3139,6 +3256,209 @@ def load_midi_map (
 		default_bank=default_bank,
 		zone_templates=tuple(zone_templates),
 	)
+
+
+def is_ensemble (path: pathlib.Path) -> bool:
+
+	"""True if the map at ``path`` declares a ``maps:`` block.
+
+	A cheap YAML peek so the caller can route to load_ensemble without
+	parsing the whole map twice.  Any error — missing file, malformed YAML —
+	answers False and leaves the real loader to report it properly, since this
+	is a routing question, not a validation one.
+	"""
+
+	try:
+		with path.open(encoding="utf-8") as handle:
+			raw = yaml.safe_load(handle)
+	except (OSError, yaml.YAMLError):
+		return False
+
+	return isinstance(raw, dict) and raw.get("maps") is not None
+
+
+def load_ensemble (
+	path: typing.Optional[pathlib.Path],
+	reference_names: list[str],
+	strict: bool = True,
+	includes: typing.Optional[list[subsample.ensemble.MapInclude]] = None,
+) -> MidiMapResult:
+
+	"""Load an ensemble — several sample sets, each bound to its own channel.
+
+	An ensemble is a normal map that declares a ``maps:`` block; it may also
+	carry its own ``assignments:``, which are parsed exactly as they would be in
+	any other map and merged with the included sets.
+
+	Every included map is loaded through ``load_midi_map`` with its binding
+	passed as ``channel_override``, so the binding is applied WHILE parsing
+	rather than by remapping a finished note map afterwards.  That is what keeps
+	an assignment's own explicit ``channel:`` winning without any special case
+	here.
+
+	Args:
+		path:            The ensemble file, or None for the
+		                 ``player.midi_maps:`` config form — which binds sets to
+		                 channels with no ensemble file of its own, and so
+		                 contributes no assignments.
+		reference_names: Names from the loaded reference library, passed to
+		                 every included map.
+		strict:          Threaded to each included map's parse.
+		includes:        Pre-built include list, used by the config form so it
+		                 reaches this same merge.  When None the list comes from
+		                 the file's own ``maps:`` block.
+
+	Returns:
+		A single MidiMapResult holding the merged rules.
+
+	Raises:
+		FileNotFoundError: If the ensemble, or any map it includes, is missing.
+		ValueError:        On a malformed ensemble, an included map that is
+		                   itself an ensemble, an included map declaring
+		                   ``programs:``, or a (channel, note) claimed twice.
+	"""
+
+	if includes is None:
+		if path is None:
+			raise ValueError("load_ensemble needs either a path or an include list")
+
+		includes = _read_ensemble_includes(path, strict)
+
+	label = path.name if path is not None else "player.midi_maps"
+
+	merged_note_map: NoteMap = {}
+	merged_zone_templates: list[ZoneTemplate] = []
+	# Which map claimed each key, so a collision can name both culprits rather
+	# than just saying "duplicate".
+	claimed_by: dict[tuple[int, int], str] = {}
+
+	# An ensemble FILE may carry assignments of its own; they are just another
+	# contributor, parsed with no override since the file has no binding.  The
+	# config form has no such file and so contributes none.
+	own: typing.Optional[MidiMapResult] = None
+
+	if path is not None:
+		own = load_midi_map(path, reference_names, strict=strict)
+		_merge_into(merged_note_map, claimed_by, own, label, merged_zone_templates)
+
+	for include in includes:
+		include_path = pathlib.Path(include.map_path)
+
+		if is_ensemble(include_path):
+			raise ValueError(
+				f"MIDI map {include_path} is included by {label} but declares its "
+				f"own 'maps:' — ensembles are flat, one level only.  Move the "
+				f"nested sets up into {label}."
+			)
+
+		result = load_midi_map(
+			include_path, reference_names, strict=strict,
+			channel_override=include.channel,
+		)
+
+		# A `programs:` block inside an included set would ask for per-channel
+		# program switching, which the bank machinery cannot express (it holds
+		# one active bank for the whole player).  Rejecting it is honest;
+		# silently ignoring it would leave a set that appears to switch and
+		# never does.
+		if result.bank_definitions:
+			raise ValueError(
+				f"MIDI map {include_path} is included by {label} but declares "
+				f"'programs:' — program switching is not supported inside an "
+				f"included set.  Use it in the ensemble itself, or load the "
+				f"set on its own."
+			)
+
+		_merge_into(
+			merged_note_map, claimed_by, result, include_path.name, merged_zone_templates,
+		)
+
+	# Zone-tuned assignments claim a channel exclusively, and until now that
+	# could only ever be checked within one map.  Re-run it across the merged
+	# set so two included maps cannot both zone the same channel.
+	manual_channels = {channel for channel, _note in merged_note_map}
+	_validate_zone_assignments(merged_zone_templates, manual_channels)
+
+	_log.info(
+		"Ensemble loaded from %s: %d set(s), %d note(s) total",
+		label, len(includes), len(merged_note_map),
+	)
+
+	return MidiMapResult(
+		note_map=merged_note_map,
+		bank_definitions=own.bank_definitions if own is not None else [],
+		bank_channel=own.bank_channel if own is not None else subsample.bank.DEFAULT_BANK_CHANNEL,
+		default_bank=own.default_bank if own is not None else None,
+		zone_templates=tuple(merged_zone_templates),
+	)
+
+
+def _read_ensemble_includes (
+	path:   pathlib.Path,
+	strict: bool,
+) -> list[subsample.ensemble.MapInclude]:
+
+	"""Parse just the ``maps:`` block of an ensemble file.
+
+	Definitions are mounted first so a binding may name a channel
+	(``channel: my.kit``) from the project vocabulary, exactly as the
+	per-assignment and map-level channel fields can.
+	"""
+
+	if not path.exists():
+		raise FileNotFoundError(f"MIDI map not found: {path}")
+
+	with path.open(encoding="utf-8") as handle:
+		raw = yaml.safe_load(handle)
+
+	if not isinstance(raw, dict):
+		raise ValueError(
+			f"MIDI map {path}: top-level YAML must be a mapping, got "
+			f"{type(raw).__name__}"
+		)
+
+	definitions = subsample.definitions.load_definitions(
+		raw.get("definitions"), path.parent,
+		reserved_prefixes=frozenset(_SYMBOL_NAMESPACES),
+		map_label=f"MIDI map {path}",
+	)
+
+	return subsample.ensemble.parse_map_includes(
+		raw.get("maps"), path.parent, definitions,
+	)
+
+
+def _merge_into (
+	note_map:       NoteMap,
+	claimed_by:     dict[tuple[int, int], str],
+	result:         MidiMapResult,
+	source_label:   str,
+	zone_templates: list["ZoneTemplate"],
+) -> None:
+
+	"""Fold one map's rules into the ensemble's merged note map.
+
+	A (channel, note) claimed by two maps is an ERROR, not a merge.  The value
+	is a list of velocity layers, so quietly appending would fabricate a
+	velocity-switched note out of two unrelated sample sets — the note would
+	still sound, just wrongly, which is far worse than refusing to start.
+	"""
+
+	for key, entries in result.note_map.items():
+		existing = claimed_by.get(key)
+
+		if existing is not None:
+			channel, note = key
+			raise ValueError(
+				f"MIDI channel {channel + 1} note {note} is claimed by both "
+				f"{existing!r} and {source_label!r}.  Each included set needs its "
+				f"own channel — bind one of them elsewhere in the ensemble."
+			)
+
+		claimed_by[key] = source_label
+		note_map[key] = list(entries)
+
+	zone_templates.extend(result.zone_templates)
 
 
 @dataclasses.dataclass
