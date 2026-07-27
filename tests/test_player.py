@@ -277,11 +277,35 @@ class TestFindMidiDeviceByName:
 
 		assert result == "Launchpad MK3 MIDI 1"
 
-	def test_returns_first_match (self) -> None:
-		with self._patch(["Launchpad A", "Launchpad B"]):
+	def test_ambiguous_pattern_does_not_silently_pick_the_first (
+		self, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""Was "Launchpad A", chosen by enumeration order.  A multi-port
+		interface reports one name per port, so a loose pattern is an ambiguity
+		to resolve rather than a choice to make on the user's behalf."""
+
+		monkeypatch.setattr(subsample.devices, "can_prompt", lambda: False)
+
+		with self._patch(["Launchpad A", "Launchpad B", "Other"]):
+			with pytest.raises(ValueError) as exc_info:
+				subsample.player.find_midi_device_by_name("Launchpad")
+
+		message = str(exc_info.value)
+		assert "Launchpad A" in message and "Launchpad B" in message
+		assert "Other" not in message
+
+	def test_ambiguous_pattern_prompts_over_just_the_matches (
+		self, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		monkeypatch.setattr(subsample.devices, "can_prompt", lambda: True)
+		monkeypatch.setattr("builtins.input", lambda _: "1")
+
+		with self._patch(["Launchpad A", "Launchpad B", "Other"]):
 			result = subsample.player.find_midi_device_by_name("Launchpad")
 
-		assert result == "Launchpad A"
+		assert result == "Launchpad B"
 
 	def test_no_match_raises (self) -> None:
 		with self._patch(["Other Device"]):
@@ -311,6 +335,7 @@ class TestSelectMidiDevice:
 			subsample.player.select_midi_device([])
 
 	def test_multiple_devices_prompts (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.setattr(subsample.devices, "can_prompt", lambda: True)
 		monkeypatch.setattr("builtins.input", lambda _: "1")
 
 		result = subsample.player.select_midi_device(["Device A", "Device B"])
@@ -318,6 +343,7 @@ class TestSelectMidiDevice:
 		assert result == "Device B"
 
 	def test_multiple_devices_invalid_then_valid (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.setattr(subsample.devices, "can_prompt", lambda: True)
 		responses = iter(["bad", "99", "0"])
 		monkeypatch.setattr("builtins.input", lambda _: next(responses))
 

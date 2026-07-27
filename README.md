@@ -2433,6 +2433,84 @@ is inherited from the defaults automatically. `subsample --init` writes a
 starter `config.yaml` with every setting present and documented, ready to
 edit.
 
+### Naming a device that keeps moving
+
+`recorder.audio.device` and `player.midi_device` take a **glob**: `*` matches any
+run of characters, `?` matches exactly one, matching is case-insensitive, and the
+pattern is matched anywhere in the name. A pattern with no wildcards is therefore
+a plain substring, which is how these fields have always worked.
+
+Wildcards exist because device names carry a number that moves. On Linux an audio
+device is named:
+
+```
+SC-U: USB Audio (hw:2,0)
+        card index ─┘ └─ subdevice
+```
+
+The **card index** is assigned by probe order, so plugging in an unrelated
+interface renumbers it - the same device can be `hw:0,0` today and `hw:2,0`
+tomorrow, and a pinned name silently stops matching. The **subdevice** does not
+move.
+
+MIDI has the same shape. `RtMidiIn Client:Subsample Virtual MIDI 129:0` carries an
+ALSA sequencer client id (`129`) handed out in registration order, so it differs
+between runs, followed by a port number (`:0`) that does not.
+
+So the rule is: **wildcard the number that moves, keep the one that doesn't.**
+
+```yaml
+recorder:
+  audio:
+    device: "SC-U: USB Audio (hw:*,0)"
+
+player:
+  midi_device: "*U6MIDI Pro *:0"
+```
+
+Keeping the trailing index matters more than it looks. A multi-port interface
+reports one name per port - a 3-port MIDI interface appears as `… 16:0`, `… 16:1`
+and `… 16:2` - so `*U6MIDI Pro*` matches all three and asks you which one at
+every launch, while `*U6MIDI Pro *:0` names one port for good.
+
+Prefer `*` to `?` for the moving number. `hw:?,0` works until the machine has ten
+sound cards, then stops matching with no symptom beyond the device seeming to
+disappear.
+
+**When a pattern is ambiguous.** If it matches exactly one device that device is
+used silently. If it matches several you are asked which, and the menu lists only
+the matches rather than every device on the system. If it matches none, Subsample
+reports that and lists what is available.
+
+Pasting a device's full name still pins that exact device - which is what you
+want if you have two identical interfaces and care which one you get.
+
+> Running without a terminal - from a service manager, over SSH without a TTY, in
+> CI - there is nobody to answer the menu. Rather than blocking on input forever,
+> Subsample reports the candidates and exits, so the log says what happened.
+
+**On Linux with PipeWire, there is a better name available.** PipeWire publishes
+its own node names alongside the raw ALSA ones, and they are built from the
+device's USB identity rather than from probe order:
+
+```
+alsa_output.usb-BEHRINGER_SC-U_0EB571140230AB13-00.multichannel-output
+                              └─ the interface's serial number
+```
+
+Nothing in that moves - no card index at all - so it survives re-plugging and
+reboots without a wildcard for an index:
+
+```yaml
+recorder:
+  audio:
+    device: "alsa_input.usb-BEHRINGER_SC-U*"
+```
+
+The trailing `*` only covers PipeWire's profile suffix. Run
+`subsample --list-devices` to see whether these names are present on your
+system; if they are, they are the most stable thing to point at.
+
 ### Where your config lives
 
 Subsample looks for `./config.yaml` in the directory you run it from, or
@@ -2479,7 +2557,7 @@ weights - is optional and rarely needs changing.
 |---|---|---|
 | `max_memory_mb` | auto | Total cache memory budget. Auto-detect: min(25% of system RAM, 1024 MB). Split: 60% instruments, 35% transforms, 5% carrier |
 | `recorder.enabled` | `true` | Enable live audio capture; set to `false` to process files only |
-| `recorder.audio.device` | `none` | Audio input device name (substring match); if unset, auto-select or prompt. `subsample --list-devices` shows the names |
+| `recorder.audio.device` | `none` | Audio input device name. Case-insensitive glob matched anywhere in the name, so a bare substring works; use `*` for the card index, which moves (`SC-U: USB Audio (hw:*,0)`). If unset, auto-select or prompt. See [Naming a device that keeps moving](#naming-a-device-that-keeps-moving) |
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
 | `recorder.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
 | `recorder.audio.channels` | auto | 1 = mono, 2 = stereo. Omitted by default (and `null`) = auto-detect from the selected device |
@@ -2495,7 +2573,7 @@ weights - is optional and rarely needs changing.
 | `player.max_polyphony` | `8` | Headroom divisor, not a voice cap: per-voice gain = 1/max\_polyphony, so this many voices at full velocity sum to full scale. Voices are never cut off. Raise if clipping; lower for louder individual voices |
 | `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched. `0.0` disables the limiter |
 | `player.limiter_ceiling_db` | `-0.1` | Maximum output level (dBFS) the limiter allows; must exceed threshold (ignored when the limiter is disabled) |
-| `player.midi_device` | `none` | MIDI input device name (substring match); if unset, auto-select or prompt. `subsample --list-devices` shows the names |
+| `player.midi_device` | `none` | MIDI input device name. Same glob rule as `recorder.audio.device`; use `*` for the sequencer client id, which changes between runs (`*U6MIDI Pro *:0`). If unset, auto-select or prompt. See [Naming a device that keeps moving](#naming-a-device-that-keeps-moving) |
 | `player.audio.device` | `none` | Audio output device name for playback |
 | `player.audio.sample_rate` | auto | Output sample rate; defaults to recorder rate. Do not set higher than source. |
 | `player.audio.bit_depth` | auto | Output bit depth (16, 24, or 32); defaults to recorder bit depth |

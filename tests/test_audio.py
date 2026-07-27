@@ -11,6 +11,7 @@ import pytest
 import soundfile
 
 import subsample.audio
+import subsample.devices
 import subsample.config
 
 
@@ -205,7 +206,12 @@ class TestFindDeviceByName:
 		mock_pa.get_device_count.return_value = len(device_names)
 
 		def _device_info (i: int) -> dict[str, typing.Union[str, int]]:
-			return {"index": i, "name": device_names[i], "maxInputChannels": 1}
+			# defaultSampleRate is printed by the selection menu; PyAudio always
+			# supplies it, so the fake must too or the ambiguity path can't run.
+			return {
+				"index": i, "name": device_names[i], "maxInputChannels": 1,
+				"defaultSampleRate": 44100,
+			}
 
 		mock_pa.get_device_info_by_index.side_effect = _device_info
 		return mock_pa
@@ -222,9 +228,37 @@ class TestFindDeviceByName:
 		pa = self._make_pa(["Built-in Mic", "Samson Go Mic: USB Audio (hw:1,0)"])
 		assert subsample.audio.find_device_by_name(pa, "Samson") == 1
 
-	def test_first_match_returned_when_multiple (self) -> None:
+	def test_ambiguous_pattern_does_not_silently_pick_the_first (
+		self, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""This used to return device 0 without a word.  Resolving ambiguity by
+		enumeration order is precisely the surprise the volatile ALSA card index
+		causes, so a pattern matching several devices must never be answered
+		silently — with no terminal to prompt on it names the candidates."""
+
+		monkeypatch.setattr(subsample.devices, "can_prompt", lambda: False)
 		pa = self._make_pa(["USB Mic A", "USB Mic B", "Built-in Mic"])
-		assert subsample.audio.find_device_by_name(pa, "USB") == 0
+
+		with pytest.raises(ValueError) as exc_info:
+			subsample.audio.find_device_by_name(pa, "USB")
+
+		message = str(exc_info.value)
+		assert "USB Mic A" in message and "USB Mic B" in message
+		assert "Built-in Mic" not in message      # the shortlist, not everything
+
+	def test_ambiguous_pattern_prompts_over_just_the_matches (
+		self, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""An ambiguous pattern is a shortlist, not a failure — the menu offers
+		the matches rather than every device on the system."""
+
+		monkeypatch.setattr(subsample.devices, "can_prompt", lambda: True)
+		monkeypatch.setattr("builtins.input", lambda _: "1")
+		pa = self._make_pa(["USB Mic A", "USB Mic B", "Built-in Mic"])
+
+		assert subsample.audio.find_device_by_name(pa, "USB") == 1
 
 	def test_no_match_raises_value_error (self) -> None:
 		pa = self._make_pa(["Built-in Mic", "HDMI Output"])

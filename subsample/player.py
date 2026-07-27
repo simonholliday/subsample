@@ -72,6 +72,7 @@ import subsample.cache
 import subsample.ensemble
 import subsample.config
 import subsample.definitions
+import subsample.devices
 import subsample.events
 import subsample.library
 import subsample.query
@@ -3549,30 +3550,51 @@ def list_midi_input_devices () -> list[str]:
 
 def find_midi_device_by_name (name: str) -> str:
 
-	"""Find a MIDI input device by a case-insensitive substring of its name.
+	"""Find a MIDI input device by a glob against its name.
+
+	*name* follows the shared device-matching convention (see subsample.devices):
+	case-insensitive, implicit ``*`` at each end, so a bare substring works as it
+	always did while "*Subsample Virtual MIDI *:0" survives the ALSA sequencer
+	client id being renumbered between runs.
+
+	Several matches prompt over just those ports rather than taking the first —
+	a multi-port interface reports one name per port, so a loose pattern is an
+	ambiguity to resolve, not a choice to make silently.
 
 	Args:
-		name: Substring to search for (case-insensitive).
+		name: Device name pattern (case-insensitive glob).
 
 	Returns:
-		Full name of the first matching device.
+		Full name of the matching device.
 
 	Raises:
-		ValueError: If no device matches, listing all available device names.
+		ValueError: If nothing matches, listing all available device names; or if
+		            several match with no terminal to choose on.
 	"""
 
-	name_lower = name.lower()
 	available: list[str] = [str(d) for d in mido.get_input_names()]
+	matches = subsample.devices.match_device_names(name, available)
 
-	for device_name in available:
-		if name_lower in device_name.lower():
-			return device_name
+	if not matches:
+		available_str = subsample.devices.format_device_list(available)
+		raise ValueError(
+			f"No MIDI input device matching {name!r}.\n"
+			f"Available devices:\n{available_str}"
+		)
 
-	available_str = "\n  ".join(available) if available else "(none found)"
-	raise ValueError(
-		f"No MIDI input device matching {name!r}.\n"
-		f"Available devices:\n  {available_str}"
-	)
+	if len(matches) == 1:
+		return available[matches[0]]
+
+	matched = [available[index] for index in matches]
+
+	if not subsample.devices.can_prompt():
+		raise ValueError(
+			subsample.devices.ambiguous_pattern_message(name, matched, "MIDI input")
+		)
+
+	print(f"{len(matched)} MIDI input devices match {name!r}:")
+
+	return select_midi_device(matched)
 
 
 def select_midi_device (devices: list[str]) -> str:
@@ -3601,6 +3623,17 @@ def select_midi_device (devices: list[str]) -> str:
 	if len(devices) == 1:
 		print(f"Using MIDI input: {devices[0]}")
 		return devices[0]
+
+	# Without a terminal there is nobody to answer the menu; blocking on input()
+	# forever is how that presented when run from a service manager or CI.
+	if not subsample.devices.can_prompt():
+		raise ValueError(
+			f"{len(devices)} MIDI input devices are available and there is no "
+			f"terminal to choose on:\n"
+			f"{subsample.devices.format_device_list(devices)}\n"
+			f"Set player.midi_device in config.yaml — a wildcard covers a changing "
+			f"client id (e.g. '*U6MIDI Pro *:0')."
+		)
 
 	print("Available MIDI input devices:")
 	for i, name in enumerate(devices):

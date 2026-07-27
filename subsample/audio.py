@@ -24,6 +24,7 @@ import numpy
 import pyaudio
 
 import subsample.config
+import subsample.devices
 import subsample.parallelism
 
 
@@ -705,26 +706,49 @@ def _list_devices (pa: pyaudio.PyAudio, direction: str) -> list[DeviceInfo]:
 
 def _find_device_by_name (pa: pyaudio.PyAudio, name: str, direction: str) -> int:
 
-	"""Return the index of the first *direction* device whose name contains *name*.
+	"""Return the index of the *direction* device matching *name*.
 
-	Matching is case-insensitive substring search, so "Samson" matches
-	"Samson Go Mic: USB Audio (hw:1,0)".
+	*name* is a glob (see subsample.devices): case-insensitive, implicit ``*`` at
+	each end, so "Samson" still matches "Samson Go Mic: USB Audio (hw:1,0)" and
+	"SC-U: USB Audio (hw:*,0)" survives the card index being renumbered when an
+	unrelated interface is plugged in.
+
+	Several matches prompt over just those devices rather than picking the first
+	silently — resolving ambiguity by enumeration order is the same surprise the
+	volatile numbering causes.
 
 	Raises:
-		ValueError: If no device name contains *name*, with a list of
-		            available device names to help the user correct the config.
+		ValueError: If nothing matches, listing the available device names; or
+		            if several match with no terminal to choose on.
 	"""
 
 	devices = _list_devices(pa, direction)
-	name_lower = name.lower()
+	names = [str(device["name"]) for device in devices]
+	matches = subsample.devices.match_device_names(name, names)
 
-	for dev in devices:
-		if name_lower in str(dev["name"]).lower():
-			return int(dev["index"])
+	if not matches:
+		raise ValueError(
+			f"No {direction} device matching {name!r} found.\nAvailable devices:\n"
+			f"{subsample.devices.format_device_list(names)}"
+		)
 
-	available = "\n".join(f"  {d['name']}" for d in devices) or "  (none)"
-	raise ValueError(
-		f"No {direction} device matching {name!r} found.\nAvailable devices:\n{available}"
+	if len(matches) == 1:
+		return int(devices[matches[0]]["index"])
+
+	matched_devices = [devices[index] for index in matches]
+
+	if not subsample.devices.can_prompt():
+		raise ValueError(
+			subsample.devices.ambiguous_pattern_message(
+				name, [names[index] for index in matches], f"audio {direction}",
+			)
+		)
+
+	print(f"{len(matches)} audio {direction} devices match {name!r}:")
+
+	return _select_device(
+		matched_devices, direction,
+		f"No {direction} device matching {name!r} found.",
 	)
 
 
@@ -734,6 +758,10 @@ def _select_device (devices: list[DeviceInfo], direction: str, empty_hint: str) 
 
 	Auto-selects when only one device is available; raises ValueError with
 	*empty_hint* when the list is empty.
+
+	Without a terminal there is nobody to prompt: raise a message naming the
+	candidates instead of blocking on input() forever, which is how this
+	presented when run from a service manager or CI.
 	"""
 
 	if not devices:
@@ -743,6 +771,17 @@ def _select_device (devices: list[DeviceInfo], direction: str, empty_hint: str) 
 		name = devices[0]["name"]
 		print(f"Using audio {direction}: {name}")
 		return int(devices[0]["index"])
+
+	names = [str(device["name"]) for device in devices]
+
+	if not subsample.devices.can_prompt():
+		raise ValueError(
+			f"{len(devices)} audio {direction} devices are available and there is "
+			f"no terminal to choose on:\n"
+			f"{subsample.devices.format_device_list(names)}\n"
+			f"Set the device in config.yaml — a wildcard covers a changing index "
+			f"(e.g. 'SC-U: USB Audio (hw:*,0)')."
+		)
 
 	# Multiple devices — let the user choose
 	print(f"Available audio {direction} devices:")

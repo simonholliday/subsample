@@ -141,7 +141,20 @@ recorder:
 
     # device: "Samson Go Mic: USB Audio (hw:1,0)"
     # Name (or substring) of the audio input device to use.
-    # Case-insensitive substring match — "Samson" matches the full device name above.
+    # Case-insensitive match, and a GLOB: `*` matches any run of characters,
+    # `?` matches exactly one, and the pattern is matched anywhere in the name —
+    # so a plain "Samson" still matches the full device name above.
+    #
+    # Use a wildcard for the number that MOVES.  On Linux a device is named
+    # "SC-U: USB Audio (hw:2,0)" where the card index (2) is assigned by probe
+    # order, so plugging in an unrelated interface renumbers it and a pinned
+    # name stops matching:
+    #     device: "SC-U: USB Audio (hw:*,0)"
+    # Keep the trailing ",0" — that is the subdevice, it does NOT move, and it
+    # is what tells a multi-output interface's outputs apart.
+    #
+    # If the pattern matches several devices you are asked which; if it matches
+    # exactly one it is used silently.  Paste a full name to pin one device.
     # If omitted, subsample auto-selects when only one input device is present,
     # or shows an interactive numbered menu when multiple devices are found.
     # Run `subsample --list-devices` to see available device names.
@@ -323,7 +336,17 @@ player:
 
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
-  # Case-insensitive substring match — "Launch" matches "Launchpad MK3 MIDI 1".
+  # Case-insensitive match, and a GLOB — the same rule as recorder.audio.device
+  # above: `*` matches any run of characters, `?` exactly one, matched anywhere
+  # in the name, so "Launch" still matches "Launchpad MK3 MIDI 1".
+  #
+  # MIDI names carry an ALSA sequencer client id handed out in registration
+  # order, so it changes between runs:
+  #     "RtMidiIn Client:Subsample Virtual MIDI 129:0"
+  # Wildcard it and keep the port number after the colon:
+  #     midi_device: "*Subsample Virtual MIDI *:0"
+  # The port is what separates the ports of a multi-port interface, so dropping
+  # it makes every port match and asks you which one at every launch.
   # If omitted, auto-selects when only one MIDI device is present, or shows an
   # interactive numbered menu when multiple are found.
   # Run `subsample --list-devices` to see available MIDI device names.
