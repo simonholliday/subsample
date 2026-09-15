@@ -25,7 +25,7 @@ you focus on playing.
 
 ## Contents
 
-- **1. Getting Started**
+- **1. Getting started**
   - [Why Subsample?](#why-subsample)
   - [At a glance](#at-a-glance)
   - [Quick start](#quick-start)
@@ -34,7 +34,7 @@ you focus on playing.
   - [MIDI map](#midi-map)
   - [Similarity engine](#similarity-engine)
   - [Transforms](#transforms)
-- **3. Configuration & Operation**
+- **3. Configuration and operation**
   - [Configuration](#configuration)
   - [Output](#output)
   - [Instrument sample library](#instrument-sample-library)
@@ -44,17 +44,16 @@ you focus on playing.
   - [Virtual MIDI](#virtual-midi)
   - [OSC integration](#osc-integration)
   - [Works with Subsequence](#works-with-subsequence)
-- **5. Project Info**
+- **5. Project information**
   - [Performance](#performance)
   - [Tools](#tools)
-  - [Roadmap](#roadmap)
   - [Architecture](#architecture)
   - [Requirements](#requirements)
   - [Tests](#tests)
-  - [Type Checking](#type-checking)
-  - [Dependencies and Credits](#dependencies-and-credits)
-  - [About the Author](#about-the-author)
-  - [License](#license)
+  - [Type checking](#type-checking)
+  - [Dependencies and credits](#dependencies-and-credits)
+  - [About the author](#about-the-author)
+  - [Licence](#licence)
   - [Commercial licensing](#commercial-licensing)
 
 
@@ -76,9 +75,9 @@ you focus on playing.
   instrument library as it happens. Adaptive noise floor tracking works in
   noisy rehearsal rooms as well as quiet studios; back-to-back sounds are
   captured reliably with zero-gap detection.
-- **Beat slicer and auto-quantize for loops.** Detected onsets in long samples
+- **Beat slicer and auto-quantise for loops.** Detected onsets in long samples
   are individually placed on a beat grid using onset-aligned timemaps - loops
-  snap to your target BPM with musical precision. A pad-quantize mode
+  snap to your target BPM with musical precision. A pad-quantise mode
   preserves natural timbre by inserting silence between hits instead of
   time-stretching. Per-hit segment playback: cycle through hits with
   `round_robin`, pick randomly with `random`, or map specific segments to
@@ -90,14 +89,14 @@ you focus on playing.
 - **20-processor DSP chain with intelligent defaults.** Compression, gating,
   transient shaping, filters, distortion, saturation, bit-depth reduction,
   radio transmission/reception, frequency shift, tuning wobble, vocoder
-  cross-synthesis, beat-quantize, pitch-shift, time-stretch, reverse,
+  cross-synthesis, beat-quantise, pitch-shift, time-stretch, reverse,
   envelope reshape, and
   HPSS harmonic/percussive separation. Every parameter auto-adapts to each
   sample's analysis data - write `compress: true` and the right threshold,
   attack, and release are derived from the audio. Variants are pre-rendered
   in a background worker pool and ready before you press a key.
 - **Sweep anything with a knob.** Bind any numeric parameter - filter cutoff,
-  beat-quantize amount, distortion drive, compression threshold - to a MIDI
+  beat-quantise amount, distortion drive, compression threshold - to a MIDI
   CC controller. Variants are re-rendered in the background between knob
   positions and bridged smoothly, so you can play with parameters that aren't
   normally automatable on samplers at all.
@@ -110,14 +109,14 @@ you focus on playing.
   generic A-format, or pre-encoded B-format FuMA/AmbiX) with decoder and
   rotation at playback time - see [Ambisonic](#ambisonic-capture).
 - **WAV or lossless FLAC storage.** Opt into FLAC (`audio_format: flac`) to
-  shrink your sample library by ~40-60% with zero quality loss. Existing
+  shrink your sample library with no loss of quality. Existing
   WAV samples continue to load unchanged alongside any new FLAC captures -
   see [Storage format](#storage-format).
 - **Visual sample previews.** Every capture gets a fixed 1024x256 `.preview.png`
   thumbnail (waveform + 4-band frequency skyline + onset ticks + pitch/BPM
-  badge) for browsing in an OS file manager, plus a compact preview-data
-  block embedded in the analysis sidecar that the Supervisor dashboard
-  renders as scalable SVG on demand - see [Sample previews](#sample-previews).
+  badge) for browsing in an OS file manager, plus the compact data it is
+  drawn from, kept in the analysis sidecar so a missing thumbnail can be
+  redrawn without re-analysing - see [Sample previews](#sample-previews).
 - **Headless and config-driven.** Everything is YAML - version-controllable,
   reproducible, no GUI required. Runs equally well on a studio Mac, a
   Raspberry Pi in the rehearsal room, or a rack server. Drive it from any
@@ -142,10 +141,10 @@ you focus on playing.
 | **Live capture** | Adaptive noise floor, zero-gap back-to-back detection, S-curve fades |
 | **Analysis** | 58 dimensions across 5 feature groups; cached `.analysis.json` sidecars |
 | **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
-| **DSP processors** | 20 (filter, comp, gate, distort, bit-depth, radio, freqshift, wobble, saturate, reshape, transient, HPSS, vocoder, repitch, stretch-quantize, pad-quantize, ...) |
+| **DSP processors** | 20 (filter, comp, gate, distort, bit-depth, radio, freqshift, wobble, saturate, reshape, transient, HPSS, vocoder, repitch, stretch-quantise, pad-quantise, ...) |
 | **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
 | **Pitch shifting** | Rubber Band offline finer (highest available quality), pre-rendered |
-| **Time stretch** | Beat-quantized with onset-aligned timemaps, partial-quantize amount, pad-quantize alternative for speech |
+| **Time stretch** | Beat-quantised with onset-aligned timemaps, partial-quantise amount, pad-quantise alternative for speech |
 | **Segment playback** | Per-hit round-robin, random, or indexed - for sliced loops |
 | **MIDI input** | Hardware port, named virtual port, or both |
 | **MIDI control** | Note on/off, Program Change for programs, CC binding for any numeric parameter |
@@ -160,7 +159,7 @@ you focus on playing.
 | **GM drums** | Ready-to-play map of 47 GM percussion instruments with researched mix chain |
 | **Configuration** | YAML, version-controllable, headless, no GUI |
 | **Platform** | Linux, macOS, Windows (via WSL), Raspberry Pi - anywhere CPython 3.12 runs |
-| **License** | AGPL-3.0 (commercial licensing on request) |
+| **Licence** | AGPL-3.0 (commercial licensing on request) |
 
 
 ## How it works
@@ -181,7 +180,7 @@ Scarlett 18i20), `recorder.audio.input` selects which physical inputs to
 record from - for example `[3, 4]` records a stereo pair from inputs 3 and 4.
 
 You can also feed it pre-recorded WAV files - they pass through the same
-detection pipeline, making it easy to build sample libraries from existing
+detection pipeline, so a sample library can be built from existing
 recordings. For pre-trimmed sources (commercial sample packs, field recordings,
 SDR radio captures), `subsample import` bypasses detection entirely and imports
 files directly with silence trimming, safety fades, re-encoding, and full
@@ -227,7 +226,7 @@ Each assigned sample passes through a per-instrument DSP processing chain before
 playback. The chain is declared in the MIDI map - a sequence of processors that
 can include filtering, compression, limiting, gating, distortion, saturation,
 envelope reshaping, transient shaping, time-stretching, pitch-shifting, reversal,
-harmonic/percussive separation, and beat quantization. Variants are computed
+harmonic/percussive separation, and beat quantisation. Variants are computed
 offline in a background worker pool and cached to disk, so by the time you press
 a key the processed audio is already waiting in memory.
 
@@ -242,10 +241,10 @@ decide how much punch to add or remove. Envelope reshape reads the decay
 character to tighten the tail. Write `compress: true` or `transient: true` and
 the right parameters are derived from the audio itself.
 
-Beat-quantized time-stretching locks samples to a target BPM using onset-aligned
+Beat-quantised time-stretching locks samples to a target BPM using onset-aligned
 timemaps - each onset is individually placed on the beat grid with minimal
 stretching between them. For speech and other material where time-stretch
-artifacts are unacceptable, pad-quantize snaps onsets to the grid by inserting
+artefacts are unacceptable, pad-quantise snaps onsets to the grid by inserting
 silence instead, preserving natural timbre completely.
 
 The included `midi-map-gm-drums.yaml` applies all of this across the full GM
@@ -256,10 +255,9 @@ can be overridden by an experienced user who wants precise control.
 
 ## MIDI map
 
-The MIDI map is where Subsample becomes an instrument you can *play*. It is the
-most expressive MIDI routing surface of any sampler we know of: you don't just
-assign samples to notes, you write *rules* that pick samples from your library
-at trigger time - by similarity to a reference, by analysis metadata, by age,
+The MIDI map is where Subsample becomes an instrument you can *play*. You do not
+assign samples to notes one by one: you write *rules* that pick samples from
+your library at trigger time - by similarity to a reference, by analysis metadata, by age,
 by user-defined scoring functions, or by whatever combination you can write
 down in a few lines of plain text. Samples can then be reshaped on the way
 out through an ordered effects chain with MIDI CC control over every
@@ -419,7 +417,7 @@ locked to the session. Combine it with filtering for a length+rhythm pick:
 ```
 
 `duration`, `onsets`, and other numeric predicates take per-field operator
-dicts (`gte`, `lte`, `gt`, `lt`, `eq`). `strength: 0.7` is a partial-quantize
+dicts (`gte`, `lte`, `gt`, `lt`, `eq`). `strength: 0.7` is a partial-quantise
 amount - fully snapped at 1.0, unchanged at 0.0.
 
 That's the ladder. The rest of this section is the full reference - every
@@ -480,8 +478,8 @@ because the channel is stated in one place, a project can play the set on
 whatever channel it likes. An assignment may still declare its own `channel:`
 when one entry belongs somewhere else; that always wins.
 
-The top-level `channel:` accepts a `definitions:` name (`channel: my.kit`) just
-as the per-assignment field does.
+The top-level `channel:` accepts a `definitions:` name (`channel: my.kit`), in
+the same way as the per-assignment field.
 
 ### Assignment fields
 
@@ -492,7 +490,7 @@ as the per-assignment field does.
 | `notes` | yes | Single note, list, range, or `zone-tuned` for auto-derived keyboard layout (see Note syntax + Zone-tuned below) |
 | `select` | yes | Which sample to play (see Select below) |
 | `process` | no | How to present it (see Process below) |
-| `mode` | no | Playback behaviour: `one_shot` (default) plays to the natural end and ignores note-off; `gated` fades out on note-off; `loop` holds a seamless loop while the key is held, then plays past it on release. Replaces the old `one_shot` flag - `one_shot: true` is now `mode: one_shot`, `one_shot: false` is `mode: gated`, and a leftover `one_shot:` key is a load error |
+| `mode` | no | Playback behaviour: `one_shot` (default) plays to the natural end and ignores note-off; `gated` fades out on note-off; `loop` holds a click-free loop while the key is held, then plays past it on release. Replaces the old `one_shot` flag - `one_shot: true` is now `mode: one_shot`, `one_shot: false` is `mode: gated`, and a leftover `one_shot:` key is a load error |
 | `loop` | no | Manual loop-point override, e.g. `{ start: 1.2, end: 3.4, crossfade: 40 }` (start/end in seconds, crossfade in ms; each optional). Implies `mode: loop`. Omit to use the sample's auto-detected loop |
 | `release` | no | Shape the note-off fade for a sustained voice (`mode: gated` or `loop`; ignored with a warning on `mode: one_shot`). A number of ms, `true` for an adaptive tail, `full` to play the remaining audio to its natural end with no fade (a loop rings out its real tail), or `{time, curve}` where `curve` is `cosine` (default) or `exponential`; `time` may be CC-bound. `mode: loop` defaults to the adaptive tail when unset. See Release below |
 | `silenced_by` | no | Choke: the note(s) whose arrival cuts this sound with a fast ~10 ms damp (a hi-hat choke). A note, a list of notes, or `self` (a re-strike stops the previous hit), and `self` may sit in a list. Overrides `release` and rings-out; not valid on `zone-tuned`. See Choke below |
@@ -500,14 +498,14 @@ as the per-assignment field does.
 | `pan` | no | Stereo position `-100` (hard left) to `100` (hard right), `0` = centre (default) - or a per-channel weight list for surround/asymmetric routing (`[50, 50]` = centre; ratios matter, not absolute values). Also `any` / a `{gte, lte}` range / `{position, variation}` for a fresh random position per note-on. Constant-power normalised at mix time. See Pan below |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
 | `extract` | no | Collapse a multi-channel sample to one channel at playback: `omni`, `left`, `right`, `front`, `back`, `side`, `depth`, `height`, `channel.N`, or `{blend: [w1, w2, ...]}` for a weighted mix to mono (see Channel extraction below) |
-| `velocity` | no | Velocity layering range — `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
+| `velocity` | no | Velocity layering range - `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
 | `stack` | no | `true` lets this sound play together with other `stack: true` assignments on the same note and velocity, instead of being rejected as an overlap (see Stacking below). Default `false` |
 | `template` | no | Inherit fields from one or more named templates (see Templates below). The assignment's own fields override the template's; lists (`process`) and nested blocks (`select`) are replaced wholesale, not merged |
 
 ### Release - shape how a held note fades
 
 By default a sustained sound (`mode: gated`) fades out over a fixed 10 ms
-when you lift the key - just enough to avoid a click. `release` lets you set
+when you lift the key, which is long enough to avoid a click. `release` lets you set
 how long that fade is, and its shape:
 
 ```yaml
@@ -555,7 +553,7 @@ other.
 
 **`release: full`** is the exception to a fade: on note-off the voice plays the
 remaining audio to its natural end with no fade at all. On a plain sample that
-just lets it ring out; on a `mode: loop` voice it stops looping and plays the
+lets it ring out; on a `mode: loop` voice it stops looping and plays the
 real tail - the natural decay of the held note.
 
 One honest limit: `release` can only shape whatever sample audio is still
@@ -568,7 +566,7 @@ key, use `mode: loop` (below).
 ### Loop - hold a sustain for as long as the key is down
 
 `mode: loop` turns a sustaining sample into a held instrument: the attack plays
-once, then a seamless slice of the steady part loops for as long as you hold the
+once, then a click-free slice of the steady part loops for as long as you hold the
 key. Lift the key and it stops looping and plays on through the sample's real
 tail, shaped by `release`.
 
@@ -583,7 +581,7 @@ tail, shaped by `release`.
 ```
 
 subsample finds the loop points automatically - the steadiest slice of the
-sustain, with a short crossfade so the wrap is inaudible. The `loopable` catalog
+sustain, with a short crossfade so the wrap is inaudible. The `loopable` catalogue
 column and `subsample loops` let you preview which samples loop well. To
 place the loop by hand, give `loop:` in seconds (crossfade in ms):
 
@@ -646,7 +644,7 @@ any note form works, including your own names from a mounted definitions file
   sound's own `release` (even `release: full`) and any loop tail: a choke models a
   hand stopping the cymbal, so the ring genuinely stops instead of fading over its
   natural release.
-- Every sounding copy is cut, not just the newest - a fast open-hat roll all damps
+- Every sounding copy is cut, not only the newest - a fast open-hat roll all damps
   together when the hat closes, the way one physical cymbal would.
 - Choke acts within a channel (a kit is one channel). Build a mutual group - like
   the three hi-hat articulations above - by listing the others (and `self`) on each
@@ -691,7 +689,7 @@ assignments:
 
 **How a template merges.** The assignment starts from the template's fields,
 then its own fields win: a field it *sets* replaces the template's, a field it
-*omits* is inherited. The merge is top-level only — if the assignment sets its
+*omits* is inherited. The merge is top-level only - if the assignment sets its
 own `process` (or `select`), that **replaces** the template's wholesale rather
 than appending to or merging into it.
 
@@ -699,7 +697,7 @@ than appending to or merging into it.
 left-to-right: a later template overrides an earlier one, and the assignment's
 own fields override them all.
 
-Templates are flat — a template cannot itself carry a `template:` (inheritance
+Templates are flat - a template cannot itself carry a `template:` (inheritance
 is one level deep). A `template:` that names an undefined template is a load
 error listing the templates you defined.
 
@@ -718,20 +716,20 @@ notes: 36..60      # range with note numbers
 Note names use the convention C4 = 60 (C-1 = 0, G9 = 127). Sharps: `C#4`,
 `D#3`. Flats: `Db4`, `Eb3`.
 
-**Symbolic GM drum names** — `drum.<name>` looks up
+**Symbolic GM drum names** - `drum.<name>` looks up
 [`pymididefs.drums.GM_DRUM_MAP`](https://github.com/simonholliday/PyMidiDefs)
 (case-insensitive, so `drum.kick_1`, `drum.KICK_1`, and `Drum.kick_1` are
 equivalent). Covers the full GM percussion key map (notes 27-87): kicks,
 snares, hi-hats, toms, cymbals, Latin percussion, shakers, woodblocks,
-triangles. Use a list for multiple drums — `drum.x..drum.y` ranges are
+triangles. Use a list for multiple drums - `drum.x..drum.y` ranges are
 deliberately not supported because drum names aren't a musical sequence.
 Equivalent: `notes: drum.low_floor_tom` and `notes: 41` produce the same
-result; the symbolic form simply makes intent visible.
+result; the symbolic form makes intent visible.
 
-The four instruments GM defines in numbered pairs — kick, snare, crash, ride —
+The four instruments GM defines in numbered pairs (kick, snare, crash and ride)
 also accept the **bare alias** `drum.kick`, `drum.snare`, `drum.crash`,
 `drum.ride`, each pointing at the GM-designated primary (`drum.kick` =
-`drum.kick_1` = Bass Drum 1 = 36). Reach for the bare name when you just want
+`drum.kick_1` = Bass Drum 1 = 36). Reach for the bare name when you want
 "the kick" rather than choosing between the two variants; use the numbered
 form when you specifically want `_2`.
 
@@ -742,7 +740,7 @@ vocabulary. A *definitions file* is a small YAML file, owned by your music
 project, that gives names to note, CC, channel, and program numbers - so your
 map reads `notes: my.dawn_chorus_pheasant` instead of `notes: 60`, and the
 same file can name the same sounds in your sequencer. Neither tool depends on
-the other; they just read the same trivial file.
+the other; they both read the same small file.
 
 ```yaml
 # project.yaml - or any filename you like
@@ -835,21 +833,21 @@ use a per-field operator dict. Operators:
 | `eq` | `==` exact equality |
 
 Any combination on one field AND-composes. A bare scalar under a numeric field
-is shorthand for `eq` — e.g. `quantized_beats: 4` is the same as
+is shorthand for `eq` - e.g. `quantized_beats: 4` is the same as
 `quantized_beats: { eq: 4 }`.
 
 | Predicate | Type | Description |
 |-----------|------|-------------|
 | `duration` | float (seconds) | Filter by sample length. Example: `{ gte: 1.0, lt: 5.0 }` |
-| `duration_beats` | float (beats) | Filter by sample length in *beats at the session tempo* rather than seconds, so the pool stays musically tight as the tempo changes. A beat is a quarter note: a 16th note is `0.25`, an 8th `0.5`, a quarter `1`, a bar of 4/4 `4`. Example: `{ lt: 0.25 }` keeps only samples shorter than a 16th note. Needs a session tempo (`tempo.bpm`, or a followed MIDI clock) - a map that uses it will not load without one. Distinct from `quantized_beats`, which measures a quantize processor's *output*; this measures the sample's own recorded length. |
+| `duration_beats` | float (beats) | Filter by sample length in *beats at the session tempo* rather than seconds, so the pool stays musically tight as the tempo changes. A beat is a quarter note: a 16th note is `0.25`, an 8th `0.5`, a quarter `1`, a bar of 4/4 `4`. Example: `{ lt: 0.25 }` keeps only samples shorter than a 16th note. Needs a session tempo (`tempo.bpm`, or a followed MIDI clock) - a map that uses it will not load without one. Distinct from `quantized_beats`, which measures a quantise processor's *output*; this measures the sample's own recorded length. |
 | `onsets` | int | Filter by detected transient count. Example: `{ gte: 4 }` |
 | `tempo` | float (BPM) | Filter by detected tempo. Example: `{ gte: 100, lte: 140 }` |
 | `pitch` | Hz or note name | Filter by detected frequency. Each operator value is either a Hz float (`{ gte: 130.8 }`) or a note name (`{ gte: C3, lt: C6 }`). The two forms are interchangeable - note names are converted to Hz at parse time. Sharps: `C#4`; flats: `Db4`. |
-| `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples whose quantized variant has not yet been computed (or whose assignment has no quantize step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
+| `quantized_beats` | float (beats) | Filter by the beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples whose quantised variant has not yet been computed (or whose assignment has no quantise step with a valid BPM) are excluded when this predicate is active. Non-integer values accepted. |
 | `pitched` | bool | `true` = has stable pitch; `false` = not pitched |
 | `loopable` | bool | `true` = has a steady sustaining region (tonal or textural) worth looping while a key is held; `false` = does not. A coarse candidate flag over existing analysis - see the loopable column of `subsample catalog` to preview which samples pass |
 | `reference` | name or path | Similarity match against a reference sample. A **name** (`GM36_BassDrum1`) resolves from the built-in GM fingerprints, or from `library.reference_directory` when set - nothing is copied into your project and the map stays portable. A **path** (`my-refs/kick.wav`, relative to the map file) uses your own reference material |
-| `name` | string / list / dict | Filename stem match. Four forms — see below. Legacy: a path-like scalar value (containing `/` or starting with `.`) is still auto-detected as a `path:` |
+| `name` | string / list / dict | Filename stem match. Four forms - see below. Legacy: a path-like scalar value (containing `/` or starting with `.`) is still auto-detected as a `path:` |
 | `path` | path | Match a specific WAV file at this path (relative paths resolved against the MIDI map's directory). Preferred over `name:` for file references |
 | `directory` | path | Only match samples whose file path is inside this directory (auto-loads on startup; see [Programs vs directory predicate](#programs-vs-directory-predicate)) |
 
@@ -859,14 +857,14 @@ The `name:` predicate accepts four forms:
 where:
   name: my-kick                       # 1. exact stem match (case-sensitive)
   name: [my-kick-1, my-kick-2]        # 2. list of exact stems (case-sensitive)
-  name: { matches: "*kick*" }         # 3. glob — fnmatch-style, case-insensitive
-  name: { regex: "kick_\\d+" }        # 4. regex — re.fullmatch, case-insensitive
+  name: { matches: "*kick*" }         # 3. glob - fnmatch-style, case-insensitive
+  name: { regex: "kick_\\d+" }        # 4. regex - re.fullmatch, case-insensitive
 ```
 
 - The **list** form matches if the sample's stem is in the list. Pair with
   `pick: any` for uniform random selection across the whole set.
 - The **glob** form (`matches:`) uses `*`, `?`, and `[abc]` character classes;
-  `.` is a literal dot. Full-string match — `kick` matches only `kick`,
+  `.` is a literal dot. Full-string match - `kick` matches only `kick`,
   `*kick*` matches any stem containing `kick`. Case-insensitive.
 - The **regex** form (`regex:`) is `re.fullmatch` with `re.IGNORECASE`. Must
   match the entire stem. YAML tip: prefer double-quoted strings so `"\\d+"`
@@ -878,12 +876,12 @@ where:
   containment), `path:` (an exact file), or `pick:` (choose among the matches).
 
 `name:` (any form) and `path:` are mutually exclusive within a single `where`
-block — use one, not both. Inside a `where` block, only one of the four `name:`
+block - use one, not both. Inside a `where` block, only one of the four `name:`
 forms is allowed; combine multiple patterns via a `select:` fallback chain
 instead.
 
 **Legacy `min_X` / `max_X` syntax**: the pre-2026-04 form
-(`min_duration: 1.0`, `max_pitch: A4`, etc.) still works indefinitely —
+(`min_duration: 1.0`, `max_pitch: A4`, etc.) still works indefinitely:
 the parser translates each legacy key into the equivalent operator
 (`gte` for `min_`, `lte` for `max_`). Mixing both forms on the same
 field in one `where` block raises an error; use one form per field. New
@@ -906,7 +904,7 @@ Built-in scorers:
 
 | `by` | What it sorts by |
 |-----|------------------|
-| `age` | Arrival time (sample_id) — `desc` = newest first |
+| `age` | Arrival time (sample_id) - `desc` = newest first |
 | `duration` | Sample length in seconds |
 | `pitch` | Dominant frequency |
 | `onsets` | Detected onset count |
@@ -914,12 +912,12 @@ Built-in scorers:
 | `level` | RMS loudness |
 | `quantized_beats` | Beat length of the assignment's `stretch_quantize`/`pad_quantize` output. Samples without a computed variant park at the end regardless of direction. |
 | `similarity` | Similarity rank against the reference in `where`. Only supported as the primary clause; requires `reference` in `where`. When `reference` is set and no `order` is given, `similarity` desc is assumed automatically. |
-| `beat_match` | Cosine similarity between a user-supplied `pattern:` (a list of numbers in `[0, 1]` per beat) and the sample's per-beat energy profile. Requires a `stretch_quantize` or `pad_quantize` step in the same assignment; samples without a quantized variant are excluded from the result. See [Beat-pattern matching](#beat-pattern-matching) below for the full semantics. |
+| `beat_match` | Cosine similarity between a user-supplied `pattern:` (a list of numbers in `[0, 1]` per beat) and the sample's per-beat energy profile. Requires a `stretch_quantize` or `pad_quantize` step in the same assignment; samples without a quantised variant are excluded from the result. See [Beat-pattern matching](#beat-pattern-matching) below for the full semantics. |
 
 #### Implicit defaults
 
-The parser fills in a few defaults that are easy to miss - they make the
-common case concise, but it helps to know which ones are on:
+The parser fills in a few defaults that are not visible in the map - they make
+the common case concise, and these are the ones that are on:
 
 | Omitted key | Default applied | When |
 |---|---|---|
@@ -927,7 +925,7 @@ common case concise, but it helps to know which ones are on:
 | `order` | `[{ by: similarity, dir: desc }]` | `where.reference` **is** set |
 | `pick` | `1` (best match) for the first note; incremented per note thereafter | Multi-note assignment without `repitch`, and no explicit `pick` |
 | `pick` | `1` for every note | Multi-note assignment with `repitch` in `process` |
-| `pick` | Same `pick` for every note (no per-note distribution) | Any explicit `pick` — scalar, range, open-ended, or `any` |
+| `pick` | Same `pick` for every note (no per-note distribution) | Any explicit `pick` - scalar, range, open-ended, or `any` |
 | `where` | Empty (all samples match) | `where` block omitted |
 | `process` | Empty (unprocessed playback) | `process` block omitted |
 | `grid` | `16` (sixteenth-note) | `stretch_quantize` / `pad_quantize` without explicit grid |
@@ -958,12 +956,12 @@ pick: { gte: 1, lte: 3 }  # explicit: same vocabulary as `where:` operators
 
 The dict form also accepts `gt` / `lt` / `eq` (so `pick: { gt: 1, lt: 5 }`
 draws from ranks 2-4). If the upper bound exceeds the number of available
-matches, the draw clamps to the last rank — matching the scalar fallback
+matches, the draw clamps to the last rank - matching the scalar fallback
 behaviour. Any explicit `pick` (scalar or range) suppresses per-note
 distribution, so a range on `notes: [60, 61, 62]` rolls independently for
 each key instead of fixing different ranks to different notes.
 
-**Pick any match — open-ended ranges.** To draw uniformly across *every*
+**Pick any match - open-ended ranges.** To draw uniformly across *every*
 match without counting your library, leave an end open. Write `null` in the
 list, drop the upper bound from the dict, or use the `any` shortcut:
 
@@ -976,10 +974,10 @@ pick: { gte: 2 }          # rank 2 onward, open upper bound
 ```
 
 An open lower bound means "from the best match"; an open upper bound means
-"to the last match", resolved against the live library on every hit — so a
+"to the last match", resolved against the live library on every hit - so a
 new capture is automatically in the running with no map edit. When the whole
 list is in play (`pick: any`), the `order:` clause makes no difference: every
-match is equally likely. (`pick: {}` with no operators is rejected — write
+match is equally likely. (`pick: {}` with no operators is rejected - write
 `pick: any` if that's what you mean.)
 
 **Map velocity to the right sample.** `pick: velocity` chooses the sample by
@@ -1046,11 +1044,11 @@ sample is picked.
 ranks by spectral/timbral closeness to a reference sample, `beat_match` ranks
 by *rhythmic* closeness to a user-defined pattern.
 
-**Applies only to quantized samples.** `beat_match` scores the per-beat energy
+**Applies only to quantised samples.** `beat_match` scores the per-beat energy
 profile that `stretch_quantize` and `pad_quantize` produce as a by-product of
 snapping onsets to a beat grid. Any assignment that uses `beat_match` in its
 `order:` must therefore include one of those processors in its `process:`
-block - without a quantize step, no sample has an energy profile to compare
+block - without a quantise step, no sample has an energy profile to compare
 against, and the result set is empty.
 
 ```yaml
@@ -1065,7 +1063,7 @@ process:
 ```
 
 **The pattern.** A list of numbers in `[0, 1]`, one per beat. Values are
-relative — only the shape matters, not the absolute magnitudes. Examples:
+relative - only the shape matters, not the absolute magnitudes. Examples:
 
 | Pattern | Intent |
 |---|---|
@@ -1074,20 +1072,20 @@ relative — only the shape matters, not the absolute magnitudes. Examples:
 | `[1, 0.9, 0.8, 0.7, 0.6, 0.5]` | gentle decay from beat 1 to beat 6 |
 | `[0, 0, 1, 1, 0, 0, 1, 1]` | double-hits on beats 3-4 and 7-8 |
 
-**How a sample is scored.** Each quantized sample has a *grid energy profile* —
-per-slot RMS computed after the quantize step. `beat_match` mean-pools that
+**How a sample is scored.** Each quantised sample has a *grid energy profile*:
+per-slot RMS computed after the quantise step. `beat_match` mean-pools that
 profile down to per-beat energy (so an 8th-note grid and a 16th-note grid
-both reduce to the same per-beat values — cross-grid invariance), then
+both reduce to the same per-beat values - cross-grid invariance), then
 computes cosine similarity between the pattern and the profile over
 `min(len(pattern), len(beats))` elements (left-aligned). Samples with no
-quantized variant score `None` and are excluded.
+quantised variant score `None` and are excluded.
 
 **Behaviour summary:**
 
 - `dir: desc` (default) = best match first. `dir: asc` = worst match first.
 - Shape-sensitive, level-insensitive: `[1, 0, 1, 0]` perfectly matches a
   sample with energy `[0.5, 0, 0.5, 0]` (score 1.0).
-- Length mismatches are truncated left-aligned — no resampling, no padding.
+- Length mismatches are truncated left-aligned - no resampling, no padding.
 - Ints and floats are both accepted in the pattern list; values outside
   `[0, 1]` are rejected at parse time.
 
@@ -1105,7 +1103,7 @@ select:
 #### Legacy `order_by:` syntax
 
 The pre-2026-04 `order_by:` key with a bare-string token is still accepted
-indefinitely — the parser translates it into the equivalent `order:` clause.
+indefinitely - the parser translates it into the equivalent `order:` clause.
 These two forms produce identical results:
 
 ```yaml
@@ -1125,7 +1123,7 @@ Legacy tokens map as follows: `newest` → `{by: age, dir: desc}`, `oldest` →
 `{by: age, dir: asc}`, `duration_desc` → `{by: duration, dir: desc}`,
 `loudest` → `{by: level, dir: desc}`, `quietest` → `{by: level, dir: asc}`,
 `quantized_beats_desc` → `{by: quantized_beats, dir: desc}`, `similarity` →
-`{by: similarity, dir: desc}`, and so on — field name without the `_asc`/
+`{by: similarity, dir: desc}`, and so on - field name without the `_asc`/
 `_desc` suffix goes into `by`, the suffix determines `dir`. Mixing both keys
 on the same `select` entry is an error.
 
@@ -1189,10 +1187,10 @@ Available processors:
 | `stretch_quantize: true` | grid (default 16), tempo (config `tempo.bpm`), strength (default 1.0) | Time-stretch to session `tempo.bpm` with all defaults |
 | `stretch_quantize: { grid: 16 }` | as above, grid overridden | Time-stretch to session `tempo.bpm` |
 | `stretch_quantize: { tempo: 120, grid: 8 }` | explicit tempo + grid | Time-stretch to a specific tempo |
-| `stretch_quantize: { strength: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantize - onsets move partway to the grid for a looser feel |
+| `stretch_quantize: { strength: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantise - onsets move partway to the grid for a looser feel |
 | `pad_quantize: true` | grid (default 16), tempo (config `tempo.bpm`), strength (default 1.0) | Silence-pad onsets with all defaults |
 | `pad_quantize: { grid: 16 }` | as above, grid overridden | Onset-aligned silence padding - snaps onsets to the beat grid by inserting silence between segments rather than time-stretching. No pitch/speed change. Ideal for speech. |
-| `pad_quantize: { strength: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantize - same as stretch_quantize strength but for silence-pad mode |
+| `pad_quantize: { strength: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantise - same as `stretch_quantize` strength but for silence-pad mode |
 | `filter_low: true` | freq (Hz, default 16000), resonance (dB, default 0) | Low-pass filter (console-style default) |
 | `filter_high: true` | freq (Hz, default 80), resonance (dB, default 0) | High-pass filter (console-style default) |
 | `filter_band: true` | freq (Hz, default 1000), q (default 0.7), resonance (dB, default 0) | Band-pass filter (Q sets width) |
@@ -1205,7 +1203,7 @@ Available processors:
 | `hpss: { keep: percussive }` | as above | Keep only percussive/transient content (remove harmonics) |
 | `gate: true` | threshold (auto), attack (auto), release (auto), hold (auto), lookahead (auto) | Noise gate - silences audio below the noise floor. All parameters auto-adapt: threshold from noise floor, attack/release/hold from onset and decay character. |
 | `distort: true` | mode (hard_clip), drive (auto), mix (1.0), tone (auto), bit_depth (8), downsample_factor (4) | Waveshaping distortion with four modes: hard_clip, fold, bit_crush, downsample. Drive adapts to crest factor; tone adapts to spectral rolloff. |
-| `bit_depth: 12` | bits (1-16, default 12), dither (false, true = triangular, or `triangular` / `rectangular`) | Clean bit-depth reduction - requantizes to an N-bit amplitude grid for vintage sampler grit (the MPC60 and SP-1200 store 12-bit samples). Pure quantization: no drive, tone filtering, or level changes. Dither defaults off (vintage units had none); turn it on to trade the gritty low-level distortion for a smooth hiss. |
+| `bit_depth: 12` | bits (1-16, default 12), dither (false, true = triangular, or `triangular` / `rectangular`) | Clean bit-depth reduction - requantises to an N-bit amplitude grid for vintage sampler grit (the MPC60 and SP-1200 store 12-bit samples). Pure quantisation: no drive, tone filtering, or level changes. Dither defaults off (vintage units had none); turn it on to trade the gritty low-level distortion for a smooth hiss. |
 | `radio: { mode: am }` | mode (am, lw, fm, ssb), demod (matched, am, fm, ssb), tune (Hz), signal (0-1), static (0-1), fade (0-1), bandwidth (Hz), stereo (mono, stereo), mix (1.0) | Broadcast-and-received: a full transmit -> channel -> demodulate round-trip. `lw` is AM through a steep longwave channel; `fm` is narrowband NFM; `ssb` with `tune` is the mistuned voice. `demod` different from the mode is the deliberate wrong demodulator (`fm` -> `ssb` is a musical warble; AM<->FM is harsh noise, silence-guarded if it recovers nothing). `signal` weakens the station (hiss, FM clicks, AGC swell-on-fade), `static` adds atmospheric crackle, `fade` adds shortwave swimming. Authentic mono collapse by default; `stereo` for dual-mono. |
 | `freqshift: 1000` | shift_hz (signed Hz), mix (1.0) | Bode/single-sideband frequency shift - adds a constant number of Hz to every partial (harmonic ratios break; NOT a pitch shift). Small shifts detune and phase; large shifts go clangorous and metallic. |
 | `wobble: { depth: 6, rate: 0.3 }` | depth (Hz), rate (Hz), base (Hz), mix (1.0) | Oscillator warble - a slow continuous drift of the tuning (microphonic / BFO wander). `depth` sets the Hz of wander, `rate` the LFO speed, `base` a constant offset to drift around. |
@@ -1294,11 +1292,11 @@ process:
   - vocoder: { carrier: carriers/vowel-ah.wav, bands: 16, depth: 0.8 }
 ```
 
-`bit_depth` and `distort: { mode: bit_crush }` share the same quantizer, but
-serve different ends: `bit_depth` is the converter itself - just the grid, with
+`bit_depth` and `distort: { mode: bit_crush }` share the same quantiser, but
+serve different ends: `bit_depth` is the converter itself - the grid alone, with
 silence staying silent and levels untouched - while bit_crush wraps that grid
 in a distortion chain (drive, tone filter, level compensation, mix). Dither
-decides what happens to material quieter than one quantization step: without
+decides what happens to material quieter than one quantisation step: without
 it (the default, and what vintage hardware did), fades and tails break up into
 gritty, signal-correlated distortion; with `dither: true` (triangular) that
 distortion becomes a smooth, constant hiss - including over silence, which is
@@ -1345,17 +1343,17 @@ squash transients and raise the relative level of the sustain/decay.
 
 HPSS (Harmonic/Percussive Source Separation) decomposes audio into sustained
 tonal content and transient clicks/hits. Useful as a pre-filter before repitch
-(avoids pitch-shifting drum bleed) or stretch_quantize (cleaner grid alignment).
+(avoids pitch-shifting drum bleed) or `stretch_quantize` (cleaner grid alignment).
 
 When `repitch` is in the process list, all notes in a multi-note assignment
 share pick 1 (same sample, pitched per note). Without `repitch`, each note gets
-the next rank — unless an explicit `pick` (scalar or range) is given, in which
+the next rank - unless an explicit `pick` (scalar or range) is given, in which
 case every note uses that same `pick` (range picks roll fresh per trigger).
 
 #### Legacy `amount:` parameter (still accepted)
 
 Four processors previously shared an `amount:` parameter with wildly different
-units (dB for `saturate` and `transient`, 0-1 fraction for the two quantizers).
+units (dB for `saturate` and `transient`, 0-1 fraction for the two quantisers).
 The parameter has been renamed per processor so the unit is obvious at the
 call site. The old `amount:` key still works indefinitely - the parser
 translates each one to the appropriate canonical name:
@@ -1379,7 +1377,7 @@ matching the `tempo:` where-predicate. Legacy `bpm:` is translated to
 `tempo:` at parse time.
 
 The processor formerly named `beat_quantize` is now `stretch_quantize`: both
-the new name and its companion `pad_quantize` describe *how* each quantizer
+the new name and its companion `pad_quantize` describe *how* each quantiser
 aligns onsets to a grid - one stretches audio in time, the other pads with
 silence between segments. The legacy name `beat_quantize` still works -
 the parser translates it to `stretch_quantize` at parse time, preserving any
@@ -1432,7 +1430,7 @@ pan: { position: -20, variation: 40 } # around a centre: -20, spread by ±20
 Positions use the same `-100`…`100` axis as the fixed form, and the draw is
 always **constant-power** - only the position is randomised, never the channel
 levels, so a note is never louder or quieter for landing off-centre. It works on
-any output layout (the stereo position up/downmixes just like a fixed pan), and
+any output layout (the stereo position up/downmixes the same way a fixed pan does), and
 stacked layers on one note each draw independently. If you also set `output:` it
 must list exactly two channels.
 
@@ -1472,10 +1470,10 @@ A single `(channel, note)` can host multiple assignments, each declaring a
 distinct velocity range. The player picks the matching layer at note-on based
 on the incoming velocity. Two common uses:
 
-- **Velocity-switched libraries** — soft taps trigger the soft-recorded sample,
+- **Velocity-switched libraries** - soft taps trigger the soft-recorded sample,
   hard hits trigger the hard-recorded one (standard pattern in drum and piano
   libraries since the 1980s).
-- **Trigger multiplication** — turn a single MIDI key into two or more distinct
+- **Trigger multiplication** - turn a single MIDI key into two or more distinct
   triggers by splitting its velocity range. Trades velocity resolution for
   more sounds per pad.
 
@@ -1519,20 +1517,20 @@ the gain calculation unchanged.
 `rescale: true` is shorthand for `[0, 127]`. With rescale on, each layer
 plays through its own full dynamic envelope: a vel-30 input on the
 0-63 layer is treated as if it were 60 out of 127, so the sample doesn't
-sound permanently quiet just because the layer only sees the low half of
+sound permanently quiet because the layer only sees the low half of
 the velocity range.
 
-Omit `rescale` (or set it to `false`) to keep the input velocity literal —
-useful when each layer's sample is already calibrated for the velocity range
+Omit `rescale` (or set it to `false`) to keep the input velocity literal,
+which is useful when each layer's sample is already calibrated for the velocity range
 it covers, so rescaling would inflate the loudness inappropriately.
 
 #### Validation
 
 | Condition | Behaviour |
 |---|---|
-| Velocity field omitted | Default — single layer covering all velocities (no change from pre-layering) |
-| Overlapping ranges on the same note | `ValueError` at load — overlap is almost always a typo, unless every overlapping assignment sets `stack: true` (see Stacking below) |
-| Coverage gap (some velocities mapped to no layer) | `WARNING` listing the gap — velocities in the gap silently play nothing |
+| Velocity field omitted | Default - single layer covering all velocities (no change from pre-layering) |
+| Overlapping ranges on the same note | `ValueError` at load - overlap is almost always a typo, unless every overlapping assignment sets `stack: true` (see Stacking below) |
+| Coverage gap (some velocities mapped to no layer) | `WARNING` listing the gap - velocities in the gap silently play nothing |
 | `trigger`/`rescale` lo > hi, or out of `[0, 127]` | `ValueError` at load |
 | Unknown inner key (e.g. `trggier` typo) | `ValueError` at load |
 
@@ -1615,12 +1613,12 @@ without manually writing 30 assignments.
       duration: { gte: 0.5 }       # optional additional filters
 ```
 
-`repitch` is **required** — each sample is pitch-shifted at note-on to the
+`repitch` is **required** - each sample is pitch-shifted at note-on to the
 note being played, with its declared pitch as the source. Without it, every
 note would play the same sample at the same pitch, which is never what
 zone-tuned is for.
 
-`pitched: true` is **implicit** — Subsample filters via the same
+`pitched: true` is **implicit** - Subsample filters via the same
 `has_stable_pitch` gate used elsewhere (`pitch_confidence`, `pitch_stability`,
 `harmonic_ratio`, etc.). Unpitched samples never sneak into a zone.
 
@@ -1655,8 +1653,8 @@ as their keyboard ranges don't overlap.
 
 #### Live re-derivation
 
-Whenever the active library changes — a new sample captured, a watcher
-import, a library eviction, a program switch, or a MIDI map reload —
+Whenever the active library changes - a new sample captured, a watcher
+import, a library eviction, a program switch, or a MIDI map reload,
 Subsample re-derives the zones. There's no manual refresh step.
 
 #### Validation
@@ -1694,7 +1692,7 @@ both outputs.
 ```
 
 When `extract:` is set and `pan:` is omitted, the mono extract is distributed
-equally across every output channel (constant-power) — the natural default for
+equally across every output channel (constant-power) - the natural default for
 a "collapsed to mono" signal. Explicit `pan:` still works as a per-output
 weighting if you want something other than uniform.
 
@@ -1766,8 +1764,8 @@ The number of weights must match the sample's channel count, checked at map load
 **Going further.** The sections that follow cover the optional advanced
 features: multichannel/ambisonic capture, program switching for live kit swaps
 via MIDI Program Change, and MIDI CC control for any numeric processor
-parameter. None of this is needed for a basic setup - skip ahead if you're
-just building a drum kit or pitched keyboard.
+parameter. None of this is needed for a basic setup - skip ahead if you are
+building a drum kit or pitched keyboard.
 
 ---
 
@@ -1815,7 +1813,7 @@ ambisonic samples rotate together.
 
 Analysis runs on the W (omnidirectional) channel only, so spectral and
 rhythmic fingerprints reflect the sound-field sum rather than a
-directionally biased mix. Pad-quantize and beat-quantize work on
+directionally biased mix. Pad-quantise and beat-quantise work on
 ambisonic samples using Rubber Band's phase-coherent multichannel engine
 - inter-channel relationships survive time-stretching within tolerance.
 
@@ -1831,7 +1829,7 @@ Home Kit 2026-07/
   hh_open_mid/
 ```
 
-Nothing declares that this is a set - it just is one, because the map's
+Nothing declares that this is a set. It is one because the map's
 `directory:` predicates resolve relative to the map file and its `reference:`
 predicates name built-in fingerprints rather than pointing at a project. So the
 folder is self-contained: copy it anywhere, share it between projects, keep it
@@ -1932,7 +1930,7 @@ Each program entry has a `name`, an optional `program` number (0-127, defaults t
 its list position), and **exactly one** of two source forms:
 
 - **`directory:`** - swap the sample pool only. The program reuses the map's
-  top-level `assignments:` and just points them at a different folder. Use this
+  top-level `assignments:` and points them at a different folder. Use this
   when the same routing rules should evaluate against different samples (the
   `directory:` example above).
 - **`map:`** - a full **preset**: a whole mapper file with its own `assignments:`
@@ -2073,42 +2071,43 @@ Every enum-string value the MIDI map accepts, in one place:
 | `radio` `mode` | `am` `lw` `fm` `ssb` |
 | `radio` `demod` | `matched` `am` `fm` `ssb` |
 | `radio` `stereo` | `mono` `stereo` |
-| Quantize `segment` | `round_robin` `random` or integer (1-indexed) |
+| Quantise `segment` | `round_robin` `random` or integer (1-indexed) |
 | `vocoder` `carrier` | `reference` (the note's reference sample) or a file path |
 | `silenced_by` value | `self`, or a note / list of notes (same syntax as `notes`) |
 | `definitions` file sections | `notes` (0-127) `cc` (0-127) `channels` (1-16) `programs` (0-127); other sections ignored |
 | Legacy `order_by` tokens | `newest` `oldest` `duration_asc` `duration_desc` `pitch_asc` `pitch_desc` `onsets_asc` `onsets_desc` `tempo_asc` `tempo_desc` `loudest` `quietest` `similarity` `quantized_beats_asc` `quantized_beats_desc` |
 | Legacy numeric-predicate keys | `min_duration` `max_duration` `min_onsets` `max_onsets` `min_tempo` `max_tempo` `min_pitch` `max_pitch` `min_quantized_beats` `max_quantized_beats` |
 | Legacy processor names | `beat_quantize` (→ `stretch_quantize`) `hpss_harmonic` (→ `hpss: { keep: harmonic }`) `hpss_percussive` (→ `hpss: { keep: percussive }`) |
-| Legacy processor param names | `amount` (→ `drive` / `gain` / `strength` per processor) `bpm` (→ `tempo` in quantizers) |
+| Legacy processor param names | `amount` (→ `drive` / `gain` / `strength` per processor) `bpm` (→ `tempo` in quantisers) |
 
 ## Performance
 
-### Zero-latency playback
+### Pre-rendered playback
 
-When a sample enters the library, a background worker immediately produces a
-pre-rendered copy at the output device's sample rate and format. Tonal samples
-also receive a full set of pitch-shifted variants. By the time the first MIDI
-note fires, the work is already done - playback is a memory copy into the mix
-buffer, not an on-the-fly calculation. A three-tier fallback guarantees playback
-is never blocked:
+When a sample enters the library, a background worker produces a pre-rendered
+copy at the output device's sample rate and format. Tonal samples also receive
+a set of pitch-shifted variants. When a MIDI note arrives, playback copies the
+prepared audio into the mix buffer rather than calculating it on the spot. If a
+variant is not ready yet, the player falls back in this order:
 
 1. **Process variant** - pre-computed with the full declared chain (pitch, filter, saturate, reverse, time-stretch, etc.)
 2. **Base variant** - pre-normalised, no DSP (all samples)
-3. **On-the-fly render** - last resort on the very first trigger only
+3. **On-the-fly render** - used only on the first trigger, before any variant exists
 
 ### MIDI dispatch model
 
 Incoming MIDI is dispatched in callback mode: rtmidi delivers each message
-to subsample's handler on its own dedicated thread the moment it arrives.
-There is no polling loop, so there is no fixed input-latency floor. The
-end-to-end path that a player feels as latency is three parts:
+to Subsample's handler on its own dedicated thread as it arrives. There is no
+polling loop, so there is no fixed input-latency floor. The delay a player
+hears between a key and its sound has three parts:
 
-1. **MIDI dispatch** — under 1 ms (rtmidi callback).
-2. **Per-note handling** — well under 1 ms (sample selection is pre-computed
-   when the library changes, so a trigger is an indexed pick, not a query).
-3. **Output latency** — the buffer→DAC floor. This is the dominant term, and
-   it's what you hear as a uniform delay against a hardware instrument.
+1. **MIDI dispatch** - the rtmidi callback handing the message over.
+2. **Per-note handling** - choosing the sample and starting the voice. Sample
+   selection is worked out when the library changes, so a trigger picks from
+   a prepared list rather than searching the library.
+3. **Output latency** - the time from the output buffer to the converter. This
+   is usually the largest part, and it is what you hear as a uniform delay
+   against a hardware instrument.
 
 The output buffer period is set via `player.audio.buffer_frames`:
 
@@ -2121,33 +2120,29 @@ The output buffer period is set via `player.audio.buffer_frames`:
 
 These are the *period*, not the total latency: PortAudio's ALSA backend keeps
 several periods in flight, so actual output latency is a small multiple of the
-figure above. The real number your device negotiated is printed at startup:
+figure above. The latency your device negotiated is printed at start-up:
 
 ```
 PortAudio output latency: 11.6 ms
 ```
 
-That line is ground truth — tune against it, not the table. Lower
-`buffer_frames` (e.g. 128, 64) to shrink it; the player logs an `Audio xrun`
-warning if the buffer is too low for your machine to sustain (audible as
-clicks), so reduce until you see those, then step back up. Leave it unset to
-let the OS pick a safe default.
+Tune against that line, not the table. Lower `buffer_frames` (e.g. 128, 64) to
+shrink it. The player logs an `Audio xrun` warning when the buffer is too small
+for your machine to keep up (audible as clicks), so reduce it until those
+appear, then step back up. Leave it unset to let the OS pick.
 
-You can measure the two software terms on your hardware with the included
-scripts — MIDI dispatch:
+Two included scripts measure the software parts on your own hardware. MIDI
+dispatch:
 
 ```bash
 python scripts/measure_midi_latency.py --count 1000
 ```
 
-and per-note handling cost (selection + variant lookup + render):
+and per-note handling (selection, variant lookup and render):
 
 ```bash
 python scripts/measure_handler_timing.py
 ```
-
-Both should report well under 1 ms; if they don't, that's a bug, not a buffer
-setting.
 
 ### End-to-end 32-bit float
 
@@ -2156,49 +2151,46 @@ that format between pipeline stages - analysis, normalisation, pitch shifting,
 gain staging, polyphonic mixing. Precision-sensitive operations (IIR filters,
 compressor/gate envelope followers, gain curve generation) promote to float64
 internally and return float32. The only integer conversion is a single pack to
-the hardware's native bit depth at the output. This approach matches professional
-DAW practice, and means that peak-normalising a quiet recording or pitch-shifting
-it across two octaves introduces no measurable quality loss.
+the hardware's native bit depth at the output, so peak-normalising a quiet
+recording or pitch-shifting it does not round it through an integer format on
+the way.
 
 ### Non-blocking capture
 
 The audio input thread does minimal work and returns immediately. Analysis runs
-in a separate worker pool, so back-to-back sounds are captured reliably even
-when spectral analysis is slow — critical for USB audio devices, which use
-isochronous transfers and are sensitive to timing jitter. The pool right-sizes
-itself to the moment: while the player is live it keeps to a small share of the
-cores so the real-time audio thread is never starved, while the one-off library
-scan at startup — before anything is playing — spreads across most of the cores
-in separate processes (leaving some headroom for the system), building a large
-library several times faster on a multi-core machine.
+in a separate worker pool, so capture keeps reading the device while a slow
+spectral analysis finishes. This matters most for USB audio devices, which use
+isochronous transfers and are sensitive to timing jitter. The pool sizes itself
+to what is happening: while the player is live it keeps to a small share of the
+cores so the audio thread always has room, while the library scan at start-up,
+before anything is playing, spreads across most of the cores in separate
+processes.
 
-### Leaves you headroom
+### Worker headroom
 
-Background analysis deliberately runs on about three-quarters of the machine's
-cores rather than every last thread, so your system stays responsive while a
-large library rebuild or `import` works away in the background. It pulls back
-much further while the player is live, so playback is never starved. The share
-is measured against the cores this process may actually use, so it does the
-right thing inside a container or under a CPU allowance rather than sizing
-itself to the whole host.
+Background analysis runs on most of the machine's cores rather than every one of
+them, so the system stays usable while a large library rebuild or `import` runs.
+It pulls back further while the player is live. The share is taken from the
+cores this process may actually use, so inside a container or under a CPU
+allowance it sizes itself to that allowance rather than to the whole host.
 
-Note that fewer workers does not mean a cooler machine: a modern CPU draws to
-its power limit whether the work is spread across four cores or forty, so the
-package temperature lands in much the same place either way. What you gain is
-headroom — the machine stays usable while it works.
+Fewer workers does not mean a cooler machine: a modern CPU draws to its power
+limit whether the work is spread across four cores or forty, so the package
+temperature lands in much the same place either way. What you gain is a machine
+that stays usable while it works.
 
-### Professional gain staging
+### Gain staging
 
 Every voice is RMS-normalised so a quiet recording and a loud one play at
 comparable levels at the same MIDI velocity. A tanh soft-limiter on the mix bus
-smoothly compresses peaks that approach 0 dBFS - the output never clips, no
-matter how many voices overlap, and the character of the sound is preserved.
+compresses peaks that approach 0 dBFS, so overlapping voices round off rather
+than hard-clip.
 
-### Pitch shifting quality
+### Pitch shifting
 
-Pitch variants are produced using the Rubber Band library's offline finer engine,
-the highest quality pitch-shifting algorithm available. Variants are pre-computed
-in the background by a worker pool; no latency is added at trigger time.
+Pitch variants are produced with the Rubber Band library's offline finer engine.
+Variants are pre-computed in the background by a worker pool, so the shifting
+happens before a note is played rather than when it is triggered.
 
 ## Similarity engine
 
@@ -2212,7 +2204,7 @@ acoustic qualities matter most for your material.
 The key insight: **the same comparison method works for both percussive and tonal
 sounds without needing to classify them first.** A kick drum naturally scores
 high on attack character; a violin scores high on sustained timbre. No
-classifier, no training data, no labelling - just geometry.
+classifier, no training data, no labelling: the comparison is geometry.
 
 For each reference, an in-memory ranked list of matches is maintained and updated
 incrementally as new recordings arrive or old ones are evicted. See
@@ -2232,13 +2224,13 @@ they survive restarts. Each variant is stored as a single binary file named by a
 SHA-256 hash of the source audio, transform chain, output sample rate, and
 analysis version - any change to any of these produces a different key, so stale
 cache hits are impossible. Recently-used files are kept warm (LRU by modification
-time); oldest files are evicted when the disk budget is exceeded. Quantized
-variants also store a grid energy profile - per-grid-slot RMS energy normalized
+time); oldest files are evicted when the disk budget is exceeded. Quantised
+variants also store a grid energy profile - per-grid-slot RMS energy normalised
 to [0, 1] - alongside the audio; the `beat_match` order scorer compares against it.
 
 Samples with detected rhythmic content can be time-stretched to a target tempo
 using the `stretch_quantize` processor in a MIDI map assignment. Detected attacks are
-snapped to a quantized beat grid and the entire mapping is applied in a single
+snapped to a quantised beat grid and the entire mapping is applied in a single
 pass using Rubber Band's offline finer engine. Time-stretch variants are produced
 on-demand when an assignment requests them - no global startup cost.
 
@@ -2247,7 +2239,7 @@ on-demand when an assignment requests them - no global startup cost.
 Standard spectral onset detection (as used by librosa and most audio analysis
 tools) identifies the frame where spectral energy changes most rapidly - the
 peak of the onset strength envelope. For percussive sounds this peak typically
-lags the actual attack by 10-30 ms, which is enough to make beat-quantized
+lags the actual attack by 10-30 ms, which is enough to make beat-quantised
 hits sound noticeably off the grid.
 
 Subsample refines each detected onset to sample-accurate precision using a
@@ -2258,7 +2250,7 @@ two-stage approach:
 2. **Attack refinement** - for each onset, a short-window amplitude envelope
    (32 samples, ~0.7 ms) is searched backward to find the inter-hit valley
    (quietest point between consecutive transients), then forward to find where
-   energy first rises above 20% of the local peak. This threshold crossing is
+   energy first rises above a set fraction of the local peak. This threshold crossing is
    the perceptual attack start - the moment a musician would tap along.
 
 The search is bounded by the midpoint to the previous onset (preventing bleed
@@ -2328,7 +2320,7 @@ automatically; see [Configuration](#configuration)).
    microphone - each distinct sound is captured, trimmed, and analysed into
    `samples/captures/` - or bring existing sounds:
    `subsample import ~/my-pack/*.wav` (trims, fades, and analyses them in),
-   or simply copy audio files (WAV, FLAC, AIFF, OGG, MP3) into
+   or copy audio files (WAV, FLAC, AIFF, OGG, MP3) into
    `samples/captures/`; everything there loads at startup.
 2. **Turn the player on.** In `config.yaml`, set `player.enabled: true` and
    your devices: `player.audio.device` (output), and `player.midi_device`
@@ -2555,7 +2547,7 @@ weights - is optional and rarely needs changing.
 
 | Setting | Default | Description |
 |---|---|---|
-| `max_memory_mb` | auto | Total cache memory budget. Auto-detect: min(25% of system RAM, 1024 MB). Split: 60% instruments, 35% transforms, 5% carrier |
+| `max_memory_mb` | auto | Total cache memory budget. Auto-detected from system RAM, with a ceiling, and split automatically: most to instrument samples, then transform variants, then the vocoder carrier cache. The per-cache settings in `library` and `transform` override the split |
 | `recorder.enabled` | `true` | Enable live audio capture; set to `false` to process files only |
 | `recorder.audio.device` | `none` | Audio input device name. Case-insensitive glob matched anywhere in the name, so a bare substring works; use `*` for the card index, which moves (`SC-U: USB Audio (hw:*,0)`). If unset, auto-select or prompt. See [Naming a device that keeps moving](#naming-a-device-that-keeps-moving) |
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
@@ -2563,9 +2555,9 @@ weights - is optional and rarely needs changing.
 | `recorder.audio.channels` | auto | 1 = mono, 2 = stereo. Omitted by default (and `null`) = auto-detect from the selected device |
 | `recorder.audio.input` | `null` | Physical input channels (1-indexed list). `[3, 4]` records from inputs 3-4 |
 | `recorder.audio.buffer_frames` | `512` | Frames per buffer read |
-| `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, ~40-60% smaller, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
+| `recorder.audio.audio_format` | `wav` | Output container: `wav` (uncompressed, 16/24/32-bit) or `flac` (lossless compressed, smaller files, 16/24-bit). See [Storage format](#storage-format) for behaviour around mixed bit depths |
 | `recorder.audio.float_import_ceiling_dbfs` | `-1.0` | Ceiling (dBFS) for 32-bit float / 64-bit double audio, wherever it is read - CLI file-input (`subsample <file>`), `directory:`/`path:` loads, OSC import, and the watcher. Peaks above full scale (these formats have no hard 0 dBFS limit) are scaled down to fit instead of hard-clipping on the way in. Whole-file, so dynamics are preserved; inaudible, since playback re-normalises. Integer sources untouched. `null` clips as before (this was the behaviour in prior versions). A hot float sample analysed before this existed can play a decibel or two quiet until re-analysed - delete its `.analysis.json` sidecar to refresh it |
-| `recorder.previews` | `true` | Emit a `.preview.png` thumbnail sidecar (1024x256, ~15-25 KB) and embed a compact `preview` data block in `.analysis.json` so the Supervisor dashboard can render a scalable SVG on demand. See [Sample previews](#sample-previews) |
+| `recorder.previews` | `true` | Emit a `.preview.png` thumbnail sidecar (1024x256) and embed the compact `preview` data it is drawn from in `.analysis.json`, so a missing thumbnail is redrawn without re-analysing. See [Sample previews](#sample-previews) |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
 | `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit. May be an ensemble - a map declaring a `maps:` block that binds several sample sets to channels. See [Ensembles](#ensembles---several-sample-sets-at-once) |
@@ -2598,7 +2590,7 @@ weights - is optional and rarely needs changing.
 | `analysis.tempo_min` | `30.0` | Minimum tempo considered by pulse detector (BPM) |
 | `analysis.tempo_max` | `300.0` | Maximum tempo considered by pulse detector (BPM) |
 | `library.max_memory_mb` | auto | Max audio memory for in-memory samples; overrides global split. Oldest evicted (FIFO) |
-| `library.directory` | `samples/captures` | Root directory of instrument samples — walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Set to `null` to load nothing in bulk and take every sample from the MIDI map's own `directory:`/`path:` predicates instead - what a project assembled from shared sample sets wants. Overridden by `programs:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
+| `library.directory` | `samples/captures` | Root directory of instrument samples - walked recursively, so samples can be organised into subdirectories (`kicks/`, `snares/`, …) however suits the user. Set to `null` to load nothing in bulk and take every sample from the MIDI map's own `directory:`/`path:` predicates instead - what a project assembled from shared sample sets wants. Overridden by `programs:` in the MIDI map when present. Missing `.analysis.json` and `.preview.png` sidecars are regenerated at startup; orphaned ones (no matching audio) are deleted |
 | `library.watch` | `false` | Monitor `library.directory` (or each program directory) at runtime for new audio files from any source - another Subsample instance, a DAW, or any application that writes audio. Watches the top level of each directory only - drop new files there, not into subdirectories (see Watching for new samples) |
 | `similarity.weight_spectral` | `1.0` | Weight for the spectral shape group (14 metrics) |
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
@@ -2607,13 +2599,11 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
 | `transform.max_memory_mb` | auto | Memory budget (MB) for transform variants; overrides global split |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
-| `tempo.bpm` | `0.0` | Session tempo (BPM). Default for `stretch_quantize` / `pad_quantize` steps that carry no explicit `tempo:`, and the reference for the `duration_beats` selection filter. Only assignments that declare a quantize processor are quantized - there is no automatic stretch-every-rhythmic-sample behaviour. `0.0` means unset: such a quantize step is skipped, and a map that filters by `duration_beats` will not load. Also the fallback under `tempo.source: midi` until a MIDI clock arrives |
-| `tempo.source` | `config` | Where the session tempo comes from. `config` uses `tempo.bpm`; `midi` follows an incoming MIDI clock so changing tempo in your sequencer doesn't leave quantized samples or beat filters on the old grid. See [Following your sequencer's tempo](#following-your-sequencers-tempo) |
+| `tempo.bpm` | `0.0` | Session tempo (BPM). Default for `stretch_quantize` / `pad_quantize` steps that carry no explicit `tempo:`, and the reference for the `duration_beats` selection filter. Only assignments that declare a quantise processor are quantised - there is no automatic stretch-every-rhythmic-sample behaviour. `0.0` means unset: such a quantise step is skipped, and a map that filters by `duration_beats` will not load. Also the fallback under `tempo.source: midi` until a MIDI clock arrives |
+| `tempo.source` | `config` | Where the session tempo comes from. `config` uses `tempo.bpm`; `midi` follows an incoming MIDI clock so changing tempo in your sequencer doesn't leave quantised samples or beat filters on the old grid. See [Following your sequencer's tempo](#following-your-sequencers-tempo) |
 | `transform.quantize_resolution` | `16` | Grid subdivision for time-stretch onset alignment: 1 (whole), 2 (half), 4 (quarter), 8 (eighth), 16 (sixteenth) |
 | `transform.variant_cache_dir` | `samples/variant-cache` | Directory for persistent disk cache of transform variants. Empty string or null disables |
 | `transform.max_disk_mb` | auto | Max disk space (MB) for cached variant files; defaults to 3x memory budget. 0 disables |
-| `supervisor.enabled` | `false` | Enable the Supervisor web dashboard (broadcasts state via WebSocket for live monitoring). Requires `pip install "subsample[supervisor] @ git+https://github.com/simonholliday/subsample.git"` |
-| `supervisor.port` | `9003` | WebSocket port the Supervisor server listens on |
 | `osc.enabled` | `false` | Enable OSC integration (send sample events, optionally receive import requests). Requires `pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"` |
 | `osc.send_host` | `127.0.0.1` | Destination host for outgoing `/sample/captured` and `/sample/loaded` messages |
 | `osc.send_port` | `9000` | Destination UDP port for outgoing OSC messages |
@@ -2633,9 +2623,9 @@ weights - is optional and rarely needs changing.
 the session tempo, and the `duration_beats` selection filter measures sample
 length in beats at that same tempo. The tempo lives in `tempo.bpm` - a fixed
 number in `config.yaml`, so if you change tempo in your sequencer and forget to
-change it here, quantized samples keep snapping to the old grid and beat filters
-keep measuring against the old tempo - it just quietly stops matching your
-sequence.
+change it here, quantised samples keep snapping to the old grid and beat filters
+keep measuring against the old tempo, and Subsample stops matching your
+sequence without any warning.
 
 Set `tempo.source: midi` and subsample takes the tempo from the MIDI clock
 arriving on the player's MIDI input instead:
@@ -2649,13 +2639,13 @@ tempo:
 Worth knowing:
 
 - **Set `tempo.bpm` anyway.** It's the fallback before any clock arrives (and
-  if your sequencer never sends one). At `0.0` nothing quantizes until the
+  if your sequencer never sends one). At `0.0` nothing quantises until the
   transport starts, and a map that filters by `duration_beats` will not load.
 - **The clock must reach the same MIDI input as your notes** (`player.midi_device`
   or your virtual port). Notes on one port and clock on another and it sees
   nothing.
 - **The tempo is rounded to whole BPM and only adopted once it holds steady.**
-  Every change re-bakes every quantized variant, so a change costs a burst of
+  Every change re-bakes every quantised variant, so a change costs a burst of
   rendering - one-off per tempo, and cached to disk, so going back to a tempo
   you've used before is instant. Change tempo while stopped if you can.
 - **It's sticky.** Stopping the transport keeps the last tempo rather than
@@ -2671,7 +2661,7 @@ rather than silently wrong timing.
 
 Recordings are saved as 16, 24, or 32-bit audio files (depending on
 `recorder.audio.bit_depth`) in the configured output directory.  Container
-format is controlled by `recorder.audio.audio_format` — `wav` (uncompressed,
+format is controlled by `recorder.audio.audio_format` - `wav` (uncompressed,
 the default) or `flac` (lossless compressed, see [Storage format](#storage-format)
 below).
 
@@ -2701,8 +2691,8 @@ the same path to get a persistent library that grows on disk across sessions.
 `.flac`:
 
 - `wav` (default) - uncompressed PCM.  Works at 16, 24, or 32-bit.
-- `flac` - lossless compressed (around 40-60% smaller on typical material,
-  decoded audio is bit-identical).  Works at 16 or 24-bit.
+- `flac` - lossless compressed (smaller files, and the decoded audio is
+  bit-identical).  Works at 16 or 24-bit.
 
 **The rule when formats don't quite line up:**
 
@@ -2711,7 +2701,7 @@ the same path to get a persistent library that grows on disk across sessions.
 | `audio_format: wav`, any bit depth | `.wav` |
 | `audio_format: flac`, live capture at 16 or 24-bit | `.flac` |
 | `audio_format: flac`, 32-bit source (e.g. imported file) | `.wav` for that file, with an INFO log explaining why |
-| `audio_format: flac` combined with `bit_depth: 32` (live capture) | Rejected at startup — set one or the other |
+| `audio_format: flac` combined with `bit_depth: 32` (live capture) | Rejected at startup - set one or the other |
 
 So if you flip `audio_format: flac` and then process a mix of 16/24-bit and
 32-bit source files, you'll see a mix of `.flac` and `.wav` in your output
@@ -2720,7 +2710,7 @@ precision rather than silently truncating.  Live captures share one bit
 depth per session, so they stay consistent within a run.
 
 **Existing libraries.** Upgrading to a subsample build with FLAC support does
-not touch your existing `.wav` samples — they continue to load unchanged.
+not touch your existing `.wav` samples - they continue to load unchanged.
 No migration, no bulk conversion.  FLAC only affects what gets written for
 *new* captures once you flip the flag.
 
@@ -2730,45 +2720,43 @@ When `recorder.previews: true` (the default), every captured or imported sample
 also produces two visual-preview artefacts alongside the audio and analysis
 sidecar:
 
-- **`<sample>.preview.png`** — a fixed 1024x256 raster thumbnail (RGB, around
-  15-25 KB) for browsing the library in an OS file manager.  The composition
+- **`<sample>.preview.png`** - a fixed 1024x256 raster thumbnail (RGB) for
+  browsing the library in an OS file manager.  The composition
   layers a 4-band frequency skyline behind a mirrored waveform envelope, with
   short vertical ticks at each detected onset and (when the sample is
   rhythmic) a dashed beat grid.  Stratum heights scale with each band's
   share of total energy (same four bands as `band_energy.energy_fractions`),
   so a bass-heavy kick looks bottom-heavy at a glance and a cymbal
-  looks top-heavy — every band keeps at least a small minimum height
+  looks top-heavy - every band keeps at least a small minimum height
   so its temporal shape stays readable.  A bottom-right badge shows
   pitch (when tonal), BPM (when rhythmic), and duration.
-- **A `preview` block embedded in `<sample>.analysis.json`** (around 4 KB) —
+- **A `preview` block embedded in `<sample>.analysis.json`**:
   the same composition's inputs (envelopes, band strata, onset/beat times,
-  accent colour, badge text) in a compact form.  The Supervisor dashboard
-  calls `subsample.preview.render_svg(data, width, height)` at request time
-  to materialise a scalable vector preview at whatever size the layout wants.
+  accent colour, badge text) in a compact form.  When a thumbnail goes
+  missing, Subsample redraws it from this block at the next start-up instead
+  of re-analysing the audio.
 
 > File managers on macOS, Windows, and Linux do **not** treat sibling PNGs as
-> the audio file's own icon — the `.preview.png` appears as a separate file
+> the audio file's own icon - the `.preview.png` appears as a separate file
 > in the directory listing.  This is deliberate: embedding cover art would
 > mutate the audio container, which subsample does not do.  Browse the
-> previews alongside the audio files, or use the Supervisor dashboard for
-> in-browser thumbnails.
+> previews alongside the audio files.
 
 Visual design (stroke weights, colours, layout) can be iterated later without
-any schema bump — the `preview` block stores the underlying data, not the
+any schema bump - the `preview` block stores the underlying data, not the
 rendered output.  Only a change in envelope resolution or band count
-requires a `preview.version` bump.  Existing samples with no `preview`
-block simply render nothing in the dashboard; they continue to play back
-and analyse identically.
+requires a `preview.version` bump.  A sample with no `preview` block still
+plays back and analyses identically.
 
-Set `recorder.previews: false` to skip both artefacts and save around
-15-25 KB per PNG plus 4 KB of JSON per sample.
+Set `recorder.previews: false` to skip both artefacts and save the disk space
+they take.
 
 ## Instrument sample library
 
 Every recording is automatically added to an in-memory instrument library
 alongside its full analysis data. A configurable memory cap prevents unbounded
 growth; the oldest samples are evicted when a new one would exceed the limit.
-The budget is auto-detected by default (60% of the global memory allocation -
+The budget is auto-detected by default (the largest share of the global memory allocation -
 see `max_memory_mb` in the configuration table) and can be overridden via
 `library.max_memory_mb`. WAV files on disk are never deleted.
 
@@ -2854,7 +2842,7 @@ required.
 This separation is useful when the recording and playback environments are
 different: a field recorder capturing environmental sound in one location, a
 performance machine somewhere else; a backstage capture machine feeding a front-
-of-house playback rig; or simply keeping CPU-intensive audio analysis on a
+of-house playback rig; or keeping CPU-intensive audio analysis on a
 dedicated host.
 
 **Recorder machine** (`config.yaml`):
@@ -3076,16 +3064,16 @@ Five companion tools ship inside Subsample as subcommands - run
 | Command | What it does |
 |---|---|
 | `subsample import` | Import pre-trimmed audio (sample packs, field recordings) into the library |
-| `subsample catalog` | CSV catalog of every sample's detected properties, with curation aids |
-| `subsample analyze` | Analyze audio files and print their detected metrics |
+| `subsample catalog` | CSV catalogue of every sample's detected properties, with curation aids |
+| `subsample analyze` | Analyse audio files and print their detected metrics |
 | `subsample similar` | Rank library samples against each reference by similarity |
-| `subsample loops` | Find and audition seamless loop points in sustained samples |
+| `subsample loops` | Find and audition click-free loop points in sustained samples |
 
 (A file argument that shares a command name needs a path prefix:
 `subsample ./import` treats it as an input file to chop into the capture
 library, while `subsample import` runs the import tool.)
 
-### Analyzing recorded files
+### Analysing recorded files
 
 ```bash
 subsample analyze samples/2026-03-17_14-32-01.wav
@@ -3141,7 +3129,7 @@ Three MFCC timbre fingerprints are stored in the sidecar (used for similarity,
 not shown in script output): `mfcc` (mean, average timbre), `mfcc_delta`
 (first-order trajectory), and `mfcc_onset` (onset-weighted, attack emphasis).
 
-### Cataloging a sample directory
+### Cataloguing a sample directory
 
 ```bash
 subsample catalog                          # configured library.directory
@@ -3155,20 +3143,20 @@ at startup) and writes one CSV row per audio file with its detected
 properties. Three capability columns show which musical behaviours each sample
 is eligible for:
 
-- **pitched** - passes the stable-pitch test, so `pitched: true` selects it in
+- **`pitched`** - passes the stable-pitch test, so `pitched: true` selects it in
   a MIDI map and it can be re-pitched across a keyboard range
-- **quantizable** - has at least 2 detected hits, so `stretch_quantize` /
-  `pad_quantize` can align them to a beat grid; below that, quantize degrades
+- **`quantizable`** - has at least 2 detected hits, so `stretch_quantize` /
+  `pad_quantize` can align them to a beat grid; below that, quantise degrades
   to a plain stretch or a pass-through
-- **loopable** - has a steady sustaining region (a held tone, or a stationary
+- **`loopable`** - has a steady sustaining region (a held tone, or a stationary
   textural bed) worth looping while a key is held, so `loopable: true` selects
   it. This is a coarse candidate flag - it means "worth trying to loop", not
-  "here is the seamless loop point" (that is found later from the audio itself).
+  "here is the loop point" (that is found later from the audio itself).
   The companion **loop_ms** column shows the actual detected loop length in
   milliseconds; it is blank when a sample is loopable but too evolving to wrap
   seamlessly (no clean loop point was found)
 
-All three columns run exactly the tests the player runs, so the catalog shows
+All three columns run exactly the tests the player runs, so the catalogue shows
 the selection pool a MIDI map would draw from.
 
 Two further columns describe *when the sound actually happens*:
@@ -3184,7 +3172,7 @@ Two further columns describe *when the sound actually happens*:
   the sample's own peak. Blank when there is nothing before it. Around -20 dB
   means a genuinely quieter preparation; **near 0 dB is a warning** that the
   file holds several comparable events (a loop, a long take) and `impact_ms` is
-  simply pointing at whichever was loudest, not measuring a pre-stroke
+  pointing at whichever was loudest, not measuring a pre-stroke
 
 The pair is intended for a sequencer that wants a note's transient to land *on*
 the beat: trigger the note `impact_ms` early and the hit arrives on time with
@@ -3192,7 +3180,7 @@ the preparation intact. Subsample's own playback does not use it - a voice
 still starts at the beginning of the sample - so nothing changes in how your kit
 sounds. The values also ride in each sample's `.analysis.json` sidecar as
 `rhythm.impact_time` (in **seconds**) and `rhythm.impact_pre_level_db`, so any
-tool that can read the sidecar can use them without going through the catalog.
+tool that can read the sidecar can use them without going through the catalogue.
 
 Because the offset comes from how a sound was *performed* rather than from what
 kind of sound it is, it varies hit to hit: across one set of pedal-close
@@ -3214,7 +3202,7 @@ subsample catalog ~/samples --quantizable | xargs -I{} cp {} ~/curated/
 subsample catalog ~/samples --loopable | mpv --playlist=-
 ```
 
-Files without an `.analysis.json` sidecar are analyzed on the way (slow on the
+Files without an `.analysis.json` sidecar are analysed on the way (slow on the
 first run, same cost as a startup load - progress goes to stderr); results are
 cached as sidecars so later runs are instant.
 
@@ -3265,9 +3253,8 @@ the same thing here as in a `beat_match`/`similarity` MIDI-map query.
 Import audio files from any source (SDR captures, commercial sample packs, field
 recordings) directly into the capture library, bypassing the detection pipeline.
 Files are silence-trimmed, safety-faded, re-encoded as standard PCM WAV, fully
-analyzed, and saved with sidecar JSON. A large batch is fingerprinted across the
-machine's cores in parallel, so importing a big sample pack is many times faster
-than processing one file at a time.
+analysed, and saved with sidecar JSON. A large batch is fingerprinted across the
+machine's cores in parallel rather than one file at a time.
 
 ```bash
 subsample import /path/to/samples/*.wav
@@ -3299,7 +3286,7 @@ Reference: GM36_BassDrum1
 
 ### Finding loop points
 
-Preview and audition the seamless loops that `mode: loop` playback will use:
+Preview and audition the click-free loops that `mode: loop` playback uses:
 
 ```bash
 subsample loops samples/captures            # propose loop points for loop candidates
@@ -3320,31 +3307,6 @@ latency guards described under [Performance](#performance)),
 `regen_previews_png.py` (regenerate preview thumbnails after a format bump),
 and `extract_gm_drums.py` (regenerate the shipped GM reference fingerprints
 from a SoundFont).
-
-## Roadmap
-
-### MIDI expressiveness
-
-- **Round-robin sample cycling** - step *deterministically* through alternative
-  samples on repeated triggers. Random per-trigger variation already ships
-  (`pick: [1, 3]` or `pick: any` draws a fresh sample on every hit - see
-  [Select](#select---which-sample-to-play)); this item is the strict-rotation
-  complement, plus per-note rotation state. (Distinct from the existing per-hit
-  segment round-robin, which cycles through detected hits inside a single
-  sliced loop.)
-
-### Sample management
-
-- **Auto-slicing** - chop loops and long recordings into individual hits by
-  transient detection, then add each slice to the library as a separate sample.
-- **Similar-to-this query** - "find more sounds like this one" by exposing the
-  similarity engine as a user-facing search.
-
-### Monitoring
-
-- **Supervisor dashboard extensions** - the read-only web dashboard shipped
-  (enable with `supervisor.enabled: true`); planned additions include voice
-  activity metering and transform queue progress.
 
 ## Architecture
 
@@ -3400,7 +3362,7 @@ SampleRecord added to library
     → TransformManager.on_sample_added()
         → enqueue base variant ONLY                 ← float32 peak-normalised copy
             → TransformProcessor worker pool
-                → TransformCache (parent-priority FIFO eviction, 50 MB default)
+                → TransformCache (parent-priority FIFO eviction, memory-capped)
 
 MIDI map loaded / reloaded
     → MidiPlayer.update_assignments()
@@ -3424,7 +3386,7 @@ families intact and playable.
 MIDI note_on
     → _resolve_sample_id: indexed pick from the pre-computed candidate cache
         (rebuilt when the library changes, not per-trigger; variant-state
-         selects — quantized_beats / beat_match — fall back to a live query)
+         selects - quantized_beats / beat_match - fall back to a live query)
     → transform_manager.get_variant(sample_id, spec)  → processed variant
         (memory cache → disk cache → enqueue + fall back to a previous/base variant)
     → transform_manager.get_base()     → base variant (all samples)
@@ -3454,7 +3416,7 @@ output device's bit depth.
 
 **Windows users:** install and run Subsample inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)
 (Windows Subsystem for Linux). This gives you a real Linux environment where
-the `apt` instructions above just work. Audio devices need to be exposed to
+the `apt` instructions above work unchanged. Audio devices need to be exposed to
 WSL - see the [WSL audio guide](https://learn.microsoft.com/en-us/windows/wsl/connect-usb)
 for USB passthrough or use a network audio bridge if your interface supports
 one. Subsample is not currently tested against native Windows Python.
@@ -3471,7 +3433,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-## Type Checking
+## Type checking
 
 Same setup as [Tests](#tests):
 
@@ -3479,11 +3441,11 @@ Same setup as [Tests](#tests):
 mypy subsample
 ```
 
-## Dependencies and Credits
+## Dependencies and credits
 
 Subsample makes use of these excellent open-source libraries:
 
-| Library | Purpose | License |
+| Library | Purpose | Licence |
 |---------|---------|---------|
 | [PyAudio ↗](https://people.csail.mit.edu/hubert/pyaudio/) | Audio device I/O (PortAudio bindings) | MIT |
 | [PyYAML ↗](https://github.com/yaml/pyyaml) | YAML config loading | MIT |
@@ -3504,11 +3466,11 @@ The compressor/limiter DSP is based on the feed-forward design described in:
 
 > D. Giannoulis, M. Massberg, and J. D. Reiss, "Digital Dynamic Range Compressor Design - A Tutorial and Analysis," *Journal of the Audio Engineering Society*, vol. 60, no. 6, pp. 399-408, 2012.
 
-## About the Author
+## About the author
 
 Subsample was created by me, Simon Holliday ([simonholliday.com ↗](https://simonholliday.com/)), a senior technologist and a junior (but trying) musician. From running an electronic music label in the 2000s to prototyping new passive SONAR techniques for defence research, my work has often explored the intersection of code and sound.
 
-## License
+## Licence
 
 Subsample is released under the [GNU Affero General Public License v3.0](LICENSE) (AGPLv3).
 
@@ -3518,4 +3480,4 @@ All runtime dependencies are permissively licensed (MIT, ISC, BSD-3-Clause) and 
 
 ## Commercial licensing
 
-If you wish to use Subsample in a proprietary or closed-source product without the obligations of the AGPL, please contact [simon.holliday@protonmail.com] to discuss a commercial license.
+If you wish to use Subsample in a proprietary or closed-source product without the obligations of the AGPL, please contact [simon.holliday@protonmail.com] to discuss a commercial licence.

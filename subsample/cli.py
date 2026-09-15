@@ -88,10 +88,10 @@ def _format_mmss (seconds: float) -> str:
 
 _TOOL_COMMANDS: dict[str, tuple[str, str]] = {
 	"import":  ("subsample.tools.import_samples",    "import pre-trimmed audio files into the sample library"),
-	"catalog": ("subsample.tools.catalog_samples",   "CSV catalog of every sample's detected properties, with curation aids"),
-	"analyze": ("subsample.tools.analyze_file",      "analyze audio files and print their detected metrics"),
+	"catalog": ("subsample.tools.catalog_samples",   "CSV catalogue of every sample's detected properties, with curation aids"),
+	"analyze": ("subsample.tools.analyze_file",      "analyse audio files and print their detected metrics"),
 	"similar": ("subsample.tools.similarity_report", "rank library samples against each reference by similarity"),
-	"loops":   ("subsample.tools.suggest_loops",     "find and audition seamless loop points in sustained samples"),
+	"loops":   ("subsample.tools.suggest_loops",     "find and audition click-free loop points in sustained samples"),
 }
 """Subcommand name → (tool module, one-line description).  The first CLI
 argument is checked against these BEFORE the run-mode parser, so `subsample
@@ -1133,7 +1133,6 @@ def _start_player (
 	player_cell: list[typing.Optional[subsample.player.MidiPlayer]],
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	bank_manager: typing.Optional[subsample.bank.BankManager] = None,
-	sv_cell: typing.Optional[list[typing.Any]] = None,
 	preloaded_midi_map_result: typing.Optional[subsample.player.MidiMapResult] = None,
 ) -> None:
 
@@ -1157,9 +1156,6 @@ def _start_player (
 		                    playback when provided.
 		bank_manager:       Optional bank manager for multi-bank switching via MIDI
 		                    Program Change.
-		sv_cell:            Single-element list holding the Supervisor instance, or None.
-		                    When present, the player's CC events are subscribed after
-		                    the player is created.
 	"""
 
 	# Load the MIDI routing map.  Requires an explicit path in config —
@@ -1268,9 +1264,6 @@ def _start_player (
 		)
 		player_cell[0] = player
 
-		if sv_cell is not None and sv_cell[0] is not None:
-			player.events.on("cc", sv_cell[0]._on_cc)
-
 		try:
 			# update_pitched_assignments materialises zones and rebuilds the
 			# candidate cache; a map error deferred past parse (e.g. `order:
@@ -1334,9 +1327,6 @@ def _start_player (
 		zone_templates=midi_map_result.zone_templates,
 	)
 	player_cell[0] = player
-
-	if sv_cell is not None and sv_cell[0] is not None:
-		player.events.on("cc", sv_cell[0]._on_cc)
 
 	try:
 		# See the virtual-port branch: update_pitched_assignments can surface a
@@ -1455,7 +1445,7 @@ def _main_impl () -> None:
 	)
 
 	# --- Application event emitter ---
-	# Integrations (OSC sender, Supervisor dashboard, etc.) subscribe here
+	# Integrations (such as the OSC sender) subscribe here
 	# instead of being manually wired into each callback chain.
 	app_events = subsample.events.EventEmitter()
 
@@ -1736,38 +1726,6 @@ def _main_impl () -> None:
 	# _start_player sets this before calling player.run().
 	_player_cell: list[typing.Optional[subsample.player.MidiPlayer]] = [None]
 
-	# --- Supervisor dashboard ---
-	# Broadcasts state via WebSocket.  Created before threads start so
-	# sample events can be subscribed immediately.  The player reference
-	# is resolved lazily via _player_cell (the player is created on a
-	# separate thread).  CC subscription happens inside _start_player
-	# after the player exists.
-	_sv_cell: list[typing.Any] = [None]
-
-	if cfg.supervisor.enabled:
-		try:
-			import supervisor.app.subsample as _sv_module
-			_sv_cell[0] = _sv_module.SubsampleSupervisor(
-				player=_player_cell,
-				instrument_library=instrument_library,
-				recorder_processor=None,
-				cfg=cfg,
-				port=cfg.supervisor.port,
-			)
-			app_events.on("sample_captured", _sv_cell[0].on_sample_captured)
-			app_events.on("sample_loaded", _sv_cell[0].on_sample_loaded)
-			_sv_cell[0].start_threaded()
-			print(f"  Supervisor   : ws://localhost:{cfg.supervisor.port}")
-		except ImportError:
-			_log.warning("Supervisor enabled but not installed. pip install 'subsample[supervisor] @ git+https://github.com/simonholliday/subsample.git'")
-		except OSError as exc:
-			# A busy WebSocket port (or similar bind failure) must not abort
-			# the whole startup — mirror the OSC receiver's degradation.
-			_log.warning(
-				"Supervisor could not start on port %d: %s — dashboard disabled",
-				cfg.supervisor.port, exc,
-			)
-
 	# Subsystem threads are daemons: an interactive device-selection prompt
 	# blocks in input(), which Ctrl+C (delivered to the main thread) cannot
 	# interrupt.  Without daemon status the interpreter would wait on that
@@ -1801,7 +1759,7 @@ def _main_impl () -> None:
 				args=(
 					cfg, shutdown_event, instrument_library,
 					similarity_matrix, reference_library, _player_cell,
-					transform_manager, bank_manager, _sv_cell,
+					transform_manager, bank_manager,
 					preloaded_midi_map_result,
 				),
 				name="player",
@@ -2157,9 +2115,6 @@ def _main_impl () -> None:
 	if osc_receiver is not None:
 		osc_receiver.stop()
 
-	if _sv_cell[0] is not None:
-		_sv_cell[0].stop_threaded()
-
 	# Drain any in-flight transform workers before exiting.
 	if bank_manager is not None:
 		for bank in bank_manager.all_banks():
@@ -2280,7 +2235,7 @@ def _integrate_sample (
 	library (evicting the oldest if over the memory limit), updates the
 	similarity matrix, notifies the transform pipeline to produce variants,
 	triggers a pitched-assignment update on the active player, and emits
-	a ``sample_loaded`` event for integrations (OSC sender, Supervisor).
+	a ``sample_loaded`` event for integrations such as the OSC sender.
 
 	Thread-safe: each subsystem uses an internal lock. The multi-step
 	sequence (library → similarity → transforms → player) is not atomic
@@ -2393,7 +2348,7 @@ def _make_on_complete (
 	It logs the analysis result, adds the recording to the instrument
 	library, updates the similarity matrix, notifies the transform
 	pipeline so derivative variants can be produced in the background,
-	and emits ``sample_captured`` for integrations (OSC sender, Supervisor).
+	and emits ``sample_captured`` for integrations such as the OSC sender.
 
 	Args:
 		store_audio:       When True, build a SampleRecord (with PCM audio) and
@@ -2429,8 +2384,8 @@ def _make_on_complete (
 			subsample.analysis.format_level_result(level),
 		)
 
-		# Emit the OSC/dashboard event BEFORE the store_audio gate.  The
-		# event is what external listeners (OSC sender, Supervisor) react
+		# Emit the integration event BEFORE the store_audio gate.  The
+		# event is what external listeners (such as the OSC sender) react
 		# to — gating it on the player being enabled would silently break
 		# the documented recorder-only-with-OSC multi-machine setup.
 		if app_events is not None:

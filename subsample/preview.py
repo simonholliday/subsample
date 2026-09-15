@@ -1,18 +1,14 @@
-"""Visual sample previews — raster PNG sidecars + vector data for SVG rendering.
+"""Visual sample previews — raster PNG sidecars and the data they are drawn from.
 
 Emits a compact preview-data block (waveform envelopes, per-band energy
 strata, onset/beat markers, accent color, badge text) alongside each captured
 or imported sample.  The block lives inside the existing .analysis.json
-sidecar so it travels with the audio in the same file.  Two consumers:
+sidecar so it travels with the audio in the same file.
 
-  * recorder: renders a fixed 1024×256 PNG sidecar to `<audio>.preview.png`
-    using Pillow, for browsing the library in an OS file manager.
-  * Supervisor: calls ``render_svg(data, width, height)`` on demand to
-    produce a scalable vector view at whatever size the dashboard layout
-    needs.
-
-Both renderers consume the same PreviewData so a sample looks recognisable
-across file manager and dashboard.
+The recorder and the library loader render it to a fixed 1024×256 PNG
+sidecar at `<audio>.preview.png` using Pillow, for browsing the library in an
+OS file manager.  Keeping the data in the sidecar lets a missing PNG be
+redrawn without re-analysing the audio.
 
 PREVIEW_VERSION is independent of analysis.ANALYSIS_VERSION — cosmetic
 changes to the renderers do not require a bump, and a bump here does not
@@ -29,7 +25,6 @@ import os
 import pathlib
 import tempfile
 import typing
-import xml.sax.saxutils
 
 import librosa
 import numpy
@@ -66,8 +61,7 @@ PNG_HEIGHT: int =  256
 
 _ENVELOPE_BINS: int = 400
 """Number of min/max pairs in the waveform envelope and per-band strata.
-~400 bins gives a crisp silhouette at 1024 px and still renders cleanly
-when the SVG is scaled down in the dashboard."""
+~400 bins gives a crisp silhouette at 1024 px."""
 
 
 _BAND_HZ: tuple[tuple[float, float], ...] = (
@@ -118,7 +112,7 @@ _BAND_RGB: tuple[tuple[int, int, int], ...] = (
 
 Pre-blended instead of using alpha so the PNG can be flat RGB — Pillow's
 alpha handling on an RGB canvas silently ignores fill-colour alpha, so
-relying on it would be a subtle source of bugs.  Both renderers draw
+relying on it would be a subtle source of bugs.  The renderer draws
 these colours as solid fills in layer order (bands → waveform → ticks
 → badge), so later layers can cover earlier ones where they overlap."""
 
@@ -144,11 +138,6 @@ Matches the threshold used in _format_pitch_label so the badge and the
 accent colour always agree on whether a sample is "pitched"."""
 
 
-_SVG_MIN_BADGE_WIDTH: int = 400
-"""Below this rendered width, the SVG corner badge is omitted.  Text
-would be illegible at small sizes and adds ~200 bytes of markup."""
-
-
 @dataclasses.dataclass(frozen=True)
 class PreviewData:
 
@@ -156,7 +145,7 @@ class PreviewData:
 
 	Serialised under the ``preview`` key in the sample's .analysis.json
 	sidecar.  Renders are deterministic: the same PreviewData always
-	produces the same PNG / SVG bytes.
+	produces the same PNG bytes.
 	"""
 
 	version: int
@@ -186,9 +175,10 @@ class PreviewData:
 	tempo_bpm:   float
 	duration:    float
 	peak:        float
-	"""Absolute peak amplitude.  Serialised for out-of-repo consumers (e.g. the
-	Supervisor dashboard); the in-repo PNG/SVG renderers draw from ``rms``, not
-	this — kept intentionally, not dead."""
+	"""Absolute peak amplitude.  Serialised in the sidecar for any external
+	tool that reads it; the PNG renderer draws from ``rms``, not this — kept
+	intentionally, not dead, because dropping it would change the sidecar's
+	data shape and force a PREVIEW_VERSION bump."""
 	rms:         float
 	accent_rgb:  tuple[int, int, int]
 
@@ -694,212 +684,6 @@ def _badge_text (data: PreviewData) -> str:
 		parts.append(f"{int(round(data.tempo_bpm))} BPM")
 	parts.append(f"{data.duration:.2f}s")
 	return "  ".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# SVG rendering (hand-rolled string)
-# ---------------------------------------------------------------------------
-
-
-def render_svg (
-	data: PreviewData,
-	width: int = PNG_WIDTH,
-	height: int = PNG_HEIGHT,
-) -> str:
-
-	"""Return a standalone SVG document string sized ``width``×``height`` px.
-
-	Mirrors render_png() so the same sample is recognisable across both
-	formats.  Badge text is suppressed below _SVG_MIN_BADGE_WIDTH where
-	it would be illegible.
-	"""
-
-	if width <= 0 or height <= 0:
-		raise ValueError(f"width and height must be positive (got {width}×{height})")
-
-	parts: list[str] = []
-	parts.append(
-		f'<svg xmlns="http://www.w3.org/2000/svg" '
-		f'viewBox="0 0 {width} {height}" '
-		f'width="{width}" height="{height}" '
-		f'preserveAspectRatio="none">'
-	)
-	parts.append(f'<rect width="{width}" height="{height}" fill="{_hex(_BG_COLOR)}"/>')
-
-	_svg_draw_band_skyline(parts, data, width, height)
-	_svg_draw_waveform(parts, data, width, height)
-	_svg_draw_reference_lines(parts, data, width, height)
-	_svg_draw_onset_ticks(parts, data, width, height)
-
-	if data.is_rhythmic:
-		_svg_draw_beat_grid(parts, data, width, height)
-
-	if width >= _SVG_MIN_BADGE_WIDTH:
-		_svg_draw_badge(parts, data, width, height)
-
-	parts.append("</svg>")
-	return "".join(parts)
-
-
-def _hex (rgb: tuple[int, int, int]) -> str:
-
-	"""Format an 8-bit RGB triple as ``#rrggbb``."""
-
-	return "#{:02x}{:02x}{:02x}".format(*rgb)
-
-
-def _svg_draw_band_skyline (
-	parts: list[str], data: PreviewData, width: int, height: int,
-) -> None:
-
-	heights = _compute_stratum_heights(data.band_totals, height)
-
-	stratum_bottom: float = float(height)
-	for b, band_i8 in enumerate(data.bands):
-		stratum_top = stratum_bottom - heights[b]
-		stratum_h   = stratum_bottom - stratum_top
-		band        = band_i8.astype(numpy.float32) / 127.0
-		n           = len(band)
-
-		if n < 2 or stratum_h < 1:
-			stratum_bottom = stratum_top
-			continue
-
-		coords: list[str] = []
-		for i in range(n):
-			x = i * width / (n - 1)
-			y = stratum_bottom - float(band[i]) * stratum_h * 0.9
-			coords.append(f"{x:.2f},{y:.2f}")
-		coords.append(f"{float(width):.2f},{stratum_bottom:.2f}")
-		coords.append(f"0,{stratum_bottom:.2f}")
-
-		parts.append(
-			f'<polygon points="{" ".join(coords)}" fill="{_hex(_BAND_RGB[b])}"/>'
-		)
-
-		stratum_bottom = stratum_top
-
-
-def _svg_draw_waveform (
-	parts: list[str], data: PreviewData, width: int, height: int,
-) -> None:
-
-	env_max = data.envelope_max.astype(numpy.float32) / 127.0
-	env_min = data.envelope_min.astype(numpy.float32) / 127.0
-	n       = len(env_max)
-
-	if n < 2:
-		return
-
-	mid_y       = height / 2.0
-	half_height = height * 0.44
-
-	coords: list[str] = []
-	for i in range(n):
-		x = i * width / (n - 1)
-		y = mid_y - float(env_max[i]) * half_height
-		coords.append(f"{x:.2f},{y:.2f}")
-	for i in range(n - 1, -1, -1):
-		x = i * width / (n - 1)
-		y = mid_y - float(env_min[i]) * half_height
-		coords.append(f"{x:.2f},{y:.2f}")
-
-	parts.append(
-		f'<polygon points="{" ".join(coords)}" fill="{_hex(data.accent_rgb)}"/>'
-	)
-
-
-def _svg_draw_reference_lines (
-	parts: list[str], data: PreviewData, width: int, height: int,
-) -> None:
-
-	if data.rms <= 0.0:
-		return
-
-	mid_y       = height / 2.0
-	half_height = height * 0.44
-	rms_px      = data.rms * half_height
-	ref_hex     = _hex(_REFERENCE_LINE)
-
-	parts.append(
-		f'<line x1="0" y1="{mid_y - rms_px:.2f}" '
-		f'x2="{width}" y2="{mid_y - rms_px:.2f}" '
-		f'stroke="{ref_hex}" stroke-width="1"/>'
-	)
-	parts.append(
-		f'<line x1="0" y1="{mid_y + rms_px:.2f}" '
-		f'x2="{width}" y2="{mid_y + rms_px:.2f}" '
-		f'stroke="{ref_hex}" stroke-width="1"/>'
-	)
-
-
-def _svg_draw_onset_ticks (
-	parts: list[str], data: PreviewData, width: int, height: int,
-) -> None:
-
-	if data.duration <= 0.0:
-		return
-
-	tick_h    = height * 0.08
-	onset_hex = _hex(_ONSET_COLOR)
-
-	for t in data.onset_times:
-		if not 0.0 <= t <= data.duration:
-			continue
-		x = t / data.duration * width
-		parts.append(
-			f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="{tick_h:.2f}" '
-			f'stroke="{onset_hex}" stroke-width="1"/>'
-		)
-
-
-def _svg_draw_beat_grid (
-	parts: list[str], data: PreviewData, width: int, height: int,
-) -> None:
-
-	if data.duration <= 0.0:
-		return
-
-	beat_hex = _hex(_BEAT_COLOR)
-	for t in data.beat_times:
-		if not 0.0 <= t <= data.duration:
-			continue
-		x = t / data.duration * width
-		parts.append(
-			f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="{height}" '
-			f'stroke="{beat_hex}" stroke-width="1" stroke-dasharray="6,6"/>'
-		)
-
-
-def _svg_draw_badge (
-	parts: list[str], data: PreviewData, width: int, height: int,
-) -> None:
-
-	text = _badge_text(data)
-	if not text:
-		return
-
-	font_size = max(10, height // 20)
-	# Approximate text width: ~0.55 px per char at font_size (close enough
-	# for an sRGB badge background that will be a few px wider than the
-	# actual text; browser rendering tolerates the estimate).
-	text_w = int(len(text) * font_size * 0.55)
-	text_h = font_size
-	margin = font_size
-
-	bx = width - text_w - margin - 6
-	by = height - text_h - margin / 2
-
-	parts.append(
-		f'<rect x="{bx - 6:.2f}" y="{by - 4:.2f}" '
-		f'width="{text_w + 12}" height="{text_h + 8}" '
-		f'fill="{_hex(_BADGE_BG)}" rx="2"/>'
-	)
-	parts.append(
-		f'<text x="{bx:.2f}" y="{by + text_h - 2:.2f}" '
-		f'font-family="monospace" font-size="{font_size}" '
-		f'fill="{_hex(_BADGE_FG)}">{xml.sax.saxutils.escape(text)}</text>'
-	)
 
 
 # ---------------------------------------------------------------------------

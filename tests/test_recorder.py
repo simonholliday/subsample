@@ -613,9 +613,9 @@ class TestPreviewEmission:
 				)
 				assert img.mode == "RGB"
 
-			# Sidecar JSON should also carry a preview block so Supervisor
-			# can render SVG on demand — both artefacts are gated by the
-			# same toggle.
+			# Sidecar JSON should also carry a preview block so the PNG can
+			# be redrawn without re-analysis — both artefacts are gated by
+			# the same toggle.
 			payload = json.loads((out_dir / "with_preview.wav.analysis.json").read_text())
 			assert "preview" in payload
 			assert payload["preview"]["version"] == subsample.preview.PREVIEW_VERSION

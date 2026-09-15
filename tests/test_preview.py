@@ -289,107 +289,6 @@ class TestRenderPng:
 
 
 # ---------------------------------------------------------------------------
-# TestRenderSvg
-# ---------------------------------------------------------------------------
-
-
-class TestRenderSvg:
-
-	def test_produces_well_formed_svg_root (self) -> None:
-
-		svg = subsample.preview.render_svg(_make_preview_data())
-
-		assert svg.startswith('<svg xmlns="http://www.w3.org/2000/svg"')
-		assert svg.endswith("</svg>")
-
-	def test_default_dimensions_match_png (self) -> None:
-
-		svg = subsample.preview.render_svg(_make_preview_data())
-		assert f'width="{subsample.preview.PNG_WIDTH}"'  in svg
-		assert f'height="{subsample.preview.PNG_HEIGHT}"' in svg
-
-	def test_custom_dimensions_applied (self) -> None:
-
-		svg = subsample.preview.render_svg(_make_preview_data(), width=2000, height=500)
-
-		assert 'width="2000"'  in svg
-		assert 'height="500"'  in svg
-		assert 'viewBox="0 0 2000 500"' in svg
-
-	def test_rejects_non_positive_dimensions (self) -> None:
-
-		with pytest.raises(ValueError, match="positive"):
-			subsample.preview.render_svg(_make_preview_data(), width=0, height=256)
-
-	def test_includes_waveform_and_band_polygons (self) -> None:
-
-		# Set non-zero envelopes so the waveform and bands actually emit polygons.
-		data = _make_preview_data(
-			envelope_min = (numpy.ones(subsample.preview._ENVELOPE_BINS, dtype=numpy.int8) * -60),
-			envelope_max = (numpy.ones(subsample.preview._ENVELOPE_BINS, dtype=numpy.int8) *  60),
-			bands        = tuple(
-				numpy.ones(subsample.preview._ENVELOPE_BINS, dtype=numpy.int8) * 80
-				for _ in range(subsample.preview._N_BANDS)
-			),
-		)
-		svg = subsample.preview.render_svg(data)
-
-		# One polygon per band + one for the waveform.
-		assert svg.count("<polygon") >= subsample.preview._N_BANDS + 1
-
-	def test_emits_onset_ticks_when_present (self) -> None:
-
-		data = _make_preview_data()  # has 4 onset_times
-		svg  = subsample.preview.render_svg(data)
-
-		# Each onset becomes a <line>.  At least 4 are present (there are also
-		# two reference lines for RMS, so we assert strictly greater).
-		assert svg.count("<line") >= 4
-
-	def test_rhythmic_sample_draws_beat_grid (self) -> None:
-
-		data = _make_preview_data(is_rhythmic=True, beat_times=(0.0, 0.5))
-		svg  = subsample.preview.render_svg(data)
-
-		assert 'stroke-dasharray="6,6"' in svg
-
-	def test_non_rhythmic_sample_suppresses_beat_grid (self) -> None:
-
-		data = _make_preview_data(is_rhythmic=False)
-		svg  = subsample.preview.render_svg(data)
-
-		assert 'stroke-dasharray' not in svg
-
-	def test_badge_included_above_threshold (self) -> None:
-
-		data = _make_preview_data()
-		svg  = subsample.preview.render_svg(data, width=1024, height=256)
-
-		assert "A4" in svg                 # pitch label
-		assert "120 BPM" in svg            # tempo
-		assert "1.00s" in svg              # duration (duration=1.0 → "1.00s")
-
-	def test_badge_suppressed_below_threshold (self) -> None:
-
-		data = _make_preview_data()
-		svg  = subsample.preview.render_svg(
-			data, width=subsample.preview._SVG_MIN_BADGE_WIDTH - 1, height=100,
-		)
-
-		# When badge is suppressed, the pitch label / BPM / duration strings do
-		# not appear as <text>.  Just check "A4" isn't present in a <text> tag.
-		assert "<text" not in svg
-
-	def test_escapes_xml_special_characters_in_badge (self) -> None:
-
-		data = _make_preview_data(pitch_label="<A>")
-		svg  = subsample.preview.render_svg(data)
-
-		# Raw "<A>" must not appear inside the text element; escaped form must.
-		assert "&lt;A&gt;" in svg
-
-
-# ---------------------------------------------------------------------------
 # TestSidecarRoundtrip
 # ---------------------------------------------------------------------------
 
@@ -480,7 +379,7 @@ class TestSidecarRoundtrip:
 		"""A v=1 sidecar loaded under v=2 must fail with a clear version-
 		mismatch message rather than a confusing 'bands must be a list of
 		N strings' error.  Matters for users on an existing library after
-		upgrading — Supervisor needs to know *why* previews stopped
+		upgrading — the log needs to say *why* previews stopped
 		rendering so they can run the regen script."""
 
 		data    = _make_preview_data()

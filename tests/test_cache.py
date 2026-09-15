@@ -875,7 +875,7 @@ class TestPreviewRoundtrip:
 		self, tmp_path: pathlib.Path,
 	) -> None:
 
-		"""A corrupt preview block must not crash the loader — Supervisor
+		"""A corrupt preview block must not crash the loader — the caller
 		should just see 'no preview' and move on."""
 
 		wav = tmp_path / "bad.wav"

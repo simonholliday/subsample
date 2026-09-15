@@ -3,13 +3,13 @@
 # This file ships with Subsample and provides all default values. To
 # customise, create a config.yaml in the directory you run subsample from
 # (or point at one with --config) containing only the settings you want to
-# override — all other values are inherited from this file automatically.
+# override - all other values are inherited from this file automatically.
 #
 # To start with a full, freely editable copy of this file:
 #   subsample --init
 
 # ---------------------------------------------------------------------------
-# Memory budget — how much RAM Subsample may use for sample caches
+# Memory budget - how much RAM Subsample may use for sample caches
 # ---------------------------------------------------------------------------
 # Subsample maintains three in-memory caches: library samples (raw PCM),
 # transform variants (processed float32 audio), and carrier files (vocoder).
@@ -21,31 +21,20 @@
 # Set explicitly to override, e.g.:  max_memory_mb: 500
 #
 # For fine-grained control, set individual cache budgets in the library
-# and transform sections below — these override the global split.
+# and transform sections below - these override the global split.
 
 # ---------------------------------------------------------------------------
-# supervisor — live web dashboard via WebSocket
-# ---------------------------------------------------------------------------
-# Broadcasts state (MIDI activity, library contents, recorder status) to
-# the Supervisor dashboard for live monitoring in a browser.
-# Requires: pip install "subsample[supervisor] @ git+https://github.com/simonholliday/subsample.git"
-
-# supervisor:
-#   enabled: false
-#   port: 9003
-
-# ---------------------------------------------------------------------------
-# osc — send sample events and receive file import requests via OSC
+# osc - send sample events and receive file import requests via OSC
 # ---------------------------------------------------------------------------
 # OSC (Open Sound Control) integration for communicating with other apps.
 # Requires the optional python-osc dependency: pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"
 #
 # Sender: forwards /sample/captured and /sample/loaded events when samples
-# are recorded or loaded — so sequencers, visualisers, or other audio tools
+# are recorded or loaded - so sequencers, visualisers, or other audio tools
 # can react to sample characteristics (pitch, tempo, timbre).
 #
-# Receiver: listens for /sample/import messages containing a file path —
-# triggers analysis and import of the specified audio file into the library.
+# Receiver: listens for /sample/import messages containing a file path,
+# and triggers analysis and import of the specified audio file into the library.
 
 # osc:
 #   enabled: false
@@ -56,10 +45,10 @@
 #   receive_host: "127.0.0.1"   # loopback by default; the /sample/import handler
 #                               # reads an arbitrary path, so binding to
 #                               # "0.0.0.0" exposes unauthenticated remote file
-#                               # read/load — only do so on a trusted LAN.
+#                               # read/load - only do so on a trusted LAN.
 
 # ---------------------------------------------------------------------------
-# ambisonic — first-order B-format (AmbiX) rotation and decoding
+# ambisonic - first-order B-format (AmbiX) rotation and decoding
 # ---------------------------------------------------------------------------
 # Controls how ambisonic samples are rotated and decoded at playback time.
 # Only applies when recorder.audio.ambisonic_format is set (see below) so
@@ -68,7 +57,7 @@
 #
 # The decoder maps the 4-channel B-format to the output layout (mono, stereo,
 # quad, 5.1, or 7.1) via a virtual speaker array.  Rotation is applied before
-# the decoder so you can re-orient the whole sound field — useful when the
+# the decoder so you can re-orient the whole sound field - useful when the
 # mic wasn't facing "forward" at capture time, or when you want to rotate the
 # image for creative effect.
 
@@ -81,7 +70,7 @@
 #   # - max_re:  Max-rE weighting (1/√3 for first order).  Narrower lobes, best
 #   #            high-frequency localisation and perceptual sweet-spot accuracy.
 #   # - inphase: In-phase / cardioid weighting.  Softest lobes, no back-lobes,
-#   #            wider image — robust for listening far from the sweet spot.
+#   #            wider image - robust for listening far from the sweet spot.
 #
 #   yaw_degrees: 0.0
 #   # Rotation about the up axis.  Positive spins the sound field
@@ -89,18 +78,18 @@
 #   # +Y left).
 #
 #   pitch_degrees: 0.0
-#   # Rotation about the left axis (+Y).  Positive tilts the nose down —
+#   # Rotation about the left axis (+Y).  Positive tilts the nose down:
 #   # front sounds rotate toward below.
 #
 #   roll_degrees: 0.0
-#   # Rotation about the front axis (+X).  Positive tilts the head right —
+#   # Rotation about the front axis (+X).  Positive tilts the head right:
 #   # sounds on the left rotate toward above.
 #
 #   max_order: 1
 #   # Reserved for future higher-order support.  Must be 1 for now.
 
 # ---------------------------------------------------------------------------
-# recorder — real-time audio capture from an input device
+# recorder - real-time audio capture from an input device
 # ---------------------------------------------------------------------------
 # Set enabled: false to skip live recording and only process files given on
 # the command line. When enabled, the device, buffer, and sample format
@@ -128,13 +117,13 @@ recorder:
   # previews: true
   # Visual sample previews.  When enabled (default), every captured or
   # imported sample gets two artefacts:
-  #   * <sample>.preview.png  — fixed 1024×256 thumbnail (RGB, ~15-25 KB),
+  #   * <sample>.preview.png  - fixed 1024×256 thumbnail (RGB, ~15-25 KB),
   #     for browsing the library in an OS file manager.
-  #   * A compact `preview` block embedded in <sample>.analysis.json,
-  #     which the Supervisor dashboard renders as scalable SVG on demand
-  #     (composition: waveform envelope, 4-band frequency skyline, onset
-  #     ticks, beat grid if rhythmic, pitch/BPM/duration badge).
-  # Set false to skip both — saves ~15-25 KB per PNG and ~4 KB of JSON
+  #   * A compact `preview` block embedded in <sample>.analysis.json: the
+  #     data the thumbnail is drawn from (waveform envelope, 4-band frequency
+  #     skyline, onset ticks, beat grid if rhythmic, pitch/BPM/duration
+  #     badge), so a missing thumbnail is redrawn without re-analysing.
+  # Set false to skip both - saves ~15-25 KB per PNG and ~4 KB of JSON
   # per sample if you do not browse the library visually.
 
   audio:
@@ -142,7 +131,7 @@ recorder:
     # device: "Samson Go Mic: USB Audio (hw:1,0)"
     # Name (or substring) of the audio input device to use.
     # Case-insensitive match, and a GLOB: `*` matches any run of characters,
-    # `?` matches exactly one, and the pattern is matched anywhere in the name —
+    # `?` matches exactly one, and the pattern is matched anywhere in the name,
     # so a plain "Samson" still matches the full device name above.
     #
     # Use a wildcard for the number that MOVES.  On Linux a device is named
@@ -150,7 +139,7 @@ recorder:
     # order, so plugging in an unrelated interface renumbers it and a pinned
     # name stops matching:
     #     device: "SC-U: USB Audio (hw:*,0)"
-    # Keep the trailing ",0" — that is the subdevice, it does NOT move, and it
+    # Keep the trailing ",0" - that is the subdevice, it does NOT move, and it
     # is what tells a multi-output interface's outputs apart.
     #
     # If the pattern matches several devices you are asked which; if it matches
@@ -162,7 +151,7 @@ recorder:
     sample_rate: 44100
     # Sample rate in Hz. Standard values: 44100 (CD quality), 48000 (professional), 16000 (speech).
     # Lower = less CPU, smaller files. Higher = better fidelity for music.
-    # Range: 8000–192000 Hz (device dependent).
+    # Range: 8000-192000 Hz (device dependent).
 
     bit_depth: 16
     # Bits per sample: 16, 24, or 32. Controls dynamic range and file size.
@@ -189,7 +178,7 @@ recorder:
     # inputs, you will be prompted to choose.
 
     buffer_frames: 512
-    # Frames per audio read — how much audio arrives at once from the device.
+    # Frames per audio read - how much audio arrives at once from the device.
     # Smaller (256, 512): lower input latency. Larger (1024, 2048): less CPU.
     # Default 512 suits USB audio interfaces. The output-side twin is
     # player.audio.buffer_frames.
@@ -199,7 +188,7 @@ recorder:
     #   wav  = uncompressed PCM (default; supports 16/24/32-bit).
     #   flac = lossless compressed, ~40-60% smaller (supports 16/24-bit).
     # With `flac` selected, 32-bit inputs are written as `.wav` per file
-    # rather than rejected — a mixed library is normal and expected.  Live
+    # rather than rejected - a mixed library is normal and expected.  Live
     # captures under `flac` + bit_depth: 32 are rejected at startup so the
     # mismatch surfaces with a clear message rather than mid-capture.
     # Existing WAV samples in your library continue to load unchanged
@@ -215,14 +204,14 @@ recorder:
     #   a_generic : Generic tetrahedral A-format with capsule order
     #               FLU (front-left-up), FRD (front-right-down),
     #               BLD (back-left-down), BRU (back-right-up).
-    #               No capsule EQ applied — matrix conversion only.
+    #               No capsule EQ applied - matrix conversion only.
     #   a_nt_sf1  : Rode NT-SF1 A-format.  Same capsule order as generic
     #               plus a capsule-matching HF shelf (pre-matrix) and a
     #               post-matrix HF shelf on X/Y/Z to compensate for
     #               capsule-spacing loss.  Best choice for the NT-SF1.
     #   b_fuma    : Pre-encoded B-format in FuMA order (W, X, Y, Z) with
-    #               MaxN normalisation — reordered and renormalised to AmbiX.
-    #   b_ambix   : Pre-encoded B-format already in AmbiX order — stored as-is.
+    #               MaxN normalisation - reordered and renormalised to AmbiX.
+    #   b_ambix   : Pre-encoded B-format already in AmbiX order - stored as-is.
     #   null or "": Ambisonic processing disabled (default).
 
     # float_import_ceiling_dbfs: -1.0
@@ -232,7 +221,7 @@ recorder:
     # sit above full scale; subsample's internal integer pipeline cannot, so such
     # peaks would hard-clip on the way in. When set, a float/double source that
     # exceeds the ceiling is scaled down as a whole (relative dynamics preserved)
-    # so its peak lands here — losslessly. Playback re-normalises level per sample,
+    # so its peak lands here - losslessly. Playback re-normalises level per sample,
     # so the attenuation is inaudible; it only prevents lost transients.
     # Integer-PCM sources are never touched. Default -1.0 (1 dB of headroom); set
     # null to hard-clip as before. (Changed default: prior versions always clipped.)
@@ -244,11 +233,11 @@ recorder:
     max_seconds: 60
     # Length of the circular recording buffer in seconds. Determines how much audio history
     # is kept before a trigger event. Larger = more pre-signal context; smaller = less RAM.
-    # At 44100 Hz mono 16-bit, 60s ≈ 5.3 MB. Useful range: 10–120 seconds.
+    # At 44100 Hz mono 16-bit, 60s ≈ 5.3 MB. Useful range: 10-120 seconds.
     # Must be large enough to hold at least one complete expected recording.
 
 # ---------------------------------------------------------------------------
-# player — MIDI input listener and sample playback
+# player - MIDI input listener and sample playback
 # ---------------------------------------------------------------------------
 # Polyphonic MIDI-triggered sample playback.  When enabled, Subsample opens a
 # MIDI input device (hardware or virtual port) and an audio output device, maps
@@ -264,37 +253,37 @@ player:
   # voice targets 0.125 RMS (~-18 dBFS), leaving headroom for 8 simultaneous
   # notes.  If you hear clipping during dense passages, raise this value
   # (more voices, each quieter).  Lower it for louder individual notes when
-  # fewer overlap.  Range: 1–64.  The player logs a warning when clipping
+  # fewer overlap.  Range: 1-64.  The player logs a warning when clipping
   # is detected, with a reminder to adjust this value.
 
   # limiter_threshold_db: -1.5
   # Safety limiter threshold (dBFS). Signals above this are soft-clipped via
-  # a tanh curve.  -1.5 means the limiter only engages 1.5 dB below full scale
-  # — transparent during normal playback, only catching genuine near-clip
+  # a tanh curve.  -1.5 means the limiter only engages 1.5 dB below full scale,
+  # so it is transparent during normal playback, only catching genuine near-clip
   # transients.  Lower values (e.g. -6.0) give more compression.  0.0 disables
-  # the limiter (equivalent to the hard clip at full scale).  Range: -12.0–0.0.
+  # the limiter (equivalent to the hard clip at full scale).  Range: -12.0 to 0.0.
 
   # limiter_ceiling_db: -0.1
   # Maximum output level (dBFS) the limiter allows.  The signal is smoothly
   # compressed between threshold and ceiling, asymptotically approaching this
-  # value — never exceeds it.  Must be greater than limiter_threshold_db.
-  # Range: limiter_threshold_db–0.0.
+  # value - never exceeds it.  Must be greater than limiter_threshold_db.
+  # Range: limiter_threshold_db to 0.0.
 
   # midi_map: midi-map-gm-drums.yaml
   # Path to a MIDI routing map file.  Defines which MIDI notes trigger which
-  # samples.  Required when the player is enabled — without it, the player
+  # samples.  Required when the player is enabled - without it, the player
   # will not start.
   #
   # `subsample --init` places two maps in your project (and wires the first
   # one in here):
-  #   midi-map-gm-drums.yaml   — complete GM percussion kit (47 instruments),
+  #   midi-map-gm-drums.yaml   - complete GM percussion kit (47 instruments),
   #                               pre-mixed with console-style filtering and
   #                               panning.  Recommended starting point.
-  #   midi-map.yaml            — heavily commented template with examples.
+  #   midi-map.yaml            - heavily commented template with examples.
   #                               Edit and point midi_map at it to build your
   #                               own.
   #
-  # The map may also be an ENSEMBLE — one declaring a `maps:` block that
+  # The map may also be an ENSEMBLE - one declaring a `maps:` block that
   # binds several sample sets to MIDI channels so they all play at once.
   # Mutually exclusive with midi_maps below.
   #
@@ -304,7 +293,7 @@ player:
   #   10: "/mnt/shared/Home Kit 2026-07/midi-map.yaml"
   #   11: "/mnt/shared/vocals/live.yaml"
   #   12: "/mnt/shared/effects/midi-map.yaml"
-  # Sample sets to play simultaneously, keyed by MIDI channel (1–16).  A SAMPLE
+  # Sample sets to play simultaneously, keyed by MIDI channel (1-16).  A SAMPLE
   # SET is a directory of samples with a MIDI map at the top of it: because the
   # map resolves its `directory:` predicates relative to itself and NAMES its
   # references rather than pointing at them, the folder is self-contained and
@@ -314,7 +303,7 @@ player:
   # would rather keep its channel assignments here.  Both go through the same
   # loader, so identical bindings give identical results.  Prefer an ensemble
   # file when you want to name channels from a `definitions:` vocabulary
-  # (`channel: my.kit`) or to reload while running — `definitions:` is a
+  # (`channel: my.kit`) or to reload while running - `definitions:` is a
   # map-level feature this file cannot see, and config.yaml is not watched.
   #
   # Mutually exclusive with midi_map above.  Pair with `library.directory: null`
@@ -329,14 +318,14 @@ player:
 
   # strict_midi_map: true
   # When true (default), reject unknown `where:` keys, unknown processor
-  # names, and non-bool `pitched:` values at parse time — surfaces typos
+  # names, and non-bool `pitched:` values at parse time - surfaces typos
   # early.  Set to false to log a warning for each unknown key and carry on,
   # which can help when loading older or hand-edited MIDI maps that pre-date
   # a renamed key.
 
   # midi_device: "Launchpad"
   # Name (or substring) of the MIDI input device for triggering sample playback.
-  # Case-insensitive match, and a GLOB — the same rule as recorder.audio.device
+  # Case-insensitive match, and a GLOB - the same rule as recorder.audio.device
   # above: `*` matches any run of characters, `?` exactly one, matched anywhere
   # in the name, so "Launch" still matches "Launchpad MK3 MIDI 1".
   #
@@ -355,7 +344,7 @@ player:
   # virtual_midi_port: "Subsample Virtual MIDI"
   # Name for a virtual MIDI input port created by Subsample at startup.
   # When set, Subsample creates this port instead of connecting to a hardware
-  # MIDI device — midi_device is ignored and no device selection menu is shown.
+  # MIDI device - midi_device is ignored and no device selection menu is shown.
   # External applications (DAWs, aconnect, MIDI routing tools) can send MIDI
   # to this port by its exact name.
   # Mutually exclusive with midi_device: virtual_midi_port takes precedence.
@@ -367,7 +356,7 @@ player:
 
     # sample_rate: null
     # Output sample rate in Hz.  Leave null (default) to use the recorder's
-    # sample rate.  Do not set higher than the recorder rate — upsampling adds
+    # sample rate.  Do not set higher than the recorder rate - upsampling adds
     # no quality.  Set lower if the output device cannot run at the source rate.
 
     # bit_depth: null
@@ -375,7 +364,7 @@ player:
     # recorder's bit depth.  Use 16 if the device only supports 16-bit output.
 
     # channels: null
-    # Number of output channels.  null = stereo (2) — NOT the device maximum
+    # Number of output channels.  null = stereo (2) - NOT the device maximum
     # (opening every physical output for a stereo set would waste a wider mix
     # per audio callback).  Set this to match your audio interface when using
     # per-instrument output routing (e.g. 8 for a Focusrite Scarlett 18i20, 4
@@ -387,7 +376,7 @@ player:
 
     # buffer_frames: null
     # PortAudio output buffer size in frames.  null (default) lets the OS pick
-    # the device-preferred size — a safe value for most setups.  Set explicitly
+    # the device-preferred size - a safe value for most setups.  Set explicitly
     # to trade stability for tighter latency.
     #   128 → ~2.9 ms at 44.1 kHz   (lowest latency; underrun risk under load)
     #   256 → ~5.8 ms
@@ -398,7 +387,7 @@ player:
     # to the device default automatically.
 
 # ---------------------------------------------------------------------------
-# detection — level-based trigger for recording segments
+# detection - level-based trigger for recording segments
 # ---------------------------------------------------------------------------
 
 detection:
@@ -408,15 +397,15 @@ detection:
   # so this means "louder than the room by N dB", not an absolute level.
   # Smaller = more sensitive (catches quiet sounds, more false triggers).
   # Larger = less sensitive (rejects noise, may miss quiet hits).
-  # Range: 3–20 dB. Typical: 6–12 dB — higher in noisy rooms, lower for
+  # Range: 3-20 dB. Typical: 6-12 dB - higher in noisy rooms, lower for
   # quiet sources.
 
   floor_adaptation: 0.1
-  # How quickly the tracked room level follows changes, 0–1.
-  # Higher (0.05–0.1): the floor chases gradual level rises, so only sounds
-  #   with a sudden onset (claps, drums, plucks) trigger — slow swells read as
+  # How quickly the tracked room level follows changes, 0-1.
+  # Higher (0.05-0.1): the floor chases gradual level rises, so only sounds
+  #   with a sudden onset (claps, drums, plucks) trigger - slow swells read as
   #   "the room getting louder" and are ignored.
-  # Lower (0.001–0.01): the floor moves slowly and stays put, so gradual
+  # Lower (0.001-0.01): the floor moves slowly and stays put, so gradual
   #   builds AND transients both trigger. Good for variable rooms (occasional
   #   traffic, voices).
   # (Technically the exponential-moving-average factor:
@@ -426,34 +415,34 @@ detection:
   hold_seconds: 0.5
   # Seconds to hold the recording open after the signal drops below threshold.
   # Prevents split recordings on brief pauses (e.g. breath between words).
-  # Range: 0.1–2.0 seconds. Larger = longer tail preservation, risk of extra silence/noise.
+  # Range: 0.1-2.0 seconds. Larger = longer tail preservation, risk of extra silence/noise.
 
   warmup_seconds: 1.0
   # Seconds of ambient sampling before detection activates. The room level is
   # calibrated during warmup; a longer warmup yields a more stable baseline.
-  # Range: 1–10 seconds. The 1.0 default favours a fast startup; raise to 2–5
+  # Range: 1-10 seconds. The 1.0 default favours a fast startup; raise to 2-5
   # for a cleaner, more stable floor in variable rooms.
 
   trim_pre_ms: 0.25
   # Extra audio kept before the detected onset, in milliseconds, with a smooth
   # fade-in over it so the start never clicks.
-  # Smaller = tighter attack. Larger = more pre-hit context. Range: 0–2 ms.
+  # Smaller = tighter attack. Larger = more pre-hit context. Range: 0-2 ms.
 
   trim_post_ms: 2.0
   # Extra audio kept after the detected end, in milliseconds, with a smooth
   # fade-out over it so the stop never clicks.
-  # Smaller = abrupt cutoff. Larger = softer tail edge. Range: 0–2 ms.
+  # Smaller = abrupt cutoff. Larger = softer tail edge. Range: 0-2 ms.
   # (For musically long fades on cut tails, use fade_out_ms below.)
 
   # release_threshold_db: null
   # Separate CLOSE threshold (dB over the ambient floor) for ending a recording.
-  # By default the recording ends when the level falls back below threshold_db
-  # — which cuts a long decay short, well above silence. Set a smaller value here
+  # By default the recording ends when the level falls back below threshold_db,
+  # which cuts a long decay short, well above silence. Set a smaller value here
   # to let the tail ring out: the recording still STARTS on the loud
   # threshold_db attack, but only ENDS once the tail has decayed to this
   # quieter level. Ideal for cymbals, rides, gongs and other long-decay hits.
-  # Must be below threshold_db. Typical: 2–6 dB (closer to 0 preserves more
-  # tail). null (default) reuses threshold_db — unchanged behaviour.
+  # Must be below threshold_db. Typical: 2-6 dB (closer to 0 preserves more
+  # tail). null (default) reuses threshold_db - unchanged behaviour.
 
   # retrigger_threshold_db: null
   # While a recording is open, a rise of this many dB over the decaying tail is
@@ -462,32 +451,32 @@ detection:
   # comes first" guarantee, and the only thing that separates hits whose tails
   # never fully fade (a tail sitting on background noise). Pair it with
   # release_threshold_db when chopping a single take of spaced hits. Typical:
-  # 10–15 dB (well above any tail modulation). null (default) disables it.
+  # 10-15 dB (well above any tail modulation). null (default) disables it.
   # Assumes each attack lands within max(hold_seconds, 0.1s): a slow or two-stage
   # attack (a soft onset then a louder transient a beat later) can otherwise read
   # its own transient as a re-strike and over-split. Fast-attack percussion is
   # fine; for slower material, raise hold_seconds so it spans the attack.
 
   # fade_out_ms: 0.0
-  # Length (ms) of a smooth fade applied to each sample's trailing edge — masks a
+  # Length (ms) of a smooth fade applied to each sample's trailing edge - masks a
   # cut taken part-way down a decay (via release_threshold_db) or at the next hit
   # (via retrigger_threshold_db) so it never clicks. 0.0 (default) keeps the tiny
-  # ~2 ms declick. Typical for long-decay material: 20–50 ms.
+  # ~2 ms declick. Typical for long-decay material: 20-50 ms.
 
   # min_peak_db: null
   # Absolute floor (dBFS) a finished recording's peak must reach to be KEPT.
-  # Every threshold above is RELATIVE — "louder than the room by N dB" — which is
+  # Every threshold above is RELATIVE - "louder than the room by N dB" - which is
   # what lets detection work in any room, but also means it cannot tell a quiet
   # room's noise from a quiet sound. In a quiet room the background level wobbles
   # by several dB on its own, so a small threshold_db or retrigger_threshold_db
   # can fire on nothing but air, and you get a file of pure room tone.
   # This is the absolute backstop for that: anything peaking below this level is
   # thrown away instead of saved. Set it against the peak of your QUIETEST wanted
-  # hit, with headroom — set it too high and you silently lose real material.
+  # hit, with headroom - set it too high and you silently lose real material.
   # Typical: -50 to -40 dBFS for close-miked percussion. null (default) = off.
 
 # ---------------------------------------------------------------------------
-# analysis — rhythm and pitch analysis parameters
+# analysis - rhythm and pitch analysis parameters
 # ---------------------------------------------------------------------------
 
 analysis:
@@ -495,19 +484,19 @@ analysis:
   # Tempo prior (initial guess) for beat detection in BPM. Biases the rhythm detection
   # but does not constrain it; librosa.beat.beat_track uses this as a starting point.
   # Set to the expected tempo of your source material for faster convergence.
-  # Range: 30–300 BPM. Always applied — it seeds librosa.beat.beat_track, whose output IS
+  # Range: 30-300 BPM. Always applied - it seeds librosa.beat.beat_track, whose output IS
   # the reported tempo. tempo_min/tempo_max are a separate control, bounding the PLP pulse
   # curve only; they do not constrain the tempo reported here or filtered on by where.tempo.
 
   tempo_min: 30.0
   # Minimum tempo (BPM) considered during beat detection.
   # Tempos below this are not detected, even if present in the audio.
-  # Range: 10–100 BPM. Typical: 30–60 BPM for slow music.
+  # Range: 10-100 BPM. Typical: 30-60 BPM for slow music.
 
   tempo_max: 300.0
   # Maximum tempo (BPM) considered during beat detection.
   # Tempos above this are not detected, even if present in the audio.
-  # Range: 150–300 BPM. Typical: 200–300 BPM for fast music.
+  # Range: 150-300 BPM. Typical: 200-300 BPM for fast music.
 
 # similarity:
 #   weight_spectral: 1.0
@@ -518,30 +507,30 @@ analysis:
 #   # flux, spectral rolloff, spectral slope, and crest factor. It captures the
 #   # overall character of the sound (bright/dark, sharp/soft, tonal/noisy, peaky/
 #   # sustained). This is the proven baseline fingerprint.
-#   # Range: 0.0–2.0. Set to 0.0 to disable spectral features entirely.
+#   # Range: 0.0-2.0. Set to 0.0 to disable spectral features entirely.
 #
 #   weight_timbre: 1.0
 #   # Influence of the sustained-timbre MFCC group on similarity scoring.
-#   # 12 mel-frequency cepstral coefficients (coeff 1–12) averaged across the
-#   # full duration of the recording. Captures the steady-state timbral colour —
+#   # 12 mel-frequency cepstral coefficients (coeff 1-12) averaged across the
+#   # full duration of the recording. Captures the steady-state timbral colour,
 #   # useful for distinguishing instrument families (pad vs pluck, strings vs brass).
-#   # Range: 0.0–2.0. Increase for libraries of sustained tonal sounds.
+#   # Range: 0.0-2.0. Increase for libraries of sustained tonal sounds.
 #   # Set to 0.0 to disable.
 #
 #   weight_timbre_delta: 0.5
 #   # Influence of the delta-MFCC (timbre dynamics) group on similarity scoring.
 #   # 12 first-order frame-to-frame differences of the MFCCs. Encodes how the
-#   # timbre evolves over time — e.g. the attack-to-sustain shift in a plucked
+#   # timbre evolves over time - e.g. the attack-to-sustain shift in a plucked
 #   # string. A secondary signal; default 0.5 gives it half the influence of the
-#   # primary timbre groups. Range: 0.0–2.0. Set to 0.0 to disable.
+#   # primary timbre groups. Range: 0.0-2.0. Set to 0.0 to disable.
 #
 #   weight_timbre_onset: 1.0
 #   # Influence of the onset-weighted MFCC group on similarity scoring.
 #   # 12 MFCCs computed with exponential emphasis on the first ~50 ms of the
-#   # sound — the attack. This is the most important group for distinguishing
+#   # sound - the attack. This is the most important group for distinguishing
 #   # percussive sounds: kick, snare, and hi-hat all share similar sustained
 #   # timbre but have clearly different attacks. Increase for percussion-heavy
-#   # libraries. Range: 0.0–2.0. Set to 0.0 to disable.
+#   # libraries. Range: 0.0-2.0. Set to 0.0 to disable.
 #
 #   weight_band_energy: 1.0
 #   # Influence of the multi-band energy group on similarity scoring.
@@ -557,7 +546,7 @@ analysis:
 # the MIDI map, not here:
 #   where: { reference: GM36_BassDrum1 }
 # That NAMES one of the General MIDI fingerprints bundled with Subsample, so it
-# resolves on any machine with Subsample installed — nothing is copied into your
+# resolves on any machine with Subsample installed - nothing is copied into your
 # project and the map stays portable.  Set library.reference_directory below to
 # match against your own reference set instead.
 # A path still works too (where: { reference: my-refs/kick.wav }, resolved
@@ -572,7 +561,7 @@ analysis:
 #   max_memory_mb: auto      # 60% of the global budget when unset (not a literal 100)
 #   # Maximum audio memory (MB) for in-memory library samples. When this
 #   # limit is exceeded, oldest samples are evicted (FIFO) to make room for new
-#   # ones — newest captures are always kept, oldest are dropped. WAV files on
+#   # ones - newest captures are always kept, oldest are dropped. WAV files on
 #   # disk are never deleted. At 44100 Hz 16-bit mono, 100 MB ≈ 19 minutes.
 #   # Overrides the global max_memory_mb split for library samples.
 #
@@ -584,13 +573,13 @@ analysis:
 #   # `.preview.png` sidecars at startup, and automatically deletes any
 #   # sidecar/PNG whose audio counterpart has gone away.
 #   # Overridden when programs: is declared in the MIDI map (see README).
-#   # Default: samples/captures — the same place the recorder writes
+#   # Default: samples/captures - the same place the recorder writes
 #   # (recorder.directory), so every new capture joins the playable library
 #   # and the library persists and grows across sessions.  Point it
 #   # somewhere else to play one collection while recording into another.
 #   #
 #   # Set to null to load NOTHING in bulk.  Every sample then comes from the
-#   # MIDI map's own `directory:`/`path:` predicates instead — which is what a
+#   # MIDI map's own `directory:`/`path:` predicates instead - which is what a
 #   # project assembled from shared sample sets wants: each set declares the
 #   # samples it needs, so there is no reason to walk a capture tree of
 #   # thousands of unrelated ones (and the sets may live outside the project
@@ -602,7 +591,7 @@ analysis:
 #   # `where: { reference: ... }` predicate.
 #   # null (default) uses the General MIDI set bundled with Subsample, so a map
 #   # can write `reference: GM46_OpenHiHat` and resolve it anywhere Subsample is
-#   # installed — with no path into any particular project.  That is what lets a
+#   # installed - with no path into any particular project.  That is what lets a
 #   # sample set live on a shared drive and still be usable by several projects.
 #   # Set it to match against your own reference set instead; its names then
 #   # replace the built-in ones.  Path-based references in a map are unaffected.
@@ -610,14 +599,14 @@ analysis:
 #   watch: false
 #   # When true, monitor library.directory at runtime for new audio files
 #   # and hot-load them without restarting. Detects audio files from any
-#   # source — another subsample instance (via sidecar), a DAW, or any
+#   # source - another subsample instance (via sidecar), a DAW, or any
 #   # application that writes WAV/FLAC/AIFF/OGG/MP3 files. Files without
-#   # sidecars are auto-analyzed after a brief grace period and file-size
+#   # sidecars are auto-analysed after a brief grace period and file-size
 #   # stability check (to handle files still being written).
 #   # Requires library.directory and player.enabled.
 
 # ---------------------------------------------------------------------------
-# transform — in-memory derivative audio (pitch variants, time-stretch, etc.)
+# transform - in-memory derivative audio (pitch variants, time-stretch, etc.)
 # ---------------------------------------------------------------------------
 # The transform pipeline creates derivative versions of existing samples for
 # playback: pitch-shifted variants so tonal samples can play across a keyboard,
@@ -632,14 +621,14 @@ analysis:
 #   max_memory_mb: auto      # 35% of the global budget when unset (not a literal 50)
 #   # Memory budget (MB) for derivative audio.
 #   # Overrides the global max_memory_mb split for transform variants.
-#   # Eviction: parent-priority FIFO — all variants of the oldest parent are
+#   # Eviction: parent-priority FIFO - all variants of the oldest parent are
 #   # evicted together so remaining sets stay complete and playable.
 #   # At 44100 Hz float32 stereo, 50 MB ≈ 150 seconds of derivative audio.
 #
 #   auto_pitch: true
 #   # When true, pitch-shifted variants are pre-computed for every MIDI note in the
 #   # assigned range (e.g. all 128 notes for C-1..G9). Requires rubberband-cli.
-#   # Pitch playback still works with this disabled — notes fall back to on-the-fly
+#   # Pitch playback still works with this disabled - notes fall back to on-the-fly
 #   # rendering (slower, higher CPU at trigger time). Set to false if rubberband-cli
 #   # is not installed or you prefer lazy rendering over background pre-computation.
 #
@@ -658,27 +647,27 @@ analysis:
 #   max_disk_mb: 500.0
 #   # Maximum disk space (MB) for cached variant files.  0 = disabled.
 #   # When unset, derived automatically as 3x the memory budget (e.g. ~3 GB
-#   # at the default 1024 MB auto budget) — set it explicitly on machines
+#   # at the default 1024 MB auto budget) - set it explicitly on machines
 #   # with small or slow storage.  Least-recently-used files are evicted
 #   # when the budget is exceeded.  At 44100 Hz float32 stereo, 500 MB ≈
 #   # 1500 seconds.
 
 
 # ---------------------------------------------------------------------------
-# tempo — the session tempo (BPM) and where it comes from
+# tempo - the session tempo (BPM) and where it comes from
 # ---------------------------------------------------------------------------
 # The session tempo drives two things: the stretch_quantize / pad_quantize
 # processors (which snap onsets to a beat grid) and the duration_beats
-# selection filter (which picks samples by their length in beats — e.g. only
+# selection filter (which picks samples by their length in beats - e.g. only
 # hi-hats shorter than a 16th note). Because it is used beyond the transform
 # pipeline it is a top-level section.
 
 # tempo:
 #   bpm: 0.0
-#   # Session tempo in BPM. 0.0 = unset: the quantize processors are skipped, and
+#   # Session tempo in BPM. 0.0 = unset: the quantise processors are skipped, and
 #   # any MIDI map that filters by duration_beats fails to load until a tempo is
-#   # set.  Also the fallback under source: midi, until a clock is first seen —
-#   # set a sensible tempo here even when following the clock, so beat-based
+#   # set.  Also the fallback under source: midi, until a clock is first seen,
+#   # so set a sensible tempo here even when following the clock, and beat-based
 #   # behaviour works from the very first note.
 #
 #   source: config
@@ -687,9 +676,9 @@ analysis:
 #   #   midi   = follow the tempo of a MIDI clock arriving on the player's MIDI
 #   #            input, rounded to whole BPM, falling back to bpm until a clock
 #   #            is seen.  Use this so changing tempo in your sequencer doesn't
-#   #            silently leave quantized samples or beat filters on the old grid.
+#   #            silently leave quantised samples or beat filters on the old grid.
 #   # The detected tempo is adopted only after it holds steady, because every
-#   # change re-bakes every quantized variant.  Once adopted it is sticky: a
+#   # change re-bakes every quantised variant.  Once adopted it is sticky: a
 #   # stopped transport keeps the last tempo rather than reverting.  An
 #   # assignment's own `tempo:` still overrides both.  The clock must arrive on
 #   # the same MIDI input as your notes.

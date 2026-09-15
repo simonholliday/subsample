@@ -1,7 +1,7 @@
 """Lightweight event emitter for inter-module communication.
 
-Provides a simple `.on()` / `.emit()` system so that integrations (OSC sender,
-Supervisor dashboard, etc.) can subscribe to sample and MIDI events without
+Provides a simple `.on()` / `.emit()` system so that integrations (such as the
+OSC sender) can subscribe to sample and MIDI events without
 tightly coupling to the callback chains in cli.py.
 
 Handlers are called synchronously on the emitting thread.  Exceptions in

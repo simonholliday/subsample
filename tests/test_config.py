@@ -460,7 +460,7 @@ class TestLoadCustomConfig:
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 	) -> None:
 		"""~/... explicit paths work even when the shell didn't expand them
-		(supervisor/systemd invocations pass the literal tilde through)."""
+		(service managers such as systemd pass the literal tilde through)."""
 
 		monkeypatch.setenv("HOME", str(tmp_path))
 		(tmp_path / "config.yaml").write_text("tempo:\n  bpm: 93.0\n")
@@ -991,37 +991,37 @@ class TestMemoryBudget:
 		assert result == 160.0
 
 
-class TestSupervisorConfig:
+class TestRemovedSupervisorSection:
 
-	def test_default_config_has_supervisor_disabled (self) -> None:
-		"""Default config produces SupervisorConfig with enabled=False."""
+	"""The Supervisor dashboard integration was removed outright, with nothing
+	to rename it to, so an old config.yaml that still carries its section gets
+	the unknown-key warning rather than a hard error."""
+
+	def test_config_has_no_supervisor_field (self) -> None:
+		"""The loaded Config no longer carries a supervisor section."""
 
 		cfg = subsample.config.load_config(_DEFAULT_CONFIG_PATH)
 
-		assert isinstance(cfg.supervisor, subsample.config.SupervisorConfig)
-		assert cfg.supervisor.enabled is False
-		assert cfg.supervisor.port == 9003
+		assert not hasattr(cfg, "supervisor")
+		assert not hasattr(subsample.config, "SupervisorConfig")
 
-	def test_explicit_supervisor_yaml_parsed (self, tmp_path: pathlib.Path) -> None:
-		"""Explicit supervisor YAML section is parsed correctly."""
+	def test_leftover_section_is_reported_by_name (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A leftover supervisor: section loads, and is warned about by name."""
 
-		import shutil
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text(textwrap.dedent("""\
+			supervisor:
+			  enabled: true
+			  port: 8888
+		"""))
 
-		default = subsample.config._locate_default_config()
-		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
+		with caplog.at_level(logging.WARNING, logger="subsample.config"):
+			subsample.config.load_config(config_file)
 
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nsupervisor:\n"
-				"  enabled: true\n"
-				"  port: 8888\n"
-			)
-
-		cfg = subsample.config.load_config(user_config)
-
-		assert cfg.supervisor.enabled is True
-		assert cfg.supervisor.port == 8888
+		messages = " | ".join(r.message for r in caplog.records)
+		assert "unknown key" in messages and "supervisor" in messages
 
 
 class TestAmbisonicConfig:

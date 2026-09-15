@@ -617,8 +617,8 @@ class SampleProcessor:
 		# Persist analysis alongside the audio file so future reads (e.g.
 		# reference file loading on startup) can skip re-analysis when
 		# nothing changes.  When preview data is supplied, it is embedded
-		# in the same sidecar so the Supervisor dashboard can render a
-		# vector preview without touching the audio.
+		# in the same sidecar so the PNG preview can be redrawn later
+		# without touching the audio.
 		subsample.cache.save_cache(
 			audio_path     = filepath,
 			audio_md5      = audio_md5,

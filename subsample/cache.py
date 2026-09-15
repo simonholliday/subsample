@@ -284,8 +284,8 @@ def save_cache (
 		             unknown.
 		preview_data: Optional compact visual-preview block (envelopes,
 		             per-band energies, onset/beat markers, accent colour,
-		             badge text) serialised into the sidecar for the
-		             Supervisor dashboard's on-demand SVG renderer.  When
+		             badge text) serialised into the sidecar, so the PNG
+		             preview can be redrawn without re-analysing.  When
 		             None, the ``preview`` key is omitted — loaders treat
 		             missing preview as "no preview available".
 	"""
@@ -784,7 +784,7 @@ def load_preview_data (
 
 	Does NOT validate audio MD5 or analysis version — preview schema evolves
 	independently.  A malformed ``preview`` block logs a warning and returns
-	None rather than raising, so consumers (e.g. Supervisor) can treat the
+	None rather than raising, so a caller (e.g. the PNG redraw) can treat the
 	sample as simply "no preview available" and continue.
 	"""
 

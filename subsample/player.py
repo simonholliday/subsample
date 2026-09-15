@@ -3985,7 +3985,7 @@ class MidiPlayer:
 		# / beat_match) are deliberately absent and resolved live instead.
 		self._candidate_cache: dict[int, _Candidates] = {}
 
-		# Event emitter for integrations (Supervisor dashboard, etc.).
+		# Event emitter for integrations to subscribe to.
 		# Currently emits 'cc' on control_change messages.
 		self.events = subsample.events.EventEmitter()
 

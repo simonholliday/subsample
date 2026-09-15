@@ -1,5 +1,5 @@
 # ===================================================================
-# midi-map-gm-drums.yaml — Complete General MIDI drum kit
+# midi-map-gm-drums.yaml - Complete General MIDI drum kit
 # ===================================================================
 #
 # Point this map at any sample collection and you get a coherent,
@@ -147,7 +147,7 @@ assignments:
 
 
   # =================================================================
-  # TOMS — panned high-to-low, left-to-right (audience perspective)
+  # TOMS - panned high-to-low, left-to-right (audience perspective)
   # =================================================================
 
   - name: Low Floor Tom
@@ -224,7 +224,7 @@ assignments:
 
 
   # =================================================================
-  # HI-HATS — hard left (audience perspective)
+  # HI-HATS - hard left (audience perspective)
   # =================================================================
 
   - name: Closed Hi-Hat
@@ -268,7 +268,7 @@ assignments:
 
 
   # =================================================================
-  # CRASH CYMBALS — spread left/right
+  # CRASH CYMBALS - spread left/right
   # =================================================================
 
   - name: Crash Cymbal 1
@@ -321,7 +321,7 @@ assignments:
 
 
   # =================================================================
-  # RIDE CYMBALS — right side
+  # RIDE CYMBALS - right side
   # =================================================================
 
   - name: Ride Cymbal 1
@@ -540,7 +540,7 @@ assignments:
 
 
   # =================================================================
-  # SHAKERS — cabasa, maracas
+  # SHAKERS - cabasa, maracas
   # =================================================================
 
   - name: Cabasa

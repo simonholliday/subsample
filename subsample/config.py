@@ -133,9 +133,10 @@ class RecorderConfig:
 	"""Master switch for visual sample previews.  When True (default),
 	every captured or imported sample gets a ``.preview.png`` sidecar
 	(fixed 1024×256 thumbnail) and an embedded ``preview`` block in its
-	``.analysis.json`` sidecar (compact data the Supervisor dashboard
-	renders as SVG on demand).  Set False to save ~15-25 KB per PNG and
-	~4 KB of JSON per sample if you do not browse the library visually."""
+	``.analysis.json`` sidecar (compact waveform and spectral data, from
+	which a preview can be redrawn without re-reading the audio).  Set False
+	to save ~15-25 KB per PNG and ~4 KB of JSON per sample if you do not
+	browse the library visually."""
 	directory: str = "samples/captures"
 	"""Directory where captured recordings are saved.  Absolute, or relative
 	to the directory subsample runs from.  Created automatically.  Point
@@ -549,27 +550,6 @@ class OscConfig:
 
 
 @dataclasses.dataclass(frozen=True)
-class SupervisorConfig:
-
-	"""Supervisor web dashboard configuration.
-
-	When enabled, Subsample broadcasts its state via WebSocket to the
-	Supervisor dashboard.  The dashboard renders live panels showing
-	MIDI activity, library contents, and recorder status.
-
-	Requires the optional ``supervisor`` dependency:
-	``pip install "subsample[supervisor] @ git+https://github.com/simonholliday/subsample.git"``
-	"""
-
-	enabled: bool = False
-	"""Master switch for the Supervisor dashboard.  When False, no
-	WebSocket server is started."""
-
-	port: int = 9003
-	"""WebSocket port the Supervisor server listens on."""
-
-
-@dataclasses.dataclass(frozen=True)
 class AmbisonicConfig:
 
 	"""Project-wide ambisonic decoding and orientation settings.
@@ -622,23 +602,24 @@ class Config:
 	transform: TransformConfig = dataclasses.field(default_factory=TransformConfig)
 	tempo: TempoConfig = dataclasses.field(default_factory=TempoConfig)
 	osc: OscConfig = dataclasses.field(default_factory=OscConfig)
-	supervisor: SupervisorConfig = dataclasses.field(default_factory=SupervisorConfig)
 	ambisonic: AmbisonicConfig = dataclasses.field(default_factory=AmbisonicConfig)
 
 
-def load_config (path: typing.Optional[pathlib.Path] = None) -> Config:
+def load_config (path: typing.Union[str, pathlib.Path, None] = None) -> Config:
 
 	"""Load configuration, merging config.yaml.default with config.yaml.
 
 	Always loads config.yaml.default as the base. If a user config.yaml exists
 	(or an explicit path is given), it is deep-merged on top so user settings
-	override defaults while unspecified keys inherit default values.
+	override defaults while unspecified keys inherit default values.  A path may
+	be given as a string, which is how a documentation build hands over the
+	shipped file to check that it loads.
 	"""
 
 	default_path = _locate_default_config()
 	base = _read_yaml(default_path)
 
-	user_path = _resolve_user_config_path(path)
+	user_path = _resolve_user_config_path(None if path is None else pathlib.Path(path))
 
 	# Avoid loading the same file twice when the caller explicitly passes the
 	# default path (e.g. in tests).
@@ -889,8 +870,13 @@ class _KeyTracker (dict[str, typing.Any]):
 	After _build_config has read everything it understands, any key present
 	in the YAML but never consulted is a typo or a removed option — warned
 	about by name so a misspelt setting doesn't silently fall back to its
-	default.  Tracking what the code actually reads means there is no
-	hand-maintained schema list to drift out of date.
+	default.  Tracking what the code actually reads means validation needs no
+	hand-maintained schema list that could drift out of date.
+
+	subsample.config_schema does declare the keys a second time, for
+	documentation only.  That list is kept honest by
+	tests/test_config_schema.py, which compares it against what this tracker
+	records, so the tracker stays the source of truth.
 	"""
 
 	def __init__ (self, raw: dict[str, typing.Any], label: str) -> None:
@@ -936,8 +922,8 @@ def _section (
 
 	# A section header with every child commented out parses as None.  _deep_merge
 	# already preserves the defaults for sections that ship UNcommented in
-	# config.yaml.default, but only four of them do — the other seven (osc,
-	# supervisor, library, similarity, transform, tempo, ambisonic) ship
+	# config.yaml.default, but only four of them do — the other six (osc,
+	# library, similarity, transform, tempo, ambisonic) ship
 	# commented, so `osc:` with its children commented reached here as None and
 	# hard-failed startup while blaming the user's indentation.  Commenting a
 	# subsystem's settings out but keeping the header is the natural way to
@@ -960,13 +946,24 @@ def _section (
 	return tracker
 
 
-def _build_config (raw: dict[str, typing.Any]) -> Config:
+def _build_config (
+	raw: dict[str, typing.Any],
+	trackers: typing.Optional[list[_KeyTracker]] = None,
+) -> Config:
 
-	"""Construct the Config dataclass tree from a raw YAML dict."""
+	"""Construct the Config dataclass tree from a raw YAML dict.
+
+	When ``trackers`` is given, every section's _KeyTracker is appended to it,
+	so a caller can see exactly which keys the builder consulted.  The
+	documentation schema's agreement test (subsample.config_schema) relies on
+	this to prove the schema declares the keys the builder actually reads.
+	"""
 
 	# Every section is wrapped in a _KeyTracker so keys the builder never
 	# consults can be warned about (typos / removed options) after the build.
-	trackers: list[_KeyTracker] = []
+	if trackers is None:
+		trackers = []
+
 	raw = _KeyTracker(raw, "top-level")
 	trackers.append(raw)
 
@@ -1535,13 +1532,6 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		receive_host=str(osc_raw.get("receive_host", "127.0.0.1")),
 	)
 
-	# --- Supervisor ---
-	supervisor_raw  = _section(raw, "supervisor", trackers)
-	supervisor = SupervisorConfig(
-		enabled=_require_bool(supervisor_raw, "enabled", False, "supervisor"),
-		port=int(supervisor_raw.get("port", 9003)),
-	)
-
 	# --- Ambisonic ---
 	ambisonic_raw   = _section(raw, "ambisonic", trackers)
 	import subsample.ambisonic
@@ -1593,6 +1583,5 @@ def _build_config (raw: dict[str, typing.Any]) -> Config:
 		transform=transform,
 		tempo=tempo,
 		osc=osc,
-		supervisor=supervisor,
 		ambisonic=ambisonic,
 	)

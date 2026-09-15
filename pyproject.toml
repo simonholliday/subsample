@@ -34,9 +34,6 @@ dependencies = [
 
 [project.optional-dependencies]
 osc = ["python-osc"]
-supervisor = [
-	"supervisor @ git+https://github.com/simonholliday/supervisor.git",
-]
 dev = [
 	"mypy>=1.9",
 	"pytest>=8.0",
@@ -78,10 +75,6 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["watchdog", "watchdog.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["supervisor", "supervisor.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
