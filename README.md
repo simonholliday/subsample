@@ -2569,7 +2569,7 @@ weights - is optional and rarely needs changing.
 | `player.audio.buffer_frames` | `null` | PortAudio output buffer in frames (power of two, 32-4096); `null` (default) lets the OS pick. Smaller → lower latency; larger → safer under load. See the **MIDI dispatch model** section for the latency table |
 | `player.virtual_midi_port` | `none` | Name for a virtual MIDI input port; overrides `player.midi_device` |
 | `player.watch_midi_map` | `false` | Monitor the `midi_map` file for changes and reload assignments on save (see Live-coding) |
-| `player.strict_midi_map` | `true` | Reject unknown `where:` keys, unknown processor names, and non-bool `pitched:` values at parse time. Set to `false` to silently ignore unknown keys when loading older or hand-edited MIDI maps |
+| `player.strict_midi_map` | `true` | Reject unknown `where:` keys, processors, processor parameters, CC binding keys and order entry keys, and non-bool `pitched:` values, at parse time. Set to `false` to log a warning for each unknown key and carry on when loading older or hand-edited MIDI maps |
 | `detection.threshold_db` | `12.0` | dB above ambient to trigger recording |
 | `detection.hold_seconds` | `0.5` | Seconds to hold recording open after signal drops |
 | `detection.warmup_seconds` | `1.0` | Calibration period before detection activates |

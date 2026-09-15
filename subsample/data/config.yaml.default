@@ -317,9 +317,11 @@ player:
   # saves from text editors are coalesced into a single reload.
 
   # strict_midi_map: true
-  # When true (default), reject unknown `where:` keys, unknown processor
-  # names, and non-bool `pitched:` values at parse time - surfaces typos
-  # early.  Set to false to log a warning for each unknown key and carry on,
+  # When true (default), reject unknown `where:` keys, processors, processor
+  # parameters, CC binding keys and order entry keys, and non-bool `pitched:`
+  # values, at parse time - surfaces typos early.  A misspelt `treshold:`
+  # would otherwise leave the compressor on its default without a word.
+  # Set to false to log a warning for each unknown key and carry on,
   # which can help when loading older or hand-edited MIDI maps that pre-date
   # a renamed key.
 

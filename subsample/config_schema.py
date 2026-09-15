@@ -439,10 +439,11 @@ def json_schema () -> dict[str, typing.Any]:
 					"strict_midi_map": _setting(
 						"boolean",
 						"""
-						Refuses a MIDI map with an unknown `where:` key, an unknown
-						processor, or a `pitched:` value that is not `true` or `false`,
-						and names the valid options.  Set `false` to log a warning for
-						each and carry on, when loading an older map.
+						Refuses a MIDI map with an unknown `where:` key, processor,
+						processor parameter, CC binding key, or order entry key, or a
+						`pitched:` value that is not `true` or `false`, and names the
+						valid options.  Set `false` to log a warning for each and carry
+						on, when loading an older map.
 						""",
 						default=True,
 					),

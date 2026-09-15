@@ -258,10 +258,12 @@ class PlayerConfig:
 	Requires midi_map to be set."""
 
 	strict_midi_map: bool = True
-	"""When True (default), unknown keys in `where:` blocks and unknown
-	processor names in `process:` blocks raise a parse error with the list
-	of valid options.  Strict mode catches typos early — e.g. a mistyped
-	`duratoin: 1.0` that would otherwise silently match every sample.
+	"""When True (default), unknown keys in `where:` blocks, unknown
+	processor names and processor parameters in `process:` blocks, unknown
+	CC binding keys, and unknown order entry keys raise a parse error with
+	the list of valid options.  Strict mode catches typos early — e.g. a
+	mistyped `duratoin: 1.0` that would otherwise silently match every
+	sample, or a `treshold:` that would leave the compressor on its default.
 
 	Set to False to restore the historical lenient behaviour where unknown
 	keys are logged as warnings and ignored.  Useful when loading older

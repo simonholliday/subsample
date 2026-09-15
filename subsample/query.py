@@ -226,34 +226,58 @@ def set_strict_mode (strict: bool) -> None:
 	_STRICT_MODE = strict
 
 
-# Valid processor names — kept in lockstep with the dispatch ladder in
-# subsample.transform.spec_from_process().  Used by parse_process() to
-# reject unknown names at parse time when strict mode is enabled.
-_VALID_PROCESSOR_NAMES: frozenset[str] = frozenset({
-	"repitch",
-	"stretch_quantize",
-	"beat_quantize",    # legacy; translated to stretch_quantize
-	"pad_quantize",
-	"filter_low",
-	"filter_high",
-	"filter_band",
-	"reverse",
-	"saturate",
-	"compress",
-	"limit",
-	"hpss",
-	"hpss_harmonic",    # legacy; translated to hpss {keep: harmonic}
-	"hpss_percussive",  # legacy; translated to hpss {keep: percussive}
-	"gate",
-	"distort",
-	"bit_depth",
-	"radio",
-	"freqshift",
-	"wobble",
-	"reshape",
-	"transient",
-	"vocoder",
+PROCESSOR_PARAMETERS: typing.Final[dict[str, tuple[str, ...]]] = {
+	"repitch":          ("note",),
+	"stretch_quantize": ("tempo", "grid", "strength", "segment"),
+	"pad_quantize":     ("tempo", "grid", "strength", "segment"),
+	"filter_low":       ("freq", "resonance"),
+	"filter_high":      ("freq", "resonance"),
+	"filter_band":      ("freq", "q", "resonance"),
+	"reverse":          (),
+	"saturate":         ("drive",),
+	"compress":         ("threshold", "ratio", "attack", "release", "knee", "makeup", "lookahead"),
+	"limit":            ("threshold", "release", "lookahead"),
+	"hpss":             ("keep",),
+	"gate":             ("threshold", "attack", "release", "hold", "lookahead"),
+	"distort":          ("mode", "drive", "tone", "mix", "bit_depth", "downsample_factor"),
+	"bit_depth":        ("bits", "dither"),
+	"radio":            ("mode", "demod", "tune", "signal", "static", "fade", "bandwidth", "stereo", "mix"),
+	"freqshift":        ("shift_hz", "mix"),
+	"wobble":           ("depth", "rate", "base", "mix"),
+	"reshape":          ("attack", "hold", "decay", "sustain", "release"),
+	"transient":        ("gain",),
+	"vocoder":          ("carrier", "bands", "depth", "formant_shift"),
+}
+"""Every processor a MIDI map's ``process:`` list accepts, with the parameters
+each one reads, in the names a map uses.
+
+The one declaration of the processor vocabulary: parse_process() refuses a
+name or a parameter that is not here (in strict mode), and everything that
+reads a parameter (spec_from_process() in subsample.transform, the player's
+segment mode, the load-time value checks below) reads only names declared
+here.  tests/test_parameter_declarations.py fails when the two disagree in
+either direction, so this table cannot drift from the code that uses it.
+Legacy processor and parameter names are declared separately below."""
+
+
+# Legacy processor names, still accepted and translated at parse time by
+# _canonical_processor_name(); spec_from_process() only ever sees the
+# canonical names in PROCESSOR_PARAMETERS.
+_LEGACY_PROCESSOR_NAMES: typing.Final[frozenset[str]] = frozenset({
+	"beat_quantize",    # translated to stretch_quantize
+	"hpss_harmonic",    # translated to hpss {keep: harmonic}
+	"hpss_percussive",  # translated to hpss {keep: percussive}
 })
+
+
+# Valid processor names, used by parse_process() to reject unknown names at
+# parse time when strict mode is enabled.
+_VALID_PROCESSOR_NAMES: frozenset[str] = frozenset(PROCESSOR_PARAMETERS) | _LEGACY_PROCESSOR_NAMES
+
+
+# Keys a CC binding accepts, wherever a processor parameter is given as
+# `{cc: 74, min: 200, max: 16000}` instead of a fixed value.
+_CC_BINDING_KEYS: typing.Final[frozenset[str]] = frozenset({"cc", "channel", "min", "max", "default"})
 
 
 # Processors that accept a bare scalar value as shorthand for their single
@@ -748,6 +772,15 @@ def _beat_match_scorer (
 
 
 _register_scorer("beat_match", _beat_match_scorer, on_missing="exclude")
+
+
+SCORER_PARAMETERS: typing.Final[dict[str, tuple[str, ...]]] = {
+	"beat_match": ("pattern",),
+}
+"""The parameters an ``order:`` entry may give its scorer, beside ``by`` and
+``dir``, keyed by scorer.  A scorer not listed takes none.  _parse_order_clause()
+refuses any other key in strict mode, so a misspelt ``dir`` cannot pass as a
+parameter nobody reads."""
 
 
 # Legacy bare-string tokens translate into a single-clause order tuple.  The
@@ -1985,12 +2018,32 @@ def _parse_order_clause (
 			f"'asc' or 'desc' (got {dir_raw!r})"
 		)
 
-	# Everything except by/dir is a scorer parameter.  Preserve insertion order
-	# by iterating the dict directly; values are kept as-is (the scorer decides
-	# how to interpret them), then any per-scorer validators run below to
-	# coerce mutable containers (lists) into hashable form.
+	# Everything except by/dir is a scorer parameter, and only the parameters
+	# the scorer declares are accepted: a misspelt `dir` would otherwise become
+	# a parameter nobody reads, and the order would silently run the default way.
+	accepted = SCORER_PARAMETERS.get(by, ())
+	unknown = sorted(str(k) for k in raw if k not in ("by", "dir") and str(k) not in accepted)
+
+	if unknown:
+		valid = ", ".join(("by", "dir", *accepted))
+
+		if _STRICT_MODE:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: order entry for "
+				f"'by: {by}' has unknown key(s) {unknown}.  Valid keys: {valid}."
+			)
+
+		_log.warning(
+			"MIDI map assignment %r: order entry for 'by: %s' has unknown key(s) %s "
+			"— ignored (valid keys: %s)",
+			assignment_name, by, unknown, valid,
+		)
+
+	# Preserve insertion order by iterating the dict directly; values are kept
+	# as-is (the scorer decides how to interpret them), then any per-scorer
+	# validators run below to coerce mutable containers (lists) into hashable form.
 	params: list[tuple[str, typing.Any]] = [
-		(str(k), v) for k, v in raw.items() if k not in ("by", "dir")
+		(str(k), v) for k, v in raw.items() if k not in ("by", "dir") and str(k) in accepted
 	]
 
 	if by == "beat_match":
@@ -2836,6 +2889,30 @@ def parse_process (
 						(canonical_name, k_str), k_str,
 					)
 
+					# A parameter the processor never reads would be silently
+					# ignored and the sample would play with that parameter's
+					# default, so a misspelt one is refused like an unknown
+					# processor.  An unknown processor name only reaches here in
+					# lenient mode, where there is no parameter list to check.
+					accepted = PROCESSOR_PARAMETERS.get(canonical_name)
+
+					if accepted is not None and canonical_param not in accepted:
+						valid = ", ".join(accepted) if accepted else "none"
+
+						if _STRICT_MODE:
+							raise ValueError(
+								f"MIDI map assignment {assignment_name!r}: "
+								f"processor {proc_name_str!r} has no parameter "
+								f"{k_str!r}.  Valid parameters: {valid}."
+							)
+
+						_log.warning(
+							"MIDI map assignment %r: processor %r has no parameter %r "
+							"— ignored (valid parameters: %s)",
+							assignment_name, proc_name_str, k_str, valid,
+						)
+						continue
+
 					if canonical_param in seen_params:
 						# Both "amount" (legacy) and "drive" (new) on one step
 						# — reject loudly.  The legacy shim is a pure alias,
@@ -2850,12 +2927,45 @@ def parse_process (
 
 					seen_params.add(canonical_param)
 
-					if isinstance(v, dict) and "cc" in v:
+					if isinstance(v, dict):
 						cc_context = (
 							f"MIDI map assignment {assignment_name!r}: "
 							f"processor {proc_name_str!r} parameter "
 							f"{canonical_param!r}"
 						)
+
+						# A mapping is only ever a CC binding.  Without `cc` (say
+						# `CC: 74`) it used to reach spec_from_process as a raw dict
+						# and raise TypeError whenever the step was compiled; a
+						# misspelt `min`/`max`/`default` was ignored and the binding
+						# used its own default.
+						if "cc" not in v:
+							if _STRICT_MODE:
+								raise ValueError(
+									f"{cc_context} is a mapping without a 'cc' key.  "
+									f"A parameter takes a value, or a CC binding "
+									f"such as {{cc: 74, min: 200, max: 16000}}."
+								)
+
+							_log.warning("%s is a mapping without a 'cc' key — ignored", cc_context)
+							continue
+
+						unknown_cc_keys = sorted(str(key) for key in v if str(key) not in _CC_BINDING_KEYS)
+
+						if unknown_cc_keys:
+							valid_cc_keys = ", ".join(sorted(_CC_BINDING_KEYS))
+
+							if _STRICT_MODE:
+								raise ValueError(
+									f"{cc_context} has unknown CC binding key(s) "
+									f"{unknown_cc_keys}.  Valid keys: {valid_cc_keys}."
+								)
+
+							_log.warning(
+								"%s: unknown CC binding key(s) %s ignored (valid keys: %s)",
+								cc_context, unknown_cc_keys, valid_cc_keys,
+							)
+
 						cc_num = subsample.definitions.resolve_scalar(
 							definitions, "cc", v["cc"], cc_context,
 						)
