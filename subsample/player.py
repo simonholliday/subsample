@@ -3076,22 +3076,13 @@ def load_midi_map (
 		silenced_by = _parse_silenced_by(assignment_raw.get("silenced_by"), name, note_namespaces)
 
 		# Extract segment playback mode from quantize step parameters.
+		# parse_process has already refused any value other than round_robin,
+		# random or a hit number from 1, so the value is used as it stands.
 		segment_mode: typing.Union[str, int] = ""
 
 		for step in process.steps:
 			if step.name in ("stretch_quantize", "pad_quantize"):
-				raw_seg = step.get("segment", "")
-
-				if isinstance(raw_seg, int) and raw_seg > 0:
-					segment_mode = raw_seg
-				elif isinstance(raw_seg, str) and raw_seg in ("round_robin", "random"):
-					segment_mode = raw_seg
-				elif raw_seg:
-					_log.warning(
-						"Assignment %r: invalid segment mode %r — using merged playback",
-						name, raw_seg,
-					)
-
+				segment_mode = step.get("segment", "")
 				break
 
 		# Zone-tuned path: emit a ZoneTemplate; concrete NoteMap entries

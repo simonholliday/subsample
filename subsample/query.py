@@ -3133,6 +3133,27 @@ def parse_process (
 					f"hard_clip, fold, bit_crush, or downsample (got {step.get('mode')!r})"
 				)
 
+	# A quantise step's `segment:` picks which detected hit plays: round_robin,
+	# random, or a hit's number counted from 1.  Validated at load like the
+	# enums above — a typo'd value used to log a warning and play the whole
+	# quantised sample on every note, a different sound with no error.  A
+	# CcBinding is refused too: a hit is chosen per note, not swept.
+	for step in steps:
+		if step.name in ("stretch_quantize", "pad_quantize"):
+			segment = step.get("segment")
+
+			if segment is None:
+				continue
+
+			valid_number = isinstance(segment, int) and not isinstance(segment, bool) and segment >= 1
+
+			if not valid_number and segment not in ("round_robin", "random"):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: {step.name} segment "
+					f"must be round_robin, random, or a hit number from 1 "
+					f"(got {segment!r})"
+				)
+
 	# repitch's fixed `note:` must be a MIDI note number (0-127) or a valid
 	# note name — an invalid value would otherwise raise inside the rtmidi
 	# handler on EVERY note-on (the same rationale as the hpss check above).

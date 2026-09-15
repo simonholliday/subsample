@@ -966,6 +966,33 @@ class TestParseProcess:
 		with pytest.raises(ValueError, match="unsupported value type"):
 			subsample.query.parse_process([{"gate": 5}], "test")
 
+	def test_quantise_segment_accepts_its_values (self) -> None:
+		"""segment takes round_robin, random, or a hit number counted from 1."""
+
+		for processor in ("stretch_quantize", "pad_quantize"):
+			for good in ("round_robin", "random", 1, 4):
+				spec = subsample.query.parse_process([{processor: {"segment": good}}], "test")
+				assert spec.steps[0].get("segment") == good
+
+	def test_quantise_segment_invalid_value_rejected_at_parse (self) -> None:
+		"""A typo, a hit number below 1, a boolean or a CC binding fails at map load.
+
+		A bad value used to log a warning and play the whole quantised sample."""
+
+		for bad in ("randmo", "Round_Robin", 0, -1, True, 1.5, {"cc": 20}):
+			with pytest.raises(ValueError, match="segment must be round_robin, random, or a hit number from 1"):
+				subsample.query.parse_process([{"pad_quantize": {"segment": bad}}], "test")
+
+	def test_quantise_segment_refused_in_lenient_mode_too (self) -> None:
+		"""Lenient mode forgives unknown keys, not invalid values, as for every other value check."""
+
+		subsample.query.set_strict_mode(False)
+		try:
+			with pytest.raises(ValueError, match="segment must be"):
+				subsample.query.parse_process([{"stretch_quantize": {"segment": "randmo"}}], "test")
+		finally:
+			subsample.query.set_strict_mode(True)
+
 	def test_radio_modes_accepted (self) -> None:
 		for mode in ("am", "lw", "fm", "ssb"):
 			spec = subsample.query.parse_process([{"radio": {"mode": mode}}], "test")

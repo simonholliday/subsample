@@ -6756,6 +6756,39 @@ class TestSelectSegment:
 
 		assert step.get("segment", "") == 3
 
+	def _load_with_segment (self, tmp_path: pathlib.Path, segment: str) -> subsample.player.MidiMapResult:
+
+		"""Load a one-assignment map whose quantise step sets segment to the given YAML value."""
+
+		path = tmp_path / "segment-map.yaml"
+		path.write_text(f"""
+assignments:
+  - name: Loop
+    channel: 1
+    notes: 60
+    select:
+      where:
+        reference: BD0025
+    process:
+      - stretch_quantize: {{ grid: 16, segment: {segment} }}
+""", encoding="utf-8")
+
+		return subsample.player.load_midi_map(path, ["BD0025"])
+
+	def test_segment_mode_reaches_the_assignment (self, tmp_path: pathlib.Path) -> None:
+		"""A loaded map carries the segment value into the assignment the player uses."""
+
+		for yaml_value, expected in (("round_robin", "round_robin"), ("random", "random"), ("3", 3)):
+			note_map = self._load_with_segment(tmp_path, yaml_value).note_map
+			assignment, _ = note_map[(0, 60)][0]
+			assert assignment.segment_mode == expected
+
+	def test_invalid_segment_mode_refuses_the_map (self, tmp_path: pathlib.Path) -> None:
+		"""A typo'd segment used to load, warn, and play the whole sample on every note."""
+
+		with pytest.raises(ValueError, match="segment must be round_robin, random, or a hit number from 1"):
+			self._load_with_segment(tmp_path, "randmo")
+
 
 # ---------------------------------------------------------------------------
 # _build_energy_profile_resolver — unit tests for the resolver builder
