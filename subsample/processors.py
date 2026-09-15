@@ -8,7 +8,7 @@ comes from, its unit, and when it has any effect at all.
 
 Everything reads it.  subsample.query takes its processor and parameter names
 from here, refuses at load a value a declaration does not allow, and builds a
-CC binding's missing ends, curve and resting value from the sweep and default.
+CC binding's missing ends, taper and resting value from the sweep and default.
 subsample.transform takes every default from here when it builds a step, and
 holds a number inside its limit.  tests/test_processors.py fails when the
 declaration disagrees with itself, or when the code stops following it.  The
@@ -53,8 +53,11 @@ tempo:       the session tempo, which follows MIDI clock when configured to
 resolution:  the configured quantise resolution, transform.quantize_resolution
 mode:        the processor's own mode setting"""
 
-SWEEP_CURVES: typing.Final[tuple[str, ...]] = ("linear", "log")
-"""How a CC binding spreads its travel: in equal steps, or in equal ratios."""
+TAPERS: typing.Final[tuple[str, ...]] = ("linear", "log")
+"""How a sweep's travel maps onto its values, as a potentiometer's taper does: in
+equal steps, or in equal ratios, so each step of a frequency knob is the same
+musical interval.  Not a curve: in a MIDI map, `curve` is release's fade shape
+and pick's velocity mapping."""
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +224,7 @@ class Parameter:
 	limit:         Limit = Limit()
 	limits_when:   tuple[LimitWhen, ...] = ()
 	sweep:         typing.Optional[tuple[float, float]] = None
-	sweep_curve:   str = "linear"
+	taper:         str = "linear"
 	default:       typing.Union[bool, int, float, str, None] = None
 	automatic:     typing.Optional[str] = None
 	required:      bool = False
@@ -426,7 +429,7 @@ def _filter_frequency (default: float) -> Parameter:
 
 	return Parameter(
 		name="freq", forms=_NUMBER, unit="Hz",
-		limit=Limit(exclusive_minimum=1.0), sweep=(20.0, 20000.0), sweep_curve="log",
+		limit=Limit(exclusive_minimum=1.0), sweep=(20.0, 20000.0), taper="log",
 		default=default,
 	)
 
@@ -486,7 +489,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 			_filter_frequency(1000.0),
 			Parameter(
 				name="q", forms=_NUMBER,
-				limit=Limit(minimum=0.1, maximum=20.0), sweep=(0.5, 10.0), sweep_curve="log",
+				limit=Limit(minimum=0.1, maximum=20.0), sweep=(0.5, 10.0), taper="log",
 				default=0.7,
 			),
 			_resonance(),
@@ -517,7 +520,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 			),
 			Parameter(
 				name="ratio", forms=_NUMBER,
-				limit=Limit(minimum=1.0), sweep=(1.0, 20.0), sweep_curve="log",
+				limit=Limit(minimum=1.0), sweep=(1.0, 20.0), taper="log",
 				default=4.0,
 			),
 			Parameter(
@@ -642,7 +645,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 			),
 			Parameter(
 				name="downsample_factor", forms=_INTEGER,
-				limit=Limit(minimum=2, maximum=64), sweep=(2, 64), sweep_curve="log",
+				limit=Limit(minimum=2, maximum=64), sweep=(2, 64), taper="log",
 				default=4,
 				applies_when=({"mode": ("downsample",)},),
 			),
@@ -709,7 +712,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				# The FM and SSB channel filters pass a band from a fixed 300 Hz,
 				# so their top edge has to clear it.
 				limits_when=(LimitWhen(when={"mode": ("fm", "ssb")}, limit=Limit(exclusive_minimum=300.0)),),
-				sweep=(500.0, 8000.0), sweep_curve="log",
+				sweep=(500.0, 8000.0), taper="log",
 				automatic="mode",
 			),
 			Parameter(
@@ -745,7 +748,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 			),
 			Parameter(
 				name="rate", forms=_NUMBER, unit="Hz",
-				limit=Limit(exclusive_minimum=0.0), sweep=(0.05, 10.0), sweep_curve="log",
+				limit=Limit(exclusive_minimum=0.0), sweep=(0.05, 10.0), taper="log",
 				default=0.3,
 			),
 			Parameter(

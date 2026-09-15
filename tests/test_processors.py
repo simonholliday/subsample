@@ -12,7 +12,7 @@ It must agree with the code, and the code must read it.  A declared default is
 what the step compiler builds when a map leaves the parameter out, and changing
 the declaration changes the compiled step.  The parser refuses at load every
 value the declaration does not allow, and every CC binding a knob could not
-honour.  A binding takes its missing ends, curve and resting place from the
+honour.  A binding takes its missing ends, taper and resting place from the
 declaration.  Every allowed word reaches a sound of its own.
 """
 
@@ -152,12 +152,12 @@ class TestVocabularies:
 
 		assert used == set(subsample.processors.AUTOMATIC_SOURCES)
 
-	def test_every_sweep_curve_is_known (self) -> None:
+	def test_every_taper_is_known (self) -> None:
 
 		"""A sweep is linear or logarithmic, and nothing else."""
 
 		for _processor, parameter in _PARAMETERS:
-			assert parameter.sweep_curve in subsample.processors.SWEEP_CURVES, parameter.name
+			assert parameter.taper in subsample.processors.TAPERS, parameter.name
 
 
 class TestDeclarationAgreesWithItself:
@@ -224,7 +224,7 @@ class TestDeclarationAgreesWithItself:
 
 		"""A binding maps a logarithmic sweep by ratio, which only works when every allowed value is above zero."""
 
-		if parameter.sweep_curve == "log":
+		if parameter.taper == "log":
 			assert parameter.limit.above_zero()
 
 	@pytest.mark.parametrize(("processor", "parameter"), _PARAMETERS, ids=_PARAMETER_IDS)
@@ -548,7 +548,7 @@ class TestCcBindings:
 		low, high = parameter.sweep
 		bare = _binding(processor.name, parameter.name, {"cc": 20})
 
-		assert (bare.min_val, bare.max_val, bare.curve) == (low, high, parameter.sweep_curve)
+		assert (bare.min_val, bare.max_val, bare.taper) == (low, high, parameter.taper)
 
 		middle = bare.at_fraction(0.5)
 		with_min = _binding(processor.name, parameter.name, {"cc": 20, "min": middle})

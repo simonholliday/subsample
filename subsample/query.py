@@ -1134,7 +1134,7 @@ class CcBinding:
 
 	When a processor parameter value is a CcBinding (instead of a scalar),
 	the actual value is resolved at note-on time from the current CC state.
-	parse_process() fills a binding's missing ends, curve and resting value from
+	parse_process() fills a binding's missing ends, taper and resting value from
 	the parameter's declaration in subsample.processors; a binding built in code
 	keeps the plain defaults below.
 
@@ -1143,7 +1143,7 @@ class CcBinding:
 	max_val:     Output value when CC = 127.  May be below min_val: the knob runs backwards.
 	default:     Value before any CC is received.  None → rests_unset decides.
 	channel:     MIDI channel (1–16, user-facing). None → omni (any channel).
-	curve:       "linear" spreads the travel in equal steps; "log" in equal ratios,
+	taper:       "linear" spreads the travel in equal steps; "log" in equal ratios,
 	             so both ends must be above zero.
 	rests_unset: With no default, True rests at the parameter's automatic value
 	             (default_value is None) and False at the middle of the travel.
@@ -1154,7 +1154,7 @@ class CcBinding:
 	max_val:     float = 1.0
 	default:     typing.Optional[float] = None
 	channel:     typing.Optional[int]   = None
-	curve:       str                    = "linear"
+	taper:       str                    = "linear"
 	rests_unset: bool                   = False
 
 	@property
@@ -1178,8 +1178,8 @@ class CcBinding:
 		return self.at_fraction(cc_value / 127.0)
 
 	def at_fraction (self, fraction: float) -> float:
-		"""The value a fraction of the way along the travel, by the binding's curve."""
-		if self.curve == "log":
+		"""The value a fraction of the way along the travel, by the binding's taper."""
+		if self.taper == "log":
 			return self.min_val * float((self.max_val / self.min_val) ** fraction)
 		return self.min_val + fraction * (self.max_val - self.min_val)
 
@@ -2837,7 +2837,7 @@ def _cc_binding (
 	"""Build the CcBinding a processor parameter's ``{cc: ...}`` mapping describes.
 
 	An end the mapping does not give comes from the parameter's declared sweep,
-	one end at a time, and the binding spreads its travel by the sweep's curve.
+	one end at a time, and the binding spreads its travel by the parameter's taper.
 	With no ``default`` it rests as if the knob were not there: at the
 	parameter's automatic value, at its fixed default where that lies inside the
 	travel, or else at the middle of the travel.  A parameter nothing declares,
@@ -2880,7 +2880,7 @@ def _cc_binding (
 		max_val=high,
 		default=default,
 		channel=channel,
-		curve=declared.sweep_curve if declared is not None else "linear",
+		taper=declared.taper if declared is not None else "linear",
 		rests_unset=rests_unset,
 	)
 
