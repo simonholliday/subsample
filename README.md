@@ -535,7 +535,8 @@ how long that fade is, and its shape:
   the default) or `exponential` (fast initial drop, long tail, like a damped
   string). `time` may be a `{cc, min, max}` mapping, read the instant each note
   is struck - so the knob shapes the notes you play next, not the one already
-  ringing.
+  ringing. With no `default`, the release stays adaptive until the knob sends
+  its first CC.
 
 `release` only applies to voices that actually receive a note-off, so it needs
 `mode: gated` or `mode: loop`. Declared on a `mode: one_shot` (play-to-end)
@@ -1174,6 +1175,12 @@ process:
 
 Processors execute in the order you declare them - different orderings
 produce different results. The full chain is pre-computed and cached.
+
+Every value is checked when the map loads. A value outside what its parameter
+allows, a fraction where a parameter takes a whole number, a word in the wrong
+letter case, or a vocoder with no `carrier` is refused, with a message naming
+what the parameter accepts. A parameter set where it has no effect, such as
+distort's `bit_depth` outside `bit_crush` mode, loads with a warning.
 
 Available processors:
 
@@ -2037,10 +2044,27 @@ process:
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `cc` | yes | | CC number (0-127) |
-| `min` | no | `0.0` | Output value when CC = 0 |
-| `max` | no | `1.0` | Output value when CC = 127 |
-| `default` | no | midpoint | Value before any CC is received |
+| `min` | no | the bottom of the parameter's knob range | Value when CC = 0 |
+| `max` | no | the top of the parameter's knob range | Value when CC = 127 |
+| `default` | no | where the parameter sits without the knob | Value before any CC is received |
 | `channel` | no | any | MIDI channel (1-16); omit for omni |
+
+Each numeric parameter has its own knob range, which a binding travels when it
+gives no `min` or `max`: the audible range for a filter's `freq`, 0 to 1 for a
+`mix`. A binding that gives one end takes the other from that range, and `min`
+above `max` turns the knob round. Parameters heard as ratios, such as a
+filter's `freq`, move through their range in equal ratios, so each step of the
+knob is the same musical interval; the rest move in equal steps.
+
+Until its first CC arrives, a binding with no `default` leaves the sound as it
+would be without the knob: at the parameter's default, or at the value it works
+out from the sample, the note or the session tempo. When the parameter's
+default lies outside the binding's own `min` and `max`, the knob rests halfway
+along them instead.
+
+A `min`, `max` or `default` outside what the parameter allows is refused when
+the map loads, and so is a binding on a parameter that takes a word, such as
+`mode`.
 
 When a mapped CC changes, new variants are enqueued after a 200 ms debounce.
 Until the new variant is ready, the previous processed variant continues to

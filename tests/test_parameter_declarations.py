@@ -1,19 +1,21 @@
 """Tests for the MIDI map's declared parameters — processors, CC bindings and order entries.
 
-subsample.query.PROCESSOR_PARAMETERS is the one declaration of which parameters
-each processor accepts.  The parser refuses anything else in strict mode, so the
-declaration must match the code that reads parameters exactly: a parameter read
-but not declared could never be set, and one declared but never read would be
-accepted and silently ignored — the bug this declaration exists to prevent.
+subsample.processors declares which parameters each processor accepts, and
+subsample.query.PROCESSOR_PARAMETERS is the parser's view of those names.  The
+parser refuses anything else in strict mode, so the declaration must match the
+code that reads parameters exactly: a parameter read but not declared could
+never be set, and one declared but never read would be accepted and silently
+ignored — the bug this declaration exists to prevent.  tests/test_processors.py
+holds the rest of each declaration (defaults, words, limits) to the code.
 
 The agreement test reads the package's source rather than a second hand-kept
-list.  A parameter read is any ``<name>.get("<literal>")`` inside an ``if`` that
-tests a processor's name (``proc.name == "compress"``, ``step.name in
-("stretch_quantize", "pad_quantize")``), which is how spec_from_process, the
-player's segment mode and the load-time value checks all read one.  A new
-reader written that way is found automatically; one written another way reads
-a name this test cannot see, and the test fails on the declaration it leaves
-unread.
+list.  A parameter read is any ``<name>.get("<literal>")`` or
+``_resolved(<name>, "<literal>", ...)`` inside an ``if`` that tests a
+processor's name (``proc.name == "compress"``, ``step.name in
+("stretch_quantize", "pad_quantize")``), which is how spec_from_process and the
+player's segment mode read one.  A new reader written that way is found
+automatically; one written another way reads a name this test cannot see, and
+the test fails on the declaration it leaves unread.
 """
 
 import ast
@@ -23,6 +25,7 @@ import typing
 
 import pytest
 
+import subsample.processors
 import subsample.query
 import subsample.transform
 
@@ -62,6 +65,31 @@ def _guarded_names (test: ast.expr) -> frozenset[str]:
 	return candidates & _PROCESSOR_NAMES
 
 
+def _read_literal (call: ast.Call) -> typing.Optional[str]:
+
+	"""The parameter name a call reads, or None when the call reads none.
+
+	``step.get("bits")`` reads `bits`, and so does spec_from_process's
+	``_resolved(proc, "bits", ...)``, which gets the value, its declared default
+	and its limit in one call."""
+
+	func = call.func
+
+	if isinstance(func, ast.Attribute) and func.attr == "get" and isinstance(func.value, ast.Name):
+		argument = call.args[0] if call.args else None
+
+	elif isinstance(func, ast.Name) and func.id == "_resolved":
+		argument = call.args[1] if len(call.args) > 1 else None
+
+	else:
+		return None
+
+	if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+		return argument.value
+
+	return None
+
+
 def _parameter_reads () -> dict[str, set[str]]:
 
 	"""Every parameter name the package reads under a test of each processor's name."""
@@ -81,16 +109,12 @@ def _parameter_reads () -> dict[str, set[str]]:
 				continue
 
 			literals = {
-				call.args[0].value
+				literal
 				for statement in node.body
 				for call in ast.walk(statement)
 				if isinstance(call, ast.Call)
-				and isinstance(call.func, ast.Attribute)
-				and call.func.attr == "get"
-				and isinstance(call.func.value, ast.Name)
-				and call.args
-				and isinstance(call.args[0], ast.Constant)
-				and isinstance(call.args[0].value, str)
+				for literal in [_read_literal(call)]
+				if literal is not None
 			}
 
 			for name in names:
@@ -212,23 +236,27 @@ class TestProcessorParameters:
 
 	def test_every_declared_parameter_is_accepted (self) -> None:
 
-		"""A plain value for each declared parameter parses, for every processor."""
+		"""A value each declared parameter allows parses, for every processor.
 
-		values: dict[str, typing.Any] = {
-			"keep": "harmonic", "mode": "am", "demod": "matched", "stereo": "mono",
-			"dither": "none", "bits": 12, "note": 60, "carrier": "reference", "segment": 1,
-		}
+		The value is the parameter's first word, the low end of its sweep, or
+		its lowest allowed number; a parameter the processor requires is given
+		alongside."""
 
-		for processor, parameters in subsample.query.PROCESSOR_PARAMETERS.items():
-			for parameter in parameters:
-				value = values.get(parameter, 1)
+		def allowed (parameter: subsample.processors.Parameter) -> typing.Any:
+			if parameter.choices:
+				return parameter.choice_values[0]
+			if parameter.sweep is not None:
+				return parameter.sweep[0]
+			return parameter.limit.minimum
 
-				if processor == "distort" and parameter == "mode":
-					value = "fold"
+		for name, processor in subsample.processors.PROCESSORS.items():
+			required = {p.name: allowed(p) for p in processor.parameters if p.required}
 
-				spec = subsample.query.parse_process([{processor: {parameter: value}}], "test")
+			for parameter in processor.parameters:
+				value = allowed(parameter)
+				spec = subsample.query.parse_process([{name: {**required, parameter.name: value}}], "test")
 
-				assert spec.steps[0].get(parameter) == value, f"{processor}.{parameter}"
+				assert spec.steps[0].get(parameter.name) == value, f"{name}.{parameter.name}"
 
 	def test_legacy_parameter_name_still_accepted (self) -> None:
 

@@ -1293,6 +1293,18 @@ class TestResolveRelease:
 		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
 		assert frames == round(500.0 / 1000.0 * 44100)   # default_value
 
+	def test_cc_time_with_no_default_stays_adaptive_until_the_first_cc (self) -> None:
+		"""A release knob rests as if it were not there: the adaptive tail, not the middle of its travel."""
+		spec = subsample.player._parse_release({"cc": 72, "min": 20, "max": 3000}, "a")
+		assert spec is not None
+		player = self._player(44100)
+		player._snapshot_cc_state.return_value = ({}, {})
+		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(player, spec, self._record(0.5))
+		assert frames == round((30.0 + 170.0 * 0.5) / 1000.0 * 44100)
+		player._snapshot_cc_state.return_value = ({}, {72: 127})
+		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(player, spec, self._record(0.5))
+		assert frames == round(3000.0 / 1000.0 * 44100)
+
 
 class TestReleaseCallback:
 
@@ -6786,7 +6798,7 @@ assignments:
 	def test_invalid_segment_mode_refuses_the_map (self, tmp_path: pathlib.Path) -> None:
 		"""A typo'd segment used to load, warn, and play the whole sample on every note."""
 
-		with pytest.raises(ValueError, match="segment must be round_robin, random, or a hit number from 1"):
+		with pytest.raises(ValueError, match="segment must be round_robin, random, or a whole number 1 or more"):
 			self._load_with_segment(tmp_path, "randmo")
 
 

@@ -886,10 +886,10 @@ class TestParseProcess:
 		trigger time the same error fires on every note-on and aborts the
 		variant pre-compute pass."""
 
-		with pytest.raises(ValueError, match="keep: harmonic or keep: percussive"):
+		with pytest.raises(ValueError, match="hpss needs keep: harmonic or percussive"):
 			subsample.query.parse_process(["hpss"], "test")
 
-		with pytest.raises(ValueError, match="keep: harmonic or keep: percussive"):
+		with pytest.raises(ValueError, match="hpss keep must be harmonic or percussive"):
 			subsample.query.parse_process([{"hpss": {"keep": "banana"}}], "test")
 
 	def test_hpss_legacy_aliases_still_parse (self) -> None:
@@ -922,28 +922,28 @@ class TestParseProcess:
 		load, not at trigger time."""
 
 		for bad in (0, 17, 12.5):
-			with pytest.raises(ValueError, match="whole number of bits from 1 to 16"):
+			with pytest.raises(ValueError, match="bits must be a whole number from 1 to 16"):
 				subsample.query.parse_process([{"bit_depth": bad}], "test")
 
 		# Dict form: same range check, plus booleans (bit_depth: true is
 		# the valid bare form, but bits: true is a mistake).
 		for bad in (17, True):
-			with pytest.raises(ValueError, match="whole number of bits from 1 to 16"):
+			with pytest.raises(ValueError, match="bits must be a whole number from 1 to 16"):
 				subsample.query.parse_process([{"bit_depth": {"bits": bad}}], "test")
 
 	def test_bit_depth_dither_forms_accepted (self) -> None:
-		"""dither accepts booleans and the named types, any case."""
+		"""dither accepts booleans and the named types, written exactly."""
 
-		for good in (True, False, "none", "triangular", "rectangular", "Triangular"):
+		for good in (True, False, "none", "triangular", "rectangular"):
 			spec = subsample.query.parse_process(
 				[{"bit_depth": {"bits": 12, "dither": good}}], "test",
 			)
 			assert spec.steps[0].get("dither") == good
 
 	def test_bit_depth_unknown_dither_rejected_at_parse (self) -> None:
-		"""An unknown dither type (or a numeric value) fails at map load."""
+		"""An unknown dither type, a word in the wrong case, or a number fails at map load."""
 
-		for bad in ("gaussian", 1, 0.5):
+		for bad in ("gaussian", "Triangular", 1, 0.5):
 			with pytest.raises(ValueError, match="dither must be"):
 				subsample.query.parse_process(
 					[{"bit_depth": {"bits": 12, "dither": bad}}], "test",
@@ -979,9 +979,12 @@ class TestParseProcess:
 
 		A bad value used to log a warning and play the whole quantised sample."""
 
-		for bad in ("randmo", "Round_Robin", 0, -1, True, 1.5, {"cc": 20}):
-			with pytest.raises(ValueError, match="segment must be round_robin, random, or a hit number from 1"):
+		for bad in ("randmo", "Round_Robin", 0, -1, True, 1.5):
+			with pytest.raises(ValueError, match="segment must be round_robin, random, or a whole number 1 or more"):
 				subsample.query.parse_process([{"pad_quantize": {"segment": bad}}], "test")
+
+		with pytest.raises(ValueError, match="segment takes round_robin, random, or a whole number 1 or more, which a CC binding cannot set"):
+			subsample.query.parse_process([{"pad_quantize": {"segment": {"cc": 20}}}], "test")
 
 	def test_quantise_segment_refused_in_lenient_mode_too (self) -> None:
 		"""Lenient mode forgives unknown keys, not invalid values, as for every other value check."""
@@ -1035,10 +1038,10 @@ class TestParseProcess:
 		for good in (60, "C4", "F#3"):
 			subsample.query.parse_process([{"repitch": {"note": good}}], "test")
 
-		with pytest.raises(ValueError, match="not a valid note name"):
+		with pytest.raises(ValueError, match="note must be a whole number from 0 to 127 or a note name"):
 			subsample.query.parse_process([{"repitch": {"note": "H4"}}], "test")
 
-		with pytest.raises(ValueError, match="outside the MIDI range"):
+		with pytest.raises(ValueError, match=r"note must be a whole number from 0 to 127 or a note name such as C4 \(got 200\)"):
 			subsample.query.parse_process([{"repitch": {"note": 200}}], "test")
 
 		with pytest.raises(ValueError, match="repitch note"):
@@ -2600,11 +2603,11 @@ class TestHpssUnification:
 		"""Forgotten `keep:` raises at PARSE time — deferring it to spec build
 		meant a per-note-on error in the rtmidi handler and an aborted
 		variant pre-compute pass."""
-		with pytest.raises(ValueError, match="keep: harmonic or keep: percussive"):
+		with pytest.raises(ValueError, match="hpss needs keep: harmonic or percussive"):
 			subsample.query.parse_process([{"hpss": {}}], "test")
 
 	def test_hpss_invalid_keep_raises_at_parse (self) -> None:
-		with pytest.raises(ValueError, match="keep: harmonic or keep: percussive"):
+		with pytest.raises(ValueError, match="hpss keep must be harmonic or percussive"):
 			subsample.query.parse_process([{"hpss": {"keep": "both"}}], "test")
 
 	def test_hpss_build_time_check_still_guards_direct_construction (self) -> None:

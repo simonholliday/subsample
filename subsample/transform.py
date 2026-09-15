@@ -133,6 +133,7 @@ import pymididefs.notes
 import subsample.analysis
 import subsample.config
 import subsample.library
+import subsample.processors
 import subsample.query
 import subsample.radio
 
@@ -204,7 +205,7 @@ class LowPassFilter:
 	freq:          Cutoff frequency in Hz.
 	resonance_db:  Peak boost at the cutoff in dB.  0 = flat Butterworth.
 	               Higher values create a resonant peak (Chebyshev Type I).
-	               Clamped to [0, 24] for stability.
+	               Held inside its declared limit (subsample.processors) for stability.
 	"""
 
 	freq:          float
@@ -400,8 +401,10 @@ class Distort:
 	tone:              Post-distortion low-pass filter as fraction of Nyquist.
 	                   0.0 = very dark, 1.0 = no filtering.
 	                   None = auto (adapts to spectral rolloff).
-	bit_depth:         Target bit depth for bit_crush mode (1–16).
-	downsample_factor: Reduction factor for downsample mode (2–64).
+	bit_depth:         Target bit depth for bit_crush mode, held inside its
+	                   declared limit (subsample.processors).
+	downsample_factor: Reduction factor for downsample mode, held inside its
+	                   declared limit.
 	"""
 
 	mode:              str                    = "hard_clip"
@@ -427,7 +430,7 @@ class BitDepth:
 	grain; 8 is overtly lo-fi; 4 and below are heavily degraded special
 	effects.
 
-	bits:    Target bit depth (1–16).
+	bits:    Target bit depth, held inside its declared limit (subsample.processors).
 	dither:  Noise added before quantization, in canonical string form.
 	         "none"        — bare quantization (the vintage behaviour;
 	                         low-level material distorts gritty).
@@ -2410,7 +2413,13 @@ def _mirror_attacks_if_reversed (
 # Filter handlers
 # ---------------------------------------------------------------------------
 
-_MAX_RESONANCE_DB: float = 24.0
+# The processor each filter type belongs to, whose declared limits hold its
+# resonance and Q inside the range the filter design stays stable in.
+_FILTER_PROCESSORS: typing.Final[dict[str, str]] = {
+	"lowpass":  "filter_low",
+	"highpass": "filter_high",
+	"bandpass": "filter_band",
+}
 
 
 def _apply_filter (
@@ -2438,11 +2447,14 @@ def _apply_filter (
 
 	nyquist = sample_rate / 2.0
 
-	# Clamp resonance to a safe range.
-	resonance_db = max(0.0, min(resonance_db, _MAX_RESONANCE_DB))
+	# Hold resonance and Q inside their declared limits, where the design is
+	# stable.  The parser refuses a map value outside them; this catches a
+	# step built in code.
+	processor = _FILTER_PROCESSORS[btype]
+	resonance_db = _declared_limit(processor, "resonance").clamp(resonance_db)
 
-	# Clamp Q to a safe range (0.1 = very wide, 20 = very narrow).
-	q = max(0.1, min(q, 20.0))
+	if btype == "bandpass":
+		q = _declared_limit(processor, "q").clamp(q)
 
 	# Build the Wn parameter.
 
@@ -3096,11 +3108,12 @@ def _apply_distort (
 		# Step size 2^(1-N) — the spacing of an N-bit converter (2^N levels
 		# across full scale).  A 2^-N step would sound one bit finer than
 		# the requested depth.
-		scale = float(2 ** (max(1, min(16, step.bit_depth)) - 1))
+		bits = int(_declared_limit("distort", "bit_depth").clamp(step.bit_depth))
+		scale = float(2 ** (bits - 1))
 		wet = (numpy.round(driven * scale) / scale).astype(numpy.float32)
 
 	elif mode == "downsample":
-		factor = max(2, min(64, step.downsample_factor))
+		factor = int(_declared_limit("distort", "downsample_factor").clamp(step.downsample_factor))
 		# Repeat every Nth sample along the time axis.
 		wet = numpy.repeat(driven[::factor], factor, axis=0)[:n_frames]
 
@@ -3159,7 +3172,8 @@ def _apply_bit_depth (
 	≤1 LSB noise floor by design.
 	"""
 
-	scale = numpy.float32(2 ** (max(1, min(16, step.bits)) - 1))
+	bits = int(_declared_limit("bit_depth", "bits").clamp(step.bits))
+	scale = numpy.float32(2 ** (bits - 1))
 	driven = audio * scale
 
 	if step.dither == "triangular":
@@ -3936,18 +3950,19 @@ def _warn_once (key: str, message: str) -> None:
 
 
 def _resolve_cc (
-	value: typing.Any,
+	value:    typing.Any,
 	cc_state: typing.Optional[dict[tuple[int, int], int]],
-	default: typing.Any = None,
-	cc_omni: typing.Optional[dict[int, int]] = None,
+	default:  typing.Any = None,
+	cc_omni:  typing.Optional[dict[int, int]] = None,
 ) -> typing.Any:
 
 	"""Resolve a parameter value that may be a CcBinding.
 
 	If value is a CcBinding, look up the current CC value in cc_state (for
 	channel-specific bindings) or cc_omni (for omni bindings, last-write-wins)
-	and map it to the output range.  Falls back to the binding's default_value
-	when no matching CC state is found.
+	and map it onto the binding's travel.  With no CC value yet the binding
+	rests where the parser set it: its default, the middle of its travel, or
+	``default`` when it rests at the parameter's automatic value.
 
 	If value is not a CcBinding, returns it unchanged (or default if None).
 	"""
@@ -3967,7 +3982,75 @@ def _resolve_cc (
 		if cc_val is not None:
 			return value.resolve(cc_val)
 
-	return value.default_value
+	rest = value.default_value
+
+	return rest if rest is not None else default
+
+
+def _optional_float (value: typing.Any) -> typing.Optional[float]:
+
+	"""A number as a float, or None for a value the effect works out itself."""
+
+	return float(value) if value is not None else None
+
+
+def _declared_limit (processor: str, parameter: str) -> subsample.processors.Limit:
+
+	"""The limit subsample.processors declares for one processor parameter."""
+
+	return subsample.processors.PROCESSORS[processor].parameter(parameter).limit
+
+
+def _resolved (
+	proc:     subsample.query.ProcessorStep,
+	name:     str,
+	cc_state: typing.Optional[dict[tuple[int, int], int]],
+	cc_omni:  typing.Optional[dict[int, int]],
+	context:  typing.Any = None,
+) -> typing.Any:
+
+	"""The value one of a step's parameters takes when the step is built.
+
+	A value the map gives is used as it stands, and a CC binding resolves from
+	the CC state or rests where the parser set it.  A parameter the map leaves
+	out takes the default subsample.processors declares, or ``context`` where
+	its automatic value comes from where the note is played (the session tempo,
+	the quantise resolution); one the effect works out from the sample stays
+	None, and so does a binding resting at that automatic value.
+
+	A number outside the parameter's limit is held inside it and logged once.
+	The parser refuses such a value, and every binding end that could resolve
+	to one, so it can only come from a step built in code.
+	"""
+
+	processor = subsample.processors.PROCESSORS[proc.name]
+	parameter = processor.parameter(name)
+	raw = proc.get(name)
+
+	if raw is None:
+		return parameter.default if parameter.default is not None else context
+
+	value = _resolve_cc(raw, cc_state, cc_omni=cc_omni)
+
+	if value is None:
+		return context
+
+	if isinstance(value, bool) or not isinstance(value, (int, float)):
+		return value
+
+	given = dict(proc.params) if parameter.limits_when else {}
+	held = value
+
+	for limit, _condition in processor.limits_for(name, given):
+		held = limit.clamp(held)
+
+	if held != value:
+		_warn_once(
+			f"held:{proc.name}.{name}",
+			f"{proc.name} {name} of {value} is outside what it allows, so it is held at {held}",
+		)
+
+	return held
 
 
 def spec_from_process (
@@ -3983,14 +4066,16 @@ def spec_from_process (
 	"""Build an ordered TransformSpec from a MIDI map process pipeline.
 
 	Iterates the process steps in *declaration order*, converting each
-	ProcessorStep into the corresponding TransformStep dataclass.  Dynamic
-	parameters (midi_note for repitch, target_bpm/resolution for
-	stretch_quantize, reference_path for vocoder carrier: reference) are
-	substituted at the position the user declared them.
+	ProcessorStep into the corresponding TransformStep dataclass.  Parameters
+	are read through _resolved(), so one the map leaves out takes the default
+	subsample.processors declares for it.  Dynamic parameters (midi_note for
+	repitch, target_bpm/resolution for the quantisers, reference_path for
+	vocoder carrier: reference) are substituted at the position the user
+	declared them.
 
 	Parameters that are CcBinding instances are resolved from cc_state at
 	call time.  When cc_state is None or the CC number has no current value,
-	the binding's default_value is used.
+	the binding rests where the parser set it.
 
 	Steps with unresolvable dynamic parameters (e.g. repitch when midi_note
 	is None) are silently skipped.  Unknown processor names log a warning
@@ -4015,13 +4100,12 @@ def spec_from_process (
 				steps.append(PitchShift(target_midi_note=midi_note))
 
 		elif proc.name == "stretch_quantize":
-			tempo = float(_resolve_cc(proc.get("tempo"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
-			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution, cc_omni=cc_omni))
-			grid = max(1, grid)   # a 0 or negative grid divides by zero in _build_quantize_grid
-			strength = max(0.0, min(1.0, float(_resolve_cc(proc.get("strength"), cc_state, 1.0, cc_omni=cc_omni))))
+			tempo = _resolved(proc, "tempo", cc_state, cc_omni, context=target_bpm)
+			grid = int(_resolved(proc, "grid", cc_state, cc_omni, context=resolution))
+			strength = float(_resolved(proc, "strength", cc_state, cc_omni))
 
-			if tempo > 0.0:
-				steps.append(TimeStretch(target_bpm=tempo, resolution=grid, amount=strength))
+			if tempo is not None and tempo > 0.0:
+				steps.append(TimeStretch(target_bpm=float(tempo), resolution=grid, amount=strength))
 			else:
 				_warn_once(
 					"stretch_quantize-no-tempo",
@@ -4031,21 +4115,21 @@ def spec_from_process (
 
 		elif proc.name == "filter_low":
 			steps.append(LowPassFilter(
-				freq=float(_resolve_cc(proc.get("freq"), cc_state, 16000.0, cc_omni=cc_omni)),
-				resonance_db=float(_resolve_cc(proc.get("resonance"), cc_state, 0.0, cc_omni=cc_omni)),
+				freq=float(_resolved(proc, "freq", cc_state, cc_omni)),
+				resonance_db=float(_resolved(proc, "resonance", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "filter_high":
 			steps.append(HighPassFilter(
-				freq=float(_resolve_cc(proc.get("freq"), cc_state, 80.0, cc_omni=cc_omni)),
-				resonance_db=float(_resolve_cc(proc.get("resonance"), cc_state, 0.0, cc_omni=cc_omni)),
+				freq=float(_resolved(proc, "freq", cc_state, cc_omni)),
+				resonance_db=float(_resolved(proc, "resonance", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "filter_band":
 			steps.append(BandPassFilter(
-				freq=float(_resolve_cc(proc.get("freq"), cc_state, 1000.0, cc_omni=cc_omni)),
-				q=float(_resolve_cc(proc.get("q"), cc_state, 0.7, cc_omni=cc_omni)),
-				resonance_db=float(_resolve_cc(proc.get("resonance"), cc_state, 0.0, cc_omni=cc_omni)),
+				freq=float(_resolved(proc, "freq", cc_state, cc_omni)),
+				q=float(_resolved(proc, "q", cc_state, cc_omni)),
+				resonance_db=float(_resolved(proc, "resonance", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "reverse":
@@ -4053,30 +4137,27 @@ def spec_from_process (
 
 		elif proc.name == "saturate":
 			steps.append(Saturate(
-				amount_db=float(_resolve_cc(proc.get("drive"), cc_state, 6.0, cc_omni=cc_omni)),
+				amount_db=float(_resolved(proc, "drive", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "compress":
 			# Adaptive fields: None = auto-compute from sample analysis.
 			# Explicit YAML values override the auto-computation.
-			_threshold_raw = _resolve_cc(proc.get("threshold"), cc_state, cc_omni=cc_omni)
-			_attack_raw    = _resolve_cc(proc.get("attack"), cc_state, cc_omni=cc_omni)
-			_release_raw   = _resolve_cc(proc.get("release"), cc_state, cc_omni=cc_omni)
 			steps.append(Compress(
-				threshold_db=float(_threshold_raw) if _threshold_raw is not None else None,
-				ratio=float(_resolve_cc(proc.get("ratio"), cc_state, 4.0, cc_omni=cc_omni)),
-				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
-				release_ms=float(_release_raw) if _release_raw is not None else None,
-				knee_db=float(_resolve_cc(proc.get("knee"), cc_state, 6.0, cc_omni=cc_omni)),
-				makeup_db=float(_resolve_cc(proc.get("makeup"), cc_state, 0.0, cc_omni=cc_omni)),
-				lookahead_ms=float(_resolve_cc(proc.get("lookahead"), cc_state, 0.0, cc_omni=cc_omni)),
+				threshold_db=_optional_float(_resolved(proc, "threshold", cc_state, cc_omni)),
+				ratio=float(_resolved(proc, "ratio", cc_state, cc_omni)),
+				attack_ms=_optional_float(_resolved(proc, "attack", cc_state, cc_omni)),
+				release_ms=_optional_float(_resolved(proc, "release", cc_state, cc_omni)),
+				knee_db=float(_resolved(proc, "knee", cc_state, cc_omni)),
+				makeup_db=float(_resolved(proc, "makeup", cc_state, cc_omni)),
+				lookahead_ms=float(_resolved(proc, "lookahead", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "limit":
 			steps.append(Limit(
-				threshold_db=float(_resolve_cc(proc.get("threshold"), cc_state, -1.0, cc_omni=cc_omni)),
-				release_ms=float(_resolve_cc(proc.get("release"), cc_state, 50.0, cc_omni=cc_omni)),
-				lookahead_ms=float(_resolve_cc(proc.get("lookahead"), cc_state, 5.0, cc_omni=cc_omni)),
+				threshold_db=float(_resolved(proc, "threshold", cc_state, cc_omni)),
+				release_ms=float(_resolved(proc, "release", cc_state, cc_omni)),
+				lookahead_ms=float(_resolved(proc, "lookahead", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "hpss":
@@ -4102,110 +4183,86 @@ def spec_from_process (
 			steps.append(HpssPercussive())
 
 		elif proc.name == "gate":
-			_threshold_raw = _resolve_cc(proc.get("threshold"), cc_state, cc_omni=cc_omni)
-			_attack_raw    = _resolve_cc(proc.get("attack"), cc_state, cc_omni=cc_omni)
-			_release_raw   = _resolve_cc(proc.get("release"), cc_state, cc_omni=cc_omni)
-			_hold_raw      = _resolve_cc(proc.get("hold"), cc_state, cc_omni=cc_omni)
-			_la_raw        = _resolve_cc(proc.get("lookahead"), cc_state, cc_omni=cc_omni)
 			steps.append(Gate(
-				threshold_db=float(_threshold_raw) if _threshold_raw is not None else None,
-				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
-				release_ms=float(_release_raw) if _release_raw is not None else None,
-				hold_ms=float(_hold_raw) if _hold_raw is not None else None,
-				lookahead_ms=float(_la_raw) if _la_raw is not None else None,
+				threshold_db=_optional_float(_resolved(proc, "threshold", cc_state, cc_omni)),
+				attack_ms=_optional_float(_resolved(proc, "attack", cc_state, cc_omni)),
+				release_ms=_optional_float(_resolved(proc, "release", cc_state, cc_omni)),
+				hold_ms=_optional_float(_resolved(proc, "hold", cc_state, cc_omni)),
+				lookahead_ms=_optional_float(_resolved(proc, "lookahead", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "distort":
-			_drive_raw = _resolve_cc(proc.get("drive"), cc_state, cc_omni=cc_omni)
-			_tone_raw  = _resolve_cc(proc.get("tone"), cc_state, cc_omni=cc_omni)
 			steps.append(Distort(
-				mode=str(proc.get("mode", "hard_clip")),
-				drive_db=float(_drive_raw) if _drive_raw is not None else None,
-				mix=float(_resolve_cc(proc.get("mix"), cc_state, 1.0, cc_omni=cc_omni)),
-				tone=float(_tone_raw) if _tone_raw is not None else None,
-				bit_depth=int(_resolve_cc(proc.get("bit_depth"), cc_state, 8, cc_omni=cc_omni)),
-				downsample_factor=int(_resolve_cc(proc.get("downsample_factor"), cc_state, 4, cc_omni=cc_omni)),
+				mode=str(_resolved(proc, "mode", cc_state, cc_omni)),
+				drive_db=_optional_float(_resolved(proc, "drive", cc_state, cc_omni)),
+				mix=float(_resolved(proc, "mix", cc_state, cc_omni)),
+				tone=_optional_float(_resolved(proc, "tone", cc_state, cc_omni)),
+				bit_depth=int(_resolved(proc, "bit_depth", cc_state, cc_omni)),
+				downsample_factor=int(_resolved(proc, "downsample_factor", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "bit_depth":
-			# parse_process validates plain values (1–16) at load; a CC
-			# binding resolves per-trigger, so clamp the resolved value here.
-			_dither_raw = proc.get("dither")
+			dither = _resolved(proc, "dither", cc_state, cc_omni)
 
-			if isinstance(_dither_raw, bool) or _dither_raw is None:
-				dither = "triangular" if _dither_raw else "none"
-			else:
-				dither = str(_dither_raw).lower()
+			# YAML `dither: true` is triangular dither and `false` none.
+			if isinstance(dither, bool):
+				dither = "triangular" if dither else "none"
 
 			steps.append(BitDepth(
-				bits=max(1, min(16, int(_resolve_cc(proc.get("bits"), cc_state, 12, cc_omni=cc_omni)))),
-				dither=dither,
+				bits=int(_resolved(proc, "bits", cc_state, cc_omni)),
+				dither=str(dither).lower(),
 			))
 
 		elif proc.name == "radio":
-			# Enum strings are validated at parse time; numeric params CC-bind.
-			_radio_mode = str(proc.get("mode", "am")).lower()
-			_bw_raw = _resolve_cc(proc.get("bandwidth"), cc_state, cc_omni=cc_omni)
-
-			# Plain bandwidth values are validated at parse; a CC binding
-			# resolves per-trigger, so clamp above the mode's filter floor
-			# here (mirrors the signal/static/fade clamps below).
-			if _bw_raw is not None:
-				_bw_floor = 301.0 if _radio_mode in ("fm", "ssb") else 1.0
-				_bw_raw = max(_bw_floor, float(_bw_raw))
-
+			# Words are validated at load; a CC-bound number resolves per trigger
+			# and is held inside its declared limit, bandwidth's by the mode.
 			steps.append(Radio(
-				mode=_radio_mode,
-				demod=str(proc.get("demod", "matched")).lower(),
-				tune=float(_resolve_cc(proc.get("tune"), cc_state, 0.0, cc_omni=cc_omni)),
-				signal=max(0.0, min(1.0, float(_resolve_cc(proc.get("signal"), cc_state, 0.0, cc_omni=cc_omni)))),
-				static=max(0.0, min(1.0, float(_resolve_cc(proc.get("static"), cc_state, 0.0, cc_omni=cc_omni)))),
-				fade=max(0.0, min(1.0, float(_resolve_cc(proc.get("fade"), cc_state, 0.0, cc_omni=cc_omni)))),
-				bandwidth=float(_bw_raw) if _bw_raw is not None else None,
-				stereo=str(proc.get("stereo", "mono")).lower(),
-				mix=max(0.0, min(1.0, float(_resolve_cc(proc.get("mix"), cc_state, 1.0, cc_omni=cc_omni)))),
+				mode=str(_resolved(proc, "mode", cc_state, cc_omni)).lower(),
+				demod=str(_resolved(proc, "demod", cc_state, cc_omni)).lower(),
+				tune=float(_resolved(proc, "tune", cc_state, cc_omni)),
+				signal=float(_resolved(proc, "signal", cc_state, cc_omni)),
+				static=float(_resolved(proc, "static", cc_state, cc_omni)),
+				fade=float(_resolved(proc, "fade", cc_state, cc_omni)),
+				bandwidth=_optional_float(_resolved(proc, "bandwidth", cc_state, cc_omni)),
+				stereo=str(_resolved(proc, "stereo", cc_state, cc_omni)).lower(),
+				mix=float(_resolved(proc, "mix", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "freqshift":
 			steps.append(FreqShift(
-				shift_hz=float(_resolve_cc(proc.get("shift_hz"), cc_state, 0.0, cc_omni=cc_omni)),
-				mix=max(0.0, min(1.0, float(_resolve_cc(proc.get("mix"), cc_state, 1.0, cc_omni=cc_omni)))),
+				shift_hz=float(_resolved(proc, "shift_hz", cc_state, cc_omni)),
+				mix=float(_resolved(proc, "mix", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "wobble":
 			steps.append(Wobble(
-				depth=float(_resolve_cc(proc.get("depth"), cc_state, 5.0, cc_omni=cc_omni)),
-				rate=float(_resolve_cc(proc.get("rate"), cc_state, 0.3, cc_omni=cc_omni)),
-				base=float(_resolve_cc(proc.get("base"), cc_state, 0.0, cc_omni=cc_omni)),
-				mix=max(0.0, min(1.0, float(_resolve_cc(proc.get("mix"), cc_state, 1.0, cc_omni=cc_omni)))),
+				depth=float(_resolved(proc, "depth", cc_state, cc_omni)),
+				rate=float(_resolved(proc, "rate", cc_state, cc_omni)),
+				base=float(_resolved(proc, "base", cc_state, cc_omni)),
+				mix=float(_resolved(proc, "mix", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "reshape":
-			_attack_raw  = _resolve_cc(proc.get("attack"), cc_state, cc_omni=cc_omni)
-			_decay_raw   = _resolve_cc(proc.get("decay"), cc_state, cc_omni=cc_omni)
-			_release_raw = _resolve_cc(proc.get("release"), cc_state, cc_omni=cc_omni)
 			steps.append(Reshape(
-				attack_ms=float(_attack_raw) if _attack_raw is not None else None,
-				hold_ms=float(_resolve_cc(proc.get("hold"), cc_state, 0.0, cc_omni=cc_omni)),
-				decay_ms=float(_decay_raw) if _decay_raw is not None else None,
-				sustain=float(_resolve_cc(proc.get("sustain"), cc_state, 1.0, cc_omni=cc_omni)),
-				release_ms=float(_release_raw) if _release_raw is not None else None,
+				attack_ms=_optional_float(_resolved(proc, "attack", cc_state, cc_omni)),
+				hold_ms=float(_resolved(proc, "hold", cc_state, cc_omni)),
+				decay_ms=_optional_float(_resolved(proc, "decay", cc_state, cc_omni)),
+				sustain=float(_resolved(proc, "sustain", cc_state, cc_omni)),
+				release_ms=_optional_float(_resolved(proc, "release", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "transient":
-			_gain_raw = _resolve_cc(proc.get("gain"), cc_state, cc_omni=cc_omni)
 			steps.append(Transient(
-				amount_db=float(_gain_raw) if _gain_raw is not None else None,
+				amount_db=_optional_float(_resolved(proc, "gain", cc_state, cc_omni)),
 			))
 
 		elif proc.name == "pad_quantize":
-			tempo = float(_resolve_cc(proc.get("tempo"), cc_state, target_bpm or 0.0, cc_omni=cc_omni))
-			grid = int(_resolve_cc(proc.get("grid"), cc_state, resolution, cc_omni=cc_omni))
-			grid = max(1, grid)   # a 0 or negative grid divides by zero in _build_quantize_grid
-			strength = max(0.0, min(1.0, float(_resolve_cc(proc.get("strength"), cc_state, 1.0, cc_omni=cc_omni))))
+			tempo = _resolved(proc, "tempo", cc_state, cc_omni, context=target_bpm)
+			grid = int(_resolved(proc, "grid", cc_state, cc_omni, context=resolution))
+			strength = float(_resolved(proc, "strength", cc_state, cc_omni))
 
-			if tempo > 0.0:
-				steps.append(PadQuantize(target_bpm=tempo, resolution=grid, amount=strength))
+			if tempo is not None and tempo > 0.0:
+				steps.append(PadQuantize(target_bpm=float(tempo), resolution=grid, amount=strength))
 			else:
 				_warn_once(
 					"pad_quantize-no-tempo",
@@ -4235,11 +4292,13 @@ def spec_from_process (
 
 				steps.append(Vocoder(
 					carrier_path=carrier_str,
-					bands=int(_resolve_cc(proc.get("bands"), cc_state, 24, cc_omni=cc_omni)),
-					depth=float(_resolve_cc(proc.get("depth"), cc_state, 1.0, cc_omni=cc_omni)),
-					formant_shift=int(_resolve_cc(proc.get("formant_shift"), cc_state, 0, cc_omni=cc_omni)),
+					bands=int(_resolved(proc, "bands", cc_state, cc_omni)),
+					depth=float(_resolved(proc, "depth", cc_state, cc_omni)),
+					formant_shift=int(_resolved(proc, "formant_shift", cc_state, cc_omni)),
 				))
 			else:
+				# The parser refuses a vocoder with no carrier; only a step built
+				# in code reaches here.
 				_warn_once(
 					"vocoder-no-carrier",
 					"vocoder requires a 'carrier' parameter — skipped",

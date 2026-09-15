@@ -51,6 +51,7 @@ import pymididefs.notes
 
 import subsample.analysis
 import subsample.definitions
+import subsample.processors
 
 if typing.TYPE_CHECKING:
 	import subsample.library
@@ -227,47 +228,32 @@ def set_strict_mode (strict: bool) -> None:
 
 
 PROCESSOR_PARAMETERS: typing.Final[dict[str, tuple[str, ...]]] = {
-	"repitch":          ("note",),
-	"stretch_quantize": ("tempo", "grid", "strength", "segment"),
-	"pad_quantize":     ("tempo", "grid", "strength", "segment"),
-	"filter_low":       ("freq", "resonance"),
-	"filter_high":      ("freq", "resonance"),
-	"filter_band":      ("freq", "q", "resonance"),
-	"reverse":          (),
-	"saturate":         ("drive",),
-	"compress":         ("threshold", "ratio", "attack", "release", "knee", "makeup", "lookahead"),
-	"limit":            ("threshold", "release", "lookahead"),
-	"hpss":             ("keep",),
-	"gate":             ("threshold", "attack", "release", "hold", "lookahead"),
-	"distort":          ("mode", "drive", "tone", "mix", "bit_depth", "downsample_factor"),
-	"bit_depth":        ("bits", "dither"),
-	"radio":            ("mode", "demod", "tune", "signal", "static", "fade", "bandwidth", "stereo", "mix"),
-	"freqshift":        ("shift_hz", "mix"),
-	"wobble":           ("depth", "rate", "base", "mix"),
-	"reshape":          ("attack", "hold", "decay", "sustain", "release"),
-	"transient":        ("gain",),
-	"vocoder":          ("carrier", "bands", "depth", "formant_shift"),
+	name: processor.parameter_names
+	for name, processor in subsample.processors.PROCESSORS.items()
 }
 """Every processor a MIDI map's ``process:`` list accepts, with the parameters
 each one reads, in the names a map uses.
 
-The one declaration of the processor vocabulary: parse_process() refuses a
-name or a parameter that is not here (in strict mode), and everything that
-reads a parameter (spec_from_process() in subsample.transform, the player's
-segment mode, the load-time value checks below) reads only names declared
-here.  tests/test_parameter_declarations.py fails when the two disagree in
-either direction, so this table cannot drift from the code that uses it.
-Legacy processor and parameter names are declared separately below."""
+Derived from subsample.processors, which declares each parameter in full:
+parse_process() refuses a name or a parameter that is not there (in strict
+mode), and everything that reads a parameter (spec_from_process() in
+subsample.transform, the player's segment mode, the load-time value checks
+below) reads only names declared there.  tests/test_parameter_declarations.py
+fails when the declaration and its readers disagree in either direction."""
 
 
 # Legacy processor names, still accepted and translated at parse time by
-# _canonical_processor_name(); spec_from_process() only ever sees the
-# canonical names in PROCESSOR_PARAMETERS.
-_LEGACY_PROCESSOR_NAMES: typing.Final[frozenset[str]] = frozenset({
-	"beat_quantize",    # translated to stretch_quantize
-	"hpss_harmonic",    # translated to hpss {keep: harmonic}
-	"hpss_percussive",  # translated to hpss {keep: percussive}
-})
+# _canonical_processor_name() into the current name, with any parameter the old
+# name implied (_legacy_name_parameters()); spec_from_process() only ever sees
+# the current names.  Maps each legacy name to its current processor's name and
+# its declaration.
+_LEGACY_PROCESSORS: typing.Final[dict[str, tuple[str, subsample.processors.LegacyName]]] = {
+	legacy.name: (processor.name, legacy)
+	for processor in subsample.processors.PROCESSORS.values()
+	for legacy in processor.legacy_names
+}
+
+_LEGACY_PROCESSOR_NAMES: typing.Final[frozenset[str]] = frozenset(_LEGACY_PROCESSORS)
 
 
 # Valid processor names, used by parse_process() to reject unknown names at
@@ -276,73 +262,59 @@ _VALID_PROCESSOR_NAMES: frozenset[str] = frozenset(PROCESSOR_PARAMETERS) | _LEGA
 
 
 # Keys a CC binding accepts, wherever a processor parameter is given as
-# `{cc: 74, min: 200, max: 16000}` instead of a fixed value.
-_CC_BINDING_KEYS: typing.Final[frozenset[str]] = frozenset({"cc", "channel", "min", "max", "default"})
+# `{cc: 74, min: 200, max: 16000}` instead of a fixed value.  A release time's
+# binding accepts the same keys and `curve` (player._RELEASE_CC_SHORTHAND_KEYS).
+CC_BINDING_KEYS: typing.Final[frozenset[str]] = frozenset({"cc", "channel", "min", "max", "default"})
 
 
 # Processors that accept a bare scalar value as shorthand for their single
 # defining parameter: `bit_depth: 12` ≡ `bit_depth: {bits: 12}`.  Maps
 # processor name → parameter name the scalar binds to.
-_SCALAR_PROCESSOR_PARAMS: dict[str, str] = {
-	"bit_depth": "bits",
-	"freqshift": "shift_hz",
-	"wobble":    "depth",
+_SCALAR_PROCESSOR_PARAMS: typing.Final[dict[str, str]] = {
+	name: processor.shorthand
+	for name, processor in subsample.processors.PROCESSORS.items()
+	if processor.shorthand is not None
 }
 
 
 # Per-processor legacy parameter renames.  Shape: (processor_name,
 # legacy_param) → new_param.  Applied by parse_process() when building
 # the ProcessorStep's params tuple — the spec_from_process() dispatch
-# only ever sees the new names.
-#
-# Each entry is a rename motivated by A1 in the language review:
-# `amount` meant four different things depending on the processor.
-# The new names are unit-indicative (drive/gain in dB, strength as a
-# 0-1 fraction) so `amount` no longer has to be context-disambiguated.
-_LEGACY_PROCESSOR_PARAMS: dict[tuple[str, str], str] = {
-	("saturate",         "amount"): "drive",     # dB
-	("transient",        "amount"): "gain",      # dB (signed)
-	("stretch_quantize", "amount"): "strength",  # 0-1 fraction
-	("pad_quantize",     "amount"): "strength",  # 0-1 fraction
-	# `bpm` → `tempo` (C2): property name matches the where-predicate.
-	("stretch_quantize", "bpm"):    "tempo",
-	("pad_quantize",     "bpm"):    "tempo",
+# only ever sees the new names.  Keyed on current processor names: the parser
+# translates a legacy processor name (`beat_quantize` → `stretch_quantize`)
+# before it looks a parameter up here.
+_LEGACY_PROCESSOR_PARAMS: typing.Final[dict[tuple[str, str], str]] = {
+	(name, legacy): parameter.name
+	for name, processor in subsample.processors.PROCESSORS.items()
+	for parameter in processor.parameters
+	for legacy in parameter.legacy_names
 }
-# Keyed on canonical processor names.  The parser translates legacy
-# processor names (e.g. `beat_quantize` → `stretch_quantize`) before
-# looking up param renames, so these entries do not need legacy-name
-# duplicates.
 
 
 def _canonical_processor_name (name: str) -> str:
-	"""Translate a legacy processor name to its canonical form.
+	"""Translate a legacy processor name to its current one.
 
-	Legacy aliases kept in the valid-names whitelist so strict mode
-	accepts them; the parser canonicalises before building the
-	ProcessorStep so downstream code (spec_from_process, ProcessSpec
-	methods) only ever sees the new names.
-
-	- hpss_harmonic / hpss_percussive → hpss (keep: injected at parse)
-	- beat_quantize → stretch_quantize (pure name rename)
+	Legacy names stay in the valid-names whitelist so strict mode accepts
+	them; the parser translates before building the ProcessorStep, so
+	downstream code (spec_from_process, ProcessSpec methods) only ever sees
+	the current names: `beat_quantize` → `stretch_quantize`, and
+	`hpss_harmonic` / `hpss_percussive` → `hpss`, whose `keep:` the parser
+	adds from _legacy_name_parameters().
 	"""
-	if name in ("hpss_harmonic", "hpss_percussive"):
-		return "hpss"
-	if name == "beat_quantize":
-		return "stretch_quantize"
+	if name in _LEGACY_PROCESSORS:
+		return _LEGACY_PROCESSORS[name][0]
 	return name
 
 
-def _hpss_keep_for_legacy_name (name: str) -> typing.Optional[str]:
-	"""Return the `keep:` value implied by a legacy HPSS processor name.
+def _legacy_name_parameters (name: str) -> tuple[tuple[str, str], ...]:
+	"""Return the parameters a legacy processor name implies, or none for any other name.
 
-	`hpss_harmonic` → "harmonic"; `hpss_percussive` → "percussive";
-	anything else → None.  Used by parse_process() to inject the
-	`keep:` param when a user writes the legacy bare name."""
-	if name == "hpss_harmonic":
-		return "harmonic"
-	if name == "hpss_percussive":
-		return "percussive"
-	return None
+	`hpss_harmonic` implies `keep: harmonic`, so parse_process() adds it to a
+	step written with the old name; `beat_quantize` is a plain rename and
+	implies nothing."""
+	if name not in _LEGACY_PROCESSORS:
+		return ()
+	return tuple(_LEGACY_PROCESSORS[name][1].implies.items())
 
 
 # Non-range where-predicate keys.  Numeric keys (new-form + legacy) are
@@ -1162,30 +1134,54 @@ class CcBinding:
 
 	When a processor parameter value is a CcBinding (instead of a scalar),
 	the actual value is resolved at note-on time from the current CC state.
+	parse_process() fills a binding's missing ends, curve and resting value from
+	the parameter's declaration in subsample.processors; a binding built in code
+	keeps the plain defaults below.
 
-	cc:       MIDI CC number (0–127).
-	min_val:  Output value when CC = 0.
-	max_val:  Output value when CC = 127.
-	default:  Value before any CC is received. None → midpoint of min/max.
-	channel:  MIDI channel (1–16, user-facing). None → omni (any channel).
+	cc:          MIDI CC number (0–127).
+	min_val:     Output value when CC = 0.
+	max_val:     Output value when CC = 127.  May be below min_val: the knob runs backwards.
+	default:     Value before any CC is received.  None → rests_unset decides.
+	channel:     MIDI channel (1–16, user-facing). None → omni (any channel).
+	curve:       "linear" spreads the travel in equal steps; "log" in equal ratios,
+	             so both ends must be above zero.
+	rests_unset: With no default, True rests at the parameter's automatic value
+	             (default_value is None) and False at the middle of the travel.
 	"""
 
-	cc:      int
-	min_val: float = 0.0
-	max_val: float = 1.0
-	default: typing.Optional[float] = None
-	channel: typing.Optional[int]   = None
+	cc:          int
+	min_val:     float = 0.0
+	max_val:     float = 1.0
+	default:     typing.Optional[float] = None
+	channel:     typing.Optional[int]   = None
+	curve:       str                    = "linear"
+	rests_unset: bool                   = False
 
 	@property
-	def default_value (self) -> float:
-		"""Return the default, falling back to the midpoint of the range."""
+	def default_value (self) -> typing.Optional[float]:
+		"""Where the binding rests before any CC: its default, its automatic value (None), or the middle of its travel."""
 		if self.default is not None:
 			return self.default
-		return (self.min_val + self.max_val) / 2.0
+		if self.rests_unset:
+			return None
+		return self.at_fraction(0.5)
 
 	def resolve (self, cc_value: int) -> float:
-		"""Map a CC value (0–127) to the output range."""
-		return self.min_val + (cc_value / 127.0) * (self.max_val - self.min_val)
+		"""Map a CC value (0–127) to the output range.
+
+		CC 0 and CC 127 give the two ends exactly, so a value can only leave
+		the range the ends span by the ends themselves being outside it."""
+		if cc_value <= 0:
+			return self.min_val
+		if cc_value >= 127:
+			return self.max_val
+		return self.at_fraction(cc_value / 127.0)
+
+	def at_fraction (self, fraction: float) -> float:
+		"""The value a fraction of the way along the travel, by the binding's curve."""
+		if self.curve == "log":
+			return self.min_val * float((self.max_val / self.min_val) ** fraction)
+		return self.min_val + fraction * (self.max_val - self.min_val)
 
 
 # Release-fade shapes accepted by ReleaseSpec.curve.  cosine = the smooth
@@ -2787,6 +2783,204 @@ def parse_select (
 # YAML parsing — process block
 # ---------------------------------------------------------------------------
 
+def _is_number (value: typing.Any) -> bool:
+
+	"""True for an int or a float, and never for a bool."""
+
+	return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _takes_form (parameter: subsample.processors.Parameter, value: typing.Any) -> bool:
+
+	"""True when a plain map value has one of the forms a parameter declares.
+
+	Words match exactly, letter case included.  A whole number may be written
+	as 8.0; infinity and not-a-number are never a number."""
+
+	forms = parameter.forms
+
+	if isinstance(value, bool):
+		return "boolean" in forms
+
+	if _is_number(value):
+		if not math.isfinite(value):
+			return False
+
+		return "number" in forms or ("integer" in forms and float(value).is_integer())
+
+	if not isinstance(value, str):
+		return False
+
+	if value in parameter.choice_values or ("path" in forms and value.strip()):
+		return True
+
+	if "note_name" in forms:
+		try:
+			pymididefs.notes.name_to_note(value)
+		except (ValueError, KeyError):
+			return False
+
+		return True
+
+	return False
+
+
+def _cc_binding (
+	raw:       typing.Mapping[typing.Any, typing.Any],
+	cc:        int,
+	channel:   typing.Optional[int],
+	processor: str,
+	parameter: str,
+	context:   str,
+) -> CcBinding:
+
+	"""Build the CcBinding a processor parameter's ``{cc: ...}`` mapping describes.
+
+	An end the mapping does not give comes from the parameter's declared sweep,
+	one end at a time, and the binding spreads its travel by the sweep's curve.
+	With no ``default`` it rests as if the knob were not there: at the
+	parameter's automatic value, at its fixed default where that lies inside the
+	travel, or else at the middle of the travel.  A parameter nothing declares,
+	on a processor only lenient mode lets through, sweeps 0 to 1.
+	"""
+
+	declaration = subsample.processors.PROCESSORS.get(processor)
+	declared = declaration.parameter(parameter) if declaration is not None else None
+	sweep = declared.sweep if declared is not None and declared.sweep is not None else (0.0, 1.0)
+	given: dict[str, float] = {}
+
+	for key in ("min", "max", "default"):
+		if key not in raw:
+			continue
+
+		value = raw[key]
+
+		if not _is_number(value) or not math.isfinite(value):
+			raise ValueError(f"{context} has CC binding {key} {value!r}, which is not a number")
+
+		given[key] = float(value)
+
+	low = given.get("min", float(sweep[0]))
+	high = given.get("max", float(sweep[1]))
+	default = given.get("default")
+	rests_unset = False
+
+	if default is None and declared is not None:
+		fixed = declared.default
+
+		if declared.automatic is not None:
+			rests_unset = True
+
+		elif isinstance(fixed, (int, float)) and not isinstance(fixed, bool) and min(low, high) <= fixed <= max(low, high):
+			default = float(fixed)
+
+	return CcBinding(
+		cc=cc,
+		min_val=low,
+		max_val=high,
+		default=default,
+		channel=channel,
+		curve=declared.sweep_curve if declared is not None else "linear",
+		rests_unset=rests_unset,
+	)
+
+
+def _checked_step (step: ProcessorStep, assignment_name: str) -> ProcessorStep:
+
+	"""Return a step whose every value its declaration allows, or refuse it.
+
+	A whole number written as 8.0 comes back as 8.  A parameter set where it has
+	no effect, such as distort's ``bit_depth`` outside bit_crush mode, loads with
+	a warning.  A step of an undeclared processor, which only lenient mode lets
+	through, comes back as it is.
+	"""
+
+	processor = subsample.processors.PROCESSORS.get(step.name)
+
+	if processor is None:
+		return step
+
+	context = f"MIDI map assignment {assignment_name!r}: {step.name}"
+	given = dict(step.params)
+
+	for parameter in processor.parameters:
+		if parameter.required and parameter.name not in given:
+			raise ValueError(f"{context} needs {parameter.name}: {parameter.accepts_text()}")
+
+	checked: list[tuple[str, typing.Any]] = []
+
+	for name, value in step.params:
+		parameter = processor.parameter(name)
+
+		if isinstance(value, CcBinding):
+			_check_binding(processor, parameter, value, given, context)
+
+		else:
+			if not _takes_form(parameter, value):
+				raise ValueError(f"{context} {name} must be {parameter.accepts_text()} (got {value!r})")
+
+			if _is_number(value):
+				whole = "number" not in parameter.forms
+
+				if whole:
+					value = int(value)
+
+				for limit, condition in processor.limits_for(name, given):
+					if limit.admits(value):
+						continue
+
+					# A parameter that also takes words names them all; a limit that
+					# holds only under a condition says which.
+					if condition is None and len(parameter.forms) > 1:
+						allowed = parameter.accepts_text()
+					else:
+						noun = "a whole number" if whole else "a number"
+						when = f" when {subsample.processors.condition_text(condition)}" if condition else ""
+						allowed = f"{noun} {limit.describe(parameter.unit)}{when}"
+
+					raise ValueError(f"{context} {name} must be {allowed} (got {value!r})")
+
+		if not processor.applies(name, given):
+			_log.warning("%s %s has no effect unless %s", context, name, parameter.applies_text())
+
+		checked.append((name, value))
+
+	return ProcessorStep(name=step.name, params=tuple(checked))
+
+
+def _check_binding (
+	processor: subsample.processors.Processor,
+	parameter: subsample.processors.Parameter,
+	binding:   CcBinding,
+	given:     typing.Mapping[str, typing.Any],
+	context:   str,
+) -> None:
+
+	"""Refuse a CC binding on a parameter a knob cannot set, or one whose ends or default break a limit."""
+
+	name = parameter.name
+
+	if not parameter.bindable:
+		raise ValueError(f"{context} {name} takes {parameter.accepts_text()}, which a CC binding cannot set")
+
+	ends = [("min", binding.min_val), ("max", binding.max_val)]
+
+	if binding.default is not None:
+		ends.append(("default", binding.default))
+
+	for limit, condition in processor.limits_for(name, given):
+		for label, end in ends:
+			if limit.admits(end):
+				continue
+
+			when = f" when {subsample.processors.condition_text(condition)}" if condition else ""
+
+			raise ValueError(
+				f"{context} {name} has a CC binding {label} of {subsample.processors.number_text(end)}, "
+				f"outside what {name} allows: {limit.describe(parameter.unit)}{when}"
+			)
+
+
 def parse_process (
 	raw: typing.Any,
 	assignment_name: str,
@@ -2832,13 +3026,12 @@ def parse_process (
 	def _build_parameterless_step (raw_name: str) -> ProcessorStep:
 		"""Build a ProcessorStep for a bare / bool processor entry.
 
-		Canonicalises the name and, for legacy HPSS aliases, injects the
-		`keep:` param that the canonical `hpss` processor requires."""
-		canonical = _canonical_processor_name(raw_name)
-		keep = _hpss_keep_for_legacy_name(raw_name)
-		if keep is not None:
-			return ProcessorStep(name=canonical, params=(("keep", keep),))
-		return ProcessorStep(name=canonical)
+		Translates a legacy name to the current one, with any parameter the
+		old name implied: `hpss_harmonic` becomes `hpss` with `keep: harmonic`."""
+		return ProcessorStep(
+			name=_canonical_processor_name(raw_name),
+			params=_legacy_name_parameters(raw_name),
+		)
 
 	for entry in raw:
 
@@ -2950,10 +3143,10 @@ def parse_process (
 							_log.warning("%s is a mapping without a 'cc' key — ignored", cc_context)
 							continue
 
-						unknown_cc_keys = sorted(str(key) for key in v if str(key) not in _CC_BINDING_KEYS)
+						unknown_cc_keys = sorted(str(key) for key in v if str(key) not in CC_BINDING_KEYS)
 
 						if unknown_cc_keys:
-							valid_cc_keys = ", ".join(sorted(_CC_BINDING_KEYS))
+							valid_cc_keys = ", ".join(sorted(CC_BINDING_KEYS))
 
 							if _STRICT_MODE:
 								raise ValueError(
@@ -2995,22 +3188,20 @@ def parse_process (
 								f"outside the MIDI range 1-16"
 							)
 
-						resolved_params.append((canonical_param, CcBinding(
-							cc=cc_num,
-							min_val=float(v.get("min", 0.0)),
-							max_val=float(v.get("max", 1.0)),
-							default=float(v["default"]) if "default" in v else None,
-							channel=cc_channel,
+						resolved_params.append((canonical_param, _cc_binding(
+							v, cc_num, cc_channel, canonical_name, canonical_param, cc_context,
 						)))
 					else:
 						resolved_params.append((canonical_param, v))
 
-				# Inject the HPSS `keep:` param for legacy dict-form entries
-				# (e.g. `hpss_harmonic: {}`).  Silently preserves any user-
-				# supplied `keep:` value in the rare dict-form legacy case.
-				keep = _hpss_keep_for_legacy_name(proc_name_str)
-				if keep is not None and "keep" not in seen_params:
-					resolved_params.insert(0, ("keep", keep))
+				# Add the parameters a legacy name implies for dict-form entries
+				# (e.g. `hpss_harmonic: {}` gains `keep: harmonic`).  A value the
+				# map gives itself wins, in the rare dict-form legacy case.
+				implied = [
+					(key, value) for key, value in _legacy_name_parameters(proc_name_str)
+					if key not in seen_params
+				]
+				resolved_params[0:0] = implied
 
 				steps.append(ProcessorStep(
 					name=canonical_name,
@@ -3029,162 +3220,12 @@ def parse_process (
 				f"a string or a dict (got {type(entry).__name__})"
 			)
 
-	# hpss needs a valid `keep:` to build a transform step.  Validate here —
-	# at trigger time the same check raises inside the rtmidi handler on
-	# EVERY note-on, and aborts the whole variant pre-compute pass; every
-	# other config error in the map already surfaces at parse time.
-	for step in steps:
-		if step.name == "hpss":
-			keep = step.get("keep", "")
-
-			if keep not in ("harmonic", "percussive"):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: hpss requires "
-					f"keep: harmonic or keep: percussive (got {keep!r})"
-				)
-
-	# bit_depth needs whole-number bits in 1–16 to build a transform step.
-	# Validate plain values here, at load, like the hpss check above.  A
-	# CcBinding resolves per-trigger and is clamped in spec_from_process;
-	# an absent param falls back to the BitDepth default (12).
-	for step in steps:
-		if step.name == "bit_depth":
-			bits = step.get("bits")
-
-			if bits is not None and not isinstance(bits, CcBinding):
-				if isinstance(bits, bool) or not isinstance(bits, int) or not (1 <= bits <= 16):
-					raise ValueError(
-						f"MIDI map assignment {assignment_name!r}: bit_depth "
-						f"requires a whole number of bits from 1 to 16 "
-						f"(got {bits!r})"
-					)
-
-			# dither: bool shorthand (true → triangular) or a named type.
-			dither = step.get("dither")
-
-			if dither is not None and not isinstance(dither, bool):
-				if not isinstance(dither, str) or dither.lower() not in ("none", "triangular", "rectangular"):
-					raise ValueError(
-						f"MIDI map assignment {assignment_name!r}: bit_depth "
-						f"dither must be true, false, none, triangular, or "
-						f"rectangular (got {dither!r})"
-					)
-
-	# radio enum strings (mode/demod/stereo) and 0..1 amounts validated at
-	# load — a bad enum would silently fall through to a default at trigger
-	# time on every note-on.  CcBinding values pass (clamped in spec_from_process).
-	for step in steps:
-		if step.name == "radio":
-			mode = str(step.get("mode", "am")).lower()
-			if mode not in ("am", "lw", "fm", "ssb"):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: radio mode must be "
-					f"am, lw, fm, or ssb (got {step.get('mode')!r})"
-				)
-
-			demod = str(step.get("demod", "matched")).lower()
-			if demod not in ("matched", "am", "fm", "ssb"):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: radio demod must be "
-					f"matched, am, fm, or ssb (got {step.get('demod')!r})"
-				)
-
-			stereo = str(step.get("stereo", "mono")).lower()
-			if stereo not in ("mono", "stereo"):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: radio stereo must be "
-					f"mono or stereo (got {step.get('stereo')!r})"
-				)
-
-			for amount in ("signal", "static", "fade"):
-				val = step.get(amount)
-				if val is not None and not isinstance(val, CcBinding):
-					if isinstance(val, bool) or not isinstance(val, (int, float)) or not (0.0 <= val <= 1.0):
-						raise ValueError(
-							f"MIDI map assignment {assignment_name!r}: radio "
-							f"{amount} must be a number from 0 to 1 (got {val!r})"
-						)
-
-			# bandwidth must clear the channel filter's fixed 300 Hz lower
-			# edge for the band-pass modes (fm/ssb) and be positive for the
-			# low-pass modes — otherwise the filter design raises at render
-			# time inside the worker and the variant silently never appears.
-			bw = step.get("bandwidth")
-
-			if bw is not None and not isinstance(bw, CcBinding):
-				bw_floor = 300.0 if mode in ("fm", "ssb") else 0.0
-
-				if isinstance(bw, bool) or not isinstance(bw, (int, float)) or bw <= bw_floor:
-					raise ValueError(
-						f"MIDI map assignment {assignment_name!r}: radio "
-						f"bandwidth must be a frequency in Hz above "
-						f"{bw_floor:.0f} (got {bw!r})"
-					)
-
-	# distort's mode enum, validated at load like radio's above — a typo'd mode
-	# would otherwise fall through to a WARNING and pass the audio unchanged on
-	# every render, silently doing nothing.
-	for step in steps:
-		if step.name == "distort":
-			d_mode = str(step.get("mode", "hard_clip")).lower()
-			if d_mode not in ("hard_clip", "fold", "bit_crush", "downsample"):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: distort mode must be "
-					f"hard_clip, fold, bit_crush, or downsample (got {step.get('mode')!r})"
-				)
-
-	# A quantise step's `segment:` picks which detected hit plays: round_robin,
-	# random, or a hit's number counted from 1.  Validated at load like the
-	# enums above — a typo'd value used to log a warning and play the whole
-	# quantised sample on every note, a different sound with no error.  A
-	# CcBinding is refused too: a hit is chosen per note, not swept.
-	for step in steps:
-		if step.name in ("stretch_quantize", "pad_quantize"):
-			segment = step.get("segment")
-
-			if segment is None:
-				continue
-
-			valid_number = isinstance(segment, int) and not isinstance(segment, bool) and segment >= 1
-
-			if not valid_number and segment not in ("round_robin", "random"):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: {step.name} segment "
-					f"must be round_robin, random, or a hit number from 1 "
-					f"(got {segment!r})"
-				)
-
-	# repitch's fixed `note:` must be a MIDI note number (0-127) or a valid
-	# note name — an invalid value would otherwise raise inside the rtmidi
-	# handler on EVERY note-on (the same rationale as the hpss check above).
-	for step in steps:
-		if step.name == "repitch":
-			note = step.get("note")
-
-			if note is None:
-				continue
-
-			if isinstance(note, bool):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: repitch note "
-					f"must be a MIDI note number (0-127) or a note name "
-					f"like C4 (got {note!r})"
-				)
-
-			if isinstance(note, int):
-				if not (0 <= note <= 127):
-					raise ValueError(
-						f"MIDI map assignment {assignment_name!r}: repitch note "
-						f"{note} is outside the MIDI range 0-127"
-					)
-			else:
-				try:
-					pymididefs.notes.name_to_note(str(note))
-				except (ValueError, KeyError) as exc:
-					raise ValueError(
-						f"MIDI map assignment {assignment_name!r}: repitch note "
-						f"{note!r} is not a valid note name: {exc}"
-					) from exc
+	# Every value is checked against its parameter's declaration here, at load,
+	# whatever the strict setting: strict mode governs only names a map misspells.
+	# A value outside what a parameter allows would otherwise be clamped, ignored,
+	# or fail inside the render worker on every note: a different sound, and no
+	# error to say why.
+	steps = [_checked_step(step, assignment_name) for step in steps]
 
 	# A process chain may carry at most ONE beat-aligning step.  Combining
 	# stretch_quantize with pad_quantize — or repeating either — is ambiguous

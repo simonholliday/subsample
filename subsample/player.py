@@ -1008,12 +1008,13 @@ def _parse_extract (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 # the {cc: ...} shorthand additionally allows the CcBinding keys.  Enforced so a
 # typo fails loudly rather than silently using a default (as _parse_velocity does).
 _RELEASE_INNER_KEYS:        typing.Final[frozenset[str]] = frozenset({"time", "curve"})
-_RELEASE_CC_SHORTHAND_KEYS: typing.Final[frozenset[str]] = frozenset({"cc", "channel", "min", "max", "default", "curve"})
+_RELEASE_CC_SHORTHAND_KEYS: typing.Final[frozenset[str]] = subsample.query.CC_BINDING_KEYS | {"curve"}
 
 # Knob span for a cc-bound `release:` when the map gives no explicit min/max.
 # CcBinding's own 0.0-1.0 default is meant for normalised processor parameters;
 # release time is in milliseconds, where that span is a click rather than a
 # release.  0 ms … 1 s covers the musically useful range of a release knob.
+# (A processor parameter takes its span from its declared sweep instead.)
 _RELEASE_CC_DEFAULT_MIN_MS: typing.Final[float] = 0.0
 _RELEASE_CC_DEFAULT_MAX_MS: typing.Final[float] = 1000.0
 
@@ -1189,12 +1190,16 @@ def _parse_release_time (
 				f"{cc_channel} outside the MIDI range 1-16"
 			)
 
+		# With no `default:` the knob rests as if it were not there: a release
+		# with no time is the adaptive tail, which _resolve_release reads from
+		# the sample until the first CC arrives.
 		return subsample.query.CcBinding(
 			cc=cc_num,
 			min_val=min_val,
 			max_val=max_val,
 			default=default,
 			channel=cc_channel,
+			rests_unset=default is None,
 		)
 
 	if isinstance(raw, (int, float)) and not isinstance(raw, bool):
