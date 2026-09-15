@@ -1,26 +1,19 @@
 # Subsample
 
-**Cross-platform open-source Python live sampler, automatic drum-kit builder,
-and MIDI sample instrument.** Point a microphone at the world (or feed in
-field recordings, sample packs, or radio captures) and Subsample captures,
-trims, analyses, and routes every distinct sound into a playable, mix-ready
-MIDI instrument, automatically, in real time. Workflows that normally require
-expensive hardware samplers, sample-pack organiser plugins, or hours of manual
-chopping and tagging happen continuously in the background.
+**A sampler that cuts separate sounds out of a live input or a recording,
+sorts them by how they sound, and plays them from MIDI.**
 
-Build a custom drum kit from your favourite vinyl. Turn a walk through the
-woods into a playable instrument. Slice and re-tempo a breakbeat. Feed a pile
-of unsorted samples in and watch them organise themselves. All four are the
-same workflow.
+Subsample listens to an audio input, or reads audio files, and cuts out each
+separate sound. It measures each sound's spectrum, timbre, attack, and pitch,
+and can compare those measurements with a set of reference sounds, so that a
+kick-like sound is offered to the kick note. A MIDI map sets which sounds each
+note plays and how they are processed on the way out, and a keyboard, pad
+controller, or sequencer plays them.
 
-Traditional samplers - hardware or software - require you to manually record,
-chop, name, categorise, and map every sample by hand. Subsample automates the
-entire pipeline: it detects individual sounds from a live audio stream or
-pre-recorded files, builds a 58-element acoustic fingerprint for each one,
-assigns them to MIDI notes based on how they sound, and runs a per-sample DSP
-processing chain that adapts its parameters from the audio content itself. A
-chaotic environment becomes an organised, mix-ready sample instrument while
-you focus on playing.
+Build a custom drum kit from the sounds outside your window. Turn a walk
+through the woods into a playable instrument. Slice a dawn chorus into single
+calls. Feed a pile of unsorted samples in and watch them organise themselves.
+All four are the same workflow.
 
 
 ## Contents
@@ -62,39 +55,40 @@ you focus on playing.
 - **A studio sampler that builds itself.** Drop samples in (or record them
   live) and Subsample maps them to MIDI notes, processes them through an
   adaptive DSP chain, and presents a playable, mix-ready instrument with no
-  manual chopping, naming, or mapping. Free, open-source, and runs anywhere
-  CPython 3.12 does - from a Raspberry Pi in the rehearsal room to a studio
-  Mac or Linux rack server.
-- **Automatic similarity-based sample organisation.** A 58-dimensional
-  acoustic fingerprint matches kicks to kick pads, snares to snare pads,
-  hi-hats to hi-hat pads - no labels, no training data, no manual tagging.
-  The same engine handles tonal samples without special treatment, and works
-  equally well on a chaotic Splice library or a fresh field-recording session.
+  manual chopping, naming, or mapping. It runs on a Raspberry Pi left in a
+  remote location as well as on a studio Mac or a Linux rack server.
+- **Automatic similarity-based sample organisation.** An acoustic fingerprint
+  of each sound's spectrum, timbre, attack, and band energy matches kicks to
+  kick pads, snares to snare pads, hi-hats to hi-hat pads - no labels, no
+  training data, no manual tagging. The same engine handles tonal samples
+  without special treatment, and works equally well on a disorganised sample
+  library or a fresh field-recording session.
 - **Real-time live sampling.** Point a microphone at the world and Subsample
   captures, trims, analyses, and adds every distinct sound event to your
   instrument library as it happens. Adaptive noise floor tracking works in
-  noisy rehearsal rooms as well as quiet studios; back-to-back sounds are
-  captured reliably with zero-gap detection.
+  noisy rehearsal rooms as well as quiet studios. Analysis runs apart from
+  capture, so a sound that arrives while the last one is still being analysed
+  is still recorded.
 - **Beat slicer and auto-quantise for loops.** Detected onsets in long samples
-  are individually placed on a beat grid using onset-aligned timemaps - loops
-  snap to your target BPM with musical precision. A pad-quantise mode
+  are individually placed on a beat grid using onset-aligned timemaps, so
+  each hit in a loop lands on the grid at your target BPM. A pad-quantise mode
   preserves natural timbre by inserting silence between hits instead of
   time-stretching. Per-hit segment playback: cycle through hits with
   `round_robin`, pick randomly with `random`, or map specific segments to
   specific notes by index.
-- **Pitched and percussive in one engine.** Tonal samples are auto-detected by
-  a seven-criterion stability gate and pitch-shifted across the keyboard range
-  at the highest available quality (Rubber Band offline finer mode). Drums,
-  melodic, and effect samples share one library and one workflow.
-- **20-processor DSP chain with intelligent defaults.** Compression, gating,
-  transient shaping, filters, distortion, saturation, bit-depth reduction,
-  radio transmission/reception, frequency shift, tuning wobble, vocoder
-  cross-synthesis, beat-quantise, pitch-shift, time-stretch, reverse,
-  envelope reshape, and
-  HPSS harmonic/percussive separation. Every parameter auto-adapts to each
-  sample's analysis data - write `compress: true` and the right threshold,
-  attack, and release are derived from the audio. Variants are pre-rendered
-  in a background worker pool and ready before you press a key.
+- **Pitched and percussive in one engine.** Subsample detects samples with a
+  single stable pitch and shifts them across the keyboard range with Rubber
+  Band's offline finer engine. Drums, melodic, and effect samples share one
+  library and one workflow.
+- **A DSP chain that sets its defaults from each sample.** Compression,
+  gating, transient shaping, filters, distortion, saturation, bit-depth
+  reduction, radio transmission/reception, frequency shift, tuning wobble,
+  vocoder cross-synthesis, beat-quantise, pitch-shift, time-stretch, reverse,
+  envelope reshape, and HPSS harmonic/percussive separation. The compressor,
+  gate, transient shaper, distortion, and envelope reshaper set their
+  parameters from each sample's analysis - write `compress: true` and the
+  threshold, attack, and release are derived from the audio. Variants are
+  rendered in a background worker pool before they play.
 - **Sweep anything with a knob.** Bind any numeric parameter - filter cutoff,
   beat-quantise amount, distortion drive, compression threshold - to a MIDI
   CC controller. Variants are re-rendered in the background between knob
@@ -118,19 +112,17 @@ you focus on playing.
   drawn from, kept in the analysis sidecar so a missing thumbnail can be
   redrawn without re-analysing - see [Sample previews](#sample-previews).
 - **Headless and config-driven.** Everything is YAML - version-controllable,
-  reproducible, no GUI required. Runs equally well on a studio Mac, a
-  Raspberry Pi in the rehearsal room, or a rack server. Drive it from any
-  DAW, hardware controller, or sequencer over standard MIDI.
+  reproducible, no GUI required. Drive it from any DAW, hardware controller,
+  or sequencer over standard MIDI.
 - **Plays nicely with the rest of your studio.** Standard MIDI input from any
   DAW or hardware controller, [virtual MIDI](#virtual-midi) ports for
   software-only routing on the same machine, [OSC integration](#osc-integration)
   for talking to sequencers and visualisers, and a ready-to-play GM drums map
   that turns any sample collection into a coherent, pre-mixed drum kit on
   first play.
-- **Pairs with Subsequence.** Subsample is one part of a fully open-source
-  generative sampler workstation - its sister project
+- **Pairs with Subsequence.** Subsample's sister project
   [Subsequence](https://github.com/simonholliday/subsequence) is a Python
-  MIDI sequencer. Subsequence drives the patterns; Subsample provides the
+  MIDI sequencer: Subsequence drives the patterns, and Subsample provides the
   sounds. Each works independently - see [Works with Subsequence](#works-with-subsequence).
 
 
@@ -138,12 +130,12 @@ you focus on playing.
 
 | | |
 |---|---|
-| **Live capture** | Adaptive noise floor, zero-gap back-to-back detection, S-curve fades |
-| **Analysis** | 58 dimensions across 5 feature groups; cached `.analysis.json` sidecars |
+| **Live capture** | Adaptive noise floor, capture that keeps recording while analysis runs, S-curve fades |
+| **Analysis** | Spectral shape, sustained timbre, timbre dynamics, attack character, and band energy; cached `.analysis.json` sidecars |
 | **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
-| **DSP processors** | 20 (filter, comp, gate, distort, bit-depth, radio, freqshift, wobble, saturate, reshape, transient, HPSS, vocoder, repitch, stretch-quantise, pad-quantise, ...) |
+| **DSP processors** | Filters, dynamics, distortion, radio, vocoder, pitch, time-stretch, and quantise - see [Process](#process---how-to-present-the-sample) |
 | **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
-| **Pitch shifting** | Rubber Band offline finer (highest available quality), pre-rendered |
+| **Pitch shifting** | Rubber Band offline finer engine, pre-rendered |
 | **Time stretch** | Beat-quantised with onset-aligned timemaps, partial-quantise amount, pad-quantise alternative for speech |
 | **Segment playback** | Per-hit round-robin, random, or indexed - for sliced loops |
 | **MIDI input** | Hardware port, named virtual port, or both |
@@ -156,9 +148,9 @@ you focus on playing.
 | **Library mgmt** | Memory-bounded with FIFO eviction, persistent disk cache for variants, hot-loading from watched directories |
 | **Live-coding** | Edit the MIDI map YAML and assignments reload on save |
 | **Program switching** | Multiple instrument directories swappable via MIDI Program Change |
-| **GM drums** | Ready-to-play map of 47 GM percussion instruments with researched mix chain |
+| **GM drums** | Ready-to-play map of the General MIDI percussion set, with a mix chain for each instrument |
 | **Configuration** | YAML, version-controllable, headless, no GUI |
-| **Platform** | Linux, macOS, Windows (via WSL), Raspberry Pi - anywhere CPython 3.12 runs |
+| **Platform** | Linux, macOS, Windows (via WSL), Raspberry Pi |
 | **Licence** | AGPL-3.0 (commercial licensing on request) |
 
 
@@ -188,18 +180,17 @@ analysis.
 
 ### 2. Analyse
 
-Each captured sound is fingerprinted across 58 acoustic dimensions spanning five
-groups:
+Each captured sound is fingerprinted across five groups of acoustic measurements:
 
-| Group | Dimensions | What it captures |
-|-------|-----------|------------------|
-| Spectral shape | 14 | Brightness, noisiness, attack/release character |
-| Sustained timbre | 12 | Steady-state tonal colour |
-| Timbre dynamics | 12 | How the sound evolves over time |
-| Attack character | 12 | Transient signature |
-| Band energy | 8 | Per-band energy distribution and decay (drum-type signature) |
+| Group | What it captures |
+|-------|------------------|
+| Spectral shape | Brightness, noisiness, attack/release character |
+| Sustained timbre | Steady-state tonal colour |
+| Timbre dynamics | How the sound evolves over time |
+| Attack character | Transient signature |
+| Band energy | Per-band energy distribution and decay (drum-type signature) |
 
-Tonal sounds are identified by a seven-criterion pitch stability gate - only
+Tonal sounds are identified by a pitch stability test - only
 samples with a single, confident, stable pitch are flagged for chromatic mapping.
 Percussive sounds are handled naturally by the same feature space without special
 treatment.
@@ -210,8 +201,8 @@ improves, stale sidecars are detected and re-analysed automatically on startup.
 
 ### 3. Assign
 
-Sounds are matched to your reference library using cosine similarity on the
-58-element feature vector. The best kick-like sound maps to your kick pad; the
+Sounds are matched to your reference library using cosine similarity on that
+fingerprint. The best kick-like sound maps to your kick pad; the
 best snare maps to your snare. When multiple notes share a reference, they
 receive ranked matches: first note gets the best match, second note gets the
 second-best, and so on.
@@ -227,14 +218,15 @@ playback. The chain is declared in the MIDI map - a sequence of processors that
 can include filtering, compression, limiting, gating, distortion, saturation,
 envelope reshaping, transient shaping, time-stretching, pitch-shifting, reversal,
 harmonic/percussive separation, and beat quantisation. Variants are computed
-offline in a background worker pool and cached to disk, so by the time you press
-a key the processed audio is already waiting in memory.
+offline in a background worker pool and cached to disk, so once a variant is
+ready, a note plays it without processing anything when it is triggered.
 
-Every processor is designed with **intelligent defaults that adapt per sample**.
-Filters default to classic console channel-strip values (80 Hz HPF, 16 kHz LPF).
-The compressor analyses each sample's peak level, onset speed, and decay
-character to set threshold, attack, and release automatically - a percussive kick
-gets a slow attack that preserves the beater transient, while a sustained pad
+The compressor, gate, transient shaper, distortion, and envelope reshaper are
+designed with **defaults that adapt to each sample**, while the filters default
+to fixed console channel-strip values (80 Hz HPF, 16 kHz LPF). The compressor
+analyses each sample's peak level, onset speed, and decay character to set
+threshold, attack, and release automatically - a percussive kick gets a slow
+attack that preserves the beater transient, while a sustained pad
 gets a faster attack with longer release to avoid pumping. The gate reads the
 noise floor to set its threshold. Transient shaping reads the crest factor to
 decide how much punch to add or remove. Envelope reshape reads the decay
@@ -248,7 +240,7 @@ artefacts are unacceptable, pad-quantise snaps onsets to the grid by inserting
 silence instead, preserving natural timbre completely.
 
 The included `midi-map-gm-drums.yaml` applies all of this across the full GM
-percussion set: 47 instruments, each with researched filtering, compression
+percussion set: every instrument in it, each with its own filtering, compression
 (where appropriate), panning, and gain. The result is a coherent, pre-mixed drum
 kit from whatever samples you have - no manual tweaking required. Every setting
 can be overridden by an experienced user who wants precise control.
@@ -341,8 +333,8 @@ reference material; use the name form for the built-in GM set. To match against
 a different reference set entirely, point `library.reference_directory` at it -
 its names then replace the built-in ones.
 
-The library's samples are ranked against that reference by a 58-dimensional
-spectral/rhythmic fingerprint; the top-ranked match plays.
+The library's samples are ranked against that reference by their acoustic
+fingerprint; the top-ranked match plays.
 (When `reference` is set and no `order` is given,
 `order: [{ by: similarity, dir: desc }]` is assumed - see
 [Implicit defaults](#implicit-defaults) further down.)
@@ -424,20 +416,20 @@ That's the ladder. The rest of this section is the full reference - every
 field, every predicate, every processor, every option - then the advanced
 features (programs, ambisonic capture, MIDI CC mapping).
 
-### The GM drums map - instant professional drum kit
+### The GM drums map - a drum kit from any sample collection
 
 Before the reference, a quick mention of the "no-config" path. If you want a
-complete drum kit in under a minute, use the `midi-map-gm-drums.yaml` that
+complete drum kit without writing a map, use the `midi-map-gm-drums.yaml` that
 `subsample --init` placed in your project (it is even pre-wired into the
 scaffolded `config.yaml`). Point Subsample at any sample collection and every
 MIDI drum note automatically finds the closest matching sample and plays it
-through a professional mix chain:
+through a mix chain set for its instrument:
 
 - **Similarity matching** - each note finds the best sample via spectral
   fingerprint comparison against GM reference sounds
 - **Console-style filtering** - per-instrument HPF/LPF to carve frequency space
   (30 Hz HPF on kicks, 300 Hz on hi-hats, 1 kHz on triangles, etc.)
-- **Adaptive compression** on 28 transient instruments - threshold, attack, and
+- **Adaptive compression** on the transient instruments - threshold, attack, and
   release auto-adapt to each sample's analysis data.  Foundation sounds get
   tailored settings: kicks at 6:1 with 15 ms attack (beater punch + thick body),
   snares at 5:1 with 8 ms attack (stick crack + ring), hi-hats at gentle 2:1
@@ -1262,7 +1254,7 @@ one-shots where that delay matters. The gate uses the same pad-and-truncate
 look-ahead.
 
 The noise gate, distortion, and envelope reshaper follow the same pattern -
-`true` gives you intelligent auto defaults, explicit parameters override:
+`true` derives the parameters from the sample, and explicit parameters override them:
 
 ```yaml
 process:
@@ -2195,9 +2187,8 @@ happens before a note is played rather than when it is triggered.
 ## Similarity engine
 
 Every new sample is scored against every reference using cosine similarity on a
-58-element composite feature vector built from five groups: spectral shape (14
-dimensions), sustained timbre (12), timbre dynamics (12), attack character (12),
-and band energy (8). Each group is independently normalised and scaled by a
+composite feature vector built from five groups: spectral shape, sustained
+timbre, timbre dynamics, attack character, and band energy. Each group is independently normalised and scaled by a
 configurable weight (`similarity.weight_*`), so you can emphasise whichever
 acoustic qualities matter most for your material.
 
@@ -3025,10 +3016,8 @@ or bird detector that wants its captures to become MIDI-playable instruments.
 
 [Subsequence](https://github.com/simonholliday/subsequence) is a sister
 project: a generative MIDI sequencer and algorithmic composition engine for
-Python with rock-solid timing (typical pulse jitter < 5 μs on Linux).
-Together, they form part of a fully open-source generative sampler
-workstation - Subsequence drives the patterns, Subsample provides the
-sounds.
+Python. Together, they form part of a generative sampler workstation -
+Subsequence drives the patterns, Subsample provides the sounds.
 
 The two communicate over standard MIDI. The simplest setup is to give
 Subsample a named [virtual MIDI port](#virtual-midi) and have Subsequence send
@@ -3336,18 +3325,18 @@ recording concurrently and independently.
 ### Similarity engine
 
 Every new instrument sample is scored against every reference using cosine
-similarity on a 58-element composite vector. The vector is split into five
+similarity on a composite vector. The vector is split into five
 groups, each independently L2-normalised so that no single group dominates by
 scale:
 
 ```
-Group 1 (x14): spectral shape   [flatness, attack, release, centroid, bandwidth, zcr,
-                                  harmonic, contrast, voiced, log_attack, flux,
-                                  spectral_rolloff, spectral_slope, crest_factor]
-Group 2 (x12): sustained MFCC   [mean timbre, coefficients 1-12]
-Group 3 (x12): delta-MFCC       [timbre trajectory, coefficients 1-12]
-Group 4 (x12): onset-weighted   [attack character, coefficients 1-12]
-Group 5 (x8):  band energy      [sub-bass/low-mid/high-mid/presence fractions + decay rates]
+Group 1: spectral shape   [flatness, attack, release, centroid, bandwidth, zcr,
+                           harmonic, contrast, voiced, log_attack, flux,
+                           spectral_rolloff, spectral_slope, crest_factor]
+Group 2: sustained MFCC   [mean timbre, coefficients 1-12]
+Group 3: delta-MFCC       [timbre trajectory, coefficients 1-12]
+Group 4: onset-weighted   [attack character, coefficients 1-12]
+Group 5: band energy      [sub-bass/low-mid/high-mid/presence fractions + decay rates]
 ```
 
 Each group is scaled by a configurable weight (`similarity.weight_*`). This
@@ -3443,7 +3432,7 @@ mypy subsample
 
 ## Dependencies and credits
 
-Subsample makes use of these excellent open-source libraries:
+Subsample uses these libraries:
 
 | Library | Purpose | Licence |
 |---------|---------|---------|
