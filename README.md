@@ -10,6 +10,11 @@ kick-like sound is offered to the kick note. A MIDI map sets which sounds each
 note plays and how they are processed on the way out, and a keyboard, pad
 controller, or sequencer plays them.
 
+Subsample has no graphical interface: it is set up in configuration files and
+run from a terminal. It runs on Linux and macOS; on Windows it runs inside
+WSL2, and is not tested on native Windows. This is an early release, and its
+configuration and MIDI map formats still change between releases.
+
 Build a custom drum kit from the sounds outside your window. Turn a walk
 through the woods into a playable instrument. Slice a dawn chorus into single
 calls. Feed a pile of unsorted samples in and watch them organise themselves.
