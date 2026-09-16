@@ -35,7 +35,7 @@ _WHERE_UNITS: typing.Final[dict[str, str]] = {"duration": "s", "tempo": "BPM", "
 
 _SCORER_PARAMETER_TERMS: typing.Final[dict[str, dict[str, typing.Any]]] = {
 	"pattern": {
-		"description": "",
+		"description": "The beat pattern to match: one number for each beat, of which only the shape counts, not the level.",
 		"type": "array",
 		"items": {"type": "number", "minimum": 0, "maximum": 1},
 		"minItems": 2,
@@ -43,6 +43,118 @@ _SCORER_PARAMETER_TERMS: typing.Final[dict[str, dict[str, typing.Any]]] = {
 }
 """What an ``order:`` entry's own parameters are written as, by name.  The
 parameters themselves are declared by the scorer, in subsample.query."""
+
+
+# ---------------------------------------------------------------------------
+# The words a map writes, each with the title and description a reader sees
+# ---------------------------------------------------------------------------
+#
+# Each list is keyed by the word the parser accepts.  _words() publishes them in
+# the parser's order and refuses a word the parser does not accept, or one it
+# accepts that has no prose here.
+
+_MODES: typing.Final[dict[str, tuple[str, str]]] = {
+	"one_shot": ("One shot", "Plays to the end of the sound and ignores note-off."),
+	"gated":    ("Gated", "Plays while the key is held, and releases at note-off."),
+	"loop":     ("Loop", "Loops while the key is held, and releases past the loop at note-off."),
+}
+
+_MEASUREMENTS: typing.Final[dict[str, str]] = {
+	"duration":        "The sample's length. A number keeps exactly that value, and bounds keep the values within them.",
+	"duration_beats":  "The sample's length in beats at the session tempo, where a beat is a quarter note. A map that uses it needs a session tempo. A number keeps exactly that value, and bounds keep the values within them.",
+	"onsets":          "How many hits Subsample detected in the sample. A number keeps exactly that value, and bounds keep the values within them.",
+	"tempo":           "The tempo Subsample detected in the sample. A number keeps exactly that value, and bounds keep the values within them.",
+	"pitch":           "The pitch Subsample detected in the sample, as a frequency or as a note name such as `C3`. A value keeps exactly that pitch, and bounds keep the pitches within them.",
+	"quantized_beats": "The sample's length in beats once the assignment's quantise processor has run. A sample not yet quantised does not qualify. A number keeps exactly that value, and bounds keep the values within them.",
+}
+
+_MEASUREMENT_BOUNDS: typing.Final[dict[str, str]] = {
+	"gte": "At least this value.",
+	"lte": "At most this value.",
+	"gt":  "More than this value.",
+	"lt":  "Less than this value.",
+	"eq":  "Exactly this value.",
+}
+
+_NAME_MATCHES: typing.Final[dict[str, str]] = {
+	"matches": "Wildcards the whole name must match, where `*` stands for any run of characters and `?` for any one character.",
+	"regex":   "A regular expression the whole name must match.",
+}
+
+_ORDER_BY: typing.Final[dict[str, tuple[str, str]]] = {
+	"duration":        ("Duration", "The sample's length."),
+	"pitch":           ("Pitch", "The pitch Subsample detected in the sample."),
+	"onsets":          ("Hits", "How many hits Subsample detected in the sample."),
+	"tempo":           ("Tempo", "The tempo Subsample detected in the sample."),
+	"level":           ("Level", "How loud the sample is. A velocity pick needs this as the first ranking."),
+	"age":             ("Age", "When Subsample took the sample in, so `desc` puts the newest first."),
+	"quantized_beats": ("Quantised beats", "The sample's length in beats once quantised. A sample not yet quantised comes last, whichever way round."),
+	"beat_match":      ("Beat match", "How closely the sample's energy on each beat follows the beat pattern in `pattern`. It needs a quantise processor, and leaves out any sample not yet quantised."),
+	"similarity":      ("Similarity", "How closely the sample resembles the `reference` in `where`. It must be the first ranking."),
+}
+
+_ORDER_DIRECTIONS: typing.Final[dict[str, tuple[str, str]]] = {
+	"asc":  ("Lowest first", "The lowest value comes first."),
+	"desc": ("Highest first", "The highest value comes first."),
+}
+
+_OLDER_ORDER_TITLES: typing.Final[dict[str, str]] = {
+	"newest":               "Newest first",
+	"oldest":               "Oldest first",
+	"duration_asc":         "Shortest first",
+	"duration_desc":        "Longest first",
+	"pitch_asc":            "Lowest pitch first",
+	"pitch_desc":           "Highest pitch first",
+	"onsets_asc":           "Fewest hits first",
+	"onsets_desc":          "Most hits first",
+	"tempo_asc":            "Slowest first",
+	"tempo_desc":           "Fastest first",
+	"loudest":              "Loudest first",
+	"quietest":             "Quietest first",
+	"similarity":           "Most similar first",
+	"quantized_beats_asc":  "Fewest quantised beats first",
+	"quantized_beats_desc": "Most quantised beats first",
+}
+
+_PICK_WORDS: typing.Final[dict[str, tuple[str, str]]] = {
+	"any":      ("Any", "A match at random on every note, each as likely as the next."),
+	"velocity": ("Velocity", "The match that suits how hard the note is struck, from the quiet end of the ranking to the loud end. The ranking must be by `level`."),
+}
+
+_RANK_BOUNDS: typing.Final[dict[str, str]] = {
+	"gte": "The first rank drawn from.",
+	"lte": "The last rank drawn from.",
+	"gt":  "Draws from the ranks after this one.",
+	"lt":  "Draws from the ranks before this one.",
+	"eq":  "Always this rank.",
+}
+
+_PICK_CURVES: typing.Final[dict[str, tuple[str, str]]] = {
+	"linear":      ("Linear", "Velocity spreads evenly across the ranking."),
+	"logarithmic": ("Logarithmic", "Soft notes spread across more of the ranking, for more distinct quiet tones."),
+	"exponential": ("Exponential", "Hard notes spread across more of the ranking, for a finer choice among the loud samples."),
+}
+
+_PICK_SPACINGS: typing.Final[dict[str, tuple[str, str]]] = {
+	"rank":     ("Rank", "Each sample takes an equal share of the velocities, by its place in the ranking."),
+	"loudness": ("Loudness", "Each sample sits at its own measured level, so the layout follows the real dynamics of the samples."),
+}
+
+_RELEASE_CURVES: typing.Final[dict[str, tuple[str, str]]] = {
+	"cosine":      ("Cosine", "Eases out of the sound and into silence smoothly."),
+	"exponential": ("Exponential", "Drops quickly, then trails off slowly, as a damped string does."),
+}
+
+_EXTRACT_PARTS: typing.Final[dict[str, tuple[str, str]]] = {
+	"omni":   ("Omni", "Every direction equally: the sum of the audio channels."),
+	"side":   ("Side", "A figure of eight facing left and right: the difference between them."),
+	"depth":  ("Depth", "A figure of eight facing front and back, from a recording that carries both."),
+	"height": ("Height", "A figure of eight facing up and down, from an ambisonic recording."),
+	"left":   ("Left", "A cardioid facing left."),
+	"right":  ("Right", "A cardioid facing right."),
+	"front":  ("Front", "A cardioid facing forward. On a stereo recording it is the same as `omni`, with a warning."),
+	"back":   ("Back", "A cardioid facing back, from a recording that carries front and back."),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +173,7 @@ def json_schema () -> dict[str, typing.Any]:
 	return {
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"title": "Subsample MIDI map",
-		"description": "",
+		"description": "The file that tells Subsample which sounds each MIDI note plays, how they are processed, and how they play. It holds assignments, and may add templates, programs, other maps to play at the same time, and definitions files that name notes, controllers, MIDI channels and programs.",
 		"type": "object",
 		"properties": _in_order(subsample.player.VALID_MAP_KEYS, _map_terms(), "map key"),
 		"additionalProperties": False,
@@ -77,26 +189,36 @@ def _map_terms () -> dict[str, typing.Any]:
 
 	return {
 		"definitions": _mounted_definitions(),
-		"channel":     {"$ref": "#/$defs/channel"},
+		"channel": {
+			"description": "The MIDI channel an assignment answers on when it names none of its own, so a map can be played on whatever MIDI channel a project gives it without editing it. A map with no `channel` needs one on every assignment.",
+			"$ref": "#/$defs/channel",
+		},
 		"programs": {
-			"description": "",
+			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/program"},
 		},
-		"program_channel": _number_or_name(0, 16, default=subsample.bank.DEFAULT_BANK_CHANNEL),
-		"default_program": {"$ref": "#/$defs/program_number"},
+		"program_channel": _number_or_name(
+			0, 16,
+			"The MIDI channel that Program Change messages are read on, where 0 reads every MIDI channel.",
+			default=subsample.bank.DEFAULT_BANK_CHANNEL,
+		),
+		"default_program": {
+			"description": "The program active at startup, which must be one the list declares. Left out, the first program in the list.",
+			"$ref": "#/$defs/program_number",
+		},
 		"templates": {
-			"description": "",
+			"description": "Named sets of assignment fields that assignments may start from, so that a kit writes its shared MIDI channel, processing or selection once.",
 			"type": "object",
 			"additionalProperties": {"$ref": "#/$defs/template"},
 		},
 		"assignments": {
-			"description": "",
+			"description": "Each instrument the map plays: the notes it answers to, the sound it chooses for them, and how that sound plays. A map whose programs are all `map:` presets, or that plays other maps through `maps`, may leave it out.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/assignment"},
 		},
 		"maps": {
-			"description": "",
+			"description": "Other maps to play at the same time, each on its own MIDI channel, which makes this map an ensemble. A map included here may not include maps of its own.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/included_map"},
 		},
@@ -111,7 +233,7 @@ def _mounted_definitions () -> dict[str, typing.Any]:
 	import subsample.player
 
 	return {
-		"description": "",
+		"description": "Definitions files to take names from, each under a prefix the map chooses: `{my: project.yaml}` lets the map write `my.kick` for a note the file names. A path is relative to the map. The `drum` prefix is reserved for the built-in General MIDI drum names.",
 		"type": "object",
 		"propertyNames": {
 			"pattern": f"^{subsample.definitions.NAME_RE.pattern}$",
@@ -129,11 +251,29 @@ def _defs () -> dict[str, typing.Any]:
 		"assignment":    _assignment(),
 		"select_spec":   _select_spec(),
 		"order_clause":  _order_clause(),
-		"channel":       _number_or_name(1, 16),
-		"program_number": _number_or_name(0, 127),
-		"controller":    _number_or_name(0, 127),
-		"rank":          {"description": "", "type": "integer", "minimum": 1},
-		"pan_position":  {"description": "", "type": "number", "minimum": -100, "maximum": 100},
+		"channel": _number_or_name(
+			1, 16,
+			"A MIDI channel, counted from 1, or a name a definitions file gives one.",
+		),
+		"program_number": _number_or_name(
+			0, 127,
+			"A MIDI program number, or a name a definitions file gives one.",
+		),
+		"controller": _number_or_name(
+			0, 127,
+			"A MIDI controller number, or a name a definitions file gives one.",
+		),
+		"rank": {
+			"description": "A place in the ranking, counted from 1 for the best match.",
+			"type": "integer",
+			"minimum": 1,
+		},
+		"pan_position": {
+			"description": "A position across the stereo field: -100 is hard left, 0 the centre, and 100 hard right.",
+			"type": "number",
+			"minimum": -100,
+			"maximum": 100,
+		},
 		"release_time":  _release_time(),
 		"template":      _template(),
 		"program":       _program(),
@@ -170,7 +310,7 @@ def _assignment () -> dict[str, typing.Any]:
 	import subsample.player
 
 	return {
-		"description": "",
+		"description": "One instrument: the notes it answers to, the sound it chooses for them, how that sound is processed, and how it plays.",
 		"type": "object",
 		"properties": _in_order(
 			subsample.player.VALID_ASSIGNMENT_KEYS, _assignment_terms(), "assignment key",
@@ -196,7 +336,7 @@ def _template () -> dict[str, typing.Any]:
 	}
 
 	return {
-		"description": "",
+		"description": "A named set of assignment fields. An assignment that names the template starts from its fields, and its own fields win: a field it sets replaces the template's whole, with nothing merged inside it. A template may not name a template of its own.",
 		"type": "object",
 		"properties": _in_order(
 			tuple(name for name in subsample.player.VALID_ASSIGNMENT_KEYS if name != "template"),
@@ -215,38 +355,41 @@ def _assignment_terms () -> dict[str, typing.Any]:
 
 	return {
 		"name": {
-			"description": "",
+			"description": "A name for the assignment, which log lines and error messages use.",
 			"type": "string",
 			"default": "<unnamed>",
 		},
 		"template": {
-			"description": "",
+			"description": "The template, or the templates in order, that the assignment starts from. A later template overrides an earlier one, and the assignment's own fields override them all.",
 			"anyOf": [
 				{"type": "string"},
 				{"type": "array", "items": {"type": "string"}, "minItems": 1},
 			],
 		},
-		"channel":     {"$ref": "#/$defs/channel"},
+		"channel": {
+			"description": "The MIDI channel the assignment answers on. Left out, the map's `channel`, or the MIDI channel an ensemble plays the map on.",
+			"$ref": "#/$defs/channel",
+		},
 		"notes":       {"$ref": "#/$defs/notes"},
 		"velocity":    {"$ref": "#/$defs/velocity"},
 		"select":      {"$ref": "#/$defs/select"},
 		"process": {
-			"description": "",
+			"description": "The processors the sound passes through, in order, rendered ahead of time. A processor is named alone for its defaults, or given its parameters. At most one of them may align the sound to the beat.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/process_step"},
 			"contains": _beat_aligning_step(),
 			"maxContains": 1,
 		},
 		"mode": {
-			"description": "",
-			"oneOf": [_word(mode, "", "") for mode in subsample.query.VALID_MODES],
+			"description": "How the sound answers the key: played to its end, played while the key is held, or looped while the key is held. Writing `loop:` sets the mode to `loop`.",
+			"oneOf": _words(subsample.query.VALID_MODES, _MODES, "mode"),
 			"default": "one_shot",
 		},
 		"loop":        {"$ref": "#/$defs/loop"},
 		"release":     {"$ref": "#/$defs/release"},
 		"extract":     {"$ref": "#/$defs/extract"},
 		"gain": {
-			"description": "",
+			"description": "Gain applied to the sound as it plays.",
 			"type": "number",
 			"default": 0.0,
 			"x-unit": "dB",
@@ -254,7 +397,7 @@ def _assignment_terms () -> dict[str, typing.Any]:
 		"pan":         {"$ref": "#/$defs/pan"},
 		"output":      {"$ref": "#/$defs/output"},
 		"stack": {
-			"description": "",
+			"description": "Lets the assignment sound together with another on the same note and velocity. Every assignment that overlaps must set it, or the map is refused.",
 			"type": "boolean",
 			"default": False,
 		},
@@ -287,7 +430,7 @@ def _notes () -> dict[str, typing.Any]:
 	"""The notes an assignment answers to."""
 
 	return {
-		"description": "",
+		"description": "The notes the assignment answers to: one note, a range written as `C2..C4` or `36..60`, a list of notes, or `zone-tuned`, which shares a range of the keyboard out among pitched samples. Without a `pick`, each note of a list plays the next rank, starting with the best match, unless the assignment repitches.",
 		"anyOf": [
 			{"$ref": "#/$defs/note"},
 			{"type": "array", "items": {"$ref": "#/$defs/note"}, "minItems": 1},
@@ -304,7 +447,7 @@ def _note () -> dict[str, typing.Any]:
 	such as ``36..60`` or ``C2..C4``, and a number written as text."""
 
 	return {
-		"description": "",
+		"description": "One note: its MIDI number, its name, where `C4` is note 60, or a name from a definitions file or from the built-in General MIDI drum names, such as `drum.kick_1`.",
 		"anyOf": [
 			{"type": "integer", "minimum": 0, "maximum": 127},
 			{"type": "string", "minLength": 1},
@@ -321,9 +464,12 @@ def _zone_tuned () -> dict[str, typing.Any]:
 	sentinel = subsample.player.ZONE_TUNED_SENTINEL
 
 	terms = {
-		"mode": {"description": "", "const": sentinel},
+		"mode": {
+			"description": "Shares the range out among the pitched samples that qualify, each on the notes nearest its own pitch. The assignment must repitch, and may neither stack nor be silenced.",
+			"const": sentinel,
+		},
 		"range": {
-			"description": "",
+			"description": "The part of the keyboard the zone covers, low note then high note.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/note"},
 			"minItems": 2,
@@ -354,9 +500,12 @@ def _velocity () -> dict[str, typing.Any]:
 	import subsample.player
 
 	terms = {
-		"trigger":  {"$ref": "#/$defs/velocity_range"},
+		"trigger": {
+			"description": "The velocities that play the assignment.",
+			"$ref": "#/$defs/velocity_range",
+		},
 		"rescale": {
-			"description": "",
+			"description": "Stretches the trigger range over a wider range of loudness, so a layer that only hears soft notes still plays through its whole dynamic range. `true` stretches it over every velocity, and a pair names the range. Left out, a velocity plays as it arrives.",
 			"anyOf": [
 				{"type": "boolean"},
 				{"$ref": "#/$defs/velocity_range"},
@@ -366,7 +515,7 @@ def _velocity () -> dict[str, typing.Any]:
 	}
 
 	return {
-		"description": "",
+		"description": "The velocities the assignment answers to, so several assignments can share a note as velocity layers: a pair, low then high, or `trigger` with `rescale`.",
 		"default": [0, 127],
 		"anyOf": [
 			{"$ref": "#/$defs/velocity_range"},
@@ -387,7 +536,7 @@ def _velocity_range () -> dict[str, typing.Any]:
 	"""A pair of MIDI velocities, low then high."""
 
 	return {
-		"description": "",
+		"description": "A range of MIDI velocities, low then high, both included.",
 		"type": "array",
 		"items": {"type": "integer", "minimum": 0, "maximum": 127},
 		"minItems": 2,
@@ -407,7 +556,7 @@ def _silenced_by () -> dict[str, typing.Any]:
 	}
 
 	return {
-		"description": "",
+		"description": "The notes on the same MIDI channel that cut this sound short, as closing a hi-hat stops its open ring. `self` means a new strike of this sound cuts the last. The cut is a quick damp that overrides any release. `false`, or an empty list, means nothing cuts it, which blanks a template's.",
 		"anyOf": [
 			choke,
 			{"type": "array", "items": choke},
@@ -426,10 +575,8 @@ def _select () -> dict[str, typing.Any]:
 
 	A list of these is a fallback chain, tried in turn until one finds a sound."""
 
-	import subsample.query
-
 	return {
-		"description": "",
+		"description": "How the assignment chooses a sound from the library. A list is a fallback chain: each is tried in turn until one finds a sound, and the first `pick` in the chain governs the whole chain.",
 		"anyOf": [
 			{"$ref": "#/$defs/select_spec"},
 			{"type": "array", "items": {"$ref": "#/$defs/select_spec"}, "minItems": 1},
@@ -446,12 +593,15 @@ def _select_spec () -> dict[str, typing.Any]:
 	terms = {
 		"where":    {"$ref": "#/$defs/where"},
 		"order":    {"$ref": "#/$defs/order"},
-		"order_by": _deprecated({"$ref": "#/$defs/order"}),
+		"order_by": _deprecated({
+			"description": "The older spelling of `order`.",
+			"$ref": "#/$defs/order",
+		}),
 		"pick":     {"$ref": "#/$defs/pick"},
 	}
 
 	return {
-		"description": "",
+		"description": "One way of choosing a sound: which samples qualify, how they are ranked, and which of them plays.",
 		"type": "object",
 		"properties": _in_order(subsample.query.VALID_SELECT_KEYS, terms, "select key"),
 		"not": {"required": ["order", "order_by"]},
@@ -467,18 +617,43 @@ def _where () -> dict[str, typing.Any]:
 
 	terms: dict[str, typing.Any] = {
 		"name": _name_term(),
-		"path":      {"description": "", "type": "string", "minLength": 1},
-		"directory": {"description": "", "type": "string", "minLength": 1},
-		"reference": {"description": "", "type": "string", "minLength": 1},
-		"pitched":   {"description": "", "type": "boolean"},
-		"loopable":  {"description": "", "type": "boolean"},
+		"path": {
+			"description": "One audio file, by its path relative to the map. It may not be combined with `name`.",
+			"type": "string",
+			"minLength": 1,
+		},
+		"directory": {
+			"description": "The samples inside this directory and the directories within it, relative to the map. Subsample loads them at startup.",
+			"type": "string",
+			"minLength": 1,
+		},
+		"reference": {
+			"description": "Ranks the samples by how closely they resemble a reference: a built-in reference by name, such as `GM36_BassDrum1`, or an audio file by its path relative to the map. An assignment whose reference name is unknown is left out, with a warning.",
+			"type": "string",
+			"minLength": 1,
+		},
+		"pitched": {
+			"description": "`true` keeps only samples with a stable pitch, and `false` only samples without one.",
+			"type": "boolean",
+		},
+		"loopable": {
+			"description": "`true` keeps only samples with a steady part worth looping, and `false` only samples without one.",
+			"type": "boolean",
+		},
 	}
 
 	for key in subsample.query.NUMERIC_YAML_KEYS:
 		terms[key] = _measurement(key)
 
-	for key, (field, _operator) in subsample.query.LEGACY_WHERE_KEYS.items():
-		terms[key] = _deprecated({"description": "", **_measured_value(field)})
+	yaml_key = {field: key for key, field in subsample.query.NUMERIC_YAML_KEYS.items()}
+
+	# An older spelling says only which current spelling it stands for, and
+	# says it from the parser's own table, so the two cannot disagree.
+	for key, (field, operator) in subsample.query.LEGACY_WHERE_KEYS.items():
+		terms[key] = _deprecated({
+			"description": f"The older spelling of `{operator}` under `{yaml_key[field]}`.",
+			**_measured_value(field),
+		})
 
 	accepted = (
 		*subsample.query.NON_RANGE_WHERE_KEYS,
@@ -487,7 +662,7 @@ def _where () -> dict[str, typing.Any]:
 	)
 
 	return {
-		"description": "",
+		"description": "Which samples qualify. Every condition written must hold. Left out, every sample qualifies.",
 		"type": "object",
 		"properties": _in_order(accepted, terms, "where key"),
 		"additionalProperties": False,
@@ -503,14 +678,16 @@ def _measurement (key: str) -> dict[str, typing.Any]:
 	value = _measured_value(subsample.query.NUMERIC_YAML_KEYS[key])
 
 	term: dict[str, typing.Any] = {
-		"description": "",
+		"description": _MEASUREMENTS[key],
 		"anyOf": [
 			value,
 			{
 				"type": "object",
 				"properties": {
-					operator: {"description": "", **value}
-					for operator in subsample.query.VALID_OPERATORS
+					operator: {"description": description, **value}
+					for operator, description in _in_order(
+						subsample.query.VALID_OPERATORS, _MEASUREMENT_BOUNDS, "measurement operator",
+					).items()
 				},
 				"minProperties": 1,
 				"additionalProperties": False,
@@ -536,22 +713,22 @@ def _measured_value (field: str) -> dict[str, typing.Any]:
 
 def _name_term () -> dict[str, typing.Any]:
 
-	"""A sound named outright, named among several, or matched by a pattern."""
+	"""A sound named outright, named among several, or matched by a wildcard."""
 
 	import subsample.query
 
-	pattern = {"type": "string", "minLength": 1}
-
 	return {
-		"description": "",
+		"description": "Samples by file name, without the folder or the extension: one name exactly, any of a list of names, or a name matched by wildcards or a regular expression. Names are not unique, so a name may match several samples. An exact name matches letter case, and a wildcard or a regular expression does not.",
 		"anyOf": [
 			{"type": "string", "minLength": 1},
 			{"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": True},
 			{
 				"type": "object",
 				"properties": {
-					operator: {"description": "", **pattern}
-					for operator in subsample.query.VALID_NAME_OPERATORS
+					operator: {"description": description, "type": "string", "minLength": 1}
+					for operator, description in _in_order(
+						subsample.query.VALID_NAME_OPERATORS, _NAME_MATCHES, "name operator",
+					).items()
 				},
 				"minProperties": 1,
 				"maxProperties": 1,
@@ -566,7 +743,7 @@ def _order () -> dict[str, typing.Any]:
 	"""How the sounds that matched are ranked, best first."""
 
 	return {
-		"description": "",
+		"description": "How the qualifying samples are ranked: one ranking, or a list in which each ranking breaks the ties the one before it leaves. Left out, the newest sample comes first, or the closest match where `where` names a `reference`.",
 		"anyOf": [
 			{"$ref": "#/$defs/order_clause"},
 			{"type": "array", "items": {"$ref": "#/$defs/order_clause"}, "minItems": 1},
@@ -595,22 +772,33 @@ def _order_clause () -> dict[str, typing.Any]:
 			"then": {"required": list(names)},
 		})
 
+	# An older word says only which ranking it stands for, from the parser's
+	# own table, so the two cannot disagree.
+	older: list[dict[str, typing.Any]] = []
+
+	titles = _in_order(tuple(subsample.query.LEGACY_ORDER_TOKENS), _OLDER_ORDER_TITLES, "older order word")
+
+	for token, title in titles.items():
+		clause = subsample.query.LEGACY_ORDER_TOKENS[token]
+		older.append(_deprecated(_word(
+			token, title, f"The older spelling of `{{by: {clause.by}, dir: {clause.dir}}}`.",
+		)))
+
 	return {
-		"description": "",
+		"description": "One ranking: what the samples are ranked by, and which way round.",
 		"anyOf": [
-			{"oneOf": [
-				_deprecated(_word(token, "", ""))
-				for token in subsample.query.LEGACY_ORDER_TOKENS
-			]},
+			{"oneOf": older},
 			{
 				"type": "object",
 				"properties": {
-					"by":  {"description": "", "oneOf": [
-						_word(name, "", "") for name in subsample.query.valid_order_names()
-					]},
-					"dir": {"description": "", "oneOf": [
-						_word(direction, "", "") for direction in ("asc", "desc")
-					]},
+					"by": {
+						"description": "What the samples are ranked by.",
+						"oneOf": _words(subsample.query.valid_order_names(), _ORDER_BY, "order name"),
+					},
+					"dir": {
+						"description": "Which end of the ranking comes first. Left out, the best match comes first for `beat_match` and `similarity`, and the lowest value for everything else.",
+						"oneOf": _words(("asc", "desc"), _ORDER_DIRECTIONS, "order direction"),
+					},
 					**parameters,
 				},
 				"required": ["by"],
@@ -630,25 +818,33 @@ def _pick () -> dict[str, typing.Any]:
 	rank: dict[str, typing.Any] = {"$ref": "#/$defs/rank"}
 
 	velocity_terms = {
-		"mode":      {"description": "", "const": "velocity"},
-		"variation": {"description": "", "type": "integer", "minimum": 0, "maximum": 127, "default": 0},
+		"mode": {
+			"description": "Chooses by velocity, with the settings beside it.",
+			"const": "velocity",
+		},
+		"variation": {
+			"description": "How far the choice may stray from the velocity played, in velocity values across both directions: 10 strays up to 5 either way. The loudness still follows the velocity played.",
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 127,
+			"default": 0,
+		},
 		"curve": {
-			"description": "",
-			"oneOf": [_word(curve, "", "") for curve in subsample.query.VALID_PICK_CURVES],
+			"description": "How the velocity played maps across the ranking.",
+			"oneOf": _words(subsample.query.VALID_PICK_CURVES, _PICK_CURVES, "pick curve"),
 			"default": "linear",
 		},
 		"spacing": {
-			"description": "",
-			"oneOf": [_word(spacing, "", "") for spacing in subsample.query.VALID_PICK_SPACINGS],
+			"description": "How the ranked samples are laid out across the range of velocities.",
+			"oneOf": _words(subsample.query.VALID_PICK_SPACINGS, _PICK_SPACINGS, "pick spacing"),
 			"default": "rank",
 		},
 	}
 
 	return {
-		"description": "",
-		"default": 1,
+		"description": "Which of the ranked samples plays: a rank, a range of ranks drawn from at random on every note, `any` for any match at random, or `velocity` to choose by how hard the note is struck. Left out, a single note plays the best match, and each note of a list plays the next rank unless the assignment repitches.",
 		"anyOf": [
-			{"oneOf": [_word("any", "", ""), _word("velocity", "", "")]},
+			{"oneOf": _words(("any", "velocity"), _PICK_WORDS, "pick word")},
 			dict(rank),
 			{
 				"type": "array",
@@ -659,8 +855,10 @@ def _pick () -> dict[str, typing.Any]:
 			{
 				"type": "object",
 				"properties": {
-					operator: {"description": "", **rank}
-					for operator in subsample.query.VALID_PICK_OPERATORS
+					operator: {"description": description, **rank}
+					for operator, description in _in_order(
+						subsample.query.VALID_PICK_OPERATORS, _RANK_BOUNDS, "pick operator",
+					).items()
 				},
 				"minProperties": 1,
 				"additionalProperties": False,
@@ -689,8 +887,8 @@ def _release () -> dict[str, typing.Any]:
 	import subsample.query
 
 	curve = {
-		"description": "",
-		"oneOf": [_word(shape, "", "") for shape in subsample.query.VALID_RELEASE_CURVES],
+		"description": "The shape of the fade.",
+		"oneOf": _words(subsample.query.VALID_RELEASE_CURVES, _RELEASE_CURVES, "release curve"),
 		"default": "cosine",
 	}
 
@@ -717,10 +915,10 @@ def _release () -> dict[str, typing.Any]:
 	}
 
 	return {
-		"description": "",
+		"description": "What the sound does after note-off. Left out, a gated sound stops with a short fade that avoids a click, and a looping one fades with the adaptive tail. `true` is the adaptive tail, shaped from the sample. A number is the fade time. `full` lets the sound play on to its end with no fade. A one-shot sound never receives note-off, so a release has no effect on it.",
 		"anyOf": [
 			{"type": "boolean"},
-			_word("full", "", ""),
+			_word("full", "Full", "Plays on to the end of the sound with no fade. A looping sound stops looping and rings out its natural tail."),
 			{"$ref": "#/$defs/release_time"},
 			spelt_out,
 			bound,
@@ -735,7 +933,7 @@ def _release_time () -> dict[str, typing.Any]:
 	import subsample.player
 
 	return {
-		"description": "",
+		"description": "How long the fade after note-off lasts. A knob's value is read as each note is struck, so it shapes the notes played next. Bound to a knob with no `default:`, it keeps the adaptive tail until the knob first moves.",
 		"anyOf": [
 			{"type": "number", "minimum": 0},
 			{"$ref": "#/$defs/cc_binding"},
@@ -752,13 +950,28 @@ def _loop () -> dict[str, typing.Any]:
 	import subsample.player
 
 	terms = {
-		"start":     {"description": "", "type": "number", "minimum": 0, "x-unit": "s"},
-		"end":       {"description": "", "type": "number", "minimum": 0, "x-unit": "s"},
-		"crossfade": {"description": "", "type": "number", "minimum": 0, "x-unit": "ms"},
+		"start": {
+			"description": "Where the loop begins, from the start of the sample.",
+			"type": "number",
+			"minimum": 0,
+			"x-unit": "s",
+		},
+		"end": {
+			"description": "Where the loop ends, from the start of the sample. It must come after `start`.",
+			"type": "number",
+			"minimum": 0,
+			"x-unit": "s",
+		},
+		"crossfade": {
+			"description": "How long the join is blended over, so the loop repeats without a click.",
+			"type": "number",
+			"minimum": 0,
+			"x-unit": "ms",
+		},
 	}
 
 	return {
-		"description": "",
+		"description": "Where the sound loops while the key is held. A point left out is found automatically, and writing `loop:` at all sets the mode to `loop`. A sample with no clean loop plays gated instead, with a note in the log.",
 		"type": "object",
 		"properties": _in_order(subsample.player.LOOP_INNER_KEYS, terms, "loop key"),
 		"additionalProperties": False,
@@ -773,16 +986,16 @@ def _extract () -> dict[str, typing.Any]:
 	import subsample.query
 
 	blend = {
-		"description": "",
+		"description": "A mix of the audio channels into mono: one weight for each, where a negative weight flips the polarity of its audio channel. The weights are scaled to add up to one, so only their balance matters.",
 		"type": "array",
 		"items": {"type": "number"},
 		"minItems": 1,
 	}
 
 	return {
-		"description": "",
+		"description": "Plays one part of a multi-channel recording as mono, as a microphone facing a chosen way would hear it, before `pan` and `output` place it. `channel.2` plays the second audio channel alone. The same sample plays whole wherever another assignment does not extract it. A part the recording cannot give is refused when the map loads.",
 		"anyOf": [
-			{"oneOf": [_word(kind, "", "") for kind in subsample.query.EXTRACT_KINDS]},
+			{"oneOf": _words(subsample.query.EXTRACT_KINDS, _EXTRACT_PARTS, "extract kind")},
 			{"type": "string", "pattern": r"^channel\.[0-9]+$"},
 			{
 				"type": "object",
@@ -806,14 +1019,29 @@ def _pan () -> dict[str, typing.Any]:
 	position: dict[str, typing.Any] = {"$ref": "#/$defs/pan_position"}
 
 	terms = {
-		"gte":       dict(position),
-		"lte":       dict(position),
-		"position":  dict(position),
-		"variation": {"description": "", "type": "number", "minimum": 0, "maximum": 200, "default": 0},
+		"gte": {
+			"description": "The leftmost position a random pan may land on.",
+			**position,
+		},
+		"lte": {
+			"description": "The rightmost position a random pan may land on.",
+			**position,
+		},
+		"position": {
+			"description": "The centre a random pan lands around.",
+			**position,
+		},
+		"variation": {
+			"description": "How widely a random pan spreads around `position`: 40 lands up to 20 either side.",
+			"type": "number",
+			"minimum": 0,
+			"maximum": 200,
+			"default": 0,
+		},
 	}
 
 	return {
-		"description": "",
+		"description": "Where the sound sits across the outputs: a position from hard left to hard right, a list of relative weights with one for each audio channel of a standard layout, `any` for a new random position on every note, or bounds to draw one from. A random position keeps the sound at the same loudness wherever it lands.",
 		"anyOf": [
 			dict(position),
 			{
@@ -824,7 +1052,7 @@ def _pan () -> dict[str, typing.Any]:
 					for count in sorted(subsample.channel.STANDARD_LAYOUTS)
 				],
 			},
-			_word("any", "", ""),
+			_word("any", "Any", "A new random position on every note, anywhere from hard left to hard right."),
 			{
 				"type": "object",
 				"properties": _in_order(subsample.query.VALID_PAN_KEYS, terms, "pan key"),
@@ -840,7 +1068,7 @@ def _output () -> dict[str, typing.Any]:
 	"""The device channels this assignment plays out of, counting from 1."""
 
 	return {
-		"description": "",
+		"description": "The outputs of the audio device the sound plays through, counted from 1 as the hardware labels them. With a list of pan weights, give one output for each weight, and with a random pan, give two. Left out, the first outputs.",
 		"type": "array",
 		"items": {"type": "integer", "minimum": 1},
 		"minItems": 1,
@@ -859,14 +1087,29 @@ def _program () -> dict[str, typing.Any]:
 	import subsample.bank
 
 	terms = {
-		"name":      {"description": "", "type": "string", "minLength": 1},
-		"program":   {"$ref": "#/$defs/program_number"},
-		"directory": {"description": "", "type": "string", "minLength": 1},
-		"map":       {"description": "", "type": "string", "minLength": 1},
+		"name": {
+			"description": "A name for the program, which log lines use.",
+			"type": "string",
+			"minLength": 1,
+		},
+		"program": {
+			"description": "The Program Change number that selects the program. Left out, its place in the list, counted from 0.",
+			"$ref": "#/$defs/program_number",
+		},
+		"directory": {
+			"description": "A directory of samples for the map's own assignments to choose from while the program is active, relative to where Subsample runs.",
+			"type": "string",
+			"minLength": 1,
+		},
+		"map": {
+			"description": "A whole map, with its own assignments and samples, relative to this map. It may not declare programs of its own.",
+			"type": "string",
+			"minLength": 1,
+		},
 	}
 
 	return {
-		"description": "",
+		"description": "One program: the instrument set a Program Change message switches to. It names either a directory of samples for this map's assignments, or a whole map of its own.",
 		"type": "object",
 		"properties": _in_order(subsample.bank.VALID_PROGRAM_KEYS, terms, "program key"),
 		"required": ["name"],
@@ -882,12 +1125,19 @@ def _included_map () -> dict[str, typing.Any]:
 	import subsample.ensemble
 
 	terms = {
-		"map":     {"description": "", "type": "string", "minLength": 1},
-		"channel": {"$ref": "#/$defs/channel"},
+		"map": {
+			"description": "The map to play, by its path relative to this map.",
+			"type": "string",
+			"minLength": 1,
+		},
+		"channel": {
+			"description": "The MIDI channel to play the map on, in place of the one it declares. An assignment that names its own MIDI channel keeps it.",
+			"$ref": "#/$defs/channel",
+		},
 	}
 
 	return {
-		"description": "",
+		"description": "One map an ensemble plays: its path alone, which keeps the MIDI channel the map declares, or its path with a MIDI channel to play it on.",
 		"anyOf": [
 			{"type": "string", "minLength": 1},
 			{
@@ -913,7 +1163,7 @@ def _defined_name () -> dict[str, typing.Any]:
 	import subsample.definitions
 
 	return {
-		"description": "",
+		"description": "A name from a mounted definitions file, written as its prefix and its name, such as `my.kick`.",
 		"type": "string",
 		"pattern": f"^{subsample.definitions.SYMBOL_RE.pattern}$",
 	}
@@ -924,22 +1174,23 @@ def _written_number () -> dict[str, typing.Any]:
 	"""A whole number written as text, which a map may do anywhere a number is asked for."""
 
 	return {
-		"description": "",
+		"description": "A whole number written as text, which the map reads as that number.",
 		"type": "string",
 		"pattern": r"^\s*[+-]?[0-9]+\s*$",
 	}
 
 
 def _number_or_name (
-	minimum: int,
-	maximum: int,
-	default: typing.Any = _ABSENT,
+	minimum:     int,
+	maximum:     int,
+	description: str,
+	default:     typing.Any = _ABSENT,
 ) -> dict[str, typing.Any]:
 
 	"""A whole number, or a name a definitions file gives that number."""
 
 	term: dict[str, typing.Any] = {
-		"description": "",
+		"description": description,
 		"anyOf": [
 			{"type": "integer", "minimum": minimum, "maximum": maximum},
 			{"$ref": "#/$defs/defined_name"},
@@ -951,6 +1202,20 @@ def _number_or_name (
 		term["default"] = default
 
 	return term
+
+
+def _words (
+	accepted: typing.Sequence[str],
+	prose:    typing.Mapping[str, tuple[str, str]],
+	what:     str,
+) -> list[dict[str, typing.Any]]:
+
+	"""The words the parser accepts, in its order, each with its title and description."""
+
+	return [
+		_word(value, title, description)
+		for value, (title, description) in _in_order(accepted, prose, what).items()
+	]
 
 
 def _in_order (
@@ -989,15 +1254,30 @@ def _cc_binding () -> dict[str, typing.Any]:
 	import subsample.query
 
 	fields: dict[str, typing.Any] = {
-		"cc":      {"$ref": "#/$defs/controller"},
-		"channel": {"$ref": "#/$defs/channel"},
-		"min":     {"description": "", "type": "number"},
-		"max":     {"description": "", "type": "number"},
-		"default": {"description": "", "type": "number"},
+		"cc": {
+			"description": "The MIDI controller that sets the value.",
+			"$ref": "#/$defs/controller",
+		},
+		"channel": {
+			"description": "The only MIDI channel the controller is read on. Left out, every MIDI channel.",
+			"$ref": "#/$defs/channel",
+		},
+		"min": {
+			"description": "The value at the bottom of the knob's travel. Left out, the bottom of the parameter's own range. A `min` above `max` turns the knob round.",
+			"type": "number",
+		},
+		"max": {
+			"description": "The value at the top of the knob's travel. Left out, the top of the parameter's own range.",
+			"type": "number",
+		},
+		"default": {
+			"description": "The value until the controller first moves. Left out, the value the parameter has without the knob, or the middle of the knob's travel where that value lies outside it.",
+			"type": "number",
+		},
 	}
 
 	return {
-		"description": "",
+		"description": "A MIDI controller in place of a fixed value, so a knob or a fader sets it. A value outside what the parameter allows is refused when the map loads, and so is a binding on a parameter that takes a word.",
 		"type": "object",
 		"properties": {key: fields[key] for key in subsample.query.CC_BINDING_KEYS},
 		"required": ["cc"],
@@ -1014,7 +1294,7 @@ def _process_step () -> dict[str, typing.Any]:
 	"""One entry of a `process:` list: a processor named on its own, or named with what it takes."""
 
 	return {
-		"description": "",
+		"description": "One processor: its name alone, for its defaults, or its name with its parameters.",
 		"anyOf": [
 			{"oneOf": _processor_words()},
 			{
@@ -1037,8 +1317,9 @@ def _processor_words () -> list[dict[str, typing.Any]]:
 	for processor in subsample.processors.PROCESSORS.values():
 		words.append(_word(processor.name, processor.title, processor.description))
 
+		# An older name is the same processor, so it carries the same words.
 		for legacy in processor.legacy_names:
-			words.append(_deprecated(_word(legacy.name, "", "")))
+			words.append(_deprecated(_word(legacy.name, processor.title, processor.description)))
 
 	return words
 

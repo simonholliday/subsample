@@ -268,9 +268,6 @@ _DEFAULT_PROBES: dict[str, tuple[dict[str, typing.Any], _Reading]] = {
 		_map(assignments=[_assignment(velocity={"trigger": [0, 127]})]),
 		lambda result: _first(result).velocity_rescale_to is not None,
 	),
-	"$defs/pick": (
-		_map(), lambda result: _first(result).select[0].pick.lo,
-	),
 	"$defs/pick/anyOf/4/properties/variation": (
 		_map(assignments=[_assignment(select={
 			"where": {"pitched": True}, "order": "loudest", "pick": {"mode": "velocity"},
@@ -304,6 +301,20 @@ _DEFAULT_PROBES: dict[str, tuple[dict[str, typing.Any], _Reading]] = {
 }
 """A map that leaves one term out, and what the loaded map then holds, by the
 path of the term that publishes the default."""
+
+
+def _a_sentence (text: str) -> bool:
+
+	"""True when prose starts a sentence and ends one."""
+
+	return bool(text) and (text[0].isupper() or text[0] in "`-0123456789") and text.endswith(".")
+
+
+def _a_label (text: str) -> bool:
+
+	"""True when a title reads as a label: a capital first, and no full stop."""
+
+	return bool(text) and text[0].isupper() and not text.endswith(".")
 
 
 def _outside (keyword: str, bound: typing.Any) -> typing.Any:
@@ -683,7 +694,7 @@ class TestSchemaIsPublishable:
 
 	def test_every_term_has_somewhere_to_say_what_it_is (self) -> None:
 
-		"""Each term carries a description, which step 3 of #2693 fills in."""
+		"""Each term carries a description, or takes the one its shared part carries."""
 
 		missing = [
 			f"{path}/{name}"
@@ -694,6 +705,40 @@ class TestSchemaIsPublishable:
 		]
 
 		assert not missing
+
+	def test_every_description_is_written_in_whole_sentences (self) -> None:
+
+		"""A reference entry is read alone at its anchor, so its prose starts and ends a sentence."""
+
+		unwritten = [
+			path for path, node in _subschemas(_SCHEMA)
+			if "description" in node and not _a_sentence(node["description"])
+		]
+
+		assert not unwritten
+
+	def test_every_word_has_a_label_and_a_description (self) -> None:
+
+		"""A word is offered as a choice, so it needs a label to show and prose to explain it."""
+
+		unwritten = [
+			path for path, node in _subschemas(_SCHEMA)
+			if "const" in node and "title" in node
+			and not (_a_label(node["title"]) and _a_sentence(node["description"]))
+		]
+
+		assert not unwritten
+
+	def test_every_title_is_a_label (self) -> None:
+
+		"""A title starts with a capital and is not a sentence."""
+
+		unlabelled = [
+			path for path, node in _subschemas(_SCHEMA)
+			if "title" in node and not _a_label(node["title"])
+		]
+
+		assert not unlabelled
 
 	def test_no_prose_contains_an_em_dash (self) -> None:
 
@@ -771,6 +816,47 @@ class TestPublishedRulesHold:
 
 			with pytest.raises(ValueError):
 				_load(tmp_path, _map(assignments=[fields]))
+
+
+class TestEachNoteOfAListPlaysTheNextRank:
+
+	"""What a pick left out means, which depends on the notes, so the schema says it in prose."""
+
+	def test_each_note_of_a_list_plays_the_next_rank (self, tmp_path: pathlib.Path) -> None:
+
+		"""Without a pick, the first note plays the best match and each after it the next."""
+
+		result = _load(tmp_path, _map(assignments=[_assignment(notes=[60, 61, 62])]))
+
+		ranks = [result.note_map[(0, note)][0][1] for note in (60, 61, 62)]
+
+		assert ranks == [subsample.query.PickSpec(rank, rank) for rank in (1, 2, 3)]
+
+	def test_a_repitched_list_plays_the_best_match_on_every_note (self, tmp_path: pathlib.Path) -> None:
+
+		"""Repitching plays one sound across the notes, so every note takes the best match."""
+
+		result = _load(tmp_path, _map(assignments=[
+			_assignment(notes=[60, 61, 62], process=[{"repitch": True}]),
+		]))
+
+		assert {result.note_map[(0, note)][0][1] for note in (60, 61, 62)} == {subsample.query.PickSpec(1, 1)}
+
+	def test_a_pick_the_map_writes_applies_to_every_note (self, tmp_path: pathlib.Path) -> None:
+
+		"""A written pick is not shared out: every note draws the same way."""
+
+		result = _load(tmp_path, _map(assignments=[
+			_assignment(notes=[60, 61], select={"where": {"pitched": True}, "pick": "any"}),
+		]))
+
+		assert {result.note_map[(0, note)][0][1] for note in (60, 61)} == {subsample.query.PickSpec(None, None)}
+
+	def test_the_schema_publishes_no_single_default_for_pick (self) -> None:
+
+		"""A default of the best match would be wrong for every note of a list but the first."""
+
+		assert "default" not in _at("/$defs/pick")
 
 
 class TestAnEmptyListIsRefusedWhereItCanOnlyBeAMistake:

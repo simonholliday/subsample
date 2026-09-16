@@ -391,6 +391,8 @@ def _mix () -> Parameter:
 		name="mix", forms=_NUMBER,
 		limit=_FRACTION, sweep=(0.0, 1.0),
 		default=1.0,
+		title="Mix",
+		description="The balance between the processed sound and the original. At 1 only the processed sound plays, and at 0 the processor has no effect.",
 	)
 
 
@@ -404,27 +406,38 @@ def _quantise_parameters () -> tuple[Parameter, ...]:
 			limit=Limit(exclusive_minimum=0.0), sweep=(60.0, 180.0),
 			automatic="tempo",
 			legacy_names=("bpm",),
+			title="Tempo",
+			description="The tempo the beat grid is laid out at. Left out, the session tempo, which follows MIDI clock when Subsample is set to.",
 		),
 		Parameter(
 			name="grid", forms=_INTEGER,
 			limit=Limit(minimum=1), sweep=(1, 32),
 			automatic="resolution",
+			title="Grid",
+			description="How many equal parts a whole note is divided into: 16 puts every hit on a sixteenth note. Left out, the quantise resolution Subsample is configured with.",
 		),
 		Parameter(
 			name="strength", forms=_NUMBER,
 			limit=_FRACTION, sweep=(0.0, 1.0),
 			default=1.0,
 			legacy_names=("amount",),
+			title="Strength",
+			description="How far each hit moves toward the grid. At 1 every hit lands on the grid, and lower values move each one partway, for a looser feel.",
 		),
 		Parameter(
 			name="segment", forms=("choice", "integer"),
-			choices=(Choice("round_robin"), Choice("random")),
+			choices=(
+				Choice("round_robin", "Round robin", "Each note plays the next hit in order, and starts again after the last."),
+				Choice("random", "Random", "Each note plays a hit chosen at random."),
+			),
 			limit=Limit(minimum=1),
+			title="Segment",
+			description="Plays one hit of the quantised sound per note instead of the whole sound: the next in turn, one at random, or always the same one, counted from 1. Left out, every note plays the whole sound.",
 		),
 	)
 
 
-def _filter_frequency (default: float) -> Parameter:
+def _filter_frequency (default: float, title: str, description: str) -> Parameter:
 
 	"""A filter's cutoff or centre frequency."""
 
@@ -432,17 +445,35 @@ def _filter_frequency (default: float) -> Parameter:
 		name="freq", forms=_NUMBER, unit="Hz",
 		limit=Limit(exclusive_minimum=1.0), sweep=(20.0, 20000.0), taper="log",
 		default=default,
+		title=title,
+		description=description,
 	)
 
 
-def _resonance () -> Parameter:
+def _resonance (description: str) -> Parameter:
 
-	"""The peak a filter adds at its cutoff."""
+	"""The peak a filter adds at its cutoff, or at its centre."""
 
 	return Parameter(
 		name="resonance", forms=_NUMBER, unit="dB",
 		limit=Limit(minimum=0.0, maximum=24.0), sweep=(0.0, 24.0),
 		default=0.0,
+		title="Resonance",
+		description=description,
+	)
+
+
+def _lookahead (default: typing.Optional[float], automatic: typing.Optional[str], sweep: tuple[float, float], description: str) -> Parameter:
+
+	"""How far ahead a dynamics processor looks, which delays the rendered sound by as much."""
+
+	return Parameter(
+		name="lookahead", forms=_NUMBER, unit="ms",
+		limit=_NOT_NEGATIVE, sweep=sweep,
+		default=default,
+		automatic=automatic,
+		title="Look-ahead",
+		description=description,
 	)
 
 
@@ -459,45 +490,80 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				name="note", forms=("integer", "note_name"),
 				limit=Limit(minimum=0, maximum=127),
 				automatic="note",
+				title="Note",
+				description="The note to shift the sound to. Left out, the note played, so the sound follows the keyboard.",
 			),
 		),
+		title="Repitch",
+		description="Shifts the sound to a note, from the pitch Subsample detected in it, without changing its length.",
 	),
 
 	Processor(
 		name="stretch_quantize",
 		parameters=_quantise_parameters(),
 		legacy_names=(LegacyName("beat_quantize"),),
+		title="Stretch quantise",
+		description="Moves each hit onto a beat grid by time-stretching the audio between hits, without changing its pitch.",
 	),
 
 	Processor(
 		name="pad_quantize",
 		parameters=_quantise_parameters(),
+		title="Pad quantise",
+		description="Moves each hit onto a beat grid by inserting silence between hits, so the audio keeps its own speed and timbre.",
 	),
 
 	Processor(
 		name="filter_low",
-		parameters=(_filter_frequency(16000.0), _resonance()),
+		parameters=(
+			_filter_frequency(
+				16000.0, "Cutoff",
+				"The frequency above which the filter rolls off.",
+			),
+			_resonance("A peak at the cutoff. At 0 the filter is flat, and higher values make the cutoff ring more."),
+		),
+		title="Low-pass filter",
+		description="Rolls off the frequencies above the cutoff, so the sound darkens as the cutoff comes down.",
 	),
 
 	Processor(
 		name="filter_high",
-		parameters=(_filter_frequency(80.0), _resonance()),
+		parameters=(
+			_filter_frequency(
+				80.0, "Cutoff",
+				"The frequency below which the filter rolls off.",
+			),
+			_resonance("A peak at the cutoff. At 0 the filter is flat, and higher values make the cutoff ring more."),
+		),
+		title="High-pass filter",
+		description="Rolls off the frequencies below the cutoff, so the sound thins as the cutoff goes up.",
 	),
 
 	Processor(
 		name="filter_band",
 		parameters=(
-			_filter_frequency(1000.0),
+			_filter_frequency(
+				1000.0, "Centre",
+				"The frequency at the centre of what the filter keeps.",
+			),
 			Parameter(
 				name="q", forms=_NUMBER,
 				limit=Limit(minimum=0.1, maximum=20.0), sweep=(0.5, 10.0), taper="log",
 				default=0.7,
+				title="Q",
+				description="How narrowly the filter keeps the frequencies around its centre. A lower Q keeps a wider range, and a higher Q a narrower one.",
 			),
-			_resonance(),
+			_resonance("A peak at the centre. At 0 the filter is flat, and higher values make the centre ring more."),
 		),
+		title="Band-pass filter",
+		description="Keeps the frequencies around its centre and rolls off those above and below.",
 	),
 
-	Processor(name="reverse"),
+	Processor(
+		name="reverse",
+		title="Reverse",
+		description="Plays the sound backwards.",
+	),
 
 	Processor(
 		name="saturate",
@@ -507,8 +573,12 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				limit=_NOT_NEGATIVE, sweep=(0.0, 24.0),
 				default=6.0,
 				legacy_names=("amount",),
+				title="Drive",
+				description="How hard the sound is pushed into the curve. At 0 the processor has no effect, and more drive gives more distortion.",
 			),
 		),
+		title="Saturation",
+		description="Rounds off the peaks with a soft curve for warmth, then restores the peak level, which also lifts the quieter parts.",
 	),
 
 	Processor(
@@ -518,38 +588,51 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				name="threshold", forms=_NUMBER, unit="dB",
 				sweep=(-60.0, 0.0),
 				automatic="sample",
+				title="Threshold",
+				description="The level above which the compressor turns the sound down, below full scale. Every sample is normalised before it is processed, so a threshold is the same depth below the peak for every sample. Left out, it sits a little below the sample's peak, so the compressor always acts.",
 			),
 			Parameter(
 				name="ratio", forms=_NUMBER,
 				limit=Limit(minimum=1.0), sweep=(1.0, 20.0), taper="log",
 				default=4.0,
+				title="Ratio",
+				description="How strongly the level is turned down above the threshold. At 1 there is no compression, and a higher ratio squashes harder.",
 			),
 			Parameter(
 				name="attack", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 100.0),
 				automatic="sample",
+				title="Attack",
+				description="How quickly the compressor acts once the sound passes the threshold. A slower attack lets the front of a hit through, for more punch. Left out, it follows the sample: slower for a percussive sound, faster for a gradual one.",
 			),
 			Parameter(
 				name="release", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 1000.0),
 				automatic="sample",
+				title="Release",
+				description="How quickly the compressor lets go once the sound falls back below the threshold. Left out, it follows the sample: shorter for a quick decay, longer for a sustained sound.",
 			),
 			Parameter(
 				name="knee", forms=_NUMBER, unit="dB",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 24.0),
 				default=6.0,
+				title="Knee",
+				description="How gradually compression begins around the threshold. At 0 it begins abruptly, and a wider knee eases it in.",
 			),
 			Parameter(
 				name="makeup", forms=_NUMBER, unit="dB",
 				sweep=(0.0, 24.0),
 				default=0.0,
+				title="Makeup gain",
+				description="Gain added after compression, to make up the level it took away.",
 			),
-			Parameter(
-				name="lookahead", forms=_NUMBER, unit="ms",
-				limit=_NOT_NEGATIVE, sweep=(0.0, 20.0),
-				default=0.0,
+			_lookahead(
+				0.0, None, (0.0, 20.0),
+				"How far ahead the compressor looks, so it acts before a peak arrives. The rendered sound starts this much later and loses as much from its end. At 0 there is no look-ahead.",
 			),
 		),
+		title="Compressor",
+		description="Turns the sound down whenever it rises above the threshold, evening out its level. Left without settings, the threshold, attack and release adapt to each sample.",
 	),
 
 	Processor(
@@ -559,18 +642,23 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				name="threshold", forms=_NUMBER, unit="dB",
 				sweep=(-24.0, 0.0),
 				default=-1.0,
+				title="Ceiling",
+				description="The highest level the sound may reach, below full scale.",
 			),
 			Parameter(
 				name="release", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 500.0),
 				default=50.0,
+				title="Release",
+				description="How quickly the limiter lets go after a peak.",
 			),
-			Parameter(
-				name="lookahead", forms=_NUMBER, unit="ms",
-				limit=_NOT_NEGATIVE, sweep=(0.0, 20.0),
-				default=5.0,
+			_lookahead(
+				5.0, None, (0.0, 20.0),
+				"How far ahead the limiter looks, so it catches a peak before it passes the ceiling. The rendered sound starts this much later and loses as much from its end. At 0 there is no look-ahead.",
 			),
 		),
+		title="Limiter",
+		description="Holds the sound below a ceiling, catching every peak that would pass it.",
 	),
 
 	Processor(
@@ -578,14 +666,21 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 		parameters=(
 			Parameter(
 				name="keep", forms=_CHOICE,
-				choices=(Choice("harmonic"), Choice("percussive")),
+				choices=(
+					Choice("harmonic", "Harmonic", "The sustained, tonal part, without the hits."),
+					Choice("percussive", "Percussive", "The hits and transients, without the sustained tone."),
+				),
 				required=True,
+				title="Keep",
+				description="Which part of the sound to keep.",
 			),
 		),
 		legacy_names=(
 			LegacyName("hpss_harmonic", implies={"keep": "harmonic"}),
 			LegacyName("hpss_percussive", implies={"keep": "percussive"}),
 		),
+		title="Harmonic and percussive split",
+		description="Separates the sound into its sustained, tonal part and its hits, and keeps one of them.",
 	),
 
 	Processor(
@@ -595,28 +690,37 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				name="threshold", forms=_NUMBER, unit="dB",
 				sweep=(-80.0, 0.0),
 				automatic="sample",
+				title="Threshold",
+				description="The level below which the gate closes, below full scale. Left out, it sits a little above the sample's noise floor.",
 			),
 			Parameter(
 				name="attack", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 50.0),
 				automatic="sample",
+				title="Attack",
+				description="How quickly the gate opens once the sound rises past the threshold. Left out, it follows the sample: fast for a percussive sound, slower for a sustained one, which avoids a click.",
 			),
 			Parameter(
 				name="release", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 500.0),
 				automatic="sample",
+				title="Release",
+				description="How quickly the gate closes once the sound falls below the threshold. Left out, it follows the sample: short for a percussive sound, long for a sustained one.",
 			),
 			Parameter(
 				name="hold", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 500.0),
 				automatic="sample",
+				title="Hold",
+				description="How long the gate stays open after the sound falls below the threshold, so a decaying tail does not chatter. Left out, it follows the sample's decay.",
 			),
-			Parameter(
-				name="lookahead", forms=_NUMBER, unit="ms",
-				limit=_NOT_NEGATIVE, sweep=(0.0, 20.0),
-				automatic="sample",
+			_lookahead(
+				None, "sample", (0.0, 20.0),
+				"How far ahead the gate looks, so it opens before a hit arrives. The rendered sound starts this much later and loses as much from its end. Left out, it follows the sample: a little for a percussive sound, none for a sustained one.",
 			),
 		),
+		title="Noise gate",
+		description="Silences the sound whenever it falls below the threshold, cutting the noise between and after hits. Left without settings, every value adapts to each sample.",
 	),
 
 	Processor(
@@ -624,18 +728,29 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 		parameters=(
 			Parameter(
 				name="mode", forms=_CHOICE,
-				choices=(Choice("hard_clip"), Choice("fold"), Choice("bit_crush"), Choice("downsample")),
+				choices=(
+					Choice("hard_clip", "Hard clip", "Flattens every peak at full scale, as an overdriven digital input does."),
+					Choice("fold", "Fold", "Folds each peak back on itself past full scale, for brighter harmonics than clipping gives."),
+					Choice("bit_crush", "Bit crush", "Snaps the driven sound to fewer amplitude levels, for lo-fi grit."),
+					Choice("downsample", "Downsample", "Keeps one frame in every few and repeats it, lowering the effective sample rate and adding aliasing."),
+				),
 				default="hard_clip",
+				title="Mode",
+				description="The shape the waveshaper gives the sound.",
 			),
 			Parameter(
 				name="drive", forms=_NUMBER, unit="dB",
 				sweep=(0.0, 36.0),
 				automatic="sample",
+				title="Drive",
+				description="Gain before the waveshaper: more drive, more distortion. Left out, it follows the sample's crest factor, so a peaky sound is driven less.",
 			),
 			Parameter(
 				name="tone", forms=_NUMBER,
 				limit=_FRACTION, sweep=(0.0, 1.0),
 				automatic="sample",
+				title="Tone",
+				description="A low-pass filter after the waveshaper, which tames the harmonics it adds. At 1 the sound passes unfiltered, and lower values darken it. Left out, it follows the sample's brightness.",
 			),
 			_mix(),
 			Parameter(
@@ -643,14 +758,20 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				limit=Limit(minimum=1, maximum=16), sweep=(1, 16),
 				default=8,
 				applies_when=({"mode": ("bit_crush",)},),
+				title="Bit depth",
+				description="How many bits `bit_crush` keeps. Fewer bits sound coarser and grittier.",
 			),
 			Parameter(
 				name="downsample_factor", forms=_INTEGER,
 				limit=Limit(minimum=2, maximum=64), sweep=(2, 64), taper="log",
 				default=4,
 				applies_when=({"mode": ("downsample",)},),
+				title="Downsample factor",
+				description="How many frames each kept frame fills in `downsample` mode. A higher factor gives a lower effective sample rate.",
 			),
 		),
+		title="Distortion",
+		description="Pushes the sound into a waveshaper, then restores its peak level. Left without settings, the drive and the tone adapt to each sample: a peaky sound is driven less, and a bright one is darkened more.",
 	),
 
 	Processor(
@@ -661,13 +782,23 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				name="bits", forms=_INTEGER,
 				limit=Limit(minimum=1, maximum=16), sweep=(1, 16),
 				default=12,
+				title="Bits",
+				description="How many bits the sound is stored in. Fewer bits sound coarser and grittier.",
 			),
 			Parameter(
 				name="dither", forms=("boolean", "choice"),
-				choices=(Choice("none"), Choice("triangular"), Choice("rectangular")),
+				choices=(
+					Choice("none", "None", "No dither: quiet passages and tails break up into grit, as they do on vintage converters."),
+					Choice("triangular", "Triangular", "The standard dither: the grit becomes a steady hiss that does not follow the sound."),
+					Choice("rectangular", "Rectangular", "A little less hiss than triangular, with some of the hiss still rising and falling with the sound."),
+				),
 				default="none",
+				title="Dither",
+				description="Noise added before the sound is requantised, which trades the grit in quiet passages for a steady hiss, over silence too. `true` is `triangular`, and `false` is `none`.",
 			),
 		),
+		title="Bit depth",
+		description="Requantises the sound to fewer bits, for the grit of a vintage sampler's converter. It adds no drive, filtering or change of level.",
 	),
 
 	Processor(
@@ -675,13 +806,27 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 		parameters=(
 			Parameter(
 				name="mode", forms=_CHOICE,
-				choices=(Choice("am"), Choice("lw"), Choice("fm"), Choice("ssb")),
+				choices=(
+					Choice("am", "AM", "Amplitude modulation, the cleanest round trip of the four."),
+					Choice("lw", "Longwave", "Amplitude modulation through a steep, narrow longwave filter, which takes away more of the top end."),
+					Choice("fm", "FM", "Narrowband frequency modulation, as a two-way radio sends it."),
+					Choice("ssb", "SSB", "Single sideband: a voice sent without its carrier, which sounds garbled when the receiver is mistuned."),
+				),
 				default="am",
+				title="Transmission",
+				description="How the sound is sent.",
 			),
 			Parameter(
 				name="demod", forms=_CHOICE,
-				choices=(Choice("matched"), Choice("am"), Choice("fm"), Choice("ssb")),
+				choices=(
+					Choice("matched", "Matched", "The receiver that suits the transmission."),
+					Choice("am", "AM", "An AM receiver, whatever was sent. AM and FM received as each other give harsh noise."),
+					Choice("fm", "FM", "An FM receiver, whatever was sent. AM and FM received as each other give harsh noise."),
+					Choice("ssb", "SSB", "An SSB receiver, whatever was sent. FM received this way gives a musical warble."),
+				),
 				default="matched",
+				title="Reception",
+				description="How the sound is received, which may be deliberately wrong for how it was sent.",
 			),
 			Parameter(
 				name="tune", forms=_NUMBER, unit="Hz",
@@ -691,21 +836,29 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				# the sound when the receiver demodulates as SSB: named outright,
 				# or matched to an SSB transmission.
 				applies_when=({"demod": ("ssb",)}, {"mode": ("ssb",), "demod": ("matched",)}),
+				title="Tuning",
+				description="How far the receiver is tuned off the station. A mistuned SSB voice sounds high or low and garbled.",
 			),
 			Parameter(
 				name="signal", forms=_NUMBER,
 				limit=_FRACTION, sweep=(0.0, 1.0),
 				default=0.0,
+				title="Weak signal",
+				description="How weak the station is: more hiss, clicks on FM, and the receiver's gain swelling as the signal fades. At 0 the signal is strong.",
 			),
 			Parameter(
 				name="static", forms=_NUMBER,
 				limit=_FRACTION, sweep=(0.0, 1.0),
 				default=0.0,
+				title="Static",
+				description="How much atmospheric crackle breaks in. At 0 there is none.",
 			),
 			Parameter(
 				name="fade", forms=_NUMBER,
 				limit=_FRACTION, sweep=(0.0, 1.0),
 				default=0.0,
+				title="Fading",
+				description="How deeply the signal swims in and out, as a distant shortwave station does. At 0 it holds steady.",
 			),
 			Parameter(
 				name="bandwidth", forms=_NUMBER, unit="Hz",
@@ -715,14 +868,23 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				limits_when=(LimitWhen(when={"mode": ("fm", "ssb")}, limit=Limit(exclusive_minimum=300.0)),),
 				sweep=(500.0, 8000.0), taper="log",
 				automatic="mode",
+				title="Bandwidth",
+				description="How wide a range of audio frequencies the radio path passes. A narrower bandwidth sounds more muffled. Left out, each transmission uses its own.",
 			),
 			Parameter(
 				name="stereo", forms=_CHOICE,
-				choices=(Choice("mono"), Choice("stereo")),
+				choices=(
+					Choice("mono", "Mono", "One receiver, so the sound collapses to mono, as a real radio does."),
+					Choice("stereo", "Stereo", "A receiver for each audio channel, with its own hiss and the same crackle."),
+				),
 				default="mono",
+				title="Receivers",
+				description="Whether the sound is received once, or once for each audio channel.",
 			),
 			_mix(),
 		),
+		title="Radio",
+		description="Sends the sound over a radio link and receives it again: modulated, weakened by noise and fading on the way, and demodulated, rightly or deliberately wrongly.",
 	),
 
 	Processor(
@@ -733,9 +895,13 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				name="shift_hz", forms=_NUMBER, unit="Hz",
 				sweep=(-2000.0, 2000.0),
 				default=0.0,
+				title="Shift",
+				description="How far every partial moves. A negative shift moves them down.",
 			),
 			_mix(),
 		),
+		title="Frequency shift",
+		description="Adds the same number of hertz to every partial, which breaks the ratios between harmonics: a small shift detunes and phases, and a large one sounds clangorous and metallic. It is not a pitch shift.",
 	),
 
 	Processor(
@@ -746,19 +912,27 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				name="depth", forms=_NUMBER, unit="Hz",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 50.0),
 				default=5.0,
+				title="Depth",
+				description="How far the tuning drifts either side of its centre.",
 			),
 			Parameter(
 				name="rate", forms=_NUMBER, unit="Hz",
 				limit=Limit(exclusive_minimum=0.0), sweep=(0.05, 10.0), taper="log",
 				default=0.3,
+				title="Rate",
+				description="How fast the tuning drifts back and forth.",
 			),
 			Parameter(
 				name="base", forms=_NUMBER, unit="Hz",
 				sweep=(-100.0, 100.0),
 				default=0.0,
+				title="Offset",
+				description="A constant shift that the drift rides on.",
 			),
 			_mix(),
 		),
+		title="Wobble",
+		description="A slow, continuous drift of the tuning, like an unsteady oscillator.",
 	),
 
 	Processor(
@@ -768,28 +942,40 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				name="attack", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 100.0),
 				automatic="sample",
+				title="Attack",
+				description="How long the sound takes to reach its peak. Left out, the sample's own attack is kept.",
 			),
 			Parameter(
 				name="hold", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 500.0),
 				default=0.0,
+				title="Hold",
+				description="How long the sound stays at its peak before it decays.",
 			),
 			Parameter(
 				name="decay", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 1000.0),
 				automatic="sample",
+				title="Decay",
+				description="How long the sound takes to fall from its peak to the sustain level. Left out, the sample's own decay is kept.",
 			),
 			Parameter(
 				name="sustain", forms=_NUMBER,
 				limit=_FRACTION, sweep=(0.0, 1.0),
 				default=1.0,
+				title="Sustain",
+				description="The level the sound settles at after its decay, as a share of its peak. At 1 it stays at the peak.",
 			),
 			Parameter(
 				name="release", forms=_NUMBER, unit="ms",
 				limit=_NOT_NEGATIVE, sweep=(0.0, 2000.0),
 				automatic="sample",
+				title="Release",
+				description="How long the sound takes to fade out at its end. Left out, it follows the sample's decay, which tightens the tail.",
 			),
 		),
+		title="Envelope",
+		description="Reshapes how the sound's level moves over time: tighten a loose kick, cut a reverb tail short, or give a soft onset more punch. Left without settings, it tightens the tail to suit the sample.",
 	),
 
 	Processor(
@@ -800,8 +986,12 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				sweep=(-12.0, 12.0),
 				automatic="sample",
 				legacy_names=("amount",),
+				title="Gain",
+				description="How far the hits are turned up, or down where the gain is negative. Left out, it follows the sample's crest factor, so a peaky sound is tamed and a dull one enhanced.",
 			),
 		),
+		title="Transient shaper",
+		description="Turns the hits in the sound up or down against its sustained part, then restores the peak level.",
 	),
 
 	Processor(
@@ -809,25 +999,37 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 		parameters=(
 			Parameter(
 				name="carrier", forms=("choice", "path"),
-				choices=(Choice("reference"),),
+				choices=(
+					Choice("reference", "Reference", "The reference sample for the note played."),
+				),
 				required=True,
+				title="Carrier",
+				description="The sound the vocoder shapes: `reference`, or the path to an audio file.",
 			),
 			Parameter(
 				name="bands", forms=_INTEGER,
 				limit=Limit(minimum=1), sweep=(4, 48),
 				default=24,
+				title="Spectral bands",
+				description="How many spectral bands the vocoder divides the sound into. Fewer sound more robotic, and more sound more natural.",
 			),
 			Parameter(
 				name="depth", forms=_NUMBER,
 				limit=_FRACTION, sweep=(0.0, 1.0),
 				default=1.0,
+				title="Depth",
+				description="The balance between the vocoded sound and the original. At 1 only the vocoded sound plays, and at 0 the vocoder has no effect.",
 			),
 			Parameter(
 				name="formant_shift", forms=_INTEGER, unit="semitones",
 				sweep=(-12, 12),
 				default=0,
+				title="Formant shift",
+				description="Moves the carrier's spectral bands up or down against the sound's own, which changes the apparent size of a voice.",
 			),
 		),
+		title="Vocoder",
+		description="Imposes the sound's changing spectrum on a carrier, so the carrier takes on the sound's rhythm and articulation.",
 	),
 )
 

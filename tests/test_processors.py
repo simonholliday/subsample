@@ -313,6 +313,85 @@ class TestDeclarationAgreesWithItself:
 					assert word in processor.parameter(name).choice_values
 
 
+def _prose () -> list[typing.Any]:
+
+	"""Every title and description the declaration publishes, named by where it sits."""
+
+	cases = []
+
+	for processor in _PROCESSORS.values():
+		cases.append(pytest.param(processor.title, processor.description, None, id=processor.name))
+
+		for parameter in processor.parameters:
+			cases.append(pytest.param(
+				parameter.title, parameter.description, parameter.unit,
+				id=f"{processor.name}.{parameter.name}",
+			))
+
+			for choice in parameter.choices:
+				cases.append(pytest.param(
+					choice.title, choice.description, None,
+					id=f"{processor.name}.{parameter.name}.{choice.value}",
+				))
+
+	return cases
+
+
+class TestProseIsWritten:
+
+	"""The titles and descriptions subsystem.co publishes and Superconductor labels its controls with."""
+
+	@pytest.mark.parametrize(("title", "description", "unit"), _prose())
+	def test_every_term_has_a_title_and_a_description (
+		self, title: str, description: str, unit: typing.Optional[str],
+	) -> None:
+
+		"""A reference entry and a control's label both need words to show."""
+
+		assert title.strip()
+		assert description.strip()
+
+	@pytest.mark.parametrize(("title", "description", "unit"), _prose())
+	def test_a_title_is_a_label_in_sentence_case (
+		self, title: str, description: str, unit: typing.Optional[str],
+	) -> None:
+
+		"""A title starts with a capital and is a label, not a sentence."""
+
+		assert title[0].isupper()
+		assert not title.endswith(".")
+
+	@pytest.mark.parametrize(("title", "description", "unit"), _prose())
+	def test_a_description_is_whole_sentences (
+		self, title: str, description: str, unit: typing.Optional[str],
+	) -> None:
+
+		"""A description starts a sentence and ends one, so it reads alone at its anchor."""
+
+		assert description[0].isupper() or description.startswith("`")
+		assert description.endswith(".")
+
+	@pytest.mark.parametrize(("title", "description", "unit"), _prose())
+	def test_prose_never_carries_an_em_dash (
+		self, title: str, description: str, unit: typing.Optional[str],
+	) -> None:
+
+		"""subsystem.co refuses to publish an em dash."""
+
+		assert "\u2014" not in title
+		assert "\u2014" not in description
+
+	@pytest.mark.parametrize(("title", "description", "unit"), _prose())
+	def test_a_description_leaves_the_unit_to_the_declaration (
+		self, title: str, description: str, unit: typing.Optional[str],
+	) -> None:
+
+		"""The unit is published beside the description, so the prose does not repeat it."""
+
+		if unit is not None:
+			assert unit not in description.split()
+
+
 class TestDefaultsAgreeWithTheCompiler:
 
 	_FIXED, _FIXED_IDS = _parameters_where(lambda parameter: parameter.default is not None)
