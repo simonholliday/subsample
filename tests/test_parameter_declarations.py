@@ -208,7 +208,7 @@ class TestDeclarationAgreesWithReaders:
 
 		"""A scorer's declared parameters name a scorer an order entry can use."""
 
-		assert set(subsample.query.SCORER_PARAMETERS) <= subsample.query._valid_order_names()
+		assert set(subsample.query.SCORER_PARAMETERS) <= set(subsample.query.valid_order_names())
 
 
 class TestProcessorParameters:

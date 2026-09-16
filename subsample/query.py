@@ -199,12 +199,12 @@ _NUMERIC_FIELDS: tuple[str, ...] = (
 	"duration", "duration_beats", "onsets", "tempo", "pitch_hz", "quantized_beats",
 )
 
-_VALID_OPERATORS: frozenset[str] = frozenset({"gte", "lte", "gt", "lt", "eq"})
+VALID_OPERATORS: typing.Final[tuple[str, ...]] = ("gte", "lte", "gt", "lt", "eq")
 
 # Operators accepted under the dict form of `where.name:` (matches: glob,
-# regex: re-module pattern).  Parallel to _VALID_OPERATORS, kept separate
+# regex: re-module pattern).  Parallel to VALID_OPERATORS, kept separate
 # because the name predicate's value space is strings, not numbers.
-_VALID_NAME_OPERATORS: frozenset[str] = frozenset({"matches", "regex"})
+VALID_NAME_OPERATORS: typing.Final[tuple[str, ...]] = ("matches", "regex")
 
 
 # Strict-mode flag.  When True (default), unknown keys in `where:` and
@@ -264,7 +264,7 @@ _VALID_PROCESSOR_NAMES: frozenset[str] = frozenset(PROCESSOR_PARAMETERS) | _LEGA
 # Keys a CC binding accepts, wherever a processor parameter is given as
 # `{cc: 74, min: 200, max: 16000}` instead of a fixed value.  A release time's
 # binding accepts the same keys and `curve` (player._RELEASE_CC_SHORTHAND_KEYS).
-CC_BINDING_KEYS: typing.Final[frozenset[str]] = frozenset({"cc", "channel", "min", "max", "default"})
+CC_BINDING_KEYS: typing.Final[tuple[str, ...]] = ("cc", "channel", "min", "max", "default")
 
 
 # Processors that accept a bare scalar value as shorthand for their single
@@ -320,17 +320,17 @@ def _legacy_name_parameters (name: str) -> tuple[tuple[str, str], ...]:
 # Non-range where-predicate keys.  Numeric keys (new-form + legacy) are
 # defined later in the file; _valid_where_keys() combines both into one
 # frozenset at call time.
-_NON_RANGE_WHERE_KEYS: frozenset[str] = frozenset(
-	{"pitched", "loopable", "reference", "name", "path", "directory"}
+NON_RANGE_WHERE_KEYS: typing.Final[tuple[str, ...]] = (
+	"name", "path", "directory", "reference", "pitched", "loopable",
 )
 
 
 def _valid_where_keys () -> frozenset[str]:
 	"""All accepted keys inside a `where:` block, including legacy aliases."""
 	return frozenset(
-		_NON_RANGE_WHERE_KEYS
-		| _NUMERIC_YAML_KEYS.keys()
-		| _LEGACY_WHERE_KEYS.keys()
+		set(NON_RANGE_WHERE_KEYS)
+		| NUMERIC_YAML_KEYS.keys()
+		| LEGACY_WHERE_KEYS.keys()
 	)
 
 
@@ -516,7 +516,7 @@ class WherePredicate:
 
 # Legacy ``min_X:`` / ``max_X:`` YAML keys translate into (field, operator)
 # pairs.  Kept indefinitely so existing YAML keeps working; not deprecated.
-_LEGACY_WHERE_KEYS: dict[str, tuple[str, str]] = {
+LEGACY_WHERE_KEYS: typing.Final[dict[str, tuple[str, str]]] = {
 	"min_duration":        ("duration",        "gte"),
 	"max_duration":        ("duration",        "lte"),
 	"min_onsets":          ("onsets",          "gte"),
@@ -533,7 +533,7 @@ _LEGACY_WHERE_KEYS: dict[str, tuple[str, str]] = {
 # YAML keys for the numeric fields — the preferred new-form names.  pitch
 # in YAML maps to the internal pitch_hz attribute (the _hz suffix makes
 # units explicit in Python, awkward in user-facing YAML).
-_NUMERIC_YAML_KEYS: dict[str, str] = {
+NUMERIC_YAML_KEYS: typing.Final[dict[str, str]] = {
 	"duration":        "duration",
 	"duration_beats":  "duration_beats",
 	"onsets":          "onsets",
@@ -758,7 +758,7 @@ parameter nobody reads."""
 # Legacy bare-string tokens translate into a single-clause order tuple.  The
 # table keeps old YAML files working indefinitely; parse_select accepts these
 # verbatim and converts them to OrderClause instances before query().
-_LEGACY_ORDER_TOKENS: dict[str, "OrderClause"] = {}   # populated after OrderClause is defined
+LEGACY_ORDER_TOKENS: typing.Final[dict[str, "OrderClause"]] = {}   # populated after OrderClause is defined
 
 
 
@@ -784,7 +784,7 @@ class OrderClause:
 
 
 # Populate legacy token translations now that OrderClause exists.
-_LEGACY_ORDER_TOKENS.update({
+LEGACY_ORDER_TOKENS.update({
 	"newest":               OrderClause(by="age",             dir="desc"),
 	"oldest":               OrderClause(by="age",             dir="asc"),
 	"duration_asc":         OrderClause(by="duration",        dir="asc"),
@@ -803,13 +803,13 @@ _LEGACY_ORDER_TOKENS.update({
 })
 
 
-def _valid_order_names () -> frozenset[str]:
+def valid_order_names () -> tuple[str, ...]:
 
 	"""Return the current set of valid ``by`` names — the registered
 	scorers plus the special ``"similarity"`` token (handled as a fast
 	path in query())."""
 
-	return frozenset(_SCORERS.keys() | {"similarity"})
+	return (*_SCORERS, "similarity")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -950,13 +950,13 @@ class PickSpec:
 # timbres; "exponential" is convex, the mirror image (finer resolution among the
 # loud samples); "linear" is the identity.  The two curved forms are exact
 # inverses of one another.
-VALID_PICK_CURVES: frozenset[str] = frozenset({"linear", "logarithmic", "exponential"})
+VALID_PICK_CURVES: typing.Final[tuple[str, ...]] = ("linear", "logarithmic", "exponential")
 
 # Velocity-pick spacing (PickSpec.spacing) — how the ranked pool is laid out
 # along the velocity axis.  "rank" spreads samples evenly by sort position;
 # "loudness" places each at its normalised level so the layout follows the
 # pool's real dynamics (see PickSpec and resolve_index).
-VALID_PICK_SPACINGS: frozenset[str] = frozenset({"rank", "loudness"})
+VALID_PICK_SPACINGS: typing.Final[tuple[str, ...]] = ("rank", "loudness")
 
 
 def _apply_pick_curve (curve: str, x: float) -> float:
@@ -1007,6 +1007,15 @@ class PanSpec:
 		"""
 
 		return random.uniform(self.lo, self.hi)
+
+
+BEAT_ALIGNING_PROCESSORS: typing.Final[tuple[str, ...]] = ("stretch_quantize", "pad_quantize")
+"""The processors that align a sample to the beat.  A chain may carry one of
+them at most: two would fight over the tempo and grid at trigger time."""
+
+
+VALID_SELECT_KEYS: typing.Final[tuple[str, ...]] = ("where", "order", "order_by", "pick")
+"""Every key a ``select:`` block may carry.  ``order_by`` is the older spelling of ``order``."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1069,9 +1078,9 @@ def select_uses_variant_state (select_specs: tuple[SelectSpec, ...]) -> bool:
 # The named first/zero-order microphone-pattern extractions.  ``channel`` is
 # the literal index escape hatch and is *not* a member of this set — it has
 # its own dataclass field.
-EXTRACT_KINDS: typing.Final[frozenset[str]] = frozenset({
+EXTRACT_KINDS: typing.Final[tuple[str, ...]] = (
 	"omni", "side", "depth", "height", "left", "right", "front", "back",
-})
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1187,7 +1196,7 @@ class CcBinding:
 # Release-fade shapes accepted by ReleaseSpec.curve.  cosine = the smooth
 # raised-cosine declick the player has always used; exponential = a fast
 # initial drop with a long tail (natural, damped-string decay).
-VALID_RELEASE_CURVES: frozenset[str] = frozenset({"cosine", "exponential"})
+VALID_RELEASE_CURVES: typing.Final[tuple[str, ...]] = ("cosine", "exponential")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1257,7 +1266,7 @@ class ProcessSpec:
 # Playback mode + loop override
 # ---------------------------------------------------------------------------
 
-VALID_MODES: frozenset[str] = frozenset({"one_shot", "gated", "loop"})
+VALID_MODES: typing.Final[tuple[str, ...]] = ("one_shot", "gated", "loop")
 """Assignment playback modes:
 one_shot — plays to the sample's natural end and ignores note-off (default).
 gated    — note-off releases the voice (the old ``one_shot: false``).
@@ -1489,7 +1498,7 @@ def query (
 		return result
 
 	# General path: validate scorer names, filter, compose multi-key sort.
-	valid_names = _valid_order_names()
+	valid_names = valid_order_names()
 	for clause in clauses:
 		if clause.by not in valid_names:
 			raise ValueError(
@@ -1620,7 +1629,7 @@ def _parse_name_operator_dict (
 	Validates:
 	  - Exactly one operator key (multiple operators would conflict and
 	    aren't meaningfully combinable for this predicate).
-	  - Operator key in ``_VALID_NAME_OPERATORS``.
+	  - Operator key in ``VALID_NAME_OPERATORS``.
 	  - Operator value is a non-empty string.
 	  - Pattern is not path-like (patterns match the stem only).
 	  - For ``regex:``, the pattern compiles (surfaces syntax errors at
@@ -1631,7 +1640,7 @@ def _parse_name_operator_dict (
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: 'name' dict must "
 			f"contain exactly one operator "
-			f"({', '.join(sorted(_VALID_NAME_OPERATORS))})"
+			f"({', '.join(sorted(VALID_NAME_OPERATORS))})"
 		)
 
 	if len(value) > 1:
@@ -1644,11 +1653,11 @@ def _parse_name_operator_dict (
 
 	op, op_value = next(iter(value.items()))
 
-	if op not in _VALID_NAME_OPERATORS:
+	if op not in VALID_NAME_OPERATORS:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: unknown operator "
 			f"{op!r} under 'name'.  Valid operators: "
-			f"{', '.join(sorted(_VALID_NAME_OPERATORS))}"
+			f"{', '.join(sorted(VALID_NAME_OPERATORS))}"
 		)
 
 	if not isinstance(op_value, str):
@@ -1761,8 +1770,8 @@ def _parse_where (
 	for key, value in raw.items():
 
 		# Legacy min_X / max_X keys: translate to (field, operator).
-		if key in _LEGACY_WHERE_KEYS:
-			field, op = _LEGACY_WHERE_KEYS[key]
+		if key in LEGACY_WHERE_KEYS:
+			field, op = LEGACY_WHERE_KEYS[key]
 			if field in touched_by_new:
 				raise ValueError(
 					f"MIDI map assignment {assignment_name!r}: field "
@@ -1776,11 +1785,11 @@ def _parse_where (
 			continue
 
 		# New-form numeric field: duration / onsets / tempo / pitch / quantized_beats.
-		if key in _NUMERIC_YAML_KEYS:
-			field = _NUMERIC_YAML_KEYS[key]
+		if key in NUMERIC_YAML_KEYS:
+			field = NUMERIC_YAML_KEYS[key]
 			if field in touched_by_legacy:
 				legacy_pair = [
-					k for k, (f, _) in _LEGACY_WHERE_KEYS.items() if f == field
+					k for k, (f, _) in LEGACY_WHERE_KEYS.items() if f == field
 				]
 				raise ValueError(
 					f"MIDI map assignment {assignment_name!r}: field "
@@ -1797,15 +1806,15 @@ def _parse_where (
 					raise ValueError(
 						f"MIDI map assignment {assignment_name!r}: {key!r} has an "
 						f"empty operator block — give at least one of "
-						f"{', '.join(sorted(_VALID_OPERATORS))}, or a scalar for eq."
+						f"{', '.join(sorted(VALID_OPERATORS))}, or a scalar for eq."
 					)
 				for op, op_value in value.items():
-					if op not in _VALID_OPERATORS:
+					if op not in VALID_OPERATORS:
 						raise ValueError(
 							f"MIDI map assignment {assignment_name!r}: "
 							f"unknown operator {op!r} under {key!r}.  "
 							f"Valid operators: "
-							f"{', '.join(sorted(_VALID_OPERATORS))}"
+							f"{', '.join(sorted(VALID_OPERATORS))}"
 						)
 					range_kwargs[field][op] = _coerce_range_value(
 						field, f"{key}.{op}", op_value, assignment_name,
@@ -1973,7 +1982,7 @@ def _parse_order_clause (
 
 	Accepts:
 	  - A bare string (legacy token: ``duration_desc``, ``loudest``, …)
-	    translated via _LEGACY_ORDER_TOKENS.
+	    translated via LEGACY_ORDER_TOKENS.
 	  - A mapping with ``by`` (required), ``dir`` (optional — defaults to
 	    "desc" (best match first) for the match-quality scorers
 	    ``similarity``/``beat_match``, "asc" for everything else), and any
@@ -1981,11 +1990,11 @@ def _parse_order_clause (
 	"""
 
 	if isinstance(raw, str):
-		clause = _LEGACY_ORDER_TOKENS.get(raw)
+		clause = LEGACY_ORDER_TOKENS.get(raw)
 		if clause is None:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: unknown order token "
-				f"{raw!r}.  Valid legacy tokens: {', '.join(sorted(_LEGACY_ORDER_TOKENS))}"
+				f"{raw!r}.  Valid legacy tokens: {', '.join(sorted(LEGACY_ORDER_TOKENS))}"
 			)
 		return clause
 
@@ -2146,9 +2155,9 @@ def _parse_order (
 	)
 
 
-_VALID_PICK_OPERATORS: typing.Final[frozenset[str]] = frozenset({"gte", "lte", "gt", "lt", "eq"})
+VALID_PICK_OPERATORS: typing.Final[tuple[str, ...]] = ("gte", "lte", "gt", "lt", "eq")
 
-_VALID_VELOCITY_PICK_KEYS: typing.Final[frozenset[str]] = frozenset({"mode", "variation", "curve", "spacing"})
+VALID_VELOCITY_PICK_KEYS: typing.Final[tuple[str, ...]] = ("mode", "variation", "curve", "spacing")
 
 
 def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> PickSpec:
@@ -2163,20 +2172,20 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 	pool and the existing _ranks_for formula already spans every rank.
 	"""
 
-	unknown = set(raw.keys()) - _VALID_VELOCITY_PICK_KEYS
+	unknown = set(raw.keys()).difference(VALID_VELOCITY_PICK_KEYS)
 
 	if unknown and _STRICT_MODE:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: unknown 'pick' key(s) "
 			f"{sorted(unknown)} for a velocity pick.  Valid keys: "
-			f"{', '.join(sorted(_VALID_VELOCITY_PICK_KEYS))}"
+			f"{', '.join(sorted(VALID_VELOCITY_PICK_KEYS))}"
 		)
 	elif unknown:
 		_log.warning(
 			"MIDI map assignment %r: unknown velocity 'pick' key(s) %s ignored — "
 			"valid keys: %s",
 			assignment_name, sorted(unknown),
-			", ".join(sorted(_VALID_VELOCITY_PICK_KEYS)),
+			", ".join(sorted(VALID_VELOCITY_PICK_KEYS)),
 		)
 
 	mode = str(raw.get("mode", "")).strip().lower()
@@ -2312,20 +2321,20 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 		if "mode" in raw:
 			return _parse_velocity_pick(raw, assignment_name)
 
-		unknown = set(raw.keys()) - _VALID_PICK_OPERATORS
+		unknown = set(raw.keys()).difference(VALID_PICK_OPERATORS)
 
 		if unknown and _STRICT_MODE:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: unknown 'pick' "
 				f"operator(s) {sorted(unknown)}.  Valid operators: "
-				f"{', '.join(sorted(_VALID_PICK_OPERATORS))}"
+				f"{', '.join(sorted(VALID_PICK_OPERATORS))}"
 			)
 		elif unknown:
 			_log.warning(
 				"MIDI map assignment %r: unknown 'pick' operator(s) %s ignored — "
 				"valid operators: %s",
 				assignment_name, sorted(unknown),
-				", ".join(sorted(_VALID_PICK_OPERATORS)),
+				", ".join(sorted(VALID_PICK_OPERATORS)),
 			)
 
 		# eq pins both bounds; other operators define lo (gte/gt) and hi (lte/lt).
@@ -2343,7 +2352,7 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: 'pick' dict must "
 				f"include at least one of "
-				f"{', '.join(sorted(_VALID_PICK_OPERATORS))}; got {raw!r}"
+				f"{', '.join(sorted(VALID_PICK_OPERATORS))}; got {raw!r}"
 			)
 
 		# Conflicting operator combinations must not be silently resolved by
@@ -2435,7 +2444,7 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 # Random-pan mapping keys: the two range operators plus the position/variation
 # sugar.  gt/lt/eq are deliberately absent — on a continuous position axis they
 # add nothing over gte/lte.
-_VALID_PAN_KEYS: typing.Final[frozenset[str]] = frozenset({"gte", "lte", "position", "variation"})
+VALID_PAN_KEYS: typing.Final[tuple[str, ...]] = ("gte", "lte", "position", "variation")
 
 
 def _pan_number (value: typing.Any, key: str, assignment_name: str) -> float:
@@ -2490,18 +2499,18 @@ def parse_pan_spec (raw: typing.Any, assignment_name: str) -> PanSpec:
 			f"a mapping (got {type(raw).__name__})"
 		)
 
-	unknown = set(raw.keys()) - _VALID_PAN_KEYS
+	unknown = set(raw.keys()).difference(VALID_PAN_KEYS)
 
 	if unknown and _STRICT_MODE:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: unknown random-pan key(s) "
-			f"{sorted(unknown)}.  Valid keys: {', '.join(sorted(_VALID_PAN_KEYS))}"
+			f"{sorted(unknown)}.  Valid keys: {', '.join(sorted(VALID_PAN_KEYS))}"
 		)
 	elif unknown:
 		_log.warning(
 			"MIDI map assignment %r: unknown random-pan key(s) %s ignored — valid "
 			"keys: %s",
-			assignment_name, sorted(unknown), ", ".join(sorted(_VALID_PAN_KEYS)),
+			assignment_name, sorted(unknown), ", ".join(sorted(VALID_PAN_KEYS)),
 		)
 
 	# The range operators and the position/variation sugar are two ways to say
@@ -2598,7 +2607,7 @@ def _parse_select_spec (
 	SelectSpec.  Within either key, both bare-string tokens
 	(``duration_desc``) and structured clauses (``{by: duration, dir:
 	desc}``) are accepted — the parser converts legacy tokens to
-	OrderClause via _LEGACY_ORDER_TOKENS.
+	OrderClause via LEGACY_ORDER_TOKENS.
 
 	Args:
 		raw:             The raw YAML value of the 'select' entry.
@@ -2616,7 +2625,7 @@ def _parse_select_spec (
 	# filter directly under `select:` (e.g. `directory:`) instead of under
 	# `where:` — which parses to an EMPTY predicate that matches the whole
 	# library.  Every other tier has this guard; the select block must too.
-	unknown = set(raw) - {"where", "order", "order_by", "pick"}
+	unknown = set(raw).difference(VALID_SELECT_KEYS)
 
 	if unknown and _STRICT_MODE:
 		raise ValueError(
@@ -2665,9 +2674,9 @@ def _parse_select_spec (
 			order = ()
 
 	# Validate every scorer name up-front so errors surface at startup, not
-	# at trigger time.  Use _valid_order_names() so newly-registered scorers
+	# at trigger time.  Use valid_order_names() so newly-registered scorers
 	# (e.g. future quantize_match) are recognised automatically.
-	valid_names = _valid_order_names()
+	valid_names = valid_order_names()
 	for clause in order:
 		if clause.by not in valid_names:
 			raise ValueError(
@@ -3231,7 +3240,7 @@ def parse_process (
 	# stretch_quantize with pad_quantize — or repeating either — is ambiguous
 	# (their tempo/grid parameters would fight at trigger time) and almost
 	# certainly a mistake; reject it at load.
-	quantize_names = [s.name for s in steps if s.name in ("stretch_quantize", "pad_quantize")]
+	quantize_names = [s.name for s in steps if s.name in BEAT_ALIGNING_PROCESSORS]
 
 	if len(quantize_names) > 1:
 		raise ValueError(

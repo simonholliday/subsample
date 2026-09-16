@@ -42,7 +42,7 @@ _log = logging.getLogger(__name__)
 # otherwise be silently ignored and the set bound to the wrong channel — or to
 # no channel at all — so this whitelist fails it loudly, matching the guards on
 # `programs:` entries and on assignments.
-_VALID_INCLUDE_KEYS: typing.Final[frozenset[str]] = frozenset({"channel", "map"})
+VALID_INCLUDE_KEYS: typing.Final[tuple[str, ...]] = ("map", "channel")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -185,11 +185,11 @@ def _split_entry (
 			f"and optional 'channel', got {type(entry).__name__}"
 		)
 
-	unknown = set(entry) - _VALID_INCLUDE_KEYS
+	unknown = set(entry).difference(VALID_INCLUDE_KEYS)
 	if unknown:
 		raise ValueError(
 			f"MIDI map maps[{index}]: unknown key(s) {sorted(unknown)} — valid "
-			f"keys: {sorted(_VALID_INCLUDE_KEYS)}"
+			f"keys: {sorted(VALID_INCLUDE_KEYS)}"
 		)
 
 	if "map" not in entry:

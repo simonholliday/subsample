@@ -91,6 +91,11 @@ class BankDefinition:
 	program:   int                  = 0
 
 
+VALID_PROGRAM_KEYS: typing.Final[tuple[str, ...]] = ("name", "program", "directory", "map")
+"""Every key one ``programs:`` entry may carry.  A typo such as 'prgoram' would
+otherwise fall back silently to the entry's position in the list."""
+
+
 def parse_banks (
 	raw: typing.Any,
 	definitions: typing.Optional[subsample.definitions.Definitions] = None,
@@ -131,7 +136,7 @@ def parse_banks (
 		if not isinstance(entry, dict):
 			raise ValueError(f"MIDI map programs[{idx}]: expected a mapping, got {type(entry).__name__}")
 
-		unknown = set(entry) - {"name", "directory", "map", "program"}
+		unknown = set(entry).difference(VALID_PROGRAM_KEYS)
 		if unknown:
 			raise ValueError(
 				f"MIDI map programs[{idx}]: unknown key(s) {sorted(unknown)} — "

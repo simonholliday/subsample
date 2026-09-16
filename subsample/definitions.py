@@ -55,13 +55,13 @@ _SECTION_RANGES: typing.Final[dict[str, tuple[int, int]]] = {
 
 # Names and mount prefixes: lowercase identifiers, no dots — the dot is the
 # prefix separator at the point of use.
-_NAME_RE: typing.Final[re.Pattern[str]] = re.compile(r"[a-z][a-z0-9_]*")
+NAME_RE: typing.Final[re.Pattern[str]] = re.compile(r"[a-z][a-z0-9_]*")
 
 # Shape of a symbolic reference at a scalar (cc / channel / program) site.
 # Only a string that full-matches this is treated as a name lookup; anything
 # else falls through to the existing int() coercion so the error behaviour
 # for non-symbolic garbage ("1.5", "kick") is unchanged.
-_SYMBOL_RE: typing.Final[re.Pattern[str]] = re.compile(
+SYMBOL_RE: typing.Final[re.Pattern[str]] = re.compile(
 	r"[A-Za-z][A-Za-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*"
 )
 
@@ -200,7 +200,7 @@ def load_definitions (
 	for prefix_raw, path_raw in raw.items():
 		prefix = str(prefix_raw)
 
-		if not _NAME_RE.fullmatch(prefix):
+		if not NAME_RE.fullmatch(prefix):
 			raise ValueError(
 				f"{map_label}: definitions prefix {prefix!r} must match "
 				f"[a-z][a-z0-9_]* (lowercase letters, digits, underscores)"
@@ -278,7 +278,7 @@ def _load_definitions_file (
 		for name_raw, value in section_raw.items():
 			name = str(name_raw)
 
-			if not _NAME_RE.fullmatch(name):
+			if not NAME_RE.fullmatch(name):
 				raise ValueError(
 					f"definitions file {path}: section {section!r}: name "
 					f"{name!r} must match [a-z][a-z0-9_]* (lowercase "
@@ -322,7 +322,7 @@ def resolve_scalar (
 	plain numbers and garbage is unchanged.
 	"""
 
-	if isinstance(raw, str) and _SYMBOL_RE.fullmatch(raw.strip()):
+	if isinstance(raw, str) and SYMBOL_RE.fullmatch(raw.strip()):
 		prefix, _, name = raw.strip().partition(".")
 
 		if definitions is None:

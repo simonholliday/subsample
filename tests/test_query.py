@@ -2139,7 +2139,7 @@ class TestExtractSpec:
 
 	def test_extract_kinds_set_contents (self) -> None:
 		"""EXTRACT_KINDS is the agreed first/zero-order vocabulary (without 'channel')."""
-		expected = {"omni", "side", "depth", "height", "left", "right", "front", "back"}
+		expected = ("omni", "side", "depth", "height", "left", "right", "front", "back")
 		assert subsample.query.EXTRACT_KINDS == expected
 
 

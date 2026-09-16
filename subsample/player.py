@@ -877,7 +877,7 @@ def _parse_output_routing (
 	return tuple(ch - 1 for ch in channels)
 
 
-_VALID_EXTRACT_KEYS: typing.Final[frozenset[str]] = frozenset({"blend"})
+VALID_EXTRACT_KEYS: typing.Final[tuple[str, ...]] = ("blend",)
 
 
 def _parse_extract_blend (
@@ -893,12 +893,12 @@ def _parse_extract_blend (
 	level) and checks the count against the sample's channel layout at map load.
 	"""
 
-	unknown = set(raw.keys()) - _VALID_EXTRACT_KEYS
+	unknown = set(raw.keys()).difference(VALID_EXTRACT_KEYS)
 
 	if unknown:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: unknown extract key(s) "
-			f"{sorted(unknown)} (valid: {', '.join(sorted(_VALID_EXTRACT_KEYS))})"
+			f"{sorted(unknown)} (valid: {', '.join(sorted(VALID_EXTRACT_KEYS))})"
 		)
 
 	weights_raw = raw.get("blend")
@@ -1007,16 +1007,15 @@ def _parse_extract (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 # Accepted keys inside a release: mapping.  Explicit form is {time, curve};
 # the {cc: ...} shorthand additionally allows the CcBinding keys.  Enforced so a
 # typo fails loudly rather than silently using a default (as _parse_velocity does).
-_RELEASE_INNER_KEYS:        typing.Final[frozenset[str]] = frozenset({"time", "curve"})
-_RELEASE_CC_SHORTHAND_KEYS: typing.Final[frozenset[str]] = subsample.query.CC_BINDING_KEYS | {"curve"}
+RELEASE_INNER_KEYS:         typing.Final[tuple[str, ...]] = ("time", "curve")
+_RELEASE_CC_SHORTHAND_KEYS: typing.Final[tuple[str, ...]] = (*subsample.query.CC_BINDING_KEYS, "curve")
 
 # Knob span for a cc-bound `release:` when the map gives no explicit min/max.
 # CcBinding's own 0.0-1.0 default is meant for normalised processor parameters;
 # release time is in milliseconds, where that span is a click rather than a
 # release.  0 ms … 1 s covers the musically useful range of a release knob.
 # (A processor parameter takes its span from its declared sweep instead.)
-_RELEASE_CC_DEFAULT_MIN_MS: typing.Final[float] = 0.0
-_RELEASE_CC_DEFAULT_MAX_MS: typing.Final[float] = 1000.0
+RELEASE_CC_SWEEP_MS: typing.Final[tuple[float, float]] = (0.0, 1000.0)
 
 
 def _parse_release (
@@ -1078,12 +1077,12 @@ def _parse_release (
 		# loud rather than silently falling back to a default — matching
 		# _parse_velocity / the notes and top-level-map parsers.
 		if "cc" in raw and "time" not in raw:
-			unknown = set(raw) - _RELEASE_CC_SHORTHAND_KEYS
+			unknown = set(raw).difference(_RELEASE_CC_SHORTHAND_KEYS)
 			allowed = _RELEASE_CC_SHORTHAND_KEYS
 			time_raw: typing.Any = raw
 		else:
-			unknown = set(raw) - _RELEASE_INNER_KEYS
-			allowed = _RELEASE_INNER_KEYS
+			unknown = set(raw).difference(RELEASE_INNER_KEYS)
+			allowed = RELEASE_INNER_KEYS
 			time_raw = raw.get("time")
 
 		if unknown:
@@ -1123,7 +1122,7 @@ def _parse_release_time (
 		# swept by _parse_release, but the nested `release: {time: {cc: ...}}`
 		# form reaches this parser directly, so a typo like `minn:` was silently
 		# discarded and the knob kept a default floor of 0 ms.
-		unknown = set(raw) - _RELEASE_CC_SHORTHAND_KEYS
+		unknown = set(raw).difference(_RELEASE_CC_SHORTHAND_KEYS)
 
 		if unknown:
 			raise ValueError(
@@ -1151,8 +1150,8 @@ def _parse_release_time (
 			# audible click, and worse than the 10 ms a user gets by writing
 			# nothing.  Default to a musically useful span instead; an explicit
 			# min/max still wins.
-			min_val    = float(raw.get("min", _RELEASE_CC_DEFAULT_MIN_MS))
-			max_val    = float(raw.get("max", _RELEASE_CC_DEFAULT_MAX_MS))
+			min_val    = float(raw.get("min", RELEASE_CC_SWEEP_MS[0]))
+			max_val    = float(raw.get("max", RELEASE_CC_SWEEP_MS[1]))
 			default    = float(raw["default"]) if "default" in raw else None
 		except (TypeError, ValueError) as exc:
 			raise ValueError(
@@ -1219,7 +1218,7 @@ def _parse_release_time (
 	)
 
 
-_LOOP_INNER_KEYS: typing.Final[frozenset[str]] = frozenset({"start", "end", "crossfade"})
+LOOP_INNER_KEYS: typing.Final[tuple[str, ...]] = ("start", "end", "crossfade")
 
 # Shortest loop the player will honour.  Auto-detected loops are far longer
 # (loopfind enforces its own minimum), so this only guards a deliberately tiny
@@ -1269,7 +1268,7 @@ def _parse_loop_override (
 			f"start/end/crossfade keys — got {type(raw).__name__}"
 		)
 
-	unknown = set(raw) - _LOOP_INNER_KEYS
+	unknown = set(raw).difference(LOOP_INNER_KEYS)
 	if unknown:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: unknown loop key(s) "
@@ -1408,7 +1407,7 @@ def _parse_silenced_by (
 	return subsample.query.ChokeSpec(is_self=is_self, notes=frozenset(notes))
 
 
-_VELOCITY_INNER_KEYS: typing.Final[frozenset[str]] = frozenset({"trigger", "rescale"})
+VELOCITY_INNER_KEYS: typing.Final[tuple[str, ...]] = ("trigger", "rescale")
 
 
 def _parse_velocity_range (
@@ -1493,11 +1492,11 @@ def _parse_velocity (
 			f"{type(raw).__name__}"
 		)
 
-	unknown = set(raw) - _VELOCITY_INNER_KEYS
+	unknown = set(raw).difference(VELOCITY_INNER_KEYS)
 	if unknown:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: unknown velocity key(s) "
-			f"{sorted(unknown)!r} (valid: {sorted(_VELOCITY_INNER_KEYS)!r})"
+			f"{sorted(unknown)!r} (valid: {sorted(VELOCITY_INNER_KEYS)!r})"
 		)
 
 	if "trigger" not in raw:
@@ -1780,7 +1779,7 @@ _parse_note_name = pymididefs.notes.name_to_note
 # aliases PyMidiDefs keeps separate), so "drum.kick" resolves to the GM primary
 # (Bass Drum 1 = 36) right alongside the explicit "drum.kick_1".  The two maps
 # are disjoint by construction, so neither shadows the other.
-_SYMBOL_NAMESPACES: typing.Final[dict[str, typing.Mapping[str, int]]] = {
+SYMBOL_NAMESPACES: typing.Final[dict[str, typing.Mapping[str, int]]] = {
 	"drum": {**pymididefs.drums.GM_DRUM_MAP, **pymididefs.drums.GM_DRUM_PRIMARY_ALIASES},
 }
 
@@ -1799,12 +1798,12 @@ def _parse_single_note (
 	can reuse the same accept-anything-then-validate dispatch.
 
 	``namespaces`` is the symbolic-name table view — the module-global
-	``_SYMBOL_NAMESPACES`` when None, or that merged with the map's mounted
+	``SYMBOL_NAMESPACES`` when None, or that merged with the map's mounted
 	``definitions:`` prefixes (load_midi_map threads the merged view here).
 	"""
 
 	if namespaces is None:
-		namespaces = _SYMBOL_NAMESPACES
+		namespaces = SYMBOL_NAMESPACES
 
 	# YAML `yes`/`no` parse to True/False and bool is an int subclass, so reject
 	# before the int check or `notes: [kick, yes]` silently maps note 1.  Guarding
@@ -1867,9 +1866,9 @@ def _parse_single_note (
 	)
 
 
-_ZONE_TUNED_SENTINEL: typing.Final[str] = "zone-tuned"
+ZONE_TUNED_SENTINEL: typing.Final[str] = "zone-tuned"
 
-_VALID_NOTES_INNER_KEYS: typing.Final[frozenset[str]] = frozenset({"mode", "range"})
+VALID_NOTES_INNER_KEYS: typing.Final[tuple[str, ...]] = ("mode", "range")
 
 
 def _parse_zone_notes (
@@ -1888,29 +1887,29 @@ def _parse_zone_notes (
 
 	Validation (raises ValueError on failure):
 	  - Unknown inner keys under the dict form (typo guard mirroring
-	    ``_VELOCITY_INNER_KEYS``).
+	    ``VELOCITY_INNER_KEYS``).
 	  - ``mode`` missing or not equal to ``zone-tuned``.
 	  - ``range:`` not a 2-element list, lo > hi, or out of [0, 127].
 	"""
 
-	if notes_raw == _ZONE_TUNED_SENTINEL:
+	if notes_raw == ZONE_TUNED_SENTINEL:
 		return (0, 127)
 
 	if not isinstance(notes_raw, dict):
 		return None
 
-	unknown = set(notes_raw) - _VALID_NOTES_INNER_KEYS
+	unknown = set(notes_raw).difference(VALID_NOTES_INNER_KEYS)
 	if unknown:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: unknown notes key(s) "
-			f"{sorted(unknown)!r} (valid: {sorted(_VALID_NOTES_INNER_KEYS)!r})"
+			f"{sorted(unknown)!r} (valid: {sorted(VALID_NOTES_INNER_KEYS)!r})"
 		)
 
 	mode = notes_raw.get("mode")
-	if mode != _ZONE_TUNED_SENTINEL:
+	if mode != ZONE_TUNED_SENTINEL:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: notes dict requires "
-			f"mode: {_ZONE_TUNED_SENTINEL!r} (got {mode!r})"
+			f"mode: {ZONE_TUNED_SENTINEL!r} (got {mode!r})"
 		)
 
 	range_raw = notes_raw.get("range")
@@ -2647,21 +2646,21 @@ def _resolve_assignment_inheritance (
 # former `banks:`/`bank_channel:`/`default_bank:` keys, renamed to the
 # MIDI-correct `programs:`/`program_channel:`/`default_program:` (each entry
 # is selected by a Program Change, not by MIDI Bank Select).
-_VALID_MAP_KEYS: typing.Final[frozenset[str]] = frozenset({
-	"definitions", "programs", "program_channel", "default_program", "assignments",
-	"templates", "channel", "maps",
-})
+VALID_MAP_KEYS: typing.Final[tuple[str, ...]] = (
+	"definitions", "channel", "programs", "program_channel", "default_program",
+	"templates", "assignments", "maps",
+)
 
 # Every key a single assignment mapping may carry.  A typo (`mdoe:`, `realease:`,
 # `gain_db:`) would otherwise be silently ignored and the assignment revert to
 # defaults; this whitelist fails such mistakes loudly, matching the top-level and
 # inner-block key guards.  `template` is consumed by inheritance resolution
 # before the per-assignment loop but is listed so a stray one still validates.
-_VALID_ASSIGNMENT_KEYS: typing.Final[frozenset[str]] = frozenset({
-	"name", "channel", "notes", "select", "process", "mode", "loop", "release",
-	"gain", "pan", "output", "extract", "velocity", "stack", "silenced_by",
-	"template",
-})
+VALID_ASSIGNMENT_KEYS: typing.Final[tuple[str, ...]] = (
+	"name", "template", "channel", "notes", "velocity", "select", "process",
+	"mode", "loop", "release", "extract", "gain", "pan", "output", "stack",
+	"silenced_by",
+)
 
 
 def load_midi_map (
@@ -2761,11 +2760,11 @@ def load_midi_map (
 			f"MIDI map {path}: top-level YAML must be a mapping, got {type(raw).__name__}"
 		)
 
-	unknown_keys = set(raw) - _VALID_MAP_KEYS
+	unknown_keys = set(raw).difference(VALID_MAP_KEYS)
 	if unknown_keys:
 		raise ValueError(
 			f"MIDI map {path}: unknown top-level key(s) {sorted(unknown_keys)!r} "
-			f"(valid: {sorted(_VALID_MAP_KEYS)!r})"
+			f"(valid: {sorted(VALID_MAP_KEYS)!r})"
 		)
 
 	# Mount the per-project definitions file(s) — name→number vocabularies
@@ -2774,11 +2773,11 @@ def load_midi_map (
 	# mounted names, so this parses first.
 	definitions = subsample.definitions.load_definitions(
 		raw.get("definitions"), midi_map_dir,
-		reserved_prefixes=frozenset(_SYMBOL_NAMESPACES),
+		reserved_prefixes=frozenset(SYMBOL_NAMESPACES),
 		map_label=f"MIDI map {path}",
 	)
 	note_namespaces: dict[str, typing.Mapping[str, int]] = {
-		**_SYMBOL_NAMESPACES, **definitions.note_namespaces(),
+		**SYMBOL_NAMESPACES, **definitions.note_namespaces(),
 	}
 
 	# Map-level default channel.  Resolved through the same definitions namespace
@@ -2903,12 +2902,12 @@ def load_midi_map (
 			# `one_shot` is a removed alias with its own migration error in
 			# _parse_mode — exclude it here so that clearer message fires instead
 			# of the generic unknown-key one.
-			unknown_keys = set(assignment_raw) - _VALID_ASSIGNMENT_KEYS - {"one_shot"}
+			unknown_keys = set(assignment_raw).difference(VALID_ASSIGNMENT_KEYS) - {"one_shot"}
 			if unknown_keys:
 				raise ValueError(
 					f"MIDI map assignment {name!r}: unknown key(s) "
 					f"{sorted(unknown_keys)}.  Valid keys: "
-					f"{sorted(_VALID_ASSIGNMENT_KEYS)}."
+					f"{sorted(VALID_ASSIGNMENT_KEYS)}."
 				)
 
 		# Channel: user-facing 1-16 → mido 0-indexed.  An explicit value here is a
@@ -3416,7 +3415,7 @@ def _read_ensemble_includes (
 
 	definitions = subsample.definitions.load_definitions(
 		raw.get("definitions"), path.parent,
-		reserved_prefixes=frozenset(_SYMBOL_NAMESPACES),
+		reserved_prefixes=frozenset(SYMBOL_NAMESPACES),
 		map_label=f"MIDI map {path}",
 	)
 

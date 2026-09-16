@@ -104,7 +104,7 @@ class TestParseSilencedBy:
 		the namespaces param (load_midi_map passes the merged per-map view)."""
 
 		spaces = {
-			**subsample.player._SYMBOL_NAMESPACES,
+			**subsample.player.SYMBOL_NAMESPACES,
 			"my": {"ride_edge_soft": 53},
 		}
 		spec = subsample.player._parse_silenced_by(

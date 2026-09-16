@@ -124,7 +124,7 @@ def _make_assignment (
 	if reference is not None and order_by == "newest":
 		order_by = "similarity"
 
-	order_clause = subsample.query._LEGACY_ORDER_TOKENS[order_by]
+	order_clause = subsample.query.LEGACY_ORDER_TOKENS[order_by]
 	select = (subsample.query.SelectSpec(where=where, order=(order_clause,)),)
 
 	steps: list[subsample.query.ProcessorStep] = []
@@ -4461,7 +4461,7 @@ class TestParseNoteSpecNamespaces:
 	the built-in drum table.  None keeps the module-global behaviour."""
 
 	_SPACES: dict[str, dict[str, int]] = {
-		**subsample.player._SYMBOL_NAMESPACES,
+		**subsample.player.SYMBOL_NAMESPACES,
 		"my": {"dawn_chorus_pheasant": 60},
 	}
 
