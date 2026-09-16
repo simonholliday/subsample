@@ -30,7 +30,7 @@ _ABSENT: typing.Final = object()
 """Marks a term whose value is worked out at load time rather than fixed."""
 
 
-_WHERE_UNITS: typing.Final[dict[str, str]] = {"tempo": "BPM", "pitch": "Hz"}
+_WHERE_UNITS: typing.Final[dict[str, str]] = {"duration": "s", "tempo": "BPM", "pitch": "Hz"}
 """The unit a measurement is written in, where Subsample has a word for it."""
 
 _SCORER_PARAMETER_TERMS: typing.Final[dict[str, dict[str, typing.Any]]] = {
@@ -223,7 +223,7 @@ def _assignment_terms () -> dict[str, typing.Any]:
 			"description": "",
 			"anyOf": [
 				{"type": "string"},
-				{"type": "array", "items": {"type": "string"}},
+				{"type": "array", "items": {"type": "string"}, "minItems": 1},
 			],
 		},
 		"channel":     {"$ref": "#/$defs/channel"},
@@ -569,7 +569,7 @@ def _order () -> dict[str, typing.Any]:
 		"description": "",
 		"anyOf": [
 			{"$ref": "#/$defs/order_clause"},
-			{"type": "array", "items": {"$ref": "#/$defs/order_clause"}},
+			{"type": "array", "items": {"$ref": "#/$defs/order_clause"}, "minItems": 1},
 		],
 	}
 
@@ -752,8 +752,8 @@ def _loop () -> dict[str, typing.Any]:
 	import subsample.player
 
 	terms = {
-		"start":     {"description": "", "type": "number", "minimum": 0},
-		"end":       {"description": "", "type": "number", "minimum": 0},
+		"start":     {"description": "", "type": "number", "minimum": 0, "x-unit": "s"},
+		"end":       {"description": "", "type": "number", "minimum": 0, "x-unit": "s"},
 		"crossfade": {"description": "", "type": "number", "minimum": 0, "x-unit": "ms"},
 	}
 

@@ -142,7 +142,9 @@ class TestVocabularies:
 
 		used = {parameter.unit for _processor, parameter in _PARAMETERS if parameter.unit is not None}
 
-		assert used == set(subsample.processors.UNITS)
+		# The set covers the whole map, so the grammar uses the words the
+		# processors do not; tests/test_midi_map_schema.py holds that half.
+		assert used <= set(subsample.processors.UNITS)
 
 	def test_every_automatic_source_is_known (self) -> None:
 

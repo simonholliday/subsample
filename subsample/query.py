@@ -514,8 +514,10 @@ class WherePredicate:
 		return True
 
 
-# Legacy ``min_X:`` / ``max_X:`` YAML keys translate into (field, operator)
-# pairs.  Kept indefinitely so existing YAML keeps working; not deprecated.
+# The older ``min_X:`` / ``max_X:`` YAML keys translate into (field, operator)
+# pairs.  Kept indefinitely so existing YAML keeps working; the schema marks
+# them `deprecated: true`, which asks a NEW map for the current spelling and
+# does not mean they are going away (#2693 decision 13).
 LEGACY_WHERE_KEYS: typing.Final[dict[str, tuple[str, str]]] = {
 	"min_duration":        ("duration",        "gte"),
 	"max_duration":        ("duration",        "lte"),
@@ -755,9 +757,11 @@ refuses any other key in strict mode, so a misspelt ``dir`` cannot pass as a
 parameter nobody reads."""
 
 
-# Legacy bare-string tokens translate into a single-clause order tuple.  The
+# The older bare-string tokens translate into a single-clause order tuple.  The
 # table keeps old YAML files working indefinitely; parse_select accepts these
-# verbatim and converts them to OrderClause instances before query().
+# verbatim and converts them to OrderClause instances before query().  The
+# schema marks them `deprecated: true`: a new map writes {by, dir}, and these
+# are not going away (#2693 decision 13).
 LEGACY_ORDER_TOKENS: typing.Final[dict[str, "OrderClause"]] = {}   # populated after OrderClause is defined
 
 
@@ -2015,7 +2019,7 @@ def _parse_order_clause (
 	# similarity clauses built by the legacy-token table and auto-injection —
 	# an omitted dir on `by: beat_match` must not rank WORST matches first.
 	default_dir = "desc" if by in ("beat_match", "similarity") else "asc"
-	dir_raw = str(raw.get("dir", default_dir)).lower()
+	dir_raw = str(raw.get("dir", default_dir))
 
 	if dir_raw not in ("asc", "desc"):
 		raise ValueError(
@@ -2107,6 +2111,15 @@ def _validate_beat_match_params (
 					f"(got {elem!r})"
 				)
 			f = float(elem)
+			# Not-a-number passes both comparisons below, and would rank the
+			# pool arbitrarily at play time, so it is caught on its own.
+			if not math.isfinite(f):
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: beat_match "
+					f"'pattern' element #{i} must be a finite number in [0, 1] "
+					f"(got {elem!r})"
+				)
+
 			if f < 0.0 or f > 1.0:
 				raise ValueError(
 					f"MIDI map assignment {assignment_name!r}: beat_match "
@@ -2147,6 +2160,15 @@ def _parse_order (
 		return (_parse_order_clause(raw, assignment_name),)
 
 	if isinstance(raw, list):
+		if not raw:
+			# An empty list used to mean the default order, which is an order
+			# the map never wrote.  Leave the key out to ask for that.
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: {key_name!r} is an "
+				f"empty list.  Give it a ranking, or leave it out for the "
+				f"default (newest first, or closest match with a reference)."
+			)
+
 		return tuple(_parse_order_clause(entry, assignment_name) for entry in raw)
 
 	raise ValueError(
@@ -2188,7 +2210,7 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 			", ".join(sorted(VALID_VELOCITY_PICK_KEYS)),
 		)
 
-	mode = str(raw.get("mode", "")).strip().lower()
+	mode = str(raw.get("mode", ""))
 
 	if mode != "velocity":
 		raise ValueError(
@@ -2212,7 +2234,7 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 			f"in [0, 127] (got {variation})"
 		)
 
-	curve = str(raw.get("curve", "linear")).strip().lower()
+	curve = str(raw.get("curve", "linear"))
 
 	if curve not in VALID_PICK_CURVES:
 		raise ValueError(
@@ -2220,7 +2242,7 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 			f"{curve!r}.  Valid curves: {', '.join(sorted(VALID_PICK_CURVES))}"
 		)
 
-	spacing = str(raw.get("spacing", "rank")).strip().lower()
+	spacing = str(raw.get("spacing", "rank"))
 
 	if spacing not in VALID_PICK_SPACINGS:
 		raise ValueError(
@@ -2257,10 +2279,10 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 	# the shorthand for a default velocity pick (no variation, linear curve); the
 	# long form pick: {mode: velocity, ...} is handled in the dict branch below.
 	if isinstance(raw, str):
-		if raw.strip().lower() == "any":
+		if raw == "any":
 			return PickSpec(None, None)
 
-		if raw.strip().lower() == "velocity":
+		if raw == "velocity":
 			return PickSpec(None, None, "velocity")
 
 		raise ValueError(
@@ -2485,7 +2507,7 @@ def parse_pan_spec (raw: typing.Any, assignment_name: str) -> PanSpec:
 	"""
 
 	if isinstance(raw, str):
-		if raw.strip().lower() == "any":
+		if raw == "any":
 			return PanSpec(-100.0, 100.0)
 
 		raise ValueError(
@@ -3065,7 +3087,16 @@ def parse_process (
 			# lookups (_LEGACY_PROCESSOR_PARAMS) use the new name as key.
 			canonical_name = _canonical_processor_name(proc_name_str)
 
-			if isinstance(proc_value, bool) or proc_value is None:
+			if proc_value is False:
+				# `reverse: false` reads as "off" and used to add the step like
+				# any other bool, so a map said one thing and played another.
+				raise ValueError(
+					f"MIDI map assignment {assignment_name!r}: processor "
+					f"{proc_name_str!r} is written as false.  Write the "
+					f"processor for it to run, or leave it out for it not to."
+				)
+
+			if proc_value is True or proc_value is None:
 				# e.g. "repitch: true" or "repitch:"
 				steps.append(_build_parameterless_step(proc_name_str))
 

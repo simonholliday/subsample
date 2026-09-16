@@ -1606,9 +1606,10 @@ class TestParsePick:
 		specs = subsample.query.parse_select({"pick": "any"}, "test")
 		assert specs[0].pick == subsample.query.PickSpec(None, None)
 
-	def test_string_any_case_insensitive (self) -> None:
-		specs = subsample.query.parse_select({"pick": "ANY"}, "test")
-		assert specs[0].pick == subsample.query.PickSpec(None, None)
+	def test_string_any_is_written_exactly (self) -> None:
+		"""One spelling, as the schema publishes it (#2693 decision 12)."""
+		with pytest.raises(ValueError, match="'pick' string"):
+			subsample.query.parse_select({"pick": "ANY"}, "test")
 
 	def test_list_open_upper (self) -> None:
 		"""[2, null] → rank 2 to the last match (hi open)."""
@@ -1751,8 +1752,10 @@ class TestParsePanSpec:
 	def test_any (self) -> None:
 		assert subsample.query.parse_pan_spec("any", "t") == subsample.query.PanSpec(-100.0, 100.0)
 
-	def test_any_case_and_whitespace (self) -> None:
-		assert subsample.query.parse_pan_spec("  ANY ", "t") == subsample.query.PanSpec(-100.0, 100.0)
+	def test_any_is_written_exactly (self) -> None:
+		"""One spelling, as the schema publishes it (#2693 decision 12)."""
+		with pytest.raises(ValueError, match="pan string"):
+			subsample.query.parse_pan_spec("  ANY ", "t")
 
 	def test_range_both_bounds (self) -> None:
 		assert subsample.query.parse_pan_spec({"gte": -50, "lte": 50}, "t") == subsample.query.PanSpec(-50.0, 50.0)

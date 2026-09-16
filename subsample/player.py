@@ -972,7 +972,7 @@ def _parse_extract (raw: typing.Any, assignment_name: str) -> typing.Optional[su
 			f"got {type(raw).__name__}"
 		)
 
-	value = raw.strip().lower()
+	value = raw
 
 	if value in subsample.query.EXTRACT_KINDS:
 		return subsample.query.ExtractSpec(kind=value)
@@ -1092,7 +1092,7 @@ def _parse_release (
 			)
 
 		time  = _parse_release_time(time_raw, assignment_name, definitions) if time_raw is not None else None
-		curve = str(curve_raw).strip().lower()
+		curve = str(curve_raw)
 
 		if curve not in subsample.query.VALID_RELEASE_CURVES:
 			valid = ", ".join(sorted(subsample.query.VALID_RELEASE_CURVES))
@@ -1385,7 +1385,7 @@ def _parse_silenced_by (
 
 	for item in items:
 		# ``self`` sentinel — the assignment's own note(s) choke its own voices.
-		if isinstance(item, str) and item.strip().lower() == "self":
+		if item == "self":
 			is_self = True
 			continue
 		# Guard bool BEFORE _parse_single_note: bool is an int subclass, so
@@ -2612,6 +2612,13 @@ def _resolve_assignment_inheritance (
 		if isinstance(template_ref, str):
 			names = [template_ref]
 		elif isinstance(template_ref, list) and all(isinstance(n, str) for n in template_ref):
+			if not template_ref:
+				raise ValueError(
+					f"MIDI map assignment {name!r}: 'template' is an empty "
+					f"list.  Name a template to inherit from, or leave the "
+					f"key out to inherit nothing."
+				)
+
 			names = template_ref
 		else:
 			raise ValueError(
@@ -2898,6 +2905,14 @@ def load_midi_map (
 	for assignment_index, assignment_raw in enumerate(raw["assignments"], start=1):
 		name = assignment_raw.get("name", "<unnamed>")
 
+		# A name reaches every log line about this assignment, where a bare
+		# number reads as a note or a channel rather than as what it is.
+		if "name" in assignment_raw and not isinstance(name, str):
+			raise ValueError(
+				f"MIDI map assignment #{assignment_index}: 'name' must be text "
+				f"(got {name!r}).  Quote it if the name is a number."
+			)
+
 		if isinstance(assignment_raw, dict):
 			# `one_shot` is a removed alias with its own migration error in
 			# _parse_mode — exclude it here so that clearer message fires instead
@@ -3043,13 +3058,14 @@ def load_midi_map (
 				f"'gain' must be a number in dB, not a boolean ({gain_raw!r})"
 			)
 
-		try:
-			gain_db = float(gain_raw)
-		except (TypeError, ValueError) as exc:
+		if not isinstance(gain_raw, (int, float)):
 			raise ValueError(
 				f"MIDI map assignment {name!r} (#{assignment_index}): "
-				f"invalid 'gain' value {gain_raw!r} — {exc}"
-			) from exc
+				f"'gain' must be a number in dB, written without quotes "
+				f"(got {gain_raw!r})"
+			)
+
+		gain_db = float(gain_raw)
 
 		if not math.isfinite(gain_db):
 			raise ValueError(

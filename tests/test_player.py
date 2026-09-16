@@ -1055,9 +1055,10 @@ class TestParseRelease:
 		spec = subsample.player._parse_release({"time": 120, "curve": "exponential"}, "a")
 		assert spec == subsample.query.ReleaseSpec(time=120.0, curve="exponential")
 
-	def test_dict_curve_case_insensitive (self) -> None:
-		spec = subsample.player._parse_release({"time": 50, "curve": "COSINE"}, "a")
-		assert spec is not None and spec.curve == "cosine"
+	def test_dict_curve_is_taken_exactly (self) -> None:
+		"""A word is written as the schema publishes it (#2693 decision 12)."""
+		with pytest.raises(ValueError, match="release curve"):
+			subsample.player._parse_release({"time": 50, "curve": "COSINE"}, "a")
 
 	def test_cc_shorthand (self) -> None:
 		spec = subsample.player._parse_release({"cc": 72, "min": 20, "max": 3000}, "a")
@@ -2596,7 +2597,7 @@ assignments:
       where:
         reference: BD0025
 """)
-		with pytest.raises(ValueError, match="assignment 'BadGain'.*invalid 'gain'"):
+		with pytest.raises(ValueError, match="assignment 'BadGain'.*'gain' must be a number"):
 			subsample.player.load_midi_map(path, ["BD0025"])
 
 	def test_empty_file_returns_empty_map (self, tmp_path: pathlib.Path) -> None:
@@ -6311,16 +6312,11 @@ class TestParseExtract:
 			result = subsample.player._parse_extract(kind, "test")
 			assert result == subsample.query.ExtractSpec(kind=kind)
 
-	def test_case_insensitive (self) -> None:
-		"""OMNI, Omni, oMnI all normalise to kind='omni'."""
-		for value in ("OMNI", "Omni", "oMnI"):
-			result = subsample.player._parse_extract(value, "test")
-			assert result == subsample.query.ExtractSpec(kind="omni")
-
-	def test_whitespace_stripped (self) -> None:
-		"""Leading/trailing whitespace is stripped."""
-		result = subsample.player._parse_extract("  omni  ", "test")
-		assert result == subsample.query.ExtractSpec(kind="omni")
+	def test_a_kind_is_written_exactly (self) -> None:
+		"""OMNI, Omni and a padded omni are refused: one spelling, as the schema publishes it."""
+		for value in ("OMNI", "Omni", "oMnI", "  omni  "):
+			with pytest.raises(ValueError):
+				subsample.player._parse_extract(value, "test")
 
 	def test_channel_index_parses (self) -> None:
 		"""'channel.3' parses to ExtractSpec(kind='channel', channel_index=3)."""

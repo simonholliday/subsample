@@ -773,29 +773,153 @@ class TestPublishedRulesHold:
 				_load(tmp_path, _map(assignments=[fields]))
 
 
-class TestSchemaIsNoStricterThanTheParser:
+class TestAnEmptyListIsRefusedWhereItCanOnlyBeAMistake:
 
-	"""A schema that refuses what Subsample loads would fail a map that plays."""
+	"""#2693 decision 16: an empty list means nothing, and only a choke may say so."""
 
-	def test_a_ranking_written_as_an_empty_list_is_not_refused (self, tmp_path: pathlib.Path) -> None:
+	def test_a_ranking_written_as_an_empty_list_is_refused (self, tmp_path: pathlib.Path) -> None:
 
-		"""`order: []` loads and falls back to newest first, so the schema allows it."""
+		"""`order: []` used to choose newest first, an order the map never wrote."""
 
-		_load(tmp_path, _map(assignments=[_assignment(
-			select={"where": {"pitched": True}, "order": []},
-		)]))
+		with pytest.raises(ValueError, match="empty list"):
+			_load(tmp_path, _map(assignments=[_assignment(
+				select={"where": {"pitched": True}, "order": []},
+			)]))
 
-		for form in _at("/$defs/order")["anyOf"]:
-			assert "minItems" not in form
+	def test_an_empty_list_of_templates_is_refused (self, tmp_path: pathlib.Path) -> None:
 
-	def test_an_empty_list_of_templates_is_not_refused (self, tmp_path: pathlib.Path) -> None:
+		"""`template: []` inherits nothing, which is what leaving the key out says."""
 
-		"""`template: []` loads and inherits nothing, so the schema allows it."""
+		with pytest.raises(ValueError, match="empty list"):
+			_load(tmp_path, _map(
+				templates={"base": {}},
+				assignments=[_assignment(template=[])],
+			))
 
-		_load(tmp_path, _map(
-			templates={"base": {}},
-			assignments=[_assignment(template=[])],
+	def test_a_choke_may_still_be_blanked (self, tmp_path: pathlib.Path) -> None:
+
+		"""`silenced_by: []` blanks a template's default, which is what it is for."""
+
+		result = _load(tmp_path, _map(
+			templates={"choked": {"silenced_by": 62}},
+			assignments=[_assignment(template="choked", silenced_by=[])],
 		))
 
-		for form in _at("/$defs/assignment/properties/template")["anyOf"]:
-			assert "minItems" not in form
+		assert _first(result).silenced_by is None
+
+
+def _in_another_case () -> list[typing.Any]:
+
+	"""A map that writes one published word in another letter case."""
+
+	velocity_pick = {"where": {"pitched": True}, "order": "loudest"}
+
+	cases: dict[str, dict[str, typing.Any]] = {
+		"mode":           _map(assignments=[_assignment(mode="ONE_SHOT")]),
+		"order-dir":      _map(assignments=[_assignment(
+			select={"where": {"pitched": True}, "order": [{"by": "level", "dir": "DESC"}]},
+		)]),
+		"pick-any":       _map(assignments=[_assignment(
+			select={"where": {"pitched": True}, "pick": "ANY"},
+		)]),
+		"pick-velocity":  _map(assignments=[_assignment(select={**velocity_pick, "pick": "VELOCITY"})]),
+		"pick-mode":      _map(assignments=[_assignment(
+			select={**velocity_pick, "pick": {"mode": "VELOCITY"}},
+		)]),
+		"pick-curve":     _map(assignments=[_assignment(
+			select={**velocity_pick, "pick": {"mode": "velocity", "curve": "LINEAR"}},
+		)]),
+		"pick-spacing":   _map(assignments=[_assignment(
+			select={**velocity_pick, "pick": {"mode": "velocity", "spacing": "RANK"}},
+		)]),
+		"release-curve":  _map(assignments=[_assignment(
+			mode="gated", release={"time": 100, "curve": "COSINE"},
+		)]),
+		"extract-kind":   _map(assignments=[_assignment(extract="OMNI")]),
+		"pan-any":        _map(assignments=[_assignment(pan="ANY")]),
+		"silenced-self":  _map(assignments=[_assignment(silenced_by="Self")]),
+	}
+
+	return [pytest.param(mapping, id=name) for name, mapping in cases.items()]
+
+
+class TestAWordIsWrittenExactly:
+
+	"""#2693 decision 12: one spelling for every word in the map, as the processors have."""
+
+	@pytest.mark.parametrize("mapping", _in_another_case())
+	def test_a_word_in_another_letter_case_is_refused (
+		self, tmp_path: pathlib.Path, mapping: dict[str, typing.Any],
+	) -> None:
+
+		"""A word the schema publishes in one spelling is the only spelling that loads."""
+
+		with pytest.raises(ValueError):
+			_load(tmp_path, mapping)
+
+
+class TestValuesAreWrittenAsTheirType:
+
+	"""#2693 decisions 11, 15 and 17: what a value is, checked where the map says it."""
+
+	def test_a_processor_written_as_false_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""`{reverse: false}` used to add the step, so a map said one thing and played another."""
+
+		with pytest.raises(ValueError, match="written as false"):
+			_load(tmp_path, _map(assignments=[_assignment(process=[{"reverse": False}])]))
+
+	def test_a_processor_written_as_true_still_runs (self, tmp_path: pathlib.Path) -> None:
+
+		"""The way to ask for a step with its defaults is unchanged."""
+
+		result = _load(tmp_path, _map(assignments=[_assignment(process=[{"reverse": True}])]))
+
+		assert [step.name for step in _first(result).process.steps] == ["reverse"]
+
+	def test_a_quoted_gain_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""A number in quotes is not a number, as a processor's parameter already has it."""
+
+		with pytest.raises(ValueError, match="'gain' must be a number"):
+			_load(tmp_path, _map(assignments=[_assignment(gain="3")]))
+
+	def test_a_name_that_is_not_text_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""A bare number for a name reads as a note or a channel in every log line about it."""
+
+		with pytest.raises(ValueError, match="'name' must be text"):
+			_load(tmp_path, _map(assignments=[_assignment(name=808)]))
+
+	def test_a_pattern_that_is_not_a_number_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""Not-a-number passes a 0 to 1 test and then ranks the pool arbitrarily."""
+
+		with pytest.raises(ValueError, match="finite number"):
+			_load(tmp_path, _map(assignments=[_assignment(select={
+				"where": {"pitched": True},
+				"order": [{"by": "beat_match", "pattern": [float("nan"), 1]}],
+			})]))
+
+
+class TestUnitsComeFromTheClosedSet:
+
+	def test_every_unit_the_map_declares_is_a_known_word (self) -> None:
+
+		"""Superconductor may act on these words, so the map declares no other (#2435)."""
+
+		declared = {
+			node["x-unit"] for _path, node in _subschemas(_SCHEMA) if "x-unit" in node
+		}
+
+		assert declared <= set(subsample.processors.UNITS)
+
+	def test_every_known_word_is_used_somewhere_in_the_map (self) -> None:
+
+		"""A unit word nothing is measured in would be a word nobody can act on."""
+
+		declared = {
+			node["x-unit"] for _path, node in _subschemas(_SCHEMA) if "x-unit" in node
+		}
+
+		assert declared == set(subsample.processors.UNITS)

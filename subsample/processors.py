@@ -37,8 +37,9 @@ FORMS: typing.Final[tuple[str, ...]] = (
 )
 """The forms a parameter's value can take.  A parameter lists one or more."""
 
-UNITS: typing.Final[tuple[str, ...]] = ("Hz", "dB", "ms", "BPM", "semitones")
-"""The unit words a parameter may declare: the unit a map's number is written in.
+UNITS: typing.Final[tuple[str, ...]] = ("Hz", "dB", "ms", "s", "BPM", "semitones")
+"""The unit words a map's numbers are written in, a processor parameter's and a
+term of the grammar's alike.
 
 A closed set that Superconductor's adapter may act on (#2435), so a word is
 never added or respelt without a test noticing.  A parameter with no unit, such
