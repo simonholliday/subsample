@@ -233,6 +233,15 @@ def build_mix_matrix (
 	The matrix routes input channels to the target layout, then (if needed)
 	folds to the actual output channel count via ITU downmix.
 
+	**Panning here is a balance, not a pan.**  Output channels are attenuated;
+	the source is not repositioned.  For a mono source that is exactly
+	constant-power at every position, as documented.  For a multi-channel one it
+	is not: panning away from where the content sits removes it, so a right-only
+	stereo source drawn hard left is silent, and at centre it is 3 dB down.
+	Everything after ``extract:`` is mono and therefore unaffected, which is why
+	this can go unnoticed.  Measured and recorded in #1473; repositioning a
+	multi-channel source is its own piece of work.
+
 	Args:
 		in_channels:  Number of channels in the source audio.
 		out_channels: Number of channels on the output device.

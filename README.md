@@ -390,8 +390,9 @@ locked to the session. Combine it with filtering for a length+rhythm pick:
 ```
 
 `duration`, `onsets`, and other numeric predicates take per-field operator
-dicts (`gte`, `lte`, `gt`, `lt`). `strength: 0.7` is a partial-quantise
-amount - fully snapped at 1.0, unchanged at 0.0.
+dicts (`gte`, `lte`, `gt`, `lt`). `strength: 0.7` is how far each hit moves
+toward the grid - every hit on it at 1.0, and at 0.0 the sample is still
+stretched to the tempo with its hits left where that puts them.
 
 That's the ladder. The rest of this section is the full reference - every
 field, every predicate, every processor, every option - then the advanced
@@ -1413,6 +1414,14 @@ ratio between channels matters. `[50, 50]`, `[1, 1]`, and `[100, 100]` all
 produce centre. Either form is normalised to constant-power gains at mix
 time, so perceived loudness stays equal across pan positions.
 
+**`pan:` is a balance, and on a stereo sample that matters.** It sets the
+levels of the output channels rather than moving the sound between them. For a
+mono sample the two amount to the same thing, and its level holds at every
+position. A stereo or multi-channel sample is different: panning away from
+where its content sits takes the content away, so a sample with sound only on
+the right is silent panned hard left, and 3 dB down at centre. Everything after
+`extract:` is mono and unaffected, which is why this is easy to miss.
+
 ```yaml assignment
 pan: [50, 50]    # centre (same as pan: 0)
 pan: [100, 0]    # hard left (same as pan: -100)
@@ -1441,7 +1450,11 @@ pan: { position: -20, variation: 40 } # around a centre: -20, spread by ±20
 
 Positions use the same `-100`…`100` axis as the fixed form, and the draw is
 always **constant-power** - only the position is randomised, never the channel
-levels, so a note is never louder or quieter for landing off-centre. It works on
+levels, so a mono sample is never louder or quieter for landing off-centre. A
+stereo sample with its content to one side is the exception, for the reason in
+[Pan](#pan) above: each strike lands at a different level, and an extreme draw
+can lose it. Use `extract:` to take a channel first, or keep the range narrow.
+It works on
 any output layout (the stereo position up/downmixes the same way a fixed pan does), and
 stacked layers on one note each draw independently. If you also set `output:` it
 must list exactly two channels.
@@ -1713,7 +1726,7 @@ canonical answer for `omni` (zero-order, equal-weight) and for each cardinal
 first-order pickup pattern. The dispatch is automatic - the same YAML works
 for mono, stereo, quad, 5.1, 7.1, and Ambisonic B-format inputs.
 
-| value      | pattern                                | stereo (2ch)      | B-format AmbiX (4ch) |
+| Value      | Pattern                                | Stereo (2ch)      | B-format AmbiX (4ch) |
 |------------|----------------------------------------|-------------------|----------------------|
 | `omni`     | equal-energy sum / W / M of M/S        | `(L+R)/√2`        | **W** only           |
 | `side`     | left-right figure-eight                | `(L-R)/√2`        | **Y**                |
@@ -2140,7 +2153,7 @@ hears between a key and its sound has three parts:
 
 The output buffer period is set via `player.audio.buffer_frames`:
 
-| frames | buffer period at 44.1 kHz | at 48 kHz |
+| Frames | Buffer period at 44.1 kHz | At 48 kHz |
 |--------|--------------------------:|----------:|
 | 128    | 2.9 ms                    | 2.7 ms    |
 | 256    | 5.8 ms                    | 5.3 ms    |

@@ -4698,6 +4698,11 @@ class MidiPlayer:
 					filled   = 0
 
 					while filled < frame_count:
+						# n >= 1 every pass, so this cannot spin: a voice only
+						# loops when _append_voice found loop_end - loop_start at
+						# least _MIN_LOOP_SECONDS, and the foot of this loop wraps
+						# position back to loop_start.  Cleared in review; noted so
+						# it is not traced again (#1481).
 						n     = min(frame_count - filled, voice.loop_end - voice.position)
 						chunk = voice.audio[voice.position : voice.position + n]
 
@@ -6757,6 +6762,12 @@ class MidiPlayer:
 		round_robin counter key so each layer on the same (channel, note) —
 		including stacked members sharing a velocity range — advances its own
 		independent counter.
+
+		A loop voice cannot reach here holding a segment-sliced buffer, which
+		would leave its loop points pointing outside the slice: bounds exist
+		only on a quantized variant, and ``mode: loop`` alongside a quantize
+		step is dropped to gated when the map parses.  Cleared twice in review;
+		noted so it is not traced a third time (#1481).
 		"""
 
 		if not segment_mode or segment_bounds is None or not segment_bounds:

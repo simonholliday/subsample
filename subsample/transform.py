@@ -177,9 +177,11 @@ class TimeStretch:
 	target_bpm: The desired playback tempo in BPM.
 	resolution: Grid subdivision (1=whole, 2=half, 4=quarter, 8=eighth,
 	            16=sixteenth).  Higher values give finer onset alignment.
-	amount:     Quantize strength (0.0 = no change, 1.0 = full snap to grid).
-	            Values between 0 and 1 move onsets partway toward the grid
-	            for a more natural, less rigid feel.
+	amount:     Quantize strength — how far each hit moves toward the grid.
+	            1.0 lands every hit on it; 0.0 leaves them where the tempo
+	            change alone puts them, which is a plain stretch to target_bpm
+	            rather than no processing at all (#1474).  Values between move
+	            each hit partway, for a more natural, less rigid feel.
 	beats:      How many beats the whole sample is stretched to fill, at
 	            target_bpm.  None (the default) keeps the historical behaviour:
 	            the output length comes from the ratio between the sample's
@@ -1033,7 +1035,10 @@ _VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
 # a changed default — so the on-disk variant cache (keyed by this) invalidates
 # stale pre-change renders instead of serving them.  ANALYSIS_VERSION covers the
 # analysis fingerprint; this covers the DSP.
-TRANSFORM_VERSION: str = "1"
+# 2: stretch_quantize below full strength now moves each hit from where the
+#    tempo change puts it rather than from where it was recorded, so a partial
+#    strength renders differently for the same map (#1474).
+TRANSFORM_VERSION: str = "2"
 
 
 def variant_cache_key (
@@ -2348,7 +2353,7 @@ def _apply_time_stretch (
 	if step.beats is not None and step.beats > 0.0 and audio.shape[0] > 0:
 		return _fit_to_beats(audio, sample_rate, record, step, step.beats)
 
-	if source_bpm <= 0.0 or step.amount <= 0.0:
+	if source_bpm <= 0.0:
 		return audio
 
 	# Duration ratio: >1 means output is longer (slower tempo), <1 means shorter.
@@ -2406,9 +2411,18 @@ def _apply_time_stretch (
 	)
 	snapped  = _snap_onsets_to_grid(tuple(rebased), grid)
 
-	# Partial quantize: interpolate between original and grid-snapped positions.
+	# Partial quantize: each hit moves from where the tempo change alone puts it,
+	# part of the way to its grid point.  Strength says how far a hit moves
+	# toward the grid, not whether the processor runs — so at 0 the sample is
+	# still stretched to the target tempo with its hits left where they fall,
+	# which is what the README has always described (#1474).  The beats path
+	# reads strength the same way.
 	if step.amount < 1.0:
-		snapped = [r + step.amount * (s - r) for r, s in zip(rebased, snapped)]
+		stretched = [time * duration_ratio for time in rebased]
+		snapped = [
+			start + step.amount * (grid_point - start)
+			for start, grid_point in zip(stretched, snapped)
+		]
 
 	# ── Build time map (source sample → target sample) ────────────────────
 
@@ -2487,6 +2501,12 @@ def _apply_reverse (
 	# Flip the timeline flag so a LATER quantize in the chain ([reverse,
 	# pad_quantize/stretch_quantize]) knows to mirror record.rhythm's
 	# original-timeline attack positions onto the now-reversed buffer.
+	#
+	# TOGGLED, not set, so two reverses in one chain cancel as they should —
+	# and cleared per job by _execute, which is what stops the flag leaking
+	# from one render into the next on the same worker thread.  Without both
+	# halves written down, a chain run twice in one process reads as broken;
+	# it made a reviewer's own first repro wrong (#1481).
 	_segment_bounds_local.reversed = not getattr(_segment_bounds_local, "reversed", False)
 
 	return audio[::-1].copy()

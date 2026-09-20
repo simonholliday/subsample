@@ -4776,3 +4776,114 @@ class TestStretchQuantizeToABeatCount:
 
 		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
 		assert spec.steps[0].beats is None
+
+
+class TestPartialStrengthStillFollowsTheTempo:
+
+	"""What `strength:` means on stretch_quantize, settled by #1474.
+
+	It says how far each hit moves toward the grid, not whether the processor
+	runs: at 0 the sample is still stretched to the target tempo, with its hits
+	left where that puts them.  The handler used to return the audio untouched,
+	while the README described a tempo change that never happened.
+	"""
+
+	SR = 44100
+
+	def _take (self) -> tuple[numpy.ndarray, typing.Any]:
+
+		"""A one-second take at 120 BPM with four hits, one per beat-ish."""
+
+		frames = self.SR
+		audio = numpy.zeros((frames, 1), dtype=numpy.float32)
+		click = numpy.exp(-numpy.linspace(0.0, 10.0, int(0.02 * self.SR))).astype(numpy.float32)
+		attacks = (0.02, 0.27, 0.52, 0.77)
+
+		for attack in attacks:
+			start = int(attack * self.SR)
+			audio[start:start + click.size, 0] += click
+
+		return audio, _make_record(
+			audio=numpy.zeros((frames, 1), dtype=numpy.int16),
+			tempo_bpm=120.0, onset_times=attacks, attack_times=attacks,
+		)
+
+	def _rendered (self, amount: float, target_bpm: float = 60.0) -> numpy.ndarray:
+		audio, record = self._take()
+		step = subsample.transform.TimeStretch(
+			target_bpm=target_bpm, resolution=16, amount=amount,
+		)
+
+		return subsample.transform._apply_time_stretch(audio, self.SR, record, step)
+
+	def test_no_strength_still_stretches_to_the_target_tempo (self) -> None:
+
+		"""120 BPM played at 60 is twice as long, snapping or not.
+
+		Twice what is left after the crop to the first attack, which this path
+		has always done and which `beats:` is the way to avoid."""
+
+		kept = self.SR - int((0.02 - subsample.transform._PRE_ONSET_SECONDS) * self.SR)
+		rendered = self._rendered(amount=0.0)
+
+		assert rendered.shape[0] == pytest.approx(2.0 * kept, abs=self.SR * 0.02)
+
+	def test_no_strength_leaves_the_hits_where_the_stretch_puts_them (self) -> None:
+
+		"""Not on the grid, and not where they were recorded: at twice their
+		original time, which is what halving the tempo does to a take."""
+
+		self._rendered(amount=0.0)
+		landed = [start / self.SR for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+		# Positions are rebased to the crop at the first attack, so the hits sit
+		# at twice their spacing from it.
+		for expected, start in zip((0.0, 0.5, 1.0, 1.5), landed):
+			assert start == pytest.approx(expected, abs=0.02)
+
+	def test_full_strength_is_unchanged (self) -> None:
+
+		"""The setting every existing map uses renders as it always did: each
+		hit on a grid point of the target tempo."""
+
+		self._rendered(amount=1.0)
+
+		interval = 60.0 / 60.0 / (16 / 4.0)
+
+		for start, _end in subsample.transform._segment_bounds_local.bounds:
+			remainder = (start / self.SR) % interval
+
+			assert min(remainder, interval - remainder) == pytest.approx(0.0, abs=0.005)
+
+	def test_half_strength_lands_between_the_two (self) -> None:
+
+		"""A partial strength is a blend of those endpoints, which is the looser
+		feel the parameter exists for."""
+
+		self._rendered(amount=0.0)
+		unsnapped = [start for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+		self._rendered(amount=1.0)
+		snapped = [start for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+		self._rendered(amount=0.5)
+		halfway = [start for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+		for loose, half, tight in zip(unsnapped, halfway, snapped):
+			assert min(loose, tight) - 1 <= half <= max(loose, tight) + 1
+
+	def test_a_sample_with_no_tempo_is_still_left_alone (self) -> None:
+
+		"""Stretching by a ratio needs a tempo to be a ratio of.  That guard
+		stays; only the strength half of it went."""
+
+		audio, _record = self._take()
+		record = _make_record(
+			audio=numpy.zeros((audio.shape[0], 1), dtype=numpy.int16),
+			tempo_bpm=0.0, onset_times=(0.02, 0.27), attack_times=(0.02, 0.27),
+		)
+		step = subsample.transform.TimeStretch(target_bpm=60.0, resolution=16, amount=0.0)
+
+		numpy.testing.assert_array_equal(
+			subsample.transform._apply_time_stretch(audio, self.SR, record, step), audio,
+		)
