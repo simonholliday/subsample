@@ -61,12 +61,12 @@ _MODES: typing.Final[dict[str, tuple[str, str]]] = {
 }
 
 _MEASUREMENTS: typing.Final[dict[str, str]] = {
-	"duration":        "The sample's length. A number keeps exactly that value, and bounds keep the values within them.",
-	"duration_beats":  "The sample's length in beats at the session tempo, where a beat is a quarter note. A map that uses it needs a session tempo. A number keeps exactly that value, and bounds keep the values within them.",
-	"onsets":          "How many hits Subsample detected in the sample. A number keeps exactly that value, and bounds keep the values within them.",
-	"tempo":           "The tempo Subsample detected in the sample. A number keeps exactly that value, and bounds keep the values within them.",
-	"pitch":           "The pitch Subsample detected in the sample, as a frequency or as a note name such as `C3`. A value keeps exactly that pitch, and bounds keep the pitches within them.",
-	"quantized_beats": "The sample's length in beats once the assignment's quantise processor has run. A sample not yet quantised does not qualify. A number keeps exactly that value, and bounds keep the values within them.",
+	"duration":        "The sample's length, kept within bounds. A length is measured from the audio, so it is written as a range: one value would keep only a sample measured at exactly that, which almost none is.",
+	"duration_beats":  "The sample's length in beats at the session tempo, where a beat is a quarter note, kept within bounds. A map that uses it needs a session tempo. It is worked out from a measured length, so it is written as a range rather than as one value.",
+	"onsets":          "How many hits Subsample detected in the sample. A number keeps exactly that count, and bounds keep the counts within them.",
+	"tempo":           "The tempo Subsample detected in the sample, kept within bounds. A detected tempo is measured, so it is written as a range: one value would keep only a sample measured at exactly that, which almost none is.",
+	"pitch":           "The pitch Subsample detected in the sample, as a frequency or as a note name such as `C3`, kept within bounds. A detected pitch is measured, so it is written as a range rather than as one pitch.",
+	"quantized_beats": "The sample's length in beats once the assignment's quantise processor has run. A sample not yet quantised does not qualify. A quantised length comes out of the grid whole, so a number keeps exactly that many beats, and bounds keep the lengths within them.",
 }
 
 _MEASUREMENT_EXAMPLES: typing.Final[dict[str, list[typing.Any]]] = {
@@ -75,7 +75,7 @@ _MEASUREMENT_EXAMPLES: typing.Final[dict[str, list[typing.Any]]] = {
 	"onsets":          [1, {"gte": 4}],
 	"tempo":           [{"gte": 118, "lte": 122}],
 	"pitch":           [{"gte": "C2", "lte": "C3"}, {"lte": 200}],
-	"quantized_beats": [{"gte": 4}],
+	"quantized_beats": [4, {"gte": 4}],
 }
 """What a map writes to keep a sample by one of its measurements.  A bare number
 is an exact match, which only a whole-number measurement such as `onsets` is
@@ -738,29 +738,37 @@ def _where () -> dict[str, typing.Any]:
 
 def _measurement (key: str) -> dict[str, typing.Any]:
 
-	"""One measured quality of a sound: a value it must equal, or bounds it must lie within."""
+	"""One measured quality of a sound: bounds it lies within, or the one value a count has."""
 
 	import subsample.query
 
 	value = _measured_value(subsample.query.NUMERIC_YAML_KEYS[key])
+	exact = key in subsample.query.EXACT_WHERE_KEYS
 
-	term: dict[str, typing.Any] = {
-		"description": _MEASUREMENTS[key],
-		"anyOf": [
-			value,
-			{
-				"type": "object",
-				"properties": {
-					operator: {"description": description, **value}
-					for operator, description in _in_order(
-						subsample.query.VALID_OPERATORS, _MEASUREMENT_BOUNDS, "measurement operator",
-					).items()
-				},
-				"minProperties": 1,
-				"additionalProperties": False,
-			},
-		],
+	operators = tuple(
+		operator for operator in subsample.query.VALID_OPERATORS
+		if exact or operator != "eq"
+	)
+
+	bounds: dict[str, typing.Any] = {
+		"type": "object",
+		"properties": {
+			operator: {"description": description, **value}
+			for operator, description in _in_order(
+				operators,
+				{name: prose for name, prose in _MEASUREMENT_BOUNDS.items() if name in operators},
+				"measurement operator",
+			).items()
+		},
+		"minProperties": 1,
+		"additionalProperties": False,
 	}
+
+	term: dict[str, typing.Any] = {"description": _MEASUREMENTS[key]}
+
+	# Only a whole count is a value a sample really has, so everything else
+	# here publishes bounds and nothing else (#3018).
+	term.update({"anyOf": [value, bounds]} if exact else bounds)
 
 	if key in _WHERE_UNITS:
 		term["x-unit"] = _WHERE_UNITS[key]

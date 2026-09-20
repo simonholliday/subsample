@@ -544,6 +544,14 @@ NUMERIC_YAML_KEYS: typing.Final[dict[str, str]] = {
 	"quantized_beats": "quantized_beats",
 }
 
+EXACT_WHERE_KEYS: typing.Final[tuple[str, ...]] = ("onsets", "quantized_beats")
+"""The measurements a map may ask for as one exact value.
+
+A sample really does have this many hits, and a quantised sound really is this
+many beats long, because a beat count comes out of the grid whole.  Everything
+else here is a measured float that nothing lands on exactly, so asking for one
+value there keeps nothing at all and the note plays silence (#3018)."""
+
 
 # ---------------------------------------------------------------------------
 # Ordering — scorer registry + OrderClause
@@ -1802,27 +1810,39 @@ def _parse_where (
 					f"one form or the other, not both."
 				)
 
+			# Only a whole count is a value a sample really has, so everything
+			# else here is written as bounds (#3018).
+			exact = key in EXACT_WHERE_KEYS
+			operators = [op for op in VALID_OPERATORS if exact or op != "eq"]
+
 			# Dict → operator block.  Scalar (int/float/str) → eq shorthand.
 			if isinstance(value, dict):
 				if not value:
 					# An empty operator block builds an unconstrained Range that
 					# silently matches the whole library — reject it.
+					scalar = ", or a scalar for eq" if exact else ""
+
 					raise ValueError(
 						f"MIDI map assignment {assignment_name!r}: {key!r} has an "
 						f"empty operator block — give at least one of "
-						f"{', '.join(sorted(VALID_OPERATORS))}, or a scalar for eq."
+						f"{', '.join(sorted(operators))}{scalar}."
 					)
 				for op, op_value in value.items():
-					if op not in VALID_OPERATORS:
+					if op == "eq" and not exact:
+						raise _measured_exactly(assignment_name, key, op_value)
+
+					if op not in operators:
 						raise ValueError(
 							f"MIDI map assignment {assignment_name!r}: "
 							f"unknown operator {op!r} under {key!r}.  "
 							f"Valid operators: "
-							f"{', '.join(sorted(VALID_OPERATORS))}"
+							f"{', '.join(sorted(operators))}"
 						)
 					range_kwargs[field][op] = _coerce_range_value(
 						field, f"{key}.{op}", op_value, assignment_name,
 					)
+			elif not exact:
+				raise _measured_exactly(assignment_name, key, value)
 			else:
 				# Scalar shorthand for eq.
 				range_kwargs[field]["eq"] = _coerce_range_value(
@@ -1923,6 +1943,22 @@ def _parse_where (
 		pitch_hz        = _range_for("pitch_hz"),
 		quantized_beats = _range_for("quantized_beats"),
 		**other_kwargs,
+	)
+
+
+def _measured_exactly (assignment_name: str, key: str, value: typing.Any) -> ValueError:
+
+	"""The refusal for a map that asks a measured field for one exact value.
+
+	Subsample works the value out from the audio, so nothing lands on a given
+	number: the assignment would match nothing and the note would play silence,
+	with no sign that the map was the reason (#3018)."""
+
+	return ValueError(
+		f"MIDI map assignment {assignment_name!r}: {key!r} is a measured "
+		f"value, so asking for exactly {value!r} keeps only a sample measured "
+		f"at exactly that, and the note plays nothing.  Write bounds instead, "
+		f"with {', '.join(sorted(op for op in VALID_OPERATORS if op != 'eq'))}."
 	)
 
 

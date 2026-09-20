@@ -1096,7 +1096,7 @@ def _is_a_bound (path: str) -> bool:
 
 	operator = path.rsplit("/", 1)[-1]
 
-	if path.startswith("/$defs/where/properties/") and "/anyOf/1/properties/" in path:
+	if path.startswith("/$defs/where/properties/") and path.count("/properties/") > 1:
 		return operator in subsample.query.VALID_OPERATORS
 
 	if path.startswith("/$defs/pick/anyOf/3/properties/"):
@@ -1509,6 +1509,49 @@ class TestValuesAreWrittenAsTheirType:
 
 		with pytest.raises(ValueError, match="'name' must be text"):
 			_load(tmp_path, _map(assignments=[_assignment(name=808)]))
+
+	@pytest.mark.parametrize("key", [
+		key for key in subsample.query.NUMERIC_YAML_KEYS
+		if key not in subsample.query.EXACT_WHERE_KEYS
+	])
+	@pytest.mark.parametrize("written", ["bare", "spelt out"])
+	def test_a_measured_value_asked_for_exactly_is_refused (
+		self, tmp_path: pathlib.Path, key: str, written: str,
+	) -> None:
+
+		"""#3018: nothing is measured at exactly the number a map names, so the note played silence."""
+
+		value: typing.Any = 120 if key == "tempo" else 1
+
+		with pytest.raises(ValueError, match="measured value"):
+			_load(tmp_path, _map(assignments=[_assignment(
+				select={"where": {key: value if written == "bare" else {"eq": value}}},
+			)]))
+
+	@pytest.mark.parametrize("key", subsample.query.EXACT_WHERE_KEYS)
+	def test_a_whole_count_asked_for_exactly_still_loads (
+		self, tmp_path: pathlib.Path, key: str,
+	) -> None:
+
+		"""A sample really does have four hits, and a quantised sound really is four beats long."""
+
+		for value in (4, {"eq": 4}):
+			result = _load(tmp_path, _map(assignments=[_assignment(
+				select={"where": {key: value}}, process=[_QUANTISED],
+			)]))
+
+			assert _first(result).select[0].where
+
+	def test_the_schema_offers_an_exact_match_only_where_one_can_be_met (self) -> None:
+
+		"""What a map may write is what the reference offers, so neither teaches the silence."""
+
+		for key in subsample.query.NUMERIC_YAML_KEYS:
+			term = _at(f"/$defs/where/properties/{key}")
+			operators = _at(f"/$defs/where/properties/{key}" + ("/anyOf/1" if "anyOf" in term else ""))
+
+			assert ("eq" in operators["properties"]) == (key in subsample.query.EXACT_WHERE_KEYS)
+			assert ("anyOf" in term) == (key in subsample.query.EXACT_WHERE_KEYS)
 
 	def test_a_pattern_that_is_not_a_number_is_refused (self, tmp_path: pathlib.Path) -> None:
 

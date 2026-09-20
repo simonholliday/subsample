@@ -414,7 +414,7 @@ locked to the session. Combine it with filtering for a length+rhythm pick:
 ```
 
 `duration`, `onsets`, and other numeric predicates take per-field operator
-dicts (`gte`, `lte`, `gt`, `lt`, `eq`). `strength: 0.7` is a partial-quantise
+dicts (`gte`, `lte`, `gt`, `lt`). `strength: 0.7` is a partial-quantise
 amount - fully snapped at 1.0, unchanged at 0.0.
 
 That's the ladder. The rest of this section is the full reference - every
@@ -828,11 +828,17 @@ use a per-field operator dict. Operators:
 | `lte` | `<=` inclusive upper bound |
 | `gt` | `>` strict lower bound |
 | `lt` | `<` strict upper bound |
-| `eq` | `==` exact equality |
+| `eq` | `==` exact equality - `onsets` and `quantized_beats` only |
 
-Any combination on one field AND-composes. A bare scalar under a numeric field
-is shorthand for `eq` - e.g. `quantized_beats: 4` is the same as
-`quantized_beats: { eq: 4 }`.
+Any combination on one field AND-composes. A bare scalar under `onsets` or
+`quantized_beats` is shorthand for `eq` - e.g. `quantized_beats: 4` is the same
+as `quantized_beats: { eq: 4 }`.
+
+`duration`, `duration_beats`, `tempo` and `pitch` are measured from the audio,
+so they take bounds only: nothing is measured at exactly the number you write,
+so an exact match would keep no sample at all and the note would play silence.
+Both spellings are refused when the map loads, and the message names the bounds
+to write instead.
 
 | Predicate | Type | Description |
 |-----------|------|-------------|
@@ -2082,7 +2088,7 @@ Every enum-string value the MIDI map accepts, in one place:
 
 | Where | Valid values |
 |---|---|
-| `where` operators | `gte` `lte` `gt` `lt` `eq` |
+| `where` operators | `gte` `lte` `gt` `lt`, and `eq` for `onsets` and `quantized_beats` |
 | Order `dir` | `asc` `desc` |
 | Order `by` | `age` `duration` `pitch` `onsets` `tempo` `level` `quantized_beats` `similarity` `beat_match` |
 | `notes` range | `<low>..<high>` (e.g. `C2..C4` or `36..60`) |

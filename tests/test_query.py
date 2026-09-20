@@ -713,14 +713,14 @@ class TestParseSelect:
 
 	def test_duration_beats_yaml_parsed (self) -> None:
 
-		"""duration_beats parses via the operator dict and the bare-scalar (eq)
-		shorthand, exactly like the other numeric predicates."""
+		"""duration_beats parses via the operator dict, like the other measured
+		predicates, and refuses the bare scalar that used to mean eq (#3018)."""
 
 		specs = subsample.query.parse_select({"where": {"duration_beats": {"lt": 0.25}}}, "test")
 		assert specs[0].where.duration_beats.lt == 0.25
 
-		scalar = subsample.query.parse_select({"where": {"duration_beats": 0.5}}, "test")
-		assert scalar[0].where.duration_beats.eq == 0.5
+		with pytest.raises(ValueError, match="measured value"):
+			subsample.query.parse_select({"where": {"duration_beats": 0.5}}, "test")
 
 	def test_defaults (self) -> None:
 
