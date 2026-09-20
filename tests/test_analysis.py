@@ -2280,3 +2280,105 @@ class TestImpactInRhythmResult:
 
 		assert rhythm.impact_time == 0.0
 		assert rhythm.impact_pre_level_db is None
+
+
+class TestAttackLevels:
+
+	"""How loud each detected attack is, relative to the sample's own peak."""
+
+	SR = 44100
+
+	@staticmethod
+	def _hit (amplitude: float, sr: int, seconds: float = 0.2) -> numpy.ndarray:
+
+		"""One decaying hit, peaking at a known fraction of full scale."""
+
+		length = int(seconds * sr)
+		envelope = numpy.exp(-numpy.linspace(0.0, 12.0, length))
+		tone = numpy.sin(2.0 * numpy.pi * 180.0 * numpy.arange(length) / sr)
+
+		return (amplitude * tone * envelope).astype(numpy.float32)
+
+	def _take (self, hits: list[tuple[float, float]], seconds: float = 2.0) -> numpy.ndarray:
+
+		"""A buffer holding each (time, amplitude) hit, as a multi-hit take."""
+
+		buffer = numpy.zeros(int(seconds * self.SR), dtype=numpy.float32)
+
+		for at, amplitude in hits:
+			hit = self._hit(amplitude, self.SR)
+			start = int(at * self.SR)
+			buffer[start:start + hit.size] += hit[:buffer.size - start]
+
+		return buffer
+
+	def test_the_hardest_hit_is_the_reference (self) -> None:
+
+		"""Levels are relative to the sample's peak, so the loudest hit reads 0."""
+
+		take = self._take([(0.1, 1.0), (0.6, 0.5)])
+		levels = subsample.analysis.attack_levels(take, (0.1, 0.6), self.SR)
+
+		assert levels[0] == pytest.approx(0.0, abs=0.1)
+
+	def test_a_quieter_hit_reads_the_difference_a_musician_would_hear (self) -> None:
+
+		"""Half the amplitude is 6 dB down, which is what the number has to say
+		for "are these hits even?" to be answerable from it."""
+
+		take = self._take([(0.1, 1.0), (0.6, 0.5)])
+		levels = subsample.analysis.attack_levels(take, (0.1, 0.6), self.SR)
+
+		assert levels[1] == pytest.approx(-6.0, abs=0.5)
+
+	def test_a_ghost_note_is_not_credited_with_the_hit_behind_it (self) -> None:
+
+		"""The window stops at the next attack.  Without that, a ghost note 30 ms
+		ahead of a loud hit measures the loud hit and reports as a full stroke —
+		the one reading that would make an uneven take look even."""
+
+		take = self._take([(0.30, 0.05), (0.33, 1.0)])
+		levels = subsample.analysis.attack_levels(take, (0.30, 0.33), self.SR)
+
+		assert levels[0] < -15.0
+		assert levels[1] == pytest.approx(0.0, abs=0.1)
+
+	def test_one_level_per_attack_in_the_order_given (self) -> None:
+		take = self._take([(0.1, 1.0), (0.6, 0.5), (1.1, 0.25)])
+		levels = subsample.analysis.attack_levels(take, (0.1, 0.6, 1.1), self.SR)
+
+		assert len(levels) == 3
+		assert levels[1] > levels[2]
+
+	def test_no_attacks_measures_nothing (self) -> None:
+		assert subsample.analysis.attack_levels(self._take([(0.1, 1.0)]), (), self.SR) == ()
+
+	def test_silence_has_no_peak_to_measure_against (self) -> None:
+
+		"""Every level is relative to the loudest moment, and a silent file has
+		none — so there is nothing to report rather than a division by zero."""
+
+		silence = numpy.zeros(self.SR, dtype=numpy.float32)
+
+		assert subsample.analysis.attack_levels(silence, (0.1,), self.SR) == ()
+
+	def test_an_empty_buffer_measures_nothing (self) -> None:
+		assert subsample.analysis.attack_levels(numpy.zeros(0, dtype=numpy.float32), (0.0,), 44100) == ()
+
+	def test_a_silent_window_is_floored_rather_than_infinite (self) -> None:
+
+		"""A level of -inf is not representable in JSON and prints as nonsense."""
+
+		take = self._take([(0.1, 1.0)])
+		levels = subsample.analysis.attack_levels(take, (0.1, 1.9), self.SR)
+
+		assert levels[1] == subsample.analysis._LEVEL_FLOOR_DB
+
+	def test_an_attack_at_the_very_end_still_measures (self) -> None:
+
+		"""The last attack's window runs to the end of the buffer, not past it."""
+
+		take = self._take([(0.1, 1.0)])
+		last = (take.size - 1) / self.SR
+
+		assert len(subsample.analysis.attack_levels(take, (0.1, last), self.SR)) == 2

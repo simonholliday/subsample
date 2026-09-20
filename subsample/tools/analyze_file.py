@@ -2,7 +2,10 @@
 
 Reads any audio file supported by soundfile (WAV, FLAC, AIFF, OGG, etc.),
 runs the same analysis pipeline used during live capture, and prints three
-summary lines per file: rhythm, spectral, and pitch metrics.
+summary lines per file: rhythm, spectral, and pitch metrics.  Every detected
+attack is listed under those, with where it lands and how loud it is — a count
+of onsets says a take has four hits, not whether they are even enough to
+quantize or whether one of them is a ghost note.
 
 Results are cached as a JSON sidecar file (<audio-file>.analysis.json) so
 that repeated analysis of the same file is instant. The cache is
@@ -35,6 +38,46 @@ import subsample.tools._shared
 _log = logging.getLogger(__name__)
 
 
+def _read_mono (filepath: pathlib.Path) -> typing.Optional[numpy.ndarray]:
+
+	"""The file's audio as the analysis reads it, or None when it cannot be read now.
+
+	Read through read_audio_file, like the analysis path above, so a level
+	measured here is measured at the same scale the player will use.
+	"""
+
+	try:
+		file_info = subsample.audio.read_audio_file(filepath)
+
+	except (OSError, ValueError) as exc:
+		_log.warning("Could not read %s to measure attack levels: %s", filepath.name, exc)
+		return None
+
+	return subsample.analysis.to_mono_float(file_info.audio, file_info.bit_depth)
+
+
+def _print_attacks (attack_times: typing.Sequence[float], levels: typing.Sequence[float]) -> None:
+
+	"""Print where each detected attack lands and how loud it is.
+
+	Levels are dB relative to the loudest moment of the sample, so the hardest
+	hit reads 0.0 and a ghost note reads well below it.
+	"""
+
+	if not attack_times:
+		print("attacks:  none")
+		return
+
+	if len(levels) != len(attack_times):
+		print(f"attacks:  {len(attack_times)}  (levels unavailable)")
+		return
+
+	print(f"attacks:  {len(attack_times)}")
+
+	for number, (attack, level) in enumerate(zip(attack_times, levels), start=1):
+		print(f"  {number:2d}   {attack:6.3f}s  {level:5.1f}dB")
+
+
 def _analyze_file (
 	filepath: pathlib.Path,
 	rhythm_cfg: subsample.config.AnalysisConfig,
@@ -44,6 +87,10 @@ def _analyze_file (
 
 	Returns True on success, False if the file could not be read or analysed
 	(so the caller can exit non-zero when every input failed)."""
+
+	# The buffer, kept for the attack levels: the sidecar holds attack times but
+	# not how loud each one is, so a cache hit still needs the audio itself.
+	mono: typing.Optional[numpy.ndarray] = None
 
 	# Try the cache first — skips CPU-intensive analysis if nothing has changed
 	cached = subsample.cache.load_cache(filepath)
@@ -120,7 +167,19 @@ def _analyze_file (
 		except OSError as exc:
 			_log.warning("Could not save analysis cache for %s: %s", filepath.name, exc)
 
+	# Re-read only when the analysis came from the sidecar.  A cache hit already
+	# reads every byte of the file to check its MD5, so this costs the decode
+	# rather than another trip to the disk.
+	if mono is None and rhythm.attack_times:
+		mono = _read_mono(filepath)
+
+	levels = (
+		subsample.analysis.attack_levels(mono, rhythm.attack_times, params.sample_rate)
+		if mono is not None else ()
+	)
+
 	print(f"rhythm:   {subsample.analysis.format_rhythm_result(rhythm)}")
+	_print_attacks(rhythm.attack_times, levels)
 	print(f"spectral: {subsample.analysis.format_result(result, duration)}")
 	print(f"pitch:    {subsample.analysis.format_pitch_result(pitch)}")
 	print(f"level:    {subsample.analysis.format_level_result(level)}")

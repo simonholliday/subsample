@@ -221,9 +221,17 @@ _IMPACT_BACKTRACK_SECONDS: float = 0.400
 # this reports 0.0 ms for every one, while preserving the pedal close's 41.8 ms.
 _IMPACT_MIN_QUIET_MS: float = 3.0
 
-# Floor for impact_pre_level_db.  A pre-impact region of digital silence would
-# otherwise be -inf, which is not representable in strict JSON.
-_IMPACT_PRE_LEVEL_FLOOR_DB: float = -120.0
+# Floor for a level reported in dB relative to the sample's own peak — the
+# pre-impact region, and each attack.  Digital silence would otherwise be -inf,
+# which is not representable in strict JSON.
+_LEVEL_FLOOR_DB: float = -120.0
+
+# How much of the signal after an attack counts as that attack.  A drum's peak
+# arrives within a few milliseconds, but a bowed or brushed stroke takes longer
+# to reach full level; 50 ms covers both while staying inside one hit at any
+# tempo a player sustains (16ths at 200 BPM are 75 ms apart).  The window is cut
+# short at the next attack regardless, so a fast flam measures only its own hit.
+_ATTACK_LEVEL_WINDOW_SECONDS: float = 0.050
 
 # Spectral flux normalisation range.  Units are mean onset-strength per frame
 # over a dB-scaled spectrogram (see _compute_spectral_onset_features) — these
@@ -966,7 +974,7 @@ def _pre_impact_level_db (
 	"""Peak level before ``impact_sample``, in dB relative to the whole sample's peak.
 
 	None when there is no pre-impact region.  Floored at
-	_IMPACT_PRE_LEVEL_FLOOR_DB so a silent lead-in stays JSON-representable.
+	_LEVEL_FLOOR_DB so a silent lead-in stays JSON-representable.
 	"""
 
 	if impact_sample <= 0:
@@ -980,9 +988,9 @@ def _pre_impact_level_db (
 	pre_peak = float(numpy.max(numpy.abs(mono[:impact_sample])))
 
 	if pre_peak <= 0.0:
-		return _IMPACT_PRE_LEVEL_FLOOR_DB
+		return _LEVEL_FLOOR_DB
 
-	return max(_IMPACT_PRE_LEVEL_FLOOR_DB, 20.0 * math.log10(pre_peak / overall_peak))
+	return max(_LEVEL_FLOOR_DB, 20.0 * math.log10(pre_peak / overall_peak))
 
 
 def _refine_onsets_to_attacks (
@@ -1088,6 +1096,58 @@ def _refine_onsets_to_attacks (
 		attacks.append(attack_sample / sample_rate)
 
 	return tuple(attacks)
+
+
+def attack_levels (
+	mono:         numpy.ndarray,
+	attack_times: typing.Sequence[float],
+	sample_rate:  int,
+) -> tuple[float, ...]:
+
+	"""How loud each attack is, in dB relative to the loudest moment of the sample.
+
+	Each attack is measured as the loudest point shortly after it, stopping at
+	the next attack so a quiet hit just ahead of a loud one is not credited with
+	its neighbour's level.  0.0 dB is the hit that carries the sample's peak, and
+	every other hit is below it — which is what says whether a take's hits are
+	even enough to quantize, or whether one of them is a ghost note.
+
+	Args:
+		mono:         Shape (n_frames,), mono float audio as analysis reads it.
+		attack_times: Attack start times in seconds (RhythmResult.attack_times).
+		sample_rate:  Sample rate of ``mono`` in Hz.
+
+	Returns:
+		One level per attack, in the order given, floored at _LEVEL_FLOOR_DB so
+		silence stays a number.  Empty when there are no attacks, or when the
+		whole sample is silent and there is no peak to compare against.
+	"""
+
+	if len(attack_times) == 0 or len(mono) == 0:
+		return ()
+
+	overall_peak = float(numpy.max(numpy.abs(mono)))
+
+	if overall_peak <= 0.0:
+		return ()
+
+	window  = max(1, int(_ATTACK_LEVEL_WINDOW_SECONDS * sample_rate))
+	nearest = [*attack_times[1:], float(len(mono)) / sample_rate]
+
+	levels: list[float] = []
+
+	for attack, following in zip(attack_times, nearest):
+		start = min(max(0, int(attack * sample_rate)), len(mono) - 1)
+		end   = min(start + window, max(start + 1, int(following * sample_rate)), len(mono))
+
+		peak = float(numpy.max(numpy.abs(mono[start:end])))
+
+		levels.append(
+			_LEVEL_FLOOR_DB if peak <= 0.0
+			else max(_LEVEL_FLOOR_DB, 20.0 * math.log10(peak / overall_peak))
+		)
+
+	return tuple(levels)
 
 
 def analyze_rhythm (

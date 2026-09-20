@@ -3085,12 +3085,25 @@ subsample analyze samples/2026-03-17_14-32-01.wav
 Output:
 ```
 rhythm:   tempo=120.2bpm  beats=4  pulses=12  onsets=4
+attacks:  4
+   1    0.020s    0.0dB
+   2    0.510s   -6.0dB
+   3    1.000s   -3.5dB
+   4    1.490s  -21.0dB
 spectral: duration=2.00s  flatness=0.001  attack=0.000  release=0.812  centroid=0.018  bandwidth=0.001  zcr=0.120  harmonic=0.821  contrast=0.310  voiced=0.940  log_attack=0.000  flux=0.312  rolloff=0.451  slope=0.023
 pitch:    pitch=440.0Hz  chroma=A  pitch_conf=0.89  stability=0.120st  voiced_frames=86
 level:    peak -1.2dBFS  rms -12.6dBFS  crest 11.4dB  floor -42.3dBFS
 noisiness: 0.012  (0 = clean event, 1 = wall-to-wall noise)
 loop:     0.412s -> 1.187s (775 ms, xfade 30 ms, junction_flux 0.08)
 ```
+
+Every detected attack is listed with where it starts and how loud it is, in dB
+relative to the sample's own peak - the hardest hit reads `0.0dB` and everything
+else sits below it. This is what answers "is this take worth quantising": hits
+spaced evenly and within a few dB of one another will land on a grid, while one
+20 dB down is a ghost note. Each level is measured over the moment after its
+attack, stopping at the next one, so a quiet hit just ahead of a loud one keeps
+its own level rather than borrowing its neighbour's.
 
 Spectral metrics (all [0, 1]):
 - **flatness** - 0 = tonal, 1 = noisy
