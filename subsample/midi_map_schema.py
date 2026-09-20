@@ -188,7 +188,7 @@ def json_schema () -> dict[str, typing.Any]:
 		"title": "Subsample MIDI map",
 		"description": "The file that tells Subsample which sounds each MIDI note plays, how they are processed, and how they play. It holds assignments, and may add templates, programs, other maps to play at the same time, and definitions files that name notes, controllers, MIDI channels and programs.",
 		"type": "object",
-		"properties": _in_order(subsample.player.VALID_MAP_KEYS, _map_terms(), "map key"),
+		"properties": in_order(subsample.player.VALID_MAP_KEYS, _map_terms(), "map key"),
 		"additionalProperties": False,
 		"$defs": _defs(),
 	}
@@ -344,7 +344,7 @@ def _assignment () -> dict[str, typing.Any]:
 	return {
 		"description": "One instrument: the notes it answers to, the sound it chooses for them, how that sound is processed, and how it plays.",
 		"type": "object",
-		"properties": _in_order(
+		"properties": in_order(
 			subsample.player.VALID_ASSIGNMENT_KEYS, _assignment_terms(), "assignment key",
 		),
 		"required": ["notes", "select"],
@@ -370,7 +370,7 @@ def _template () -> dict[str, typing.Any]:
 	return {
 		"description": "A named set of assignment fields. An assignment that names the template starts from its fields, and its own fields win: a field it sets replaces the template's whole, with nothing merged inside it. A template may not name a template of its own.",
 		"type": "object",
-		"properties": _in_order(
+		"properties": in_order(
 			tuple(name for name in subsample.player.VALID_ASSIGNMENT_KEYS if name != "template"),
 			fields,
 			"template key",
@@ -531,7 +531,7 @@ def _zone_tuned () -> dict[str, typing.Any]:
 			{"const": sentinel},
 			{
 				"type": "object",
-				"properties": _in_order(
+				"properties": in_order(
 					subsample.player.VALID_NOTES_INNER_KEYS, terms, "notes key",
 				),
 				"required": ["mode"],
@@ -571,7 +571,7 @@ def _velocity () -> dict[str, typing.Any]:
 			{"$ref": "#/$defs/velocity_range"},
 			{
 				"type": "object",
-				"properties": _in_order(
+				"properties": in_order(
 					subsample.player.VELOCITY_INNER_KEYS, terms, "velocity key",
 				),
 				"required": ["trigger"],
@@ -666,7 +666,7 @@ def _select_spec () -> dict[str, typing.Any]:
 	return {
 		"description": "One way of choosing a sound: which samples qualify, how they are ranked, and which of them plays.",
 		"type": "object",
-		"properties": _in_order(subsample.query.VALID_SELECT_KEYS, terms, "select key"),
+		"properties": in_order(subsample.query.VALID_SELECT_KEYS, terms, "select key"),
 		"not": {"required": ["order", "order_by"]},
 		"additionalProperties": False,
 	}
@@ -730,7 +730,7 @@ def _where () -> dict[str, typing.Any]:
 	return {
 		"description": "Which samples qualify. Every condition written must hold. Left out, every sample qualifies.",
 		"type": "object",
-		"properties": _in_order(accepted, terms, "where key"),
+		"properties": in_order(accepted, terms, "where key"),
 		"additionalProperties": False,
 		"examples": [{"pitched": True, "duration": {"gte": 1.0}}],
 	}
@@ -754,7 +754,7 @@ def _measurement (key: str) -> dict[str, typing.Any]:
 		"type": "object",
 		"properties": {
 			operator: {"description": description, **value}
-			for operator, description in _in_order(
+			for operator, description in in_order(
 				operators,
 				{name: prose for name, prose in _MEASUREMENT_BOUNDS.items() if name in operators},
 				"measurement operator",
@@ -808,7 +808,7 @@ def _name_term () -> dict[str, typing.Any]:
 						"minLength": 1,
 						"examples": [example],
 					}
-					for operator, (description, example) in _in_order(
+					for operator, (description, example) in in_order(
 						subsample.query.VALID_NAME_OPERATORS, _NAME_MATCHES, "name operator",
 					).items()
 				},
@@ -863,7 +863,7 @@ def _order_clause () -> dict[str, typing.Any]:
 	# own table, so the two cannot disagree.
 	older: list[dict[str, typing.Any]] = []
 
-	titles = _in_order(tuple(subsample.query.LEGACY_ORDER_TOKENS), _OLDER_ORDER_TITLES, "older order word")
+	titles = in_order(tuple(subsample.query.LEGACY_ORDER_TOKENS), _OLDER_ORDER_TITLES, "older order word")
 
 	for token, title in titles.items():
 		clause = subsample.query.LEGACY_ORDER_TOKENS[token]
@@ -944,7 +944,7 @@ def _pick () -> dict[str, typing.Any]:
 				"type": "object",
 				"properties": {
 					operator: {"description": description, **rank}
-					for operator, description in _in_order(
+					for operator, description in in_order(
 						subsample.query.VALID_PICK_OPERATORS, _RANK_BOUNDS, "pick operator",
 					).items()
 				},
@@ -953,7 +953,7 @@ def _pick () -> dict[str, typing.Any]:
 			},
 			{
 				"type": "object",
-				"properties": _in_order(
+				"properties": in_order(
 					subsample.query.VALID_VELOCITY_PICK_KEYS, velocity_terms, "velocity pick key",
 				),
 				"required": ["mode"],
@@ -985,7 +985,7 @@ def _release () -> dict[str, typing.Any]:
 
 	spelt_out = {
 		"type": "object",
-		"properties": _in_order(
+		"properties": in_order(
 			subsample.player.RELEASE_INNER_KEYS, {"time": time, "curve": curve}, "release key",
 		),
 		"additionalProperties": False,
@@ -1080,7 +1080,7 @@ def _loop () -> dict[str, typing.Any]:
 	return {
 		"description": "Where the sound loops while the key is held. A point left out is found automatically, and writing `loop:` at all sets the mode to `loop`. A sample with no clean loop plays gated instead, with a note in the log.",
 		"type": "object",
-		"properties": _in_order(subsample.player.LOOP_INNER_KEYS, terms, "loop key"),
+		"properties": in_order(subsample.player.LOOP_INNER_KEYS, terms, "loop key"),
 		"additionalProperties": False,
 		"examples": [{"start": 0.5, "end": 2.5, "crossfade": 20}],
 	}
@@ -1108,7 +1108,7 @@ def _extract () -> dict[str, typing.Any]:
 			{"type": "string", "pattern": r"^channel\.[0-9]+$"},
 			{
 				"type": "object",
-				"properties": _in_order(
+				"properties": in_order(
 					subsample.player.VALID_EXTRACT_KEYS, {"blend": blend}, "extract key",
 				),
 				"required": ["blend"],
@@ -1169,7 +1169,7 @@ def _pan () -> dict[str, typing.Any]:
 			_word("any", "Any", "A new random position on every note, anywhere from hard left to hard right."),
 			{
 				"type": "object",
-				"properties": _in_order(subsample.query.VALID_PAN_KEYS, terms, "pan key"),
+				"properties": in_order(subsample.query.VALID_PAN_KEYS, terms, "pan key"),
 				"minProperties": 1,
 				"additionalProperties": False,
 			},
@@ -1231,7 +1231,7 @@ def _program () -> dict[str, typing.Any]:
 	return {
 		"description": "One program: the instrument set a Program Change message switches to. It names either a directory of samples for this map's assignments, or a whole map of its own.",
 		"type": "object",
-		"properties": _in_order(subsample.bank.VALID_PROGRAM_KEYS, terms, "program key"),
+		"properties": in_order(subsample.bank.VALID_PROGRAM_KEYS, terms, "program key"),
 		"required": ["name"],
 		"oneOf": [{"required": ["directory"]}, {"required": ["map"]}],
 		"additionalProperties": False,
@@ -1264,7 +1264,7 @@ def _included_map () -> dict[str, typing.Any]:
 			{"type": "string", "minLength": 1},
 			{
 				"type": "object",
-				"properties": _in_order(
+				"properties": in_order(
 					subsample.ensemble.VALID_INCLUDE_KEYS, terms, "included map key",
 				),
 				"required": ["map"],
@@ -1340,11 +1340,11 @@ def _words (
 
 	return [
 		_word(value, title, description)
-		for value, (title, description) in _in_order(accepted, prose, what).items()
+		for value, (title, description) in in_order(accepted, prose, what).items()
 	]
 
 
-def _in_order (
+def in_order (
 	accepted: typing.Sequence[str],
 	declared: typing.Mapping[str, typing.Any],
 	what:     str,
@@ -1354,7 +1354,10 @@ def _in_order (
 
 	Reading the parser's list is what keeps the two together: a key added to one
 	and not the other stops the schema being built at all, rather than going out
-	as a reference that quietly omits it."""
+	as a reference that quietly omits it.
+
+	subsample.definitions_schema declares a second file format the same way and
+	calls this, rather than keeping a guard of its own that could differ."""
 
 	undeclared = [name for name in accepted if name not in declared]
 	unaccepted = [name for name in declared if name not in accepted]

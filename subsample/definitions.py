@@ -40,13 +40,14 @@ import yaml
 
 # The sections subsample reads.  Everything else in the file belongs to other
 # tools and is ignored without comment.
-CONSUMED_SECTIONS: typing.Final[frozenset[str]] = frozenset({
+CONSUMED_SECTIONS: typing.Final[tuple[str, ...]] = (
 	"notes", "cc", "channels", "programs",
-})
+)
+"""In the order a reference lists them, which subsample.definitions_schema reads."""
 
 # Inclusive value range per consumed section.  Channels are user-facing 1-16
 # (the map's own `channel:` convention); the rest are raw MIDI data ranges.
-_SECTION_RANGES: typing.Final[dict[str, tuple[int, int]]] = {
+SECTION_RANGES: typing.Final[dict[str, tuple[int, int]]] = {
 	"notes":    (0, 127),
 	"cc":       (0, 127),
 	"channels": (1, 16),
@@ -259,7 +260,7 @@ def _load_definitions_file (
 
 	sections: dict[str, dict[str, int]] = {}
 
-	for section in sorted(CONSUMED_SECTIONS):
+	for section in CONSUMED_SECTIONS:
 		section_raw = raw.get(section)
 
 		if section_raw is None:
@@ -272,7 +273,7 @@ def _load_definitions_file (
 				f"(got {type(section_raw).__name__})"
 			)
 
-		lo, hi = _SECTION_RANGES[section]
+		lo, hi = SECTION_RANGES[section]
 		table: dict[str, int] = {}
 
 		for name_raw, value in section_raw.items():
