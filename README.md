@@ -60,75 +60,52 @@ All four are the same workflow.
 - **A studio sampler that builds itself.** Drop samples in (or record them
   live) and Subsample maps them to MIDI notes, processes them through an
   adaptive DSP chain, and presents a playable, mix-ready instrument with no
-  manual chopping, naming, or mapping. It runs on a Raspberry Pi left in a
-  remote location as well as on a studio Mac or a Linux rack server.
-- **Automatic similarity-based sample organisation.** An acoustic fingerprint
-  of each sound's spectrum, timbre, attack, and band energy matches kicks to
+  manual chopping, naming, or mapping.
+- **Automatic similarity-based sample organisation.** Kicks are matched to
   kick pads, snares to snare pads, hi-hats to hi-hat pads - no labels, no
   training data, no manual tagging. The same engine handles tonal samples
   without special treatment, and works equally well on a disorganised sample
   library or a fresh field-recording session.
 - **Real-time live sampling.** Point a microphone at the world and Subsample
   captures, trims, analyses, and adds every distinct sound event to your
-  instrument library as it happens. Adaptive noise floor tracking works in
-  noisy rehearsal rooms as well as quiet studios. Analysis runs apart from
-  capture, so a sound that arrives while the last one is still being analysed
-  is still recorded.
+  instrument library as it happens. It works in noisy rehearsal rooms as well
+  as quiet studios.
 - **Beat slicer and auto-quantise for loops.** Detected onsets in long samples
-  are individually placed on a beat grid using onset-aligned timemaps, so
-  each hit in a loop lands on the grid at your target BPM. A pad-quantise mode
-  preserves natural timbre by inserting silence between hits instead of
-  time-stretching. Per-hit segment playback: cycle through hits with
-  `round_robin`, pick randomly with `random`, or map specific segments to
-  specific notes by index.
+  are individually placed on a beat grid, so each hit in a loop lands on the
+  grid at your target BPM.
 - **Pitched and percussive in one engine.** Subsample detects samples with a
-  single stable pitch and shifts them across the keyboard range with Rubber
-  Band's offline finer engine. Drums, melodic, and effect samples share one
-  library and one workflow.
-- **A DSP chain that sets its defaults from each sample.** Compression,
-  gating, transient shaping, filters, distortion, saturation, bit-depth
-  reduction, radio transmission/reception, frequency shift, tuning wobble,
-  vocoder cross-synthesis, beat-quantise, pitch-shift, time-stretch, reverse,
-  envelope reshape, and HPSS harmonic/percussive separation. The compressor,
-  gate, transient shaper, distortion, and envelope reshaper set their
-  parameters from each sample's analysis - write `compress: true` and the
-  threshold, attack, and release are derived from the audio. Variants are
-  rendered in a background worker pool before they play.
-- **Sweep anything with a knob.** Bind any numeric parameter - filter cutoff,
-  beat-quantise amount, distortion drive, compression threshold - to a MIDI
-  CC controller. Variants are re-rendered in the background between knob
-  positions and bridged smoothly, so you can play with parameters that aren't
-  normally automatable on samplers at all.
+  single stable pitch and shifts them across the keyboard range. Drums,
+  melodic, and effect samples share one library and one workflow.
+- **A DSP chain that sets its defaults from each sample.** Write
+  `compress: true` and the threshold, attack, and release are derived from the
+  audio. Variants are rendered in a background worker pool before they play.
+- **Sweep anything with a knob.** A filter cutoff, a beat-quantise amount, a
+  distortion drive, a compression threshold: variants are re-rendered in the
+  background between knob positions and bridged smoothly, so you can play with
+  parameters that aren't normally automatable on samplers at all.
 - **Multichannel in, multichannel out.** Records from any subset of physical
   inputs on a multi-channel interface (e.g. inputs 3-4 of a Focusrite Scarlett
   18i20). Routes individual instruments to specific outputs (kick to outputs
-  1-2, snare to outputs 3-4) for separate external processing. Standard
-  ITU-R BS.775 downmix and conservative upmix for stereo, quad, 5.1, and 7.1.
-  First-order ambisonic capture from tetrahedral mics (Rode NT-SF1,
-  generic A-format, or pre-encoded B-format FuMA/AmbiX) with decoder and
-  rotation at playback time - see [Ambisonic](#ambisonic-capture).
+  1-2, snare to outputs 3-4) for separate external processing. First-order
+  ambisonic capture from tetrahedral mics (Rode NT-SF1, generic A-format, or
+  pre-encoded B-format FuMA/AmbiX) with decoder and rotation at playback time.
 - **WAV or lossless FLAC storage.** Opt into FLAC (`audio_format: flac`) to
-  shrink your sample library with no loss of quality. Existing
-  WAV samples continue to load unchanged alongside any new FLAC captures -
-  see [Storage format](#storage-format).
+  shrink your sample library with no loss of quality. Existing WAV samples
+  continue to load unchanged alongside any new FLAC captures.
 - **Visual sample previews.** Every capture gets a fixed 1024x256 `.preview.png`
   thumbnail (waveform + 4-band frequency skyline + onset ticks + pitch/BPM
   badge) for browsing in an OS file manager, plus the compact data it is
   drawn from, kept in the analysis sidecar so a missing thumbnail can be
-  redrawn without re-analysing - see [Sample previews](#sample-previews).
-- **Headless and config-driven.** Everything is YAML - version-controllable,
-  reproducible, no GUI required. Drive it from any DAW, hardware controller,
-  or sequencer over standard MIDI.
+  redrawn without re-analysing.
 - **Plays nicely with the rest of your studio.** Standard MIDI input from any
-  DAW or hardware controller, [virtual MIDI](#virtual-midi) ports for
-  software-only routing on the same machine, [OSC integration](#osc-integration)
-  for talking to sequencers and visualisers, and a ready-to-play GM drums map
-  that turns any sample collection into a coherent, pre-mixed drum kit on
-  first play.
+  DAW or hardware controller, virtual MIDI ports for software-only routing on
+  the same machine, OSC integration for talking to sequencers and visualisers,
+  and a ready-to-play GM drums map that turns any sample collection into a
+  coherent, pre-mixed drum kit on first play.
 - **Pairs with Subsequence.** Subsample's sister project
   [Subsequence](https://github.com/simonholliday/subsequence) is a Python
   MIDI sequencer: Subsequence drives the patterns, and Subsample provides the
-  sounds. Each works independently - see [Works with Subsequence](#works-with-subsequence).
+  sounds. Each works independently.
 
 
 ## At a glance
@@ -138,7 +115,7 @@ All four are the same workflow.
 | **Live capture** | Adaptive noise floor, capture that keeps recording while analysis runs, S-curve fades |
 | **Analysis** | Spectral shape, sustained timbre, timbre dynamics, attack character, and band energy; cached `.analysis.json` sidecars |
 | **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
-| **DSP processors** | Filters, dynamics, distortion, radio, vocoder, pitch, time-stretch, and quantise - see [Process](#process---how-to-present-the-sample) |
+| **DSP processors** | Filters, dynamics, distortion, radio, vocoder, pitch, time-stretch, and quantise |
 | **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
 | **Pitch shifting** | Rubber Band offline finer engine, pre-rendered |
 | **Time stretch** | Beat-quantised with onset-aligned timemaps, partial-quantise amount, pad-quantise alternative for speech |
@@ -156,7 +133,6 @@ All four are the same workflow.
 | **GM drums** | Ready-to-play map of the General MIDI percussion set, with a mix chain for each instrument |
 | **Configuration** | YAML, version-controllable, headless, no GUI |
 | **Platform** | Linux, macOS, Windows (via WSL), Raspberry Pi |
-| **Licence** | AGPL-3.0 (commercial licensing on request) |
 
 
 ## How it works
@@ -3500,7 +3476,7 @@ Subsample is released under the [GNU Affero General Public License v3.0](LICENSE
 
 You are free to use, modify, and distribute this software under the terms of the AGPL. If you run a modified version of Subsample as part of a network service, you must make the source code available to its users.
 
-All runtime dependencies are permissively licensed (MIT, ISC, BSD-3-Clause) and compatible with AGPLv3.
+All runtime dependencies are permissively licensed and compatible with AGPLv3.
 
 ## Commercial licensing
 
