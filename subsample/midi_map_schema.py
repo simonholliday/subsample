@@ -413,6 +413,11 @@ def _assignment_terms () -> dict[str, typing.Any]:
 			"type": "array",
 			"items": {"$ref": "#/$defs/process_step"},
 			"contains": _beat_aligning_step(),
+
+			# JSON Schema reads `contains` as "at least one" unless it is told
+			# otherwise, and the rule here is "at most one": a chain with no
+			# beat-aligning processor at all is the ordinary case.
+			"minContains": 0,
 			"maxContains": 1,
 			"examples": [[
 				"reverse",

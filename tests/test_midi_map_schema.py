@@ -1038,6 +1038,9 @@ class TestProcessorsFollowTheirDeclaration:
 
 		process = _at("/$defs/assignment/properties/process")
 
+		# Without minContains the rule reads as "at least one", which would
+		# refuse every chain that does not align to the beat.
+		assert process["minContains"] == 0
 		assert process["maxContains"] == 1
 		assert process["contains"]["anyOf"][0]["enum"] == list(subsample.query.BEAT_ALIGNING_PROCESSORS)
 

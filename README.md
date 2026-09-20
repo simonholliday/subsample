@@ -268,7 +268,7 @@ the advanced features (programs, ambisonic capture, MIDI CC mapping).
 MIDI routing is defined in a YAML file - by default `midi-map.yaml` in the
 project directory, referenced from `config.yaml`:
 
-```yaml
+```yaml config
 player:
   midi_map: midi-map.yaml
 ```
@@ -296,7 +296,7 @@ The examples below are working YAML. Each one is a self-contained
 The simplest possible assignment: MIDI note 36 (on channel 10, the GM drum
 channel) always plays one named sample.
 
-```yaml
+```yaml map.assignments
 - name: My favourite kick
   channel: 10
   notes: 36
@@ -316,7 +316,7 @@ Now the interesting bit. Instead of naming a specific sample, describe the
 match from your library - every time you load new samples, the best candidate
 may change, but you never have to rewrite the YAML.
 
-```yaml
+```yaml map.assignments
 - name: Any kick
   channel: 10
   notes: 36
@@ -350,7 +350,7 @@ Filter the library by analysis metadata, sort the qualifying samples, and
 pick one. This example plays the **oldest pitched sample** across a whole
 keyboard range, pitch-shifted to each MIDI note:
 
-```yaml
+```yaml map.assignments
 - name: Pitched keyboard
   channel: 1
   notes: C2..C6
@@ -373,7 +373,7 @@ assignment, 49 notes. `repitch: true` pitch-shifts the chosen sample per note.
 Everything in `process:` is an ordered audio-effects pipeline. Order matters -
 the sample flows through top to bottom.
 
-```yaml
+```yaml map.assignments
 - name: Warm keys
   channel: 1
   notes: C2..C6
@@ -398,7 +398,7 @@ the [Process](#process---how-to-present-the-sample) reference below.
 to a beat grid - turning any loosely-timed loop in your library into something
 locked to the session. Combine it with filtering for a length+rhythm pick:
 
-```yaml
+```yaml map.assignments
 - name: Tight loops
   channel: 2
   notes: C3..C4
@@ -461,7 +461,7 @@ when you want to try something the tutorial didn't show.
 A map can set a default channel once, at the top level, instead of repeating it
 on every assignment:
 
-```yaml
+```yaml map
 channel: 10          # every assignment below plays on channel 10
 
 assignments:
@@ -505,7 +505,7 @@ By default a sustained sound (`mode: gated`) fades out over a fixed 10 ms
 when you lift the key, which is long enough to avoid a click. `release` lets you set
 how long that fade is, and its shape:
 
-```yaml
+```yaml map.assignments
 - name: Warm pad
   channel: 1
   notes: 48
@@ -568,7 +568,7 @@ once, then a click-free slice of the steady part loops for as long as you hold t
 key. Lift the key and it stops looping and plays on through the sample's real
 tail, shaped by `release`.
 
-```yaml
+```yaml map.assignments
 - name: Pad
   channel: 1
   notes: C2..C4
@@ -583,7 +583,7 @@ sustain, with a short crossfade so the wrap is inaudible. The `loopable` catalog
 column and `subsample loops` let you preview which samples loop well. To
 place the loop by hand, give `loop:` in seconds (crossfade in ms):
 
-```yaml
+```yaml assignment
   loop: { start: 1.2, end: 3.4, crossfade: 40 }
 ```
 
@@ -618,7 +618,7 @@ Declare it on the sound that should be *cut*, naming the note(s) that cut it -
 any note form works, including your own names from a mounted definitions file
 (see [Naming your own sounds](#naming-your-own-sounds---the-definitions-file)):
 
-```yaml
+```yaml map.assignments
 - name: Open Hi-Hat
   channel: 10
   notes: drum.hi_hat_open
@@ -664,7 +664,7 @@ same `select` shape on every pad. Define those shared fields once in a
 top-level `templates:` section and pull them into each assignment with a
 `template:` reference.
 
-```yaml
+```yaml map
 templates:
   percussion:                    # any subset of assignment fields
     channel: 10
@@ -701,7 +701,7 @@ error listing the templates you defined.
 
 ### Note syntax
 
-```yaml
+```yaml assignment
 notes: 36          # single MIDI note number
 notes: C4          # scientific pitch (C4 = MIDI 60, as in REAPER; Ableton/Logic show 60 as C3, FL as C5)
 notes: drum.kick_1 # GM percussion by symbolic name (case-insensitive)
@@ -740,7 +740,7 @@ map reads `notes: my.dawn_chorus_pheasant` instead of `notes: 60`, and the
 same file can name the same sounds in your sequencer. Neither tool depends on
 the other; they both read the same small file.
 
-```yaml
+```yaml definitions
 # project.yaml - or any filename you like
 notes:
   ride_edge_soft: 53
@@ -757,7 +757,7 @@ programs:
 Mount it in the MIDI map under a prefix of your choosing (the path is
 relative to the map file, like `reference:` paths):
 
-```yaml
+```yaml map
 definitions: { my: project.yaml }
 
 assignments:
@@ -801,7 +801,7 @@ The `select` block defines how to choose a sample from the instrument library.
 It has three parts: filter predicates (`where`), a sort order (`order`), and
 a pick position (`pick`).
 
-```yaml
+```yaml assignment
 select:
   where:
     duration: { gte: 1.0 }                # at least 1 second long
@@ -857,7 +857,7 @@ to write instead.
 
 The `name:` predicate accepts four forms:
 
-```yaml
+```yaml assignment.select
 where:
   name: my-kick                       # 1. exact stem match (case-sensitive)
   name: [my-kick-1, my-kick-2]        # 2. list of exact stems (case-sensitive)
@@ -898,7 +898,7 @@ first), and optional scorer-specific parameters.
 Later clauses break ties on earlier ones, so primary sort + secondary
 tie-breaker is natural:
 
-```yaml
+```yaml assignment.select
 order:
   - { by: duration, dir: desc }           # primary
   - { by: onsets,   dir: asc }            # tiebreaker
@@ -953,7 +953,7 @@ so `notes: [36, 35]` gives note 36 pick 1 (best match) and note 35 pick 2.
 fresh random rank is drawn on every note-on, so the same pad plays a different
 sample each time without scripting. Two equivalent forms:
 
-```yaml
+```yaml assignment.select
 pick: [1, 3]              # shorthand: random rank in 1..3 inclusive
 pick: { gte: 1, lte: 3 }  # explicit: same vocabulary as `where:` operators
 ```
@@ -969,7 +969,7 @@ each key instead of fixing different ranks to different notes.
 match without counting your library, leave an end open. Write `null` in the
 list, drop the upper bound from the dict, or use the `any` shortcut:
 
-```yaml
+```yaml assignment.select
 pick: any                 # uniform draw across all matches
 pick: [null, null]        # same thing, list spelling
 pick: [2, null]           # rank 2 to the last match (skip the top hit)
@@ -991,7 +991,7 @@ ranks. Point it at a folder of one sound recorded at many strengths - ghost
 notes through full strikes - and each velocity plays the take that was performed
 at roughly that strength.
 
-```yaml
+```yaml map.assignments
 - notes: drum.snare
   channel: 10
   select:
@@ -1008,7 +1008,7 @@ do not need one sample per velocity.
 
 Two refinements are available in the long form:
 
-```yaml
+```yaml assignment.select
 pick: { mode: velocity, variation: 10, curve: logarithmic }
 ```
 
@@ -1055,7 +1055,7 @@ snapping onsets to a beat grid. Any assignment that uses `beat_match` in its
 block - without a quantise step, no sample has an energy profile to compare
 against, and the result set is empty.
 
-```yaml
+```yaml assignment
 select:
   where:
     duration: { gte: 1.0 }
@@ -1098,7 +1098,7 @@ quantised variant score `None` and are excluded.
 `select` can be a list of specs tried in order. The first that returns a
 result wins:
 
-```yaml
+```yaml assignment
 select:
   - where: { name: my-favourite-kick }                               # try specific sample first
   - where: { reference: GM36_BassDrum1 }       # fall back to similarity match
@@ -1110,7 +1110,7 @@ The pre-2026-04 `order_by:` key with a bare-string token is still accepted
 indefinitely - the parser translates it into the equivalent `order:` clause.
 These two forms produce identical results:
 
-```yaml
+```yaml assignment
 # Legacy (still accepted)
 select:
   where: { pitched: true }
@@ -1133,7 +1133,7 @@ on the same `select` entry is an error.
 
 #### Examples
 
-```yaml
+```yaml assignment
 # GM kicks - ranked by similarity to a kick reference
 select:
   where:
@@ -1172,7 +1172,7 @@ select:
 The optional `process` block declares an ordered list of audio processors
 applied after sample selection. Omit it entirely for unprocessed playback.
 
-```yaml
+```yaml assignment
 process:
   - filter_low: { freq: 800, resonance: 6 }   # low-pass, then
   - repitch: true                               # pitch-shift, then
@@ -1225,7 +1225,7 @@ Available processors:
 All three filters can be used without parameters - they default to classic
 console channel-strip values:
 
-```yaml
+```yaml assignment
 process:
   - filter_high: true    # 80 Hz high-pass  (rumble filter)
   - filter_low: true     # 16 kHz low-pass  (analog warmth roll-off)
@@ -1253,7 +1253,7 @@ are dBFS against the processing buffer, which every sample is normalised to
 before the chain runs - so a given number means the same depth below the peak
 for every sample, whatever its recording level.
 
-```yaml
+```yaml assignment
 process:
   - compress: true                                        # adapts to each sample
   - compress: { threshold: -30, ratio: 10, attack: 0.5 } # explicit - squash + raise tail
@@ -1274,7 +1274,7 @@ look-ahead.
 The noise gate, distortion, and envelope reshaper follow the same pattern -
 `true` derives the parameters from the sample, and explicit parameters override them:
 
-```yaml
+```yaml assignment
 process:
   - gate: true                              # auto noise gate
   - gate: { threshold: -40, hold: 20 }      # explicit threshold
@@ -1314,7 +1314,7 @@ the trade. Use `rectangular` for marginally less hiss at the cost of slight
 noise pumping. For the full vintage-sampler character, pair the converter with
 its low sample rate:
 
-```yaml
+```yaml assignment
 process:
   - bit_depth: 12                            # the converter grain
   - distort: { mode: downsample, downsample_factor: 2, drive: 0, tone: 1.0 }
@@ -1341,7 +1341,7 @@ broadcast is mono); `stereo: stereo` runs each channel as its own receiver
 sharing one sky - independent hiss, but the same lightning crackle centred
 across both.
 
-```yaml
+```yaml assignment
 process:
   - radio: { mode: ssb, tune: 150, signal: 0.3, static: 0.3 }   # a voice on a crowded band
   - radio: { mode: fm, demod: ssb }                             # the wrong-mode warble
@@ -1398,7 +1398,7 @@ params.
 The simple form is a single **position**, the way a mixer pan pot reads:
 `-100` hard left, `0` centre, `+100` hard right.
 
-```yaml
+```yaml assignment
 pan: 0       # centre (default)
 pan: -100    # hard left
 pan: -50     # halfway left
@@ -1411,7 +1411,7 @@ ratio between channels matters. `[50, 50]`, `[1, 1]`, and `[100, 100]` all
 produce centre. Either form is normalised to constant-power gains at mix
 time, so perceived loudness stays equal across pan positions.
 
-```yaml
+```yaml assignment
 pan: [50, 50]    # centre (same as pan: 0)
 pan: [100, 0]    # hard left (same as pan: -100)
 pan: [75, 25]    # left of centre (same as pan: -50)
@@ -1431,7 +1431,7 @@ Instead of a fixed position, `pan` can draw a **fresh random position on every
 note-on** - each strike lands somewhere new in the field and holds there for
 that note. Three forms:
 
-```yaml
+```yaml assignment
 pan: any                              # anywhere, hard left to hard right
 pan: { gte: -50, lte: 50 }            # within a range (omit an end to open it)
 pan: { position: -20, variation: 40 } # around a centre: -20, spread by ±20
@@ -1449,7 +1449,7 @@ must list exactly two channels.
 On a multi-channel interface you can route each instrument to specific physical
 outputs. Numbers are 1-indexed, matching the labels on your hardware:
 
-```yaml
+```yaml map.templates
 kick:
   pan: [50, 50]
   output: [1, 2]       # main monitors (default when omitted)
@@ -1489,7 +1489,7 @@ on the incoming velocity. Two common uses:
 
 #### List shortcut - filter only
 
-```yaml
+```yaml map.assignments
 - name: Hard snare hit
   channel: 10
   notes: 38
@@ -1504,7 +1504,7 @@ the gain calculation unchanged.
 
 #### Dict form - filter with optional rescale
 
-```yaml
+```yaml map.assignments
 - name: Soft hat
   channel: 10
   notes: 42
@@ -1562,7 +1562,7 @@ because that is almost always a copy-paste slip. To stack them on purpose, set
 `stack: true` on **every** assignment that shares the note - the flag is your
 explicit "yes, I meant these to overlap":
 
-```yaml
+```yaml map.assignments
 - name: Kick body
   channel: 10
   notes: 36
@@ -1612,7 +1612,7 @@ without manually writing 30 assignments.
 
 #### Shortcut form - full keyboard
 
-```yaml
+```yaml map.assignments
 - name: Pitched library
   channel: 1
   notes: zone-tuned                # covers MIDI 0-127
@@ -1634,7 +1634,7 @@ zone-tuned is for.
 
 #### Dict form - restricted keyboard range and split keyboards
 
-```yaml
+```yaml map.assignments
 - name: Bass zone
   channel: 1
   notes:
@@ -1692,7 +1692,7 @@ kick to land dead-centre and mono. `extract: omni` collapses the stereo source
 to its `(L+R)/√2` sum and then `pan: [50, 50]` sends the mono signal equally to
 both outputs.
 
-```yaml
+```yaml map.assignments
 - name: Kick
   channel: 10
   notes: drum.kick_1
@@ -1757,7 +1757,7 @@ are roughly 180° out of phase; summing them naively (`omni`) thins the body of
 the drum. Flip the bottom mic with a negative weight and set the balance to
 taste - more of the bottom mic brings up the snare wires:
 
-```yaml
+```yaml map.assignments
 - name: Snare
   channel: 10
   notes: drum.snare_1
@@ -1789,7 +1789,7 @@ sized to match `player.audio.channels` (mono, stereo, quad, 5.1, or 7.1).
 
 Enable ambisonic capture in `config.yaml`:
 
-```yaml
+```yaml config
 recorder:
   audio:
     channels: 4
@@ -1866,7 +1866,7 @@ An **ensemble** binds sets to MIDI channels so they all play together. It is
 not a new kind of file: any map may declare a `maps:` block, and may carry its
 own `assignments:` alongside.
 
-```yaml
+```yaml map
 # ensemble.yaml
 maps:
   - "/mnt/shared/Home Kit 2026-07/midi-map.yaml"       # keeps its own channel
@@ -1887,7 +1887,7 @@ binding logs a warning when it finds one, since it will not move those entries.
 The same thing can be written straight into `config.yaml` when you would rather
 not keep a separate file:
 
-```yaml
+```yaml config
 player:
   midi_maps:
     10: "/mnt/shared/Home Kit 2026-07/midi-map.yaml"
@@ -1923,7 +1923,7 @@ messages - no restart, no disk I/O, instant switching. A `program:` number may
 also be a name from a mounted definitions file (`program: my.brushes` - see
 [Naming your own sounds](#naming-your-own-sounds---the-definitions-file)):
 
-```yaml
+```yaml map
 programs:
   - name: "Acoustic Kit"
     directory: samples/acoustic
@@ -1969,7 +1969,7 @@ only exist in one program silently produce no match in others; rule-based select
 
 A `map:` program is a complete, self-contained preset:
 
-```yaml
+```yaml map
 programs:
   - name: "Acoustic Kit"
     program: 0
@@ -2038,7 +2038,7 @@ Replace the scalar value with a CC binding (`cc:` and `channel:` also accept
 names from a mounted definitions file, e.g. `cc: my.brightness` - see
 [Naming your own sounds](#naming-your-own-sounds---the-definitions-file)):
 
-```yaml
+```yaml assignment
 process:
   - pad_quantize: { grid: 16, strength: { cc: 1 } }         # bare CC binding
   - filter_low: { freq: { cc: 74, min: 200, max: 16000 } }  # ranged CC binding
@@ -2384,7 +2384,7 @@ To capture the full tail, record one hit at a time - strike, let it ring down to
 silence, strike again - and give the recorder a separate, lower threshold for the
 *end* of each hit:
 
-```yaml
+```yaml config
 detection:
   threshold_db: 10.5         # START: still fires only on the loud attack
   release_threshold_db: 4.0      # END: let the tail ring out to ~4 dB over the floor
@@ -2423,7 +2423,7 @@ it. Counter-intuitively, the quieter the room, the easier this is to provoke.
 
 Two settings guard against it:
 
-```yaml
+```yaml config
 detection:
   threshold_db: 12.0             # comfortably above the room's own wobble
   retrigger_threshold_db: 15.0   # a real strike, not a fluctuation in the tail
@@ -2477,7 +2477,7 @@ between runs, followed by a port number (`:0`) that does not.
 
 So the rule is: **wildcard the number that moves, keep the one that doesn't.**
 
-```yaml
+```yaml config
 recorder:
   audio:
     device: "SC-U: USB Audio (hw:*,0)"
@@ -2519,7 +2519,7 @@ alsa_output.usb-BEHRINGER_SC-U_0EB571140230AB13-00.multichannel-output
 Nothing in that moves - no card index at all - so it survives re-plugging and
 reboots without a wildcard for an index:
 
-```yaml
+```yaml config
 recorder:
   audio:
     device: "alsa_input.usb-BEHRINGER_SC-U*"
@@ -2656,7 +2656,7 @@ sequence without any warning.
 Set `tempo.source: midi` and subsample takes the tempo from the MIDI clock
 arriving on the player's MIDI input instead:
 
-```yaml
+```yaml config
 tempo:
   bpm: 125.0        # fallback, used until a clock is seen
   source: midi      # follow the sequencer
@@ -2788,7 +2788,7 @@ see `max_memory_mb` in the configuration table) and can be overridden via
 
 ### Persistent library across sessions
 
-```yaml
+```yaml config
 recorder:
   directory: samples/captures     # where new captures are written
 
@@ -2872,7 +2872,7 @@ of-house playback rig; or keeping CPU-intensive audio analysis on a
 dedicated host.
 
 **Recorder machine** (`config.yaml`):
-```yaml
+```yaml config
 recorder:
   enabled: true
   directory: "/mnt/shared/samples"
@@ -2882,7 +2882,7 @@ player:
 ```
 
 **Player machine** (`config.yaml`):
-```yaml
+```yaml config
 recorder:
   enabled: false
 
@@ -2923,7 +2923,7 @@ relies on filesystem notifications, which do not cross machines - a sample set o
 a network drive edited from another machine generates no events at all. Both are
 fine for pre-built sets, which do not change while you play.
 
-```yaml
+```yaml config
 player:
   enabled: true
   midi_map: midi-map.yaml
@@ -2942,7 +2942,7 @@ kick drum, snare, hi-hat, etc. Each reference is represented by its
 `.analysis.json` sidecar file alongside the original audio. References are
 declared as path-based `where: { reference: ... }` predicates in the MIDI map:
 
-```yaml
+```yaml map.assignments
 - name: Bass Drum
   channel: 10
   notes: 36
@@ -3001,7 +3001,7 @@ pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git
 
 then enable it in `config.yaml`:
 
-```yaml
+```yaml config
 osc:
   enabled: true
   send_host: "127.0.0.1"
@@ -3058,7 +3058,7 @@ The two communicate over standard MIDI. The simplest setup is to give
 Subsample a named [virtual MIDI port](#virtual-midi) and have Subsequence send
 to it - no hardware MIDI cabling required, no audio routing on the host:
 
-```yaml
+```yaml config
 # config.yaml
 player:
   enabled: true
