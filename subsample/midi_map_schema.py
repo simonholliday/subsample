@@ -39,6 +39,7 @@ _SCORER_PARAMETER_TERMS: typing.Final[dict[str, dict[str, typing.Any]]] = {
 		"type": "array",
 		"items": {"type": "number", "minimum": 0, "maximum": 1},
 		"minItems": 2,
+		"examples": [[1, 0, 0.5, 0]],
 	},
 }
 """What an ``order:`` entry's own parameters are written as, by name.  The
@@ -68,6 +69,18 @@ _MEASUREMENTS: typing.Final[dict[str, str]] = {
 	"quantized_beats": "The sample's length in beats once the assignment's quantise processor has run. A sample not yet quantised does not qualify. A number keeps exactly that value, and bounds keep the values within them.",
 }
 
+_MEASUREMENT_EXAMPLES: typing.Final[dict[str, list[typing.Any]]] = {
+	"duration":        [{"lte": 0.5}],
+	"duration_beats":  [{"gte": 4}],
+	"onsets":          [1, {"gte": 4}],
+	"tempo":           [{"gte": 118, "lte": 122}],
+	"pitch":           [{"gte": "C2", "lte": "C3"}, {"lte": 200}],
+	"quantized_beats": [{"gte": 4}],
+}
+"""What a map writes to keep a sample by one of its measurements.  A bare number
+is an exact match, which only a whole-number measurement such as `onsets` is
+ever written with."""
+
 _MEASUREMENT_BOUNDS: typing.Final[dict[str, str]] = {
 	"gte": "At least this value.",
 	"lte": "At most this value.",
@@ -76,9 +89,9 @@ _MEASUREMENT_BOUNDS: typing.Final[dict[str, str]] = {
 	"eq":  "Exactly this value.",
 }
 
-_NAME_MATCHES: typing.Final[dict[str, str]] = {
-	"matches": "Wildcards the whole name must match, where `*` stands for any run of characters and `?` for any one character.",
-	"regex":   "A regular expression the whole name must match.",
+_NAME_MATCHES: typing.Final[dict[str, tuple[str, str]]] = {
+	"matches": ("Wildcards the whole name must match, where `*` stands for any run of characters and `?` for any one character.", "kick*"),
+	"regex":   ("A regular expression the whole name must match.", "^(kick|bd)_[0-9]+$"),
 }
 
 _ORDER_BY: typing.Final[dict[str, tuple[str, str]]] = {
@@ -192,35 +205,53 @@ def _map_terms () -> dict[str, typing.Any]:
 		"channel": {
 			"description": "The MIDI channel an assignment answers on when it names none of its own, so a map can be played on whatever MIDI channel a project gives it without editing it. A map with no `channel` needs one on every assignment.",
 			"$ref": "#/$defs/channel",
+			"examples": [10],
 		},
 		"programs": {
 			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/program"},
+			"examples": [[
+				{"name": "Acoustic kit", "directory": "kits/acoustic"},
+				{"name": "Electronic kit", "directory": "kits/electronic"},
+			]],
 		},
 		"program_channel": _number_or_name(
 			0, 16,
 			"The MIDI channel that Program Change messages are read on, where 0 reads every MIDI channel.",
 			default=subsample.bank.DEFAULT_BANK_CHANNEL,
+			examples=[0],
 		),
 		"default_program": {
 			"description": "The program active at startup, which must be one the list declares. Left out, the first program in the list.",
 			"$ref": "#/$defs/program_number",
+			"examples": [1, "my.brushes"],
 		},
 		"templates": {
 			"description": "Named sets of assignment fields that assignments may start from, so that a kit writes its shared MIDI channel, processing or selection once.",
 			"type": "object",
 			"additionalProperties": {"$ref": "#/$defs/template"},
+			"examples": [{"kit": {
+				"channel": 10,
+				"process": [{"compress": {"threshold": -20.0, "ratio": 8.0}}],
+			}}],
 		},
 		"assignments": {
 			"description": "Each instrument the map plays: the notes it answers to, the sound it chooses for them, and how that sound plays. A map whose programs are all `map:` presets, or that plays other maps through `maps`, may leave it out.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/assignment"},
+			"examples": [[{
+				"name":    "Kick",
+				"channel": 10,
+				"notes":   "drum.kick_1",
+				"select":  {"where": {"reference": "GM36_BassDrum1"}},
+			}]],
 		},
 		"maps": {
 			"description": "Other maps to play at the same time, each on its own MIDI channel, which makes this map an ensemble. A map included here may not include maps of its own.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/included_map"},
+			"examples": [["drums.yaml", {"map": "bass.yaml", "channel": 2}]],
 		},
 	}
 
@@ -240,6 +271,7 @@ def _mounted_definitions () -> dict[str, typing.Any]:
 			"not": {"enum": list(subsample.player.SYMBOL_NAMESPACES)},
 		},
 		"additionalProperties": {"type": "string", "minLength": 1},
+		"examples": [{"my": "project.yaml"}],
 	}
 
 
@@ -358,6 +390,7 @@ def _assignment_terms () -> dict[str, typing.Any]:
 			"description": "A name for the assignment, which log lines and error messages use.",
 			"type": "string",
 			"default": "<unnamed>",
+			"examples": ["Kick"],
 		},
 		"template": {
 			"description": "The template, or the templates in order, that the assignment starts from. A later template overrides an earlier one, and the assignment's own fields override them all.",
@@ -365,10 +398,12 @@ def _assignment_terms () -> dict[str, typing.Any]:
 				{"type": "string"},
 				{"type": "array", "items": {"type": "string"}, "minItems": 1},
 			],
+			"examples": ["kit", ["kit", "room"]],
 		},
 		"channel": {
 			"description": "The MIDI channel the assignment answers on. Left out, the map's `channel`, or the MIDI channel an ensemble plays the map on.",
 			"$ref": "#/$defs/channel",
+			"examples": [10, "my.kit"],
 		},
 		"notes":       {"$ref": "#/$defs/notes"},
 		"velocity":    {"$ref": "#/$defs/velocity"},
@@ -379,6 +414,11 @@ def _assignment_terms () -> dict[str, typing.Any]:
 			"items": {"$ref": "#/$defs/process_step"},
 			"contains": _beat_aligning_step(),
 			"maxContains": 1,
+			"examples": [[
+				"reverse",
+				{"filter_low": {"freq": 800.0, "resonance": 6.0}},
+				{"saturate": {"drive": 4.0}},
+			]],
 		},
 		"mode": {
 			"description": "How the sound answers the key: played to its end, played while the key is held, or looped while the key is held. Writing `loop:` sets the mode to `loop`.",
@@ -393,6 +433,7 @@ def _assignment_terms () -> dict[str, typing.Any]:
 			"type": "number",
 			"default": 0.0,
 			"x-unit": "dB",
+			"examples": [-3.0],
 		},
 		"pan":         {"$ref": "#/$defs/pan"},
 		"output":      {"$ref": "#/$defs/output"},
@@ -436,6 +477,12 @@ def _notes () -> dict[str, typing.Any]:
 			{"type": "array", "items": {"$ref": "#/$defs/note"}, "minItems": 1},
 			_zone_tuned(),
 		],
+		"examples": [
+			36,
+			"C2..C4",
+			["drum.kick_1", "drum.kick_2"],
+			{"mode": "zone-tuned", "range": ["C2", "C4"]},
+		],
 	}
 
 
@@ -475,6 +522,7 @@ def _zone_tuned () -> dict[str, typing.Any]:
 			"minItems": 2,
 			"maxItems": 2,
 			"default": [0, 127],
+			"examples": [["C2", "C4"]],
 		},
 	}
 
@@ -503,6 +551,7 @@ def _velocity () -> dict[str, typing.Any]:
 		"trigger": {
 			"description": "The velocities that play the assignment.",
 			"$ref": "#/$defs/velocity_range",
+			"examples": [[64, 127]],
 		},
 		"rescale": {
 			"description": "Stretches the trigger range over a wider range of loudness, so a layer that only hears soft notes still plays through its whole dynamic range. `true` stretches it over every velocity, and a pair names the range. Left out, a velocity plays as it arrives.",
@@ -511,6 +560,7 @@ def _velocity () -> dict[str, typing.Any]:
 				{"$ref": "#/$defs/velocity_range"},
 			],
 			"default": False,
+			"examples": [[40, 127]],
 		},
 	}
 
@@ -528,6 +578,7 @@ def _velocity () -> dict[str, typing.Any]:
 				"additionalProperties": False,
 			},
 		],
+		"examples": [[0, 63], {"trigger": [64, 127], "rescale": True}],
 	}
 
 
@@ -562,6 +613,11 @@ def _silenced_by () -> dict[str, typing.Any]:
 			{"type": "array", "items": choke},
 			{"const": False},
 		],
+		"examples": [
+			"self",
+			"drum.hi_hat_closed",
+			["drum.hi_hat_closed", "drum.hi_hat_pedal"],
+		],
 	}
 
 
@@ -580,6 +636,13 @@ def _select () -> dict[str, typing.Any]:
 		"anyOf": [
 			{"$ref": "#/$defs/select_spec"},
 			{"type": "array", "items": {"$ref": "#/$defs/select_spec"}, "minItems": 1},
+		],
+		"examples": [
+			{"where": {"reference": "GM36_BassDrum1"}},
+			[
+				{"where": {"name": "my-favourite-kick"}},
+				{"where": {"reference": "GM36_BassDrum1"}},
+			],
 		],
 	}
 
@@ -621,16 +684,19 @@ def _where () -> dict[str, typing.Any]:
 			"description": "One audio file, by its path relative to the map. It may not be combined with `name`.",
 			"type": "string",
 			"minLength": 1,
+			"examples": ["kicks/909-kick.wav"],
 		},
 		"directory": {
 			"description": "The samples inside this directory and the directories within it, relative to the map. Subsample loads them at startup.",
 			"type": "string",
 			"minLength": 1,
+			"examples": ["kits/acoustic"],
 		},
 		"reference": {
 			"description": "Ranks the samples by how closely they resemble a reference: a built-in reference by name, such as `GM36_BassDrum1`, or an audio file by its path relative to the map. An assignment whose reference name is unknown is left out, with a warning.",
 			"type": "string",
 			"minLength": 1,
+			"examples": ["GM36_BassDrum1", "references/my-kick.wav"],
 		},
 		"pitched": {
 			"description": "`true` keeps only samples with a stable pitch, and `false` only samples without one.",
@@ -666,6 +732,7 @@ def _where () -> dict[str, typing.Any]:
 		"type": "object",
 		"properties": _in_order(accepted, terms, "where key"),
 		"additionalProperties": False,
+		"examples": [{"pitched": True, "duration": {"gte": 1.0}}],
 	}
 
 
@@ -698,6 +765,8 @@ def _measurement (key: str) -> dict[str, typing.Any]:
 	if key in _WHERE_UNITS:
 		term["x-unit"] = _WHERE_UNITS[key]
 
+	term["examples"] = _MEASUREMENT_EXAMPLES[key]
+
 	return term
 
 
@@ -725,8 +794,13 @@ def _name_term () -> dict[str, typing.Any]:
 			{
 				"type": "object",
 				"properties": {
-					operator: {"description": description, "type": "string", "minLength": 1}
-					for operator, description in _in_order(
+					operator: {
+						"description": description,
+						"type": "string",
+						"minLength": 1,
+						"examples": [example],
+					}
+					for operator, (description, example) in _in_order(
 						subsample.query.VALID_NAME_OPERATORS, _NAME_MATCHES, "name operator",
 					).items()
 				},
@@ -735,6 +809,7 @@ def _name_term () -> dict[str, typing.Any]:
 				"additionalProperties": False,
 			},
 		],
+		"examples": ["909-kick", ["909-kick", "808-kick"], {"matches": "kick*"}],
 	}
 
 
@@ -747,6 +822,10 @@ def _order () -> dict[str, typing.Any]:
 		"anyOf": [
 			{"$ref": "#/$defs/order_clause"},
 			{"type": "array", "items": {"$ref": "#/$defs/order_clause"}, "minItems": 1},
+		],
+		"examples": [
+			{"by": "level", "dir": "desc"},
+			[{"by": "duration", "dir": "asc"}, {"by": "level", "dir": "desc"}],
 		],
 	}
 
@@ -828,6 +907,7 @@ def _pick () -> dict[str, typing.Any]:
 			"minimum": 0,
 			"maximum": 127,
 			"default": 0,
+			"examples": [10],
 		},
 		"curve": {
 			"description": "How the velocity played maps across the ranking.",
@@ -872,6 +952,7 @@ def _pick () -> dict[str, typing.Any]:
 				"additionalProperties": False,
 			},
 		],
+		"examples": [2, [1, 4], {"gte": 3}, {"mode": "velocity", "variation": 10}],
 	}
 
 
@@ -903,13 +984,22 @@ def _release () -> dict[str, typing.Any]:
 	}
 
 	# The knob written where the time itself would go, which is the same
-	# binding with the fade's shape beside it.
+	# binding with the fade's shape beside it.  Its examples are the fade's own
+	# times, because the binding's are a filter's frequencies.
+	times: dict[str, list[typing.Any]] = {
+		"cc": [72], "min": [20], "max": [3000], "default": [400],
+	}
+
+	fields = {
+		name: ({**field, "examples": times[name]} if name in times else field)
+		for name, field in typing.cast(
+			dict[str, typing.Any], _cc_binding()["properties"],
+		).items()
+	}
+
 	bound = {
 		"type": "object",
-		"properties": {
-			**typing.cast(dict[str, typing.Any], _cc_binding()["properties"]),
-			"curve": curve,
-		},
+		"properties": {**fields, "curve": curve},
 		"required": ["cc"],
 		"additionalProperties": False,
 	}
@@ -922,6 +1012,11 @@ def _release () -> dict[str, typing.Any]:
 			{"$ref": "#/$defs/release_time"},
 			spelt_out,
 			bound,
+		],
+		"examples": [
+			250,
+			{"time": 250, "curve": "exponential"},
+			{"cc": 72, "max": 3000, "curve": "exponential"},
 		],
 	}
 
@@ -940,6 +1035,7 @@ def _release_time () -> dict[str, typing.Any]:
 		],
 		"x-unit": "ms",
 		"x-sweep": list(subsample.player.RELEASE_CC_SWEEP_MS),
+		"examples": [250],
 	}
 
 
@@ -955,18 +1051,21 @@ def _loop () -> dict[str, typing.Any]:
 			"type": "number",
 			"minimum": 0,
 			"x-unit": "s",
+			"examples": [0.5],
 		},
 		"end": {
 			"description": "Where the loop ends, from the start of the sample. It must come after `start`.",
 			"type": "number",
 			"minimum": 0,
 			"x-unit": "s",
+			"examples": [2.5],
 		},
 		"crossfade": {
 			"description": "How long the join is blended over, so the loop repeats without a click.",
 			"type": "number",
 			"minimum": 0,
 			"x-unit": "ms",
+			"examples": [20],
 		},
 	}
 
@@ -975,6 +1074,7 @@ def _loop () -> dict[str, typing.Any]:
 		"type": "object",
 		"properties": _in_order(subsample.player.LOOP_INNER_KEYS, terms, "loop key"),
 		"additionalProperties": False,
+		"examples": [{"start": 0.5, "end": 2.5, "crossfade": 20}],
 	}
 
 
@@ -990,6 +1090,7 @@ def _extract () -> dict[str, typing.Any]:
 		"type": "array",
 		"items": {"type": "number"},
 		"minItems": 1,
+		"examples": [[1, -1]],
 	}
 
 	return {
@@ -1006,6 +1107,7 @@ def _extract () -> dict[str, typing.Any]:
 				"additionalProperties": False,
 			},
 		],
+		"examples": ["channel.2", {"blend": [1, -1]}],
 	}
 
 
@@ -1022,14 +1124,17 @@ def _pan () -> dict[str, typing.Any]:
 		"gte": {
 			"description": "The leftmost position a random pan may land on.",
 			**position,
+			"examples": [-60],
 		},
 		"lte": {
 			"description": "The rightmost position a random pan may land on.",
 			**position,
+			"examples": [60],
 		},
 		"position": {
 			"description": "The centre a random pan lands around.",
 			**position,
+			"examples": [-20],
 		},
 		"variation": {
 			"description": "How widely a random pan spreads around `position`: 40 lands up to 20 either side.",
@@ -1037,6 +1142,7 @@ def _pan () -> dict[str, typing.Any]:
 			"minimum": 0,
 			"maximum": 200,
 			"default": 0,
+			"examples": [40],
 		},
 	}
 
@@ -1060,6 +1166,7 @@ def _pan () -> dict[str, typing.Any]:
 				"additionalProperties": False,
 			},
 		],
+		"examples": [25, [50, 87], {"gte": -60, "lte": 60}, {"position": -20, "variation": 40}],
 	}
 
 
@@ -1073,6 +1180,7 @@ def _output () -> dict[str, typing.Any]:
 		"items": {"type": "integer", "minimum": 1},
 		"minItems": 1,
 		"uniqueItems": True,
+		"examples": [[3, 4]],
 	}
 
 
@@ -1091,20 +1199,24 @@ def _program () -> dict[str, typing.Any]:
 			"description": "A name for the program, which log lines use.",
 			"type": "string",
 			"minLength": 1,
+			"examples": ["Acoustic kit"],
 		},
 		"program": {
 			"description": "The Program Change number that selects the program. Left out, its place in the list, counted from 0.",
 			"$ref": "#/$defs/program_number",
+			"examples": [1],
 		},
 		"directory": {
 			"description": "A directory of samples for the map's own assignments to choose from while the program is active, relative to where Subsample runs.",
 			"type": "string",
 			"minLength": 1,
+			"examples": ["kits/acoustic"],
 		},
 		"map": {
 			"description": "A whole map, with its own assignments and samples, relative to this map. It may not declare programs of its own.",
 			"type": "string",
 			"minLength": 1,
+			"examples": ["kits/808-kit.yaml"],
 		},
 	}
 
@@ -1129,10 +1241,12 @@ def _included_map () -> dict[str, typing.Any]:
 			"description": "The map to play, by its path relative to this map.",
 			"type": "string",
 			"minLength": 1,
+			"examples": ["drums.yaml"],
 		},
 		"channel": {
 			"description": "The MIDI channel to play the map on, in place of the one it declares. An assignment that names its own MIDI channel keeps it.",
 			"$ref": "#/$defs/channel",
+			"examples": [2],
 		},
 	}
 
@@ -1185,6 +1299,7 @@ def _number_or_name (
 	maximum:     int,
 	description: str,
 	default:     typing.Any = _ABSENT,
+	examples:    typing.Optional[list[typing.Any]] = None,
 ) -> dict[str, typing.Any]:
 
 	"""A whole number, or a name a definitions file gives that number."""
@@ -1200,6 +1315,9 @@ def _number_or_name (
 
 	if default is not _ABSENT:
 		term["default"] = default
+
+	if examples:
+		term["examples"] = examples
 
 	return term
 
@@ -1257,22 +1375,27 @@ def _cc_binding () -> dict[str, typing.Any]:
 		"cc": {
 			"description": "The MIDI controller that sets the value.",
 			"$ref": "#/$defs/controller",
+			"examples": [74, "my.sampler_release"],
 		},
 		"channel": {
 			"description": "The only MIDI channel the controller is read on. Left out, every MIDI channel.",
 			"$ref": "#/$defs/channel",
+			"examples": [2],
 		},
 		"min": {
 			"description": "The value at the bottom of the knob's travel. Left out, the bottom of the parameter's own range. A `min` above `max` turns the knob round.",
 			"type": "number",
+			"examples": [200],
 		},
 		"max": {
 			"description": "The value at the top of the knob's travel. Left out, the top of the parameter's own range.",
 			"type": "number",
+			"examples": [8000],
 		},
 		"default": {
 			"description": "The value until the controller first moves. Left out, the value the parameter has without the knob, or the middle of the knob's travel where that value lies outside it.",
 			"type": "number",
+			"examples": [1000],
 		},
 	}
 
@@ -1282,6 +1405,10 @@ def _cc_binding () -> dict[str, typing.Any]:
 		"properties": {key: fields[key] for key in subsample.query.CC_BINDING_KEYS},
 		"required": ["cc"],
 		"additionalProperties": False,
+		"examples": [
+			{"cc": 74},
+			{"cc": 74, "channel": 2, "min": 200, "max": 8000, "default": 1000},
+		],
 	}
 
 
@@ -1356,11 +1483,16 @@ def _processor_value (
 
 	forms.append(_parameters_object(processor, implied))
 
-	return {
+	value: dict[str, typing.Any] = {
 		"title": processor.title,
 		"description": processor.description,
 		"anyOf": forms,
 	}
+
+	if processor.examples:
+		value["examples"] = list(processor.examples)
+
+	return value
 
 
 def _parameters_object (
@@ -1451,6 +1583,9 @@ def _parameter (parameter: subsample.processors.Parameter) -> dict[str, typing.A
 	if parameter.applies_when:
 		entry["x-applies-when"] = [_condition(condition) for condition in parameter.applies_when]
 
+	if parameter.examples:
+		entry["examples"] = list(parameter.examples)
+
 	return entry
 
 
@@ -1533,7 +1668,26 @@ def _word (value: str, title: str, description: str) -> dict[str, typing.Any]:
 
 def _deprecated (entry: dict[str, typing.Any]) -> dict[str, typing.Any]:
 
-	"""The same term under a name Subsample still accepts but no longer documents."""
+	"""The same term under a name Subsample still accepts but no longer documents.
 
-	return {**entry, "deprecated": True}
+	Nothing under it carries an example: an example is there to be copied, and
+	nothing should copy a spelling that is on its way out."""
+
+	return {**_unexampled(entry), "deprecated": True}
+
+
+def _unexampled (node: typing.Any) -> typing.Any:
+
+	"""The same schema with every example taken out of it, however deep it sits."""
+
+	if isinstance(node, dict):
+		return {
+			key: _unexampled(value) for key, value in node.items()
+			if key != "examples"
+		}
+
+	if isinstance(node, list):
+		return [_unexampled(item) for item in node]
+
+	return node
 

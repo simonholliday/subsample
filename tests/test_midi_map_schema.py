@@ -10,7 +10,9 @@ When one fails, the fix is to change the schema to match the parser, unless the
 parser is the half that is wrong.
 """
 
+import dataclasses
 import json
+import logging
 import pathlib
 import typing
 
@@ -301,6 +303,378 @@ _DEFAULT_PROBES: dict[str, tuple[dict[str, typing.Any], _Reading]] = {
 }
 """A map that leaves one term out, and what the loaded map then holds, by the
 path of the term that publishes the default."""
+
+
+# ---------------------------------------------------------------------------
+# Where each published example is written in a real map
+# ---------------------------------------------------------------------------
+
+_DEFINITIONS: typing.Final[dict[str, typing.Any]] = {
+	"notes":    {"kick": 36},
+	"cc":       {"sampler_release": 21},
+	"channels": {"kit": 10},
+	"programs": {"brushes": 1},
+}
+"""A definitions file the probes mount as `my`, naming one of each kind, so an
+example written as `my.kit` has something to resolve to."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _Case:
+
+	"""A map with one example written where it belongs, and what it needs around it."""
+
+	mapping:     dict[str, typing.Any]
+	references:  tuple[str, ...] = ()
+	files:       dict[str, typing.Any] = dataclasses.field(default_factory=dict)
+	ensemble:    bool = False
+
+
+_Probe = typing.Callable[[typing.Any], _Case]
+
+
+def _defined (mapping: dict[str, typing.Any]) -> _Case:
+
+	"""The same map with the probe definitions file mounted under `my`."""
+
+	return _Case(
+		{"definitions": {"my": "project.yaml"}, **mapping},
+		files={"project.yaml": _DEFINITIONS},
+	)
+
+
+def _played (**fields: typing.Any) -> _Case:
+
+	"""A map whose one assignment carries these fields, with the definitions file mounted."""
+
+	return _defined(_map(assignments=[_assignment(**fields)]))
+
+
+def _chosen (**select: typing.Any) -> _Case:
+
+	"""A map whose one assignment chooses its sound this way."""
+
+	return _Case(_map(assignments=[_assignment(select=select)]), references=("GM36_BassDrum1",))
+
+
+def _measured (key: str, value: typing.Any, **fields: typing.Any) -> _Case:
+
+	"""A map that keeps a sample by one of its measurements."""
+
+	return _Case(_map(assignments=[_assignment(select={"where": {key: value}}, **fields)]))
+
+
+def _in_a_template (key: str, value: typing.Any) -> _Case:
+
+	"""A map whose template carries the term, and whose assignment leaves it to the template."""
+
+	fields = {name: field for name, field in _assignment().items() if name != key}
+
+	return _defined(_map(
+		templates={"kit": {key: value}},
+		assignments=[{**fields, "template": "kit"}],
+	))
+
+
+def _stepped (step: dict[str, typing.Any]) -> _Case:
+
+	"""A map whose one assignment passes its sound through one processor."""
+
+	return _defined(_map(assignments=[_assignment(process=[step])]))
+
+
+_QUANTISED: typing.Final[dict[str, typing.Any]] = {"stretch_quantize": {"grid": 16}}
+"""The step a beat pattern and a quantised length are measured against."""
+
+
+_EXAMPLE_PROBES: dict[str, _Probe] = {
+	"properties/definitions":
+		lambda value: _Case(_map(definitions=value), files={"project.yaml": _DEFINITIONS}),
+	"properties/channel":
+		lambda value: _Case(_map(
+			channel=value,
+			assignments=[{k: v for k, v in _assignment().items() if k != "channel"}],
+		)),
+	"properties/programs":
+		lambda value: _Case(_map(programs=value)),
+	"properties/program_channel":
+		lambda value: _Case(_map(program_channel=value)),
+	"properties/default_program":
+		lambda value: _defined(_map(
+			programs=[{"name": "Brushes", "program": 1, "directory": "kits/brushes"}],
+			default_program=value,
+		)),
+	"properties/templates":
+		lambda value: _Case(_map(
+			templates=value,
+			assignments=[_assignment(template=next(iter(value)))],
+		)),
+	"properties/assignments":
+		lambda value: _Case(_map(assignments=value), references=("GM36_BassDrum1",)),
+	"properties/maps":
+		lambda value: _Case(
+			{"maps": value},
+			files={
+				"drums.yaml": _map(),
+				"bass.yaml":  {"assignments": [
+					{k: v for k, v in _assignment(notes=48).items() if k != "channel"},
+				]},
+			},
+			ensemble=True,
+		),
+
+	"$defs/assignment/properties/name":     lambda value: _played(name=value),
+	"$defs/assignment/properties/channel":  lambda value: _played(channel=value),
+	"$defs/assignment/properties/process":  lambda value: _played(process=value),
+	"$defs/assignment/properties/gain":     lambda value: _played(gain=value),
+	"$defs/assignment/properties/template":
+		lambda value: _defined(_map(
+			templates={"kit": {}, "room": {}},
+			assignments=[_assignment(template=value)],
+		)),
+
+	"$defs/template/properties/name":     lambda value: _in_a_template("name", value),
+	"$defs/template/properties/channel":  lambda value: _in_a_template("channel", value),
+	"$defs/template/properties/process":  lambda value: _in_a_template("process", value),
+	"$defs/template/properties/gain":     lambda value: _in_a_template("gain", value),
+
+	"$defs/program/properties/name":
+		lambda value: _Case(_map(programs=[{"name": value, "directory": "kits/acoustic"}])),
+	"$defs/program/properties/program":
+		lambda value: _Case(_map(programs=[{"name": "Brushes", "program": value, "directory": "kits/brushes"}])),
+	"$defs/program/properties/directory":
+		lambda value: _Case(_map(programs=[{"name": "Acoustic kit", "directory": value}])),
+	"$defs/program/properties/map":
+		lambda value: _Case(
+			_map(programs=[{"name": "808 kit", "map": value}]),
+			files={value: _map()},
+		),
+
+	"$defs/included_map/anyOf/1/properties/map":
+		lambda value: _Case(
+			{"maps": [{"map": value}]},
+			files={value: _map()},
+			ensemble=True,
+		),
+	"$defs/included_map/anyOf/1/properties/channel":
+		lambda value: _Case(
+			{"maps": [{"map": "drums.yaml", "channel": value}]},
+			files={"drums.yaml": {"assignments": [
+				{k: v for k, v in _assignment().items() if k != "channel"},
+			]}},
+			ensemble=True,
+		),
+
+	"$defs/notes":
+		lambda value: _played(notes=value, process=[{"repitch": True}]),
+	"$defs/notes/anyOf/2/anyOf/1/properties/range":
+		lambda value: _played(
+			notes={"mode": "zone-tuned", "range": value}, process=[{"repitch": True}],
+		),
+
+	"$defs/velocity":
+		lambda value: _played(velocity=value),
+	"$defs/velocity/anyOf/1/properties/trigger":
+		lambda value: _played(velocity={"trigger": value}),
+	"$defs/velocity/anyOf/1/properties/rescale":
+		lambda value: _played(velocity={"trigger": [0, 63], "rescale": value}),
+
+	"$defs/silenced_by":
+		lambda value: _Case(_map(assignments=[
+			_assignment(silenced_by=value),
+			_assignment(notes=["drum.hi_hat_closed", "drum.hi_hat_pedal"]),
+		])),
+
+	"$defs/select":
+		lambda value: _Case(_map(assignments=[_assignment(select=value)]), references=("GM36_BassDrum1",)),
+	"$defs/where":
+		lambda value: _chosen(where=value),
+	"$defs/where/properties/name":
+		lambda value: _chosen(where={"name": value}),
+	"$defs/where/properties/name/anyOf/2/properties/matches":
+		lambda value: _chosen(where={"name": {"matches": value}}),
+	"$defs/where/properties/name/anyOf/2/properties/regex":
+		lambda value: _chosen(where={"name": {"regex": value}}),
+	"$defs/where/properties/path":
+		lambda value: _chosen(where={"path": value}),
+	"$defs/where/properties/directory":
+		lambda value: _chosen(where={"directory": value}),
+	"$defs/where/properties/reference":
+		lambda value: _chosen(where={"reference": value}),
+	"$defs/where/properties/duration":
+		lambda value: _measured("duration", value),
+	"$defs/where/properties/duration_beats":
+		lambda value: _measured("duration_beats", value),
+	"$defs/where/properties/onsets":
+		lambda value: _measured("onsets", value),
+	"$defs/where/properties/tempo":
+		lambda value: _measured("tempo", value),
+	"$defs/where/properties/pitch":
+		lambda value: _measured("pitch", value),
+	"$defs/where/properties/quantized_beats":
+		lambda value: _measured("quantized_beats", value, process=[_QUANTISED]),
+
+	"$defs/order":
+		lambda value: _chosen(where={"pitched": True}, order=value),
+	"$defs/order_clause/anyOf/1/properties/pattern":
+		lambda value: _Case(_map(assignments=[_assignment(
+			select={"where": {"pitched": True}, "order": [{"by": "beat_match", "pattern": value}]},
+			process=[_QUANTISED],
+		)])),
+
+	"$defs/pick":
+		lambda value: _chosen(where={"pitched": True}, order={"by": "level"}, pick=value),
+	"$defs/pick/anyOf/4/properties/variation":
+		lambda value: _chosen(
+			where={"pitched": True},
+			order={"by": "level"},
+			pick={"mode": "velocity", "variation": value},
+		),
+
+	"$defs/cc_binding":
+		lambda value: _stepped({"filter_low": {"freq": value}}),
+	"$defs/cc_binding/properties/cc":
+		lambda value: _stepped({"filter_low": {"freq": {"cc": value}}}),
+	"$defs/cc_binding/properties/channel":
+		lambda value: _stepped({"filter_low": {"freq": {"cc": 74, "channel": value}}}),
+	"$defs/cc_binding/properties/min":
+		lambda value: _stepped({"filter_low": {"freq": {"cc": 74, "min": value}}}),
+	"$defs/cc_binding/properties/max":
+		lambda value: _stepped({"filter_low": {"freq": {"cc": 74, "max": value}}}),
+	"$defs/cc_binding/properties/default":
+		lambda value: _stepped({"filter_low": {"freq": {"cc": 74, "default": value}}}),
+
+	"$defs/release":
+		lambda value: _played(mode="gated", release=value),
+	"$defs/release_time":
+		lambda value: _played(mode="gated", release={"time": value}),
+	"$defs/release/anyOf/4/properties/cc":
+		lambda value: _played(mode="gated", release={"cc": value}),
+	"$defs/release/anyOf/4/properties/channel":
+		lambda value: _played(mode="gated", release={"cc": 72, "channel": value}),
+	"$defs/release/anyOf/4/properties/min":
+		lambda value: _played(mode="gated", release={"cc": 72, "min": value}),
+	"$defs/release/anyOf/4/properties/max":
+		lambda value: _played(mode="gated", release={"cc": 72, "max": value}),
+	"$defs/release/anyOf/4/properties/default":
+		lambda value: _played(mode="gated", release={"cc": 72, "default": value}),
+
+	"$defs/loop":
+		lambda value: _played(loop=value),
+	"$defs/loop/properties/start":
+		lambda value: _played(loop={"start": value}),
+	"$defs/loop/properties/end":
+		lambda value: _played(loop={"end": value}),
+	"$defs/loop/properties/crossfade":
+		lambda value: _played(loop={"crossfade": value}),
+
+	"$defs/extract":
+		lambda value: _played(extract=value),
+	"$defs/extract/anyOf/2/properties/blend":
+		lambda value: _played(extract={"blend": value}),
+
+	"$defs/pan":
+		lambda value: _played(pan=value),
+	"$defs/pan/anyOf/3/properties/gte":
+		lambda value: _played(pan={"gte": value, "lte": 60}),
+	"$defs/pan/anyOf/3/properties/lte":
+		lambda value: _played(pan={"gte": -60, "lte": value}),
+	"$defs/pan/anyOf/3/properties/position":
+		lambda value: _played(pan={"position": value}),
+	"$defs/pan/anyOf/3/properties/variation":
+		lambda value: _played(pan={"position": 0, "variation": value}),
+
+	"$defs/output":
+		lambda value: _played(output=value, pan=[50, 50]),
+}
+"""A map that writes one published example where it belongs, by the path of the
+term that publishes it.  The processors are generated below, because every one
+of them is written into a `process:` list the same way."""
+
+
+def _processor_probes () -> dict[str, _Probe]:
+
+	"""Where each processor's own example, and each parameter's, is written."""
+
+	probes: dict[str, _Probe] = {}
+	entries = "$defs/process_step/anyOf/1/properties"
+
+	for processor in subsample.processors.PROCESSORS.values():
+
+		if processor.examples:
+			probes[f"{entries}/{processor.name}"] = (
+				lambda value, name=processor.name: _stepped({name: value})
+			)
+
+		for index, form in enumerate(_processor_entry(processor.name)["anyOf"]):
+			if form.get("type") != "object":
+				continue
+
+			for parameter in processor.parameters:
+
+				if not parameter.examples:
+					continue
+
+				probes[f"{entries}/{processor.name}/anyOf/{index}/properties/{parameter.name}"] = (
+					lambda value, processor=processor, parameter=parameter:
+						_stepped({processor.name: {
+							parameter.name: value, **_beside(processor, parameter),
+						}})
+				)
+
+	return probes
+
+
+def _beside (
+	processor: subsample.processors.Processor,
+	parameter: subsample.processors.Parameter,
+) -> dict[str, typing.Any]:
+
+	"""The siblings a parameter needs to do anything: what the processor must be
+	told, and what makes this parameter apply at all."""
+
+	context = {
+		other.name: other.choice_values[0]
+		for other in processor.parameters
+		if other.required and other.name != parameter.name
+	}
+
+	for condition in parameter.applies_when[:1]:
+		for name, words in condition.items():
+			context[name] = words[0]
+
+	return context
+
+
+def _examples () -> list[typing.Any]:
+
+	"""One case per example the schema publishes, named by where it sits."""
+
+	cases = []
+
+	for path, node in _subschemas(_SCHEMA):
+		for index, value in enumerate(node.get("examples", ())):
+			cases.append(pytest.param(path.lstrip("/"), value, id=f"{path.lstrip('/')}-{index}"))
+
+	return cases
+
+
+def _load_case (tmp_path: pathlib.Path, case: _Case) -> None:
+
+	"""Write the map and whatever it names beside it, and load it as Subsample does."""
+
+	for name, content in case.files.items():
+		beside = tmp_path / name
+		beside.parent.mkdir(parents=True, exist_ok=True)
+		beside.write_text(yaml.safe_dump(content), encoding="utf-8")
+
+	path = tmp_path / "midi-map.yaml"
+	path.write_text(yaml.safe_dump(case.mapping), encoding="utf-8")
+
+	if case.ensemble:
+		subsample.player.load_ensemble(path, list(case.references))
+	else:
+		subsample.player.load_midi_map(path, list(case.references))
 
 
 def _a_sentence (text: str) -> bool:
@@ -666,6 +1040,165 @@ class TestProcessorsFollowTheirDeclaration:
 
 		assert process["maxContains"] == 1
 		assert process["contains"]["anyOf"][0]["enum"] == list(subsample.query.BEAT_ALIGNING_PROCESSORS)
+
+
+# ---------------------------------------------------------------------------
+# The examples a reader copies
+# ---------------------------------------------------------------------------
+
+_PROBES: typing.Final[dict[str, _Probe]] = {**_EXAMPLE_PROBES, **_processor_probes()}
+
+
+def _older_spellings () -> tuple[str, ...]:
+
+	"""The path of every term the schema marks as a name it no longer documents."""
+
+	return tuple(path for path, node in _subschemas(_SCHEMA) if node.get("deprecated"))
+
+
+def _parts_a_key_points_at () -> set[str]:
+
+	"""The shared parts a key names with nothing of its own, so the part carries that key's prose."""
+
+	named = set()
+
+	for _path, node in _subschemas(_SCHEMA):
+		for child in node.get("properties", {}).values():
+			if set(child) == {"$ref"}:
+				named.add(child["$ref"].rsplit("/", 1)[-1])
+
+	return named
+
+
+def _values_are_listed (node: dict[str, typing.Any]) -> bool:
+
+	"""True when the schema names every value a term may take, so an example would only repeat one."""
+
+	if "const" in node or node.get("type") in ("boolean", "null"):
+		return True
+
+	if "oneOf" in node and all("const" in option for option in node["oneOf"]):
+		return True
+
+	# A processor that takes nothing is written as its name and no more.
+	if node.get("type") == "object" and not node.get("properties"):
+		return True
+
+	if "anyOf" in node:
+		return all(_values_are_listed(option) for option in node["anyOf"])
+
+	return False
+
+
+def _is_a_bound (path: str) -> bool:
+
+	"""True when a term is one operator of a bounds block, which its own key shows in place."""
+
+	operator = path.rsplit("/", 1)[-1]
+
+	if path.startswith("/$defs/where/properties/") and "/anyOf/1/properties/" in path:
+		return operator in subsample.query.VALID_OPERATORS
+
+	if path.startswith("/$defs/pick/anyOf/3/properties/"):
+		return operator in subsample.query.VALID_PICK_OPERATORS
+
+	return False
+
+
+def _owed_an_example (path: str, node: dict[str, typing.Any], parts: set[str]) -> bool:
+
+	"""True when a term is one a reader would copy, so the schema owes it an example."""
+
+	if not path or "description" not in node or "const" in node:
+		return False
+
+	if any(path.startswith(older) for older in _older_spellings()):
+		return False
+
+	# A shared part stands in for a key only where the key points at it with
+	# nothing of its own; one reached from a list or a choice is shown whole by
+	# the key that holds it.
+	if path.count("/") == 2 and path.startswith("/$defs/"):
+		return path.rsplit("/", 1)[-1] in parts
+
+	return not (_is_a_bound(path) or _values_are_listed(node))
+
+
+class TestExamplesAreWhatAMapWrites:
+
+	"""The examples subsystem.co publishes, each proved against the parser."""
+
+	def test_every_term_a_reader_would_copy_shows_what_to_write (self) -> None:
+
+		"""A term with no example leaves a reader to guess, and nothing would catch a wrong guess."""
+
+		parts = _parts_a_key_points_at()
+
+		unshown = [
+			path for path, node in _subschemas(_SCHEMA)
+			if _owed_an_example(path, node, parts) and not node.get("examples")
+		]
+
+		assert not unshown
+
+	def test_an_older_spelling_shows_nothing_to_copy (self) -> None:
+
+		"""An example is there to be copied, and nothing should copy a spelling on its way out."""
+
+		for older in _older_spellings():
+			for path, node in _subschemas(_at(older), older):
+				assert "examples" not in node, path
+
+	def test_a_knob_is_shown_where_the_binding_is_declared_and_nowhere_else (self) -> None:
+
+		"""Simon's decision, 2026-09-20: one entry shows the form, and the 56 parameters that take
+		a knob each show only their own number."""
+
+		assert _at("/$defs/cc_binding")["examples"]
+
+		bound = [
+			path for path, node in _subschemas(_SCHEMA)
+			for value in node.get("examples", ())
+			if isinstance(value, dict) and "cc" in value
+		]
+
+		# Release is the one term with a shape of its own here: the knob with
+		# the fade's curve beside it, which is written nowhere else.
+		assert bound == ["/$defs/cc_binding", "/$defs/cc_binding", "/$defs/release"]
+
+	def test_every_example_has_somewhere_it_is_written (self) -> None:
+
+		"""An example nobody loads is one the schema may be publishing wrongly."""
+
+		published = {case.values[0] for case in _examples()}
+
+		assert published == set(_PROBES)
+
+	@pytest.mark.parametrize(("path", "value"), _examples())
+	def test_every_example_loads_in_a_real_map (
+		self, tmp_path: pathlib.Path, path: str, value: typing.Any,
+	) -> None:
+
+		"""What the reference offers to be copied is what Subsample accepts."""
+
+		_load_case(tmp_path, _PROBES[path](value))
+
+	@pytest.mark.parametrize(("path", "value"), _examples())
+	def test_no_example_loads_with_a_complaint (
+		self,
+		tmp_path: pathlib.Path,
+		caplog:   pytest.LogCaptureFixture,
+		path:     str,
+		value:    typing.Any,
+	) -> None:
+
+		"""A map that loads and warns has written something that does nothing, which no example should teach."""
+
+		caplog.set_level(logging.WARNING)
+
+		_load_case(tmp_path, _PROBES[path](value))
+
+		assert [record.getMessage() for record in caplog.records] == []
 
 
 # ---------------------------------------------------------------------------

@@ -392,6 +392,124 @@ class TestProseIsWritten:
 			assert unit not in description.split()
 
 
+def _admitted (
+	parameter: subsample.processors.Parameter,
+	value:     typing.Any,
+	limits:    typing.Sequence[subsample.processors.Limit],
+) -> bool:
+
+	"""True when a value is one this parameter's own declaration accepts."""
+
+	if isinstance(value, bool):
+		return "boolean" in parameter.forms
+
+	if isinstance(value, (int, float)):
+
+		if "number" not in parameter.forms and not (isinstance(value, int) and "integer" in parameter.forms):
+			return False
+
+		return all(limit.admits(value) for limit in limits)
+
+	if isinstance(value, str):
+		return value in parameter.choice_values or bool({"note_name", "path"} & set(parameter.forms))
+
+	return False
+
+
+class TestExamplesAreWorthCopying:
+
+	"""The examples subsystem.co publishes: a value a map would really write here.
+
+	tests/test_midi_map_schema.py holds the other half, loading each of them in a
+	real map."""
+
+	@pytest.mark.parametrize(("processor", "parameter"), _PARAMETERS, ids=_PARAMETER_IDS)
+	def test_a_parameter_shows_an_example_unless_its_words_are_the_examples (
+		self, processor: subsample.processors.Processor, parameter: subsample.processors.Parameter,
+	) -> None:
+
+		"""A parameter that takes a value of its own shows one; a parameter of words shows its words."""
+
+		if set(parameter.forms) <= {"choice", "boolean"}:
+			assert parameter.examples == ()
+		else:
+			assert parameter.examples
+
+	@pytest.mark.parametrize(("processor", "parameter"), _PARAMETERS, ids=_PARAMETER_IDS)
+	def test_an_example_is_a_value_the_parameter_admits (
+		self, processor: subsample.processors.Processor, parameter: subsample.processors.Parameter,
+	) -> None:
+
+		"""An example its own declaration refuses would be published and then refused at load."""
+
+		for value in parameter.examples:
+			assert _admitted(parameter, value, [parameter.limit]), f"{parameter.name}: {value!r}"
+
+	@pytest.mark.parametrize(("processor", "parameter"), _PARAMETERS, ids=_PARAMETER_IDS)
+	def test_an_example_lies_within_the_travel_a_knob_would_sweep (
+		self, processor: subsample.processors.Processor, parameter: subsample.processors.Parameter,
+	) -> None:
+
+		"""A sweep is the musically useful range, so an example outside it is one nobody would play."""
+
+		if parameter.sweep is None:
+			return
+
+		low, high = parameter.sweep
+
+		for value in parameter.examples:
+			if isinstance(value, (int, float)) and not isinstance(value, bool):
+				assert low <= value <= high, f"{parameter.name}: {value!r}"
+
+	@pytest.mark.parametrize(("processor", "parameter"), _PARAMETERS, ids=_PARAMETER_IDS)
+	def test_an_example_is_not_the_value_a_map_gets_for_free (
+		self, processor: subsample.processors.Processor, parameter: subsample.processors.Parameter,
+	) -> None:
+
+		"""The default is published beside it, so an example that repeats it shows nothing."""
+
+		assert parameter.default not in parameter.examples
+
+	@pytest.mark.parametrize("processor", list(_PROCESSORS.values()), ids=list(_PROCESSORS))
+	def test_a_processor_shows_a_step_unless_a_map_only_ever_names_it (
+		self, processor: subsample.processors.Processor,
+	) -> None:
+
+		"""A processor that takes parameters shows a setting of them; one that takes none has nothing to show."""
+
+		if processor.parameters:
+			assert processor.examples
+		else:
+			assert processor.examples == ()
+
+	@pytest.mark.parametrize("processor", list(_PROCESSORS.values()), ids=list(_PROCESSORS))
+	def test_a_step_example_is_one_the_processor_takes (
+		self, processor: subsample.processors.Processor,
+	) -> None:
+
+		"""Every name in a step is a parameter of that processor, and every value one it admits."""
+
+		for example in processor.examples:
+
+			if not isinstance(example, dict):
+				assert processor.shorthand is not None, processor.name
+
+				shorthand = processor.parameter(processor.shorthand)
+
+				assert _admitted(shorthand, example, [shorthand.limit]), f"{processor.name}: {example!r}"
+				continue
+
+			for name, value in example.items():
+				parameter = processor.parameter(name)
+				limits = [limit for limit, _when in processor.limits_for(name, example)]
+
+				assert _admitted(parameter, value, limits), f"{processor.name}.{name}: {value!r}"
+
+			for parameter in processor.parameters:
+				if parameter.required:
+					assert parameter.name in example, f"{processor.name}: {example!r}"
+
+
 class TestDefaultsAgreeWithTheCompiler:
 
 	_FIXED, _FIXED_IDS = _parameters_where(lambda parameter: parameter.default is not None)
