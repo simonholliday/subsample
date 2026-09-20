@@ -29,6 +29,18 @@ MIDI_NAMES = [
 	"RtMidiIn Client:Midi Through Port-0 14:0",
 ]
 
+# Names PortAudio reports on the author's machine under PipeWire, where three of
+# the ten present are a strict substring of another.  `default` is inside both
+# `Default Sink` and `Default Source`, and PipeWire publishes a `.monitor` source
+# for every sink, so any output device can end up inside another name.
+NESTED_NAMES = [
+	"default",
+	"Default Sink",
+	"Default Source",
+	"auto_null",
+	"auto_null.monitor",
+]
+
 
 class TestMatchDeviceNames:
 
@@ -56,6 +68,36 @@ class TestMatchDeviceNames:
 		assert self._matched("SC-U: USB Audio (hw:2,0)", AUDIO_NAMES) == [
 			"SC-U: USB Audio (hw:2,0)",
 		]
+
+	def test_full_name_wins_over_every_longer_name_containing_it (self) -> None:
+
+		"""The escape hatch has to hold where it is needed, which is the case a
+		substring match gets wrong: `default` is inside `Default Sink`, so
+		pasting it used to offer three devices and ask which."""
+
+		assert self._matched("default", NESTED_NAMES) == ["default"]
+		assert self._matched("auto_null", NESTED_NAMES) == ["auto_null"]
+
+	def test_the_full_name_may_be_typed_in_any_case (self) -> None:
+
+		"""Case-insensitive everywhere else, so pinning a name must not quietly
+		become the one rule that cares."""
+
+		assert self._matched("DEFAULT", NESTED_NAMES) == ["default"]
+
+	def test_a_shortened_name_still_offers_everything_it_is_inside_of (self) -> None:
+
+		"""Naming one device in full is a tie-break, not a narrowing of the glob:
+		a pattern that names nothing still matches anywhere in a name."""
+
+		assert self._matched("Default S", NESTED_NAMES) == ["Default Sink", "Default Source"]
+
+	def test_two_devices_reported_under_one_name_stay_ambiguous (self) -> None:
+
+		"""A backend can report the same name twice, and the answer then is still
+		"which of these?" rather than whichever was enumerated first."""
+
+		assert subsample.devices.match_device_names("Scarlett 2i2", ["Scarlett 2i2"] * 2) == [0, 1]
 
 	def test_wildcard_covers_a_renumbered_card (self) -> None:
 

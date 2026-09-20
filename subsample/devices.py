@@ -19,6 +19,15 @@ So the configured name is a **glob**:
   - Nothing else is special.  ``[`` is literal (device names may contain one,
     and treating it as a character class would match for baffling reasons).
 
+**A name given in full wins outright.**  The pattern is first compared, case
+insensitively, against each whole name; if that names a device present, that
+device is the answer and the glob is never reached.  Every other rule here
+widens the search, so without this the advice "paste the whole name" fails
+exactly when it is needed: ``default`` is inside ``Default Sink``, and PipeWire
+publishes a ``.monitor`` source for every sink, so ``auto_null`` is inside
+``auto_null.monitor``.  A pattern that names nothing falls through to the glob,
+so a shortened name still offers everything it is inside of.
+
 The convention to teach: **wildcard the number that moves, keep the one that
 does not.**
 
@@ -60,8 +69,9 @@ def match_device_names (pattern: str, names: typing.Sequence[str]) -> list[int]:
 
 	"""Return the positions in ``names`` of every device the pattern matches.
 
-	Case-insensitive, with an implicit ``*`` at both ends; ``*`` and ``?`` are
-	the only wildcards.  Returns every match, in the order given — the caller
+	A name given in full wins outright; otherwise the pattern is a glob, matched
+	case-insensitively with an implicit ``*`` at both ends, where ``*`` and ``?``
+	are the only wildcards.  Returns every match, in the order given — the caller
 	decides what to do with none, one, or several (see the module docstring).
 
 	Args:
@@ -71,6 +81,16 @@ def match_device_names (pattern: str, names: typing.Sequence[str]) -> list[int]:
 	Returns:
 		Indices into ``names``.  Empty when nothing matches.
 	"""
+
+	lowered = pattern.lower()
+
+	# The whole name first, before anything widens the search.  Two devices
+	# reported under one name stay ambiguous, which is a real machine's answer
+	# rather than a tie broken by enumeration order.
+	exact = [index for index, name in enumerate(names) if name.lower() == lowered]
+
+	if exact:
+		return exact
 
 	# Escape `[` so a pasted name containing one cannot be read as a character
 	# class.  fnmatch would otherwise take "[Pro]" as "any of P, r, o" and match

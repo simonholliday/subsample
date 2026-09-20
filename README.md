@@ -2476,8 +2476,11 @@ used silently. If it matches several you are asked which, and the menu lists onl
 the matches rather than every device on the system. If it matches none, Subsample
 reports that and lists what is available.
 
-Pasting a device's full name still pins that exact device - which is what you
-want if you have two identical interfaces and care which one you get.
+**A device's full name always pins that one device.** The whole name is tried
+before anything else, so pasting it wins even where a longer name contains it -
+`default` is also inside `Default Sink` and `Default Source`, and PipeWire
+publishes a `.monitor` source for every sink. Shorten the name and you are back
+to a substring, which matches everything it appears in.
 
 > Running without a terminal - from a service manager, over SSH without a TTY, in
 > CI - there is nobody to answer the menu. Rather than blocking on input forever,
@@ -2551,7 +2554,7 @@ weights - is optional and rarely needs changing.
 |---|---|---|
 | `max_memory_mb` | auto | Total cache memory budget. Auto-detected from system RAM, with a ceiling, and split automatically: most to instrument samples, then transform variants, then the vocoder carrier cache. The per-cache settings in `library` and `transform` override the split |
 | `recorder.enabled` | `true` | Enable live audio capture; set to `false` to process files only |
-| `recorder.audio.device` | `none` | Audio input device name. Case-insensitive glob matched anywhere in the name, so a bare substring works; use `*` for the card index, which moves (`SC-U: USB Audio (hw:*,0)`). If unset, auto-select or prompt. See [Naming a device that keeps moving](#naming-a-device-that-keeps-moving) |
+| `recorder.audio.device` | `none` | Audio input device name. Case-insensitive glob matched anywhere in the name, so a bare substring works and a full name pins one device; use `*` for the card index, which moves (`SC-U: USB Audio (hw:*,0)`). If unset, auto-select or prompt. See [Naming a device that keeps moving](#naming-a-device-that-keeps-moving) |
 | `recorder.audio.sample_rate` | `44100` | Sample rate in Hz |
 | `recorder.audio.bit_depth` | `16` | Bit depth (16, 24, or 32) |
 | `recorder.audio.channels` | auto | 1 = mono, 2 = stereo. Omitted by default (and `null`) = auto-detect from the selected device |
