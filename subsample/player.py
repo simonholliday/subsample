@@ -369,6 +369,37 @@ def _quantize_params (
 	return (bpm if bpm > 0 else None, grid)
 
 
+def _quantize_beats (process: subsample.query.ProcessSpec) -> typing.Optional[float]:
+
+	"""The beat count a stretch_quantize step declares, or None when it declares none.
+
+	Two things follow from a declared beat count, and both are decided here so
+	they cannot disagree: the step renders for a sample with no detected tempo
+	of its own, because it no longer consults one; and the variant built for
+	scoring has to carry the same count as the one that renders, or they are two
+	different variants and the score never finds its audio.
+
+	A CC-bound count is read at the value the knob rests at, the same way the
+	tempo is — a binding resting unset reads as no beat count, which is what the
+	step does until the knob moves.
+	"""
+
+	step = next((s for s in process.steps if s.name == "stretch_quantize"), None)
+
+	if step is None:
+		return None
+
+	raw = step.get("beats")
+
+	if isinstance(raw, subsample.query.CcBinding):
+		raw = raw.default_value
+
+	if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+		return None
+
+	return float(raw) if raw > 0 else None
+
+
 # MIDI clock runs at 24 pulses per quarter note, so the span of 24 pulses is
 # exactly one beat.
 _CLOCK_PULSES_PER_BEAT: typing.Final[int] = 24
@@ -567,7 +598,9 @@ def _build_variant_lookup (
 		bpm, grid = _quantize_params(process, "stretch_quantize", session_bpm)
 		if bpm is None or bpm <= 0:
 			return None
-		step = subsample.transform.TimeStretch(target_bpm=float(bpm), resolution=int(grid))
+		step = subsample.transform.TimeStretch(
+			target_bpm=float(bpm), resolution=int(grid), beats=_quantize_beats(process),
+		)
 	elif process.has_pad_quantize():
 		bpm, grid = _quantize_params(process, "pad_quantize", session_bpm)
 		if bpm is None or bpm <= 0:
@@ -606,6 +639,20 @@ def _build_beats_resolver (
 	lookup = _build_variant_lookup(process, transform_manager, session_bpm)
 	if lookup is None:
 		return None
+
+	declared = _quantize_beats(process)
+
+	if declared is not None:
+
+		# Every variant of this assignment fills exactly that many beats, by
+		# construction.  Measuring the rendered audio to find a number the step
+		# was told is how the two come to disagree — and the measurement is only
+		# available once the variant has baked, so the filter would drop samples
+		# whose length is already known.
+		def _declared (sample_id: int) -> typing.Optional[float]:
+			return declared
+
+		return _declared
 
 	def _resolver (sample_id: int) -> typing.Optional[float]:
 		result = lookup(sample_id)
@@ -5230,7 +5277,10 @@ class MidiPlayer:
 		grid_for_spec = 16
 
 		if assignment.process.has_stretch_quantize():
-			if record.rhythm.tempo_bpm > 0.0:
+			# A declared beat count sets the output length outright, so a sample
+			# with no tempo of its own — the case the count exists for — is no
+			# longer a reason to skip the step.
+			if record.rhythm.tempo_bpm > 0.0 or _quantize_beats(assignment.process) is not None:
 				bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "stretch_quantize", self._target_bpm)
 			else:
 				# DEBUG, not WARNING: on the trigger path this fires on EVERY
@@ -6314,12 +6364,14 @@ class MidiPlayer:
 			# PickSpec may resolve to any rank in [lo, hi] at trigger time —
 			# enqueue a variant for every reachable rank.  The full process
 			# chain is included via spec_from_process().  stretch_quantize
-			# additionally requires the source to have a detected tempo;
-			# pad_quantize does not (it only needs onsets).
+			# additionally requires the source to have a detected tempo, unless
+			# it declares a beat count, which replaces detected tempo outright;
+			# pad_quantize never needs one (it only needs onsets).
 			elif asgn.process.has_stretch_quantize():
 				enqueued = self._enqueue_quantize_variants(
 					asgn, "stretch_quantize", note_picks, ranked,
-					eff_library, eff_transform, require_tempo=True,
+					eff_library, eff_transform,
+					require_tempo=_quantize_beats(asgn.process) is None,
 				)
 
 				if enqueued > 0:

@@ -4580,3 +4580,199 @@ class TestReverseThenQuantize:
 		]))
 
 		assert reversed_last == pytest.approx(reference, rel=0.01)
+
+
+class TestStretchQuantizeToABeatCount:
+
+	"""`beats:` makes stretch_quantize fill an exact span, whatever the sample's own speed.
+
+	The driving case is a run-out groove cut to one rotation of a record: some
+	at 45 RPM (1.333 s), some at 33 1/3 (1.800 s), neither with a tempo worth
+	detecting.  Before this, the output length came from librosa's guess at the
+	source tempo, so two rotations with identical event structure rendered to
+	2.81 and 3.51 beats — two arbitrary lengths that do not even agree with each
+	other.
+	"""
+
+	SR = 44100
+	FRACTIONS = (0.02, 0.26, 0.51, 0.76)
+
+	def _rotation (
+		self, seconds: float, detected_bpm: float,
+		fractions: typing.Optional[tuple[float, ...]] = None,
+	) -> tuple[numpy.ndarray, typing.Any]:
+
+		"""A clip of `seconds` with clicks at the given fractions of its length."""
+
+		at = self.FRACTIONS if fractions is None else fractions
+		frames = int(seconds * self.SR)
+		audio = numpy.zeros((frames, 1), dtype=numpy.float32)
+		click = numpy.exp(-numpy.linspace(0.0, 10.0, int(0.03 * self.SR))).astype(numpy.float32)
+
+		for fraction in at:
+			start = int(fraction * frames)
+			end = min(frames, start + click.size)
+			audio[start:end, 0] += click[:end - start]
+
+		attacks = tuple(fraction * seconds for fraction in at)
+
+		return audio, _make_record(
+			audio=numpy.zeros((frames, 1), dtype=numpy.int16),
+			tempo_bpm=detected_bpm, onset_times=attacks, attack_times=attacks,
+		)
+
+	def _rendered (self, audio: numpy.ndarray, record: typing.Any, **fields: typing.Any) -> numpy.ndarray:
+
+		"""Run the handler with a beats target, keeping the other fields explicit."""
+
+		step = subsample.transform.TimeStretch(
+			target_bpm=fields.pop("target_bpm", 120.0),
+			resolution=fields.pop("resolution", 32),
+			amount=fields.pop("amount", 1.0),
+			beats=fields.pop("beats", 8.0),
+		)
+
+		return subsample.transform._apply_time_stretch(audio, self.SR, record, step)
+
+	def test_the_output_is_exactly_the_beats_asked_for (self) -> None:
+
+		"""8 beats at 120 BPM is 4 seconds, to the sample."""
+
+		audio, record = self._rotation(1.3333, 152.0)
+		rendered = self._rendered(audio, record)
+
+		assert rendered.shape[0] == pytest.approx(4.0 * self.SR, abs=self.SR * 0.002)
+
+	def test_two_rotations_of_different_speeds_render_to_the_same_length (self) -> None:
+
+		"""The measurement in the design note: 45 and 33 1/3 RPM cuts of the same
+		groove used to differ by three quarters of a beat, because the length
+		came from a tempo guessed off surface noise."""
+
+		fast, fast_record = self._rotation(1.3333, 152.0)
+		slow, slow_record = self._rotation(1.8000, 123.0)
+
+		lengths = (
+			self._rendered(fast, fast_record).shape[0],
+			self._rendered(slow, slow_record).shape[0],
+		)
+
+		assert lengths[0] == pytest.approx(lengths[1], abs=self.SR * 0.002)
+
+	def test_each_hit_lands_on_the_grid (self) -> None:
+
+		"""What the step is for: every hit on a 32nd-note point of the target tempo."""
+
+		audio, record = self._rotation(1.3333, 152.0)
+		self._rendered(audio, record)
+
+		interval = 60.0 / 120.0 / (32 / 4.0)
+
+		for start, _end in subsample.transform._segment_bounds_local.bounds:
+			# Distance to the nearest point, from either side: a position a
+			# sample short of a grid point reads as a whole interval under it.
+			remainder = (start / self.SR) % interval
+
+			assert min(remainder, interval - remainder) == pytest.approx(0.0, abs=0.002)
+
+	def test_a_hit_moves_by_no_more_than_half_a_grid_interval (self) -> None:
+
+		"""The finer the grid the less each hit moves; at worst it is half a step."""
+
+		audio, record = self._rotation(1.3333, 152.0)
+		self._rendered(audio, record)
+
+		interval = 60.0 / 120.0 / (32 / 4.0)
+		landed = [start / self.SR for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+		for fraction, start in zip(self.FRACTIONS, landed):
+			assert abs(start - fraction * 4.0) <= interval / 2 + 0.001
+
+	def test_the_start_of_the_file_is_the_start_of_the_span (self) -> None:
+
+		"""No crop to the first hit.  The file start is the rotation start, and
+		cropping it would move the loop point the whole thing exists to keep."""
+
+		audio, record = self._rotation(1.3333, 152.0)
+		self._rendered(audio, record)
+
+		first_start = subsample.transform._segment_bounds_local.bounds[0][0]
+
+		assert first_start > 0
+
+	def test_a_hit_near_the_end_is_held_inside_the_span (self) -> None:
+
+		"""An event within half a grid step of the end would snap to the span end
+		or past it, which is the next repetition's downbeat and breaks the time
+		map.  It is clamped to the last point inside, deliberately."""
+
+		audio, record = self._rotation(1.3333, 152.0, fractions=(0.02, 0.51, 0.999))
+		rendered = self._rendered(audio, record)
+
+		bounds = subsample.transform._segment_bounds_local.bounds
+
+		assert bounds[-1][0] < rendered.shape[0]
+		assert rendered.shape[0] == pytest.approx(4.0 * self.SR, abs=self.SR * 0.002)
+
+	def test_a_sample_with_no_detected_tempo_still_fills_the_span (self) -> None:
+
+		"""The case this exists for.  Without a beat count the step returns the
+		audio untouched when librosa found no tempo."""
+
+		audio, record = self._rotation(1.3333, 0.0)
+		rendered = self._rendered(audio, record)
+
+		assert rendered.shape[0] == pytest.approx(4.0 * self.SR, abs=self.SR * 0.002)
+
+	def test_one_hit_is_stretched_to_the_span_too (self) -> None:
+
+		"""Nothing to place on a grid, but the length still holds."""
+
+		audio, record = self._rotation(1.3333, 152.0, fractions=(0.02,))
+		rendered = self._rendered(audio, record)
+
+		assert rendered.shape[0] == pytest.approx(4.0 * self.SR, abs=self.SR * 0.01)
+
+	def test_no_snapping_still_fills_the_span (self) -> None:
+
+		"""At strength 0 the hits stay where an even stretch puts them — the beat
+		count is the point of the step, not the snapping."""
+
+		audio, record = self._rotation(1.3333, 152.0)
+		rendered = self._rendered(audio, record, amount=0.0)
+
+		assert rendered.shape[0] == pytest.approx(4.0 * self.SR, abs=self.SR * 0.002)
+
+		landed = [start / self.SR for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+		for fraction, start in zip(self.FRACTIONS, landed):
+			assert start == pytest.approx(fraction * 4.0, abs=0.002)
+
+	def test_without_a_beat_count_nothing_changes (self) -> None:
+
+		"""The historical behaviour is what a map without `beats:` still gets."""
+
+		audio, record = self._rotation(1.3333, 152.0)
+		rendered = self._rendered(audio, record, beats=None)
+
+		assert rendered.shape[0] != pytest.approx(4.0 * self.SR, abs=self.SR * 0.1)
+
+	def test_the_beat_count_reaches_the_step_from_a_map (self) -> None:
+
+		"""`stretch_quantize: {beats: 8, grid: 32}` as a map writes it."""
+
+		process = subsample.query.parse_process(
+			[{"stretch_quantize": {"beats": 8, "grid": 32}}], "test",
+		)
+		spec = subsample.transform.spec_from_process(process, target_bpm=120.0)
+
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].beats == 8.0
+		assert spec.steps[0].resolution == 32
+
+	def test_a_map_without_it_leaves_the_step_with_none (self) -> None:
+		process = subsample.query.parse_process([{"stretch_quantize": {"grid": 16}}], "test")
+		spec = subsample.transform.spec_from_process(process, target_bpm=120.0)
+
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].beats is None

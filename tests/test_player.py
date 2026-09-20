@@ -8970,3 +8970,113 @@ maps:
 
 		assert subsample.player.is_ensemble(tmp_path / "absent.yaml") is False
 		assert subsample.player.is_ensemble(broken) is False
+
+
+class TestDeclaredBeatCount:
+
+	"""What a `beats:` on stretch_quantize changes outside the renderer.
+
+	Two things follow from the count, and both used to be decided by the
+	sample's detected tempo: whether the step runs at all, and how long its
+	output is said to be.
+	"""
+
+	@staticmethod
+	def _process (step: dict[str, typing.Any]) -> subsample.query.ProcessSpec:
+		return subsample.query.parse_process([{"stretch_quantize": step}], "test")
+
+	def test_the_count_is_read_from_the_step (self) -> None:
+		assert subsample.player._quantize_beats(self._process({"beats": 8, "grid": 32})) == 8.0
+
+	def test_a_step_without_one_reads_as_none (self) -> None:
+
+		"""Absence is a different rule, not a value: the length then follows the
+		sample's own detected tempo."""
+
+		assert subsample.player._quantize_beats(self._process({"grid": 16})) is None
+
+	def test_another_processor_is_not_mistaken_for_it (self) -> None:
+		process = subsample.query.parse_process([{"pad_quantize": {"grid": 16}}], "test")
+
+		assert subsample.player._quantize_beats(process) is None
+
+	def test_a_knob_resting_unset_reads_as_no_count (self) -> None:
+
+		"""Until the knob moves the step has no beat count, which is exactly what
+		a binding with no default rests at."""
+
+		process = self._process({"beats": {"cc": 20, "min": 2, "max": 16}})
+
+		assert subsample.player._quantize_beats(process) is None
+
+	def test_a_knob_with_a_resting_place_reads_at_it (self) -> None:
+		process = self._process({"beats": {"cc": 20, "min": 2, "max": 16, "default": 8}})
+
+		assert subsample.player._quantize_beats(process) == 8.0
+
+	def test_the_scored_variant_carries_the_count_the_rendered_one_has (self) -> None:
+
+		"""A variant is identified by its whole spec, so a count on one side and
+		not the other is two different variants and the score finds no audio."""
+
+		process = self._process({"beats": 8, "grid": 32})
+		compiled = subsample.transform.spec_from_process(process, target_bpm=120.0)
+		lookup_step = subsample.transform.TimeStretch(
+			target_bpm=120.0, resolution=32,
+			beats=subsample.player._quantize_beats(process),
+		)
+
+		assert compiled.steps[0] == lookup_step
+
+	def _player (self) -> subsample.player.MidiPlayer:
+
+		"""A player with mocked dependencies, for the spec it builds per note."""
+
+		return subsample.player.MidiPlayer(
+			"Test Device", threading.Event(),
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map={}, sample_rate=44100, bit_depth=16,
+		)
+
+	def _record (self, tempo_bpm: float) -> subsample.library.SampleRecord:
+
+		"""A sample whose only relevant property is whether a tempo was detected."""
+
+		rhythm = subsample.analysis.RhythmResult(
+			tempo_bpm=tempo_bpm, beat_times=(), pulse_curve=numpy.zeros(0, dtype=numpy.float32),
+			pulse_peak_times=(), onset_times=(0.1, 0.5), attack_times=(0.1, 0.5), onset_count=2,
+		)
+
+		return subsample.library.SampleRecord(
+			sample_id=1, name="rotation", spectral=tests.helpers._make_spectral(),
+			rhythm=rhythm, pitch=tests.helpers._make_pitch(), timbre=tests.helpers._make_timbre(),
+			level=tests.helpers._make_level(), band_energy=tests.helpers._make_band_energy(),
+			params=tests.helpers._make_params(), duration=1.5,
+			audio=numpy.zeros((66150, 1), dtype=numpy.int16),
+		)
+
+	def _spec (self, step: dict[str, typing.Any], tempo_bpm: float) -> subsample.transform.TransformSpec:
+		player = self._player()
+		player._target_bpm = 120.0
+		assignment = subsample.query.Assignment(
+			name="Rotations", select=(), process=self._process(step),
+		)
+
+		return player._build_trigger_spec(assignment, self._record(tempo_bpm), 60)
+
+	def test_a_sample_with_no_tempo_of_its_own_still_gets_the_step (self) -> None:
+
+		"""The case the count exists for: a run-out groove has no tempo to detect,
+		and the step no longer consults one."""
+
+		spec = self._spec({"beats": 8, "grid": 32}, tempo_bpm=0.0)
+
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].beats == 8.0
+
+	def test_without_a_count_a_sample_with_no_tempo_is_still_skipped (self) -> None:
+
+		"""Nothing else changes: stretching by a ratio needs a tempo to be a ratio of."""
+
+		assert self._spec({"grid": 32}, tempo_bpm=0.0).steps == ()

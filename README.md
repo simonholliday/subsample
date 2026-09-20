@@ -1174,6 +1174,7 @@ Available processors:
 | `stretch_quantize: { grid: 16 }` | as above, grid overridden | Time-stretch to session `tempo.bpm` |
 | `stretch_quantize: { tempo: 120, grid: 8 }` | explicit tempo + grid | Time-stretch to a specific tempo |
 | `stretch_quantize: { strength: 0.5 }` | 0.0-1.0 (default 1.0) | Partial quantise - onsets move partway to the grid for a looser feel |
+| `stretch_quantize: { beats: 8, grid: 32 }` | beats (a number, no default) | Stretch the whole sample to exactly 8 beats of the target tempo, then snap each hit to the grid. See [Fitting a sample to a beat count](#fitting-a-sample-to-a-beat-count) |
 | `pad_quantize: true` | grid (default 16), tempo (config `tempo.bpm`), strength (default 1.0) | Silence-pad onsets with all defaults |
 | `pad_quantize: { grid: 16 }` | as above, grid overridden | Onset-aligned silence padding - snaps onsets to the beat grid by inserting silence between segments rather than time-stretching. No pitch/speed change. Ideal for speech. |
 | `pad_quantize: { strength: 0.75 }` | 0.0-1.0 (default 1.0) | Partial quantise - same as `stretch_quantize` strength but for silence-pad mode |
@@ -1197,6 +1198,31 @@ Available processors:
 | `transient: true` | gain (auto, dB signed) | Transient enhancement/taming via HPSS rebalancing. Auto-adapts from crest factor: peaky samples are tamed, dull samples enhanced. |
 | `transient: { gain: 6 }` | gain (dB, signed: +/- enhance/tame) | Explicit dB of transient enhancement or taming |
 | `vocoder: { carrier: reference }` | carrier (required), bands (24), depth (1.0), formant_shift (0) | Channel vocoder cross-synthesis. Imposes the sample's spectral envelope onto a carrier signal. `carrier: reference` uses this note's reference sample; or specify a file path. |
+
+#### Fitting a sample to a beat count
+
+`stretch_quantize` works out how long its output should be from the tempo
+Subsample detected in the sample - which is a guess when there is no steady
+rhythm to detect. `beats:` replaces that guess with a length you choose:
+
+```yaml assignment
+process:
+  - stretch_quantize: { beats: 8, grid: 32 }   # fill 8 beats, hits on 32nds
+```
+
+The whole sample is stretched to fill exactly that many beats of the target
+tempo, first moment to last, and each hit then moves to the nearest point on
+the grid. Nothing is cropped, so the start of the file stays the start of the
+span - which is what a loop needs. Two cuts of the same groove played at
+different speeds, a run-out groove at 45 RPM and another at 33 1/3, come out
+the same length with their hits in the same places.
+
+Two things worth knowing. A hit within half a grid step of the end is held at
+the last point inside the span rather than landing on the end, which belongs to
+the next repetition. And the beat count decides how far the audio is stretched:
+a 1.3 second rotation over 8 beats at 120 BPM is a 3x stretch and will sound
+smeared, while over 2 beats it is 0.75x and sounds untouched. The finer the
+grid, the less each hit has to move.
 
 All three filters can be used without parameters - they default to classic
 console channel-strip values:

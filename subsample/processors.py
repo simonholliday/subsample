@@ -411,9 +411,28 @@ def _mix () -> Parameter:
 	)
 
 
-def _quantise_parameters () -> tuple[Parameter, ...]:
+def _beats () -> Parameter:
 
-	"""The parameters stretch_quantize and pad_quantize share."""
+	"""The length a stretched sound is made to fill, counted in beats."""
+
+	return Parameter(
+		name="beats", forms=_NUMBER,
+		limit=Limit(exclusive_minimum=0.0), sweep=(1.0, 16.0),
+		automatic="sample",
+		examples=(8,),
+		title="Beats",
+		description="How many beats of the tempo the whole sound is stretched to fill, first moment to last, whatever speed it was played at. Left out, the length follows the sample: the sound is stretched by the difference between the tempo Subsample detected in it and the tempo here.",
+	)
+
+
+def _quantise_parameters (extra: tuple[Parameter, ...] = ()) -> tuple[Parameter, ...]:
+
+	"""The parameters stretch_quantize and pad_quantize share, with any the caller adds after the grid.
+
+	``beats`` is stretch_quantize's alone: filling an exact length means
+	changing how fast the sound plays, which pad_quantize deliberately does not
+	do — it keeps the sound's own speed and pads the gaps with silence.
+	"""
 
 	return (
 		Parameter(
@@ -433,6 +452,7 @@ def _quantise_parameters () -> tuple[Parameter, ...]:
 			title="Grid",
 			description="How many equal parts a whole note is divided into: 16 puts every hit on a sixteenth note. Left out, the quantise resolution Subsample is configured with.",
 		),
+		*extra,
 		Parameter(
 			name="strength", forms=_NUMBER,
 			limit=_FRACTION, sweep=(0.0, 1.0),
@@ -530,9 +550,9 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 
 	Processor(
 		name="stretch_quantize",
-		parameters=_quantise_parameters(),
+		parameters=_quantise_parameters(extra=(_beats(),)),
 		legacy_names=(LegacyName("beat_quantize"),),
-		examples=({"grid": 16, "strength": 0.7},),
+		examples=({"grid": 16, "strength": 0.7}, {"beats": 8, "grid": 32}),
 		title="Stretch quantise",
 		description="Moves each hit onto a beat grid by time-stretching the audio between hits, without changing its pitch.",
 	),

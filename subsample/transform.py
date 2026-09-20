@@ -180,11 +180,20 @@ class TimeStretch:
 	amount:     Quantize strength (0.0 = no change, 1.0 = full snap to grid).
 	            Values between 0 and 1 move onsets partway toward the grid
 	            for a more natural, less rigid feel.
+	beats:      How many beats the whole sample is stretched to fill, at
+	            target_bpm.  None (the default) keeps the historical behaviour:
+	            the output length comes from the ratio between the sample's
+	            DETECTED tempo and target_bpm.  With a beat count, detected
+	            tempo plays no part — the ratio comes from the file's own
+	            duration, so a recording with no real tempo of its own (a
+	            run-out groove cut to one rotation of a record) still lands on
+	            an exact, musically meaningful span.
 	"""
 
 	target_bpm:  float
 	resolution:  int = 16
 	amount:      float = 1.0
+	beats:       typing.Optional[float] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2193,6 +2202,117 @@ def _build_time_map (
 	return time_map
 
 
+def _publish_segment_bounds (onset_target_samples: list[int], target_length: int) -> None:
+
+	"""Record where each hit starts and ends in the rendered audio, for segment playback.
+
+	Each hit runs to the next one, and the last runs to the end of the sample.
+	"""
+
+	_segment_bounds_local.bounds = tuple(
+		(
+			start,
+			onset_target_samples[index + 1] if index + 1 < len(onset_target_samples) else target_length,
+		)
+		for index, start in enumerate(onset_target_samples)
+	)
+
+
+def _fit_to_beats (
+	audio:       numpy.ndarray,
+	sample_rate: int,
+	record:      "subsample.library.SampleRecord",
+	step:        TimeStretch,
+	beats:       float,
+) -> numpy.ndarray:
+
+	"""Stretch the whole sample to fill an exact number of beats, each hit on the grid.
+
+	The span is ``beats × 60 / target_bpm`` seconds, which comes from the target
+	tempo alone — so a recording whose own tempo is a guess, like a run-out
+	groove cut to one rotation of a record, still lands on a musically
+	meaningful length.  Each attack is projected into that span by the file's
+	own duration and snapped from there, and the map is anchored end to end with
+	NO crop to the first hit: the start of the file is the start of the rotation,
+	and cropping it would move the loop point.
+
+	The grid and the span stay consistent by construction, both coming from
+	``target_bpm``.  An attack that would snap to or past the end of the span is
+	held at the last grid point inside it.  Musically such a hit belongs to the
+	downbeat of the next repetition; wrapping it forward would be more correct
+	when looping, and is much more involved, so this clamps deliberately.
+
+	Args:
+		audio:       float32, shape (n_frames, channels).
+		sample_rate: Hz (e.g. 44100).
+		record:      Parent SampleRecord — provides the attack positions.
+		step:        TimeStretch being applied, for its grid, tempo and strength.
+		beats:       How many beats the sample is made to fill.  Positive.
+
+	Returns:
+		float32, shape (n_frames_out, channels) — as close to ``beats`` long as
+		Rubber Band renders, which is within a millisecond of exact.
+	"""
+
+	source_duration = audio.shape[0] / sample_rate
+	target_span     = beats * 60.0 / step.target_bpm
+	target_length   = max(1, int(round(target_span * sample_rate)))
+
+	# Same positions the tempo-ratio path uses: sample-accurate attacks, mirrored
+	# when an earlier reverse in the chain flipped the buffer.
+	attack_times = subsample.analysis.effective_attack_times(record.rhythm)
+	attack_times = _mirror_attacks_if_reversed(attack_times, audio, sample_rate)
+
+	# Fewer than two hits: nothing to place on a grid, but the span still holds.
+	if not subsample.analysis.has_beat_map(record.rhythm):
+		return pyrubberband.time_stretch(  # type: ignore[no-any-return]  # pyrubberband ships no stubs
+			audio, sample_rate, source_duration / target_span,
+			rbargs={"--fine": "", "--smoothing": ""},
+		)
+
+	# Where each hit lands when the sample is stretched evenly into the span.
+	# Snapping in source time against a target-time grid, as the tempo-ratio
+	# path does, would pile every hit into the first part of a lengthened span.
+	projected = [t * target_span / source_duration for t in attack_times]
+
+	# Only grid points strictly inside the span can be snapped to: a hit on the
+	# span end is the next repetition's downbeat, and an anchor at or past the
+	# end would break the time map's strict increase.  The snapper piles any
+	# leftover hits onto the last point, which is the clamp this wants.
+	inside = [
+		point
+		for point in _build_quantize_grid(
+			step.target_bpm, step.resolution, target_span, min_points=len(projected) + 2,
+		)
+		if point < target_span
+	]
+
+	snapped = _snap_onsets_to_grid(tuple(projected), inside or [0.0])
+
+	# Partial quantize.  At 0 the hits stay where the even stretch put them and
+	# the sample still fills the span — the beat count is the point of the step,
+	# not the snapping.
+	if step.amount < 1.0:
+		snapped = [p + step.amount * (s - p) for p, s in zip(projected, snapped)]
+
+	onset_src = [int(t * sample_rate) for t in attack_times]
+	onset_tgt = [int(t * sample_rate) for t in snapped]
+
+	time_map = _build_time_map(onset_src, onset_tgt, audio.shape[0], target_length)
+
+	_log.debug(
+		"Time-stretch %s: %.3fs → %g beats at %.1f BPM (%.3fs, res=%d), %d attacks",
+		record.name, source_duration, beats, step.target_bpm, target_span,
+		step.resolution, len(attack_times),
+	)
+
+	_publish_segment_bounds(onset_tgt, target_length)
+
+	return pyrubberband.timemap_stretch(  # type: ignore[no-any-return]  # pyrubberband ships no stubs
+		audio, sample_rate, time_map, rbargs={"--fine": "", "--smoothing": ""},
+	)
+
+
 def _apply_time_stretch (
 	audio:       numpy.ndarray,
 	sample_rate: int,
@@ -2221,6 +2341,12 @@ def _apply_time_stretch (
 	"""
 
 	source_bpm = record.rhythm.tempo_bpm
+
+	# A beat count fixes the output length outright, so nothing below applies:
+	# detected tempo plays no part, and the whole file is stretched rather than
+	# cropped to its first hit.
+	if step.beats is not None and step.beats > 0.0 and audio.shape[0] > 0:
+		return _fit_to_beats(audio, sample_rate, record, step, step.beats)
 
 	if source_bpm <= 0.0 or step.amount <= 0.0:
 		return audio
@@ -2323,14 +2449,7 @@ def _apply_time_stretch (
 	# tighter than any frame-level detector.
 
 	# Compute segment bounds in the stretched output for per-segment playback.
-	bounds: list[tuple[int, int]] = []
-
-	for i in range(len(onset_tgt)):
-		seg_start = onset_tgt[i]
-		seg_end = onset_tgt[i + 1] if i + 1 < len(onset_tgt) else target_length
-		bounds.append((seg_start, seg_end))
-
-	_segment_bounds_local.bounds = tuple(bounds)
+	_publish_segment_bounds(onset_tgt, target_length)
 
 	return pyrubberband.timemap_stretch(  # type: ignore[no-any-return]  # pyrubberband ships no stubs
 		audio, sample_rate, time_map, rbargs={"--fine": "", "--smoothing": ""},
@@ -4103,9 +4222,13 @@ def spec_from_process (
 			tempo = _resolved(proc, "tempo", cc_state, cc_omni, context=target_bpm)
 			grid = int(_resolved(proc, "grid", cc_state, cc_omni, context=resolution))
 			strength = float(_resolved(proc, "strength", cc_state, cc_omni))
+			beats = _resolved(proc, "beats", cc_state, cc_omni)
 
 			if tempo is not None and tempo > 0.0:
-				steps.append(TimeStretch(target_bpm=float(tempo), resolution=grid, amount=strength))
+				steps.append(TimeStretch(
+					target_bpm=float(tempo), resolution=grid, amount=strength,
+					beats=float(beats) if beats is not None else None,
+				))
 			else:
 				_warn_once(
 					"stretch_quantize-no-tempo",
