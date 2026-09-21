@@ -1542,3 +1542,59 @@ assignments:
 
 		assert with_names is not None and (9, 42) in with_names.note_map
 		assert without is not None and without.note_map == {}
+
+
+class TestDrainingCapturesOnTheWayOut:
+
+	"""Ctrl+C used to throw away captures that were still being analysed.
+
+	Shutdown joined each subsystem thread for ten seconds and then hard-exited
+	with code 0.  A capture's audio file is written only after its analysis,
+	preview and loop search, and pyin alone costs seconds per sample, so a
+	backlog outlived the timeout and the recordings went with it, silently.
+	"""
+
+	class _Processor:
+
+		"""A stand-in that drains one capture per flush."""
+
+		def __init__ (self, depth: int) -> None:
+			self.depth = depth
+			self.flushes = 0
+
+		@property
+		def queue_depth (self) -> int:
+			return self.depth
+
+		def flush (self) -> None:
+			self.flushes += 1
+			self.depth = max(0, self.depth - 1)
+
+	def test_it_waits_for_every_capture (self, capsys: pytest.CaptureFixture[str]) -> None:
+		processor = self._Processor(depth=3)
+
+		subsample.cli._drain_captures(processor, poll=0.0)
+
+		assert processor.depth == 0
+		assert processor.flushes == 3
+
+	def test_it_says_how_many_are_left (self, capsys: pytest.CaptureFixture[str]) -> None:
+
+		"""An unexplained wait reads as a hang, which is what makes people kill it."""
+
+		subsample.cli._drain_captures(self._Processor(depth=2), poll=0.0)
+
+		out = capsys.readouterr().out
+		assert "2 capture(s)" in out
+		assert "to go" in out
+
+	def test_an_empty_queue_says_nothing (self, capsys: pytest.CaptureFixture[str]) -> None:
+		subsample.cli._drain_captures(self._Processor(depth=0), poll=0.0)
+
+		assert capsys.readouterr().out == ""
+
+	def test_no_recorder_is_not_an_error (self) -> None:
+
+		"""Player-only and watcher-only runs have no capture queue at all."""
+
+		subsample.cli._drain_captures(None, poll=0.0)

@@ -771,6 +771,7 @@ def _run_recorder (
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]] = None,
 	app_events: typing.Optional[subsample.events.EventEmitter] = None,
+	processor_cell: typing.Optional[list[typing.Optional[subsample.recorder.SampleProcessor]]] = None,
 ) -> None:
 
 	"""Set up an audio input device and run the real-time capture loop.
@@ -795,6 +796,9 @@ def _run_recorder (
 		                    updated when the best match changes.
 		app_events:         Optional event emitter; forwarded to _make_on_complete
 		                    so sample_captured and sample_loaded events are emitted.
+		processor_cell:     Single-element list this stores its SampleProcessor in, so
+		                    the shutdown path can see how many captures are still being
+		                    analysed and wait for them rather than killing them.
 	"""
 
 	pa = subsample.audio.create_pyaudio()
@@ -883,6 +887,12 @@ def _run_recorder (
 		on_complete=on_complete_callback,
 		reserve_for_player=cfg.player.enabled,
 	)
+
+	# Hand it to the shutdown path, which waits for whatever is still being
+	# analysed: a capture's audio file is written only after its analysis, so a
+	# queue killed on the way out is a recording that never existed.
+	if processor_cell is not None:
+		processor_cell[0] = writer
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
 
@@ -1726,6 +1736,7 @@ def _main_impl () -> None:
 	# when the best-matching sample changes for a pitched keyboard assignment.
 	# _start_player sets this before calling player.run().
 	_player_cell: list[typing.Optional[subsample.player.MidiPlayer]] = [None]
+	_processor_cell: list[typing.Optional[subsample.recorder.SampleProcessor]] = [None]
 
 	# Subsystem threads are daemons: an interactive device-selection prompt
 	# blocks in input(), which Ctrl+C (delivered to the main thread) cannot
@@ -1742,7 +1753,7 @@ def _main_impl () -> None:
 				analysis_params, similarity_matrix,
 				shutdown_event, cfg.player.enabled,
 				transform_manager, _player_cell,
-				app_events,
+				app_events, _processor_cell,
 			),
 			name="recorder",
 			daemon=True,
@@ -2104,6 +2115,13 @@ def _main_impl () -> None:
 		print("\nStopping…")
 		shutdown_event.set()
 
+	# Wait for captures still being analysed BEFORE joining with a timeout.
+	# A capture's audio file is written only after its analysis, its preview and
+	# its loop search have run, and pyin alone costs seconds per sample — so a
+	# backlog takes longer than the join timeout below, and the hard exit that
+	# followed threw those recordings away with no message and exit code 0.
+	_drain_captures(_processor_cell[0])
+
 	for t in threads:
 		t.join(timeout=10.0)
 
@@ -2143,6 +2161,48 @@ def _main_impl () -> None:
 	# co-occurs with the stuck-daemon path above).
 	if startup_failed:
 		raise SystemExit(1)
+
+
+def _drain_captures (
+	processor: typing.Optional[subsample.recorder.SampleProcessor],
+	poll:      float = 0.5,
+) -> None:
+
+	"""Wait for every capture still being analysed, saying how many are left.
+
+	A capture is written to disk only after its analysis, preview and loop
+	search have finished, so anything still in the queue at shutdown is a
+	recording that does not exist yet.  Shutdown used to join each subsystem
+	thread for ten seconds and then hard-exit, which on a Pi, or with
+	reserve_for_player narrowing the pool, is far less than a backlog needs:
+	the recordings went with it, silently and with exit code 0.
+
+	Waiting is unbounded on purpose, because the alternative is losing work the
+	musician has already played.  The count is printed so the wait is explained
+	rather than looking like a hang.
+	"""
+
+	if processor is None:
+		return
+
+	remaining = processor.queue_depth
+
+	if not remaining:
+		return
+
+	print(f"Finishing {remaining} capture(s) still being analysed…")
+
+	while True:
+		processor.flush()
+
+		still_going = processor.queue_depth
+
+		if not still_going:
+			break
+
+		# A capture that arrived while we were flushing: report and go round.
+		print(f"  {still_going} to go…")
+		time.sleep(poll)
 
 
 def _print_banner (cfg: subsample.config.Config, multi_bank: bool = False) -> None:
