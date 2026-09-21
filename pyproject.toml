@@ -38,7 +38,12 @@ dev = [
 	"jsonschema>=4.21",
 	"mypy>=1.9",
 	"pytest>=8.0",
+	# The OSC tests skip themselves when python-osc is absent, so without it
+	# here the documented `pip install -e ".[dev]" && pytest` ran none of them
+	# and said so only in the skip count.
+	"python-osc",
 	"scipy-stubs>=1.4",
+	"types-jsonschema>=4.21",
 	"types-pyaudio>=0.2.16",
 	"types-PyYAML>=6.0.12",
 ]

@@ -48,9 +48,12 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 	parser.add_argument(
 		"--reference-dir",
 		type=pathlib.Path,
-		default=pathlib.Path("samples/reference"),
+		default=None,
 		metavar="DIR",
-		help="Directory containing reference .analysis.json sidecar files (default: samples/reference)",
+		help=(
+			"Directory containing reference .analysis.json sidecar files "
+			"(default: library.reference_directory, or the GM set bundled with Subsample)"
+		),
 	)
 	return parser.parse_args(argv)
 
@@ -71,7 +74,15 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	# --- Load libraries ---
 
-	reference_library = subsample.library.load_reference_library(args.reference_dir)
+	# The same references the app itself would use, unless asked otherwise.  This
+	# defaulted to `samples/reference`, which --init has never created and which
+	# the app does not read: the tool failed with "no reference samples found" in
+	# every new project, including for the example in the README.
+	reference_dir = (
+		args.reference_dir if args.reference_dir is not None
+		else subsample.config.reference_directory(cfg)
+	)
+	reference_library = subsample.library.load_reference_library(reference_dir)
 
 	if len(reference_library) == 0:
 		print("No reference samples found — nothing to compare against.", file=sys.stderr)

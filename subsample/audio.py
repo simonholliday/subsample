@@ -131,6 +131,18 @@ def scale_float_to_ceiling (
 	return data
 
 
+# Subtypes whose decoded samples can exceed full scale, so reading them as
+# integers hard-clips.  Float and double have no 0 dBFS ceiling at all, and a
+# lossy codec reconstructs a waveform rather than replaying stored samples:
+# VORBIS, Opus and MP3 routinely overshoot by a fraction of a dB on a master
+# that was already loud.  Read as float and let the import ceiling scale them,
+# which is what that setting is for — as integers the overshoot was flattened
+# before anything in Subsample ever saw it.
+_DECODES_ABOVE_FULL_SCALE: typing.Final[frozenset[str]] = frozenset({
+	"FLOAT", "DOUBLE", "VORBIS", "OPUS", "MPEG_LAYER_III", "MPEG_LAYER_II", "MPEG_LAYER_I",
+})
+
+
 def read_audio_file (
 	path: pathlib.Path,
 	float_ceiling_dbfs: typing.Union[float, None, _Unset] = _UNSET,
@@ -243,11 +255,11 @@ def read_audio_file (
 		sf_info = soundfile.info(str(path))
 		subtype = (sf_info.subtype or "").upper()
 
-		if subtype in ("FLOAT", "DOUBLE"):
+		if subtype in _DECODES_ABOVE_FULL_SCALE:
 			# Read at native float precision.  DOUBLE → float64 preserves the
 			# extra mantissa bits during scaling; FLOAT → float32 is enough.
 			# Either way the scale-and-clamp logic below is identical.
-			float_dtype = "float32" if subtype == "FLOAT" else "float64"
+			float_dtype = "float32" if subtype != "DOUBLE" else "float64"
 			float_data, sample_rate = soundfile.read(str(path), dtype=float_dtype, always_2d=True)
 
 			# Scrub non-finite samples before anything reads them.  numpy.clip

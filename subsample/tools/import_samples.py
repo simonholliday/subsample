@@ -17,7 +17,6 @@ Usage:
 
 import argparse
 import functools
-import glob
 import logging
 import math
 import pathlib
@@ -368,20 +367,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 
 	target_dir.mkdir(parents=True, exist_ok=True)
 
-	# Expand globs
-
-	_GLOB_CHARS = frozenset("*?[")
-	paths: list[pathlib.Path] = []
-
-	for arg in args.files:
-		matches = sorted(glob.glob(arg))
-
-		if matches:
-			paths.extend(pathlib.Path(m) for m in matches)
-		elif any(c in arg for c in _GLOB_CHARS):
-			print(f"No files matched: {arg}", file=sys.stderr)
-		else:
-			paths.append(pathlib.Path(arg))
+	paths = subsample.tools._shared.expanded_paths(args.files)
 
 	if not paths:
 		print("No input files.", file=sys.stderr)

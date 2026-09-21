@@ -5025,3 +5025,100 @@ class TestShortBuffersAndDenseTakes:
 
 		for index, start in enumerate(landed):
 			assert start == pytest.approx(index * 0.25, abs=0.01)
+
+
+class TestAFallbackRenderIsNotRemembered:
+
+	"""A vocoder whose carrier is missing returns the audio dry, and that is a
+	fallback rather than the variant the map asked for.
+
+	The memory cache keys on the spec, which holds the carrier's PATH and
+	nothing about its contents, so the dry render went on playing after the
+	file appeared — until the parent sample was evicted.  The disk key folds in
+	the carrier's mtime and size, so only the memory half was blind.
+	"""
+
+	def _audio (self) -> numpy.ndarray:
+		return numpy.tile(
+			numpy.sin(numpy.linspace(0.0, 40.0, 4410, dtype=numpy.float32))[:, None], (1, 1),
+		)
+
+	def test_a_missing_carrier_marks_the_render_as_a_fallback (self, tmp_path: pathlib.Path) -> None:
+		subsample.transform._segment_bounds_local.fell_back = False
+
+		step = subsample.transform.Vocoder(carrier_path=str(tmp_path / "absent.wav"))
+		audio = self._audio()
+
+		rendered = subsample.transform._apply_vocoder(
+			audio, 44100, _make_record(), step,
+		)
+
+		numpy.testing.assert_array_equal(rendered, audio)
+		assert subsample.transform._segment_bounds_local.fell_back is True
+
+	def test_a_carrier_that_is_there_renders_normally (self, tmp_path: pathlib.Path) -> None:
+		subsample.transform._segment_bounds_local.fell_back = False
+
+		carrier = tmp_path / "carrier.wav"
+		soundfile.write(
+			str(carrier),
+			numpy.sin(numpy.linspace(0.0, 400.0, 44100, dtype=numpy.float32)),
+			44100, subtype="PCM_16",
+		)
+
+		subsample.transform._apply_vocoder(
+			self._audio(), 44100, _make_record(), subsample.transform.Vocoder(carrier_path=str(carrier)),
+		)
+
+		assert subsample.transform._segment_bounds_local.fell_back is False
+
+
+class TestPadQuantizeKeepsWhatTheCropKept:
+
+	"""The first segment started at the attack, not at the crop point.
+
+	The crop deliberately keeps 2 ms of audio in front of the first hit and
+	fades it in; the segment then began 2 ms later, so both were discarded and
+	the output opened on the transient at full level.  The per-segment fade
+	skips segment 0 because it "already has the crop fade-in", which had just
+	been thrown away.
+	"""
+
+	SR = 44100
+
+	def _rendered (self) -> numpy.ndarray:
+		hits = (0.10, 0.60)
+		frames = self.SR
+		audio = numpy.zeros((frames, 1), dtype=numpy.float32)
+		click = numpy.exp(-numpy.linspace(0.0, 10.0, int(0.05 * self.SR))).astype(numpy.float32)
+
+		for hit in hits:
+			start = int(hit * self.SR)
+			audio[start:start + click.size, 0] += click
+
+		record = _make_record(
+			audio=numpy.zeros((frames, 1), dtype=numpy.int16),
+			tempo_bpm=120.0, onset_times=hits, attack_times=hits,
+		)
+
+		return subsample.transform._apply_pad_quantize(
+			audio, self.SR, record,
+			subsample.transform.PadQuantize(target_bpm=120.0, resolution=16, amount=1.0),
+		)
+
+	def test_the_output_does_not_open_on_the_transient (self) -> None:
+		rendered = self._rendered()
+
+		assert abs(float(rendered[0, 0])) < 0.01
+
+	def test_the_hit_still_lands_on_its_grid_point (self) -> None:
+
+		"""Keeping the margin must not push the hit late: its target moves back
+		by the same amount, so the attack sits where the grid says."""
+
+		rendered = self._rendered()
+		loudest = int(numpy.argmax(numpy.abs(rendered[:, 0])))
+		interval = 60.0 / 120.0 / (16 / 4.0)
+		remainder = (loudest / self.SR) % interval
+
+		assert min(remainder, interval - remainder) == pytest.approx(0.0, abs=0.005)

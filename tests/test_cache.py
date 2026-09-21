@@ -1027,3 +1027,45 @@ class TestLoopPersistence:
 		)
 		assert loop is not None
 		assert 0 <= loop.start < loop.end <= len(tone)
+
+
+class TestSidecarsThatAreValidJsonButNotSidecars:
+
+	"""Valid JSON is not necessarily a sidecar, and the wrong shape used to raise.
+
+	A file holding `[]`, `"x"` or `1` parses cleanly, and the loader cast it to
+	a dict without checking, so every reader called .get() on it and raised
+	AttributeError — which the "corrupt, re-analyse" branch does not catch.  The
+	sample was skipped with a traceback on every start, and in the watcher the
+	exception escaped its timer thread.
+	"""
+
+	@pytest.mark.parametrize("contents", ["[]", '"x"', "1", "null", "true"])
+	def test_a_payload_that_is_not_an_object_is_treated_as_malformed (
+		self, tmp_path: pathlib.Path, contents: str,
+	) -> None:
+		sidecar = tmp_path / "odd.wav.analysis.json"
+		sidecar.write_text(contents, encoding="utf-8")
+
+		assert subsample.cache._load_payload(sidecar, "cache") is None
+
+	def test_a_block_of_the_wrong_shape_is_corrupt_not_a_crash (self, tmp_path: pathlib.Path) -> None:
+
+		"""`"level": []` reaches .get() on a list, which is AttributeError."""
+
+		wav = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav)
+
+		subsample.cache.save_cache(
+			wav, subsample.cache.compute_audio_md5(wav), tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+		)
+
+		sidecar = subsample.cache.cache_path(wav)
+		payload = json.loads(sidecar.read_text())
+		payload["level"] = []
+		sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+		assert subsample.cache._deserialize_payload(payload, "cache") is None

@@ -402,20 +402,9 @@ def _peak_dbfs (audio: numpy.ndarray) -> float:
 
 def _reference_directory (cfg: subsample.config.Config) -> pathlib.Path:
 
-	"""Resolve which directory reference fingerprints are loaded from.
+	"""Where reference fingerprints are loaded from — see subsample.config."""
 
-	``library.reference_directory`` when set, otherwise the set bundled with the
-	package.  Bundling the default is the whole point: a map that names
-	``reference: GM46_OpenHiHat`` resolves on any machine with Subsample
-	installed, so a sample set shared between projects — or living on a drive
-	shared between machines — can use references without pointing into one
-	project's directory tree.
-	"""
-
-	if cfg.library.reference_directory is not None:
-		return pathlib.Path(cfg.library.reference_directory)
-
-	return subsample.config.data_dir() / "reference"
+	return subsample.config.reference_directory(cfg)
 
 
 def _preload_midi_map (

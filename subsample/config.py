@@ -662,6 +662,28 @@ def data_dir () -> pathlib.Path:
 	return pathlib.Path(__file__).parent / "data"
 
 
+def reference_directory (cfg: "Config") -> pathlib.Path:
+
+	"""Where reference fingerprints are loaded from.
+
+	``library.reference_directory`` when set, otherwise the set bundled with the
+	package.  Bundling the default is the whole point: a map that names
+	``reference: GM46_OpenHiHat`` resolves on any machine with Subsample
+	installed, so a sample set shared between projects — or living on a drive
+	shared between machines — can use references without pointing into one
+	project's directory tree.
+
+	Every caller reads it from here: the app and the tools disagreeing about
+	where references live is what made `subsample similar` fail in a project
+	that had done nothing wrong.
+	"""
+
+	if cfg.library.reference_directory is not None:
+		return pathlib.Path(cfg.library.reference_directory)
+
+	return data_dir() / "reference"
+
+
 def _locate_default_config () -> pathlib.Path:
 
 	"""Return the path to the bundled config.yaml.default.

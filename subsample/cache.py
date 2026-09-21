@@ -832,7 +832,7 @@ def _load_payload (
 
 	try:
 		with path.open("r", encoding="utf-8") as f:
-			return typing.cast(dict[str, typing.Any], json.load(f))
+			payload = json.load(f)
 
 	except FileNotFoundError:
 		return None
@@ -841,6 +841,22 @@ def _load_payload (
 		# ValueError catches UnicodeDecodeError (subclass) for files with invalid UTF-8.
 		_log.warning("Ignoring malformed %s %s: %s", label, path.name, exc)
 		return None
+
+	# Valid JSON is not necessarily a sidecar.  A file holding `[]`, `"x"` or
+	# `1` parses cleanly, and the cast below used to promise a dict without
+	# checking: every reader then called .get() on it and raised AttributeError,
+	# which is not what _deserialize_payload catches, so the sample was skipped
+	# with a traceback on every single start — and inside the watcher the
+	# exception escaped its timer thread entirely.  Treat it as malformed, which
+	# is the branch that re-analyses and heals.
+	if not isinstance(payload, dict):
+		_log.warning(
+			"Ignoring malformed %s %s: expected an object, found %s",
+			label, path.name, type(payload).__name__,
+		)
+		return None
+
+	return typing.cast(dict[str, typing.Any], payload)
 
 
 def _deserialize_payload (
@@ -872,7 +888,10 @@ def _deserialize_payload (
 		channel_format = str(payload.get("channel_format", "pcm"))
 		loop        = _deserialize_loop(payload.get("loop"))
 
-	except (KeyError, TypeError, ValueError) as exc:
+	except (AttributeError, KeyError, TypeError, ValueError) as exc:
+		# AttributeError belongs here too: a block that is valid JSON but the
+		# wrong shape — `"level": []` — reaches .get() on a list and raises it,
+		# which fell straight past this handler and out through every caller.
 		_log.warning("Ignoring corrupt %s: %s", label, exc)
 		return None
 

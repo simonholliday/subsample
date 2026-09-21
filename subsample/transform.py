@@ -1537,6 +1537,11 @@ class TransformProcessor:
 			# buffer's timeline, so a following quantize mirrors the original-
 			# timeline attack positions instead of slicing silence.
 			_segment_bounds_local.reversed = False
+			# Set by a handler that could not do the job it was asked to do and
+			# passed the audio through instead.  Such a render is a fallback, not
+			# the variant the map describes, so it is not kept: see the caching
+			# below and _apply_vocoder's missing-carrier paths.
+			_segment_bounds_local.fell_back = False
 
 			# enqueue() guards against None audio, but the type system can't see that.
 			if record.audio is None:
@@ -1692,15 +1697,24 @@ class TransformProcessor:
 				energy_profile=energy_profile,
 			)
 
+			# A handler that passed the audio through because it could not reach
+			# something — a vocoder carrier that is missing right now — produced a
+			# fallback, not this variant.  Keeping it means the carrier can appear
+			# and the dry render goes on playing until the parent is evicted, and
+			# the memory cache does not key on the carrier at all, so nothing else
+			# would notice.  Play it for this note; do not remember it.
+			fell_back = bool(getattr(_segment_bounds_local, "fell_back", False))
+
 			# Write to disk cache (skip base variants — they're cheap to recompute).
 			if (
 				self._disk_cache is not None
 				and spec.steps
 				and audio_md5 is not None
+				and not fell_back
 			):
 				self._disk_cache.put(audio_md5, spec, result)
 
-			if self._on_complete is not None:
+			if self._on_complete is not None and not fell_back:
 				self._on_complete(result)
 
 		except Exception:
@@ -3734,6 +3748,20 @@ def _apply_pad_quantize (
 	seg_ends   = seg_starts[1:] + [audio.shape[0]]
 	target_starts = [int(t * sample_rate) for t in snapped]
 
+	# The first segment starts at the CROP point, not at the attack.  The crop
+	# deliberately keeps _PRE_ONSET_SECONDS of audio in front of the hit and
+	# fades it in, and starting the segment at the attack threw both away: the
+	# output began on the transient at full level, and the fade-in that was just
+	# applied went with it.  The segment below is exempted from the per-segment
+	# fade on the grounds that it "already has the crop fade-in", which was only
+	# true before this line.  Its target moves back by the same margin so the
+	# attack still lands on its grid point.
+	margin = seg_starts[0]
+
+	if margin > 0:
+		seg_starts[0]    = 0
+		target_starts[0] = max(0, target_starts[0] - margin)
+
 	# Compute output length: the last segment placed at its target position.
 	last_seg_idx    = len(seg_starts) - 1
 	last_seg_len    = seg_ends[last_seg_idx] - seg_starts[last_seg_idx]
@@ -4016,6 +4044,7 @@ def _apply_vocoder (
 		carrier_mono = _load_carrier(step.carrier_path, sample_rate)
 	except (OSError, soundfile.SoundFileError) as exc:
 		_log.warning("Vocoder: could not load carrier %r: %s — returning dry", step.carrier_path, exc)
+		_segment_bounds_local.fell_back = True
 		return audio
 
 	# A readable-but-empty (or sub-filter-length) carrier would divide by zero
@@ -4023,6 +4052,7 @@ def _apply_vocoder (
 	# clear message instead of a generic worker traceback.
 	if len(carrier_mono) == 0:
 		_log.warning("Vocoder: carrier %r decoded to zero frames — returning dry", step.carrier_path)
+		_segment_bounds_local.fell_back = True
 		return audio
 
 	n_frames, n_channels = audio.shape

@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import pathlib
+import tempfile
 import threading
 import typing
 
@@ -130,6 +131,39 @@ class _OnCompleteCallback(typing.Protocol):
 	) -> None:
 
 		"""Take one finished capture."""
+
+
+def _write_atomically (filepath: pathlib.Path, payload: bytes) -> None:
+
+	"""Put the bytes at that path, or leave whatever was there untouched.
+
+	Written to a temp file beside it and renamed, which is how the sidecar has
+	always been written.  `write_bytes` truncates and writes in place: a crash
+	or a full disk halfway through left a truncated file with no sidecar, which
+	the next start analysed as if it were the whole recording, and overwriting
+	an existing capture exposed a half-written file to anything watching the
+	directory.
+	"""
+
+	handle, temporary = tempfile.mkstemp(dir=filepath.parent, prefix=filepath.name + ".tmp")
+
+	try:
+		# mkstemp creates 0600; a recording is ordinary data, so apply the umask
+		# rather than leaving it readable only by its owner.
+		os.fchmod(handle, 0o666 & ~subsample.cache._UMASK)
+
+		with os.fdopen(handle, "wb") as opened:
+			opened.write(payload)
+
+		os.replace(temporary, filepath)
+
+	except Exception:
+		try:
+			os.unlink(temporary)
+		except OSError:
+			pass
+
+		raise
 
 
 def _format_filename (timestamp: datetime.datetime, fmt: str) -> str:
@@ -620,7 +654,9 @@ class SampleProcessor:
 		try:
 			if filepath.exists():
 				_log.info("Overwriting: %s", filepath.name)
-			filepath.write_bytes(file_bytes)
+
+			_write_atomically(filepath, file_bytes)
+
 		except OSError as exc:
 			_log.error("Failed to write %s: %s", filepath.name, exc)
 			return None

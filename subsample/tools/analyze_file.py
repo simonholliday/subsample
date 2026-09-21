@@ -19,7 +19,6 @@ Usage:
 """
 
 import argparse
-import glob
 import logging
 import pathlib
 import sys
@@ -228,24 +227,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 	# scale and tuning the app itself would use.
 	cfg = subsample.tools._shared.load_config_and_wire(args.config)
 
-	# Expand each argument with glob so quoted wildcards work (e.g. "*.wav").
-	# If an argument contains glob metacharacters but matches nothing, report
-	# it immediately — the literal string is not a valid file path and soundfile
-	# would produce a cryptic "System error" message.
-	# If there are no metacharacters, treat it as a literal path so that the
-	# normal "file not found" error is produced by the audio reader.
-	_GLOB_CHARS = frozenset("*?[")
-
-	paths: list[pathlib.Path] = []
-	for arg in args.files:
-		matches = sorted(glob.glob(arg))
-
-		if matches:
-			paths.extend(pathlib.Path(m) for m in matches)
-		elif any(c in arg for c in _GLOB_CHARS):
-			print(f"No files matched: {arg}", file=sys.stderr)
-		else:
-			paths.append(pathlib.Path(arg))
+	paths = subsample.tools._shared.expanded_paths(args.files)
 
 	if not paths:
 		return 1

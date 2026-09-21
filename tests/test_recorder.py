@@ -7,6 +7,8 @@ import tempfile
 import wave
 
 import numpy
+import unittest.mock
+
 import pytest
 
 import subsample.analysis
@@ -706,3 +708,42 @@ class TestWhatTheCaptureHandsOn:
 		assert len(handed) == 1
 		assert set(handed[0]) == {"channel_format", "loop"}
 		assert handed[0]["channel_format"] == "pcm"
+
+
+class TestTheAudioWriteIsAllOrNothing:
+
+	"""A capture arrives whole or not at all.
+
+	The comment said "a single atomic write", but `write_bytes` truncates and
+	writes in place.  A crash or a full disk halfway through left a truncated
+	file with no sidecar, which the next start analysed as though it were the
+	whole recording; overwriting an existing capture exposed a half-written file
+	to anything watching the directory.
+	"""
+
+	def test_a_failed_write_leaves_the_old_file_intact (self, tmp_path: pathlib.Path) -> None:
+		target = tmp_path / "capture.wav"
+		target.write_bytes(b"the recording that was already there")
+
+		with unittest.mock.patch("os.replace", side_effect=OSError("no space left on device")):
+			with pytest.raises(OSError):
+				subsample.recorder._write_atomically(target, b"x" * 1024)
+
+		assert target.read_bytes() == b"the recording that was already there"
+
+	def test_it_leaves_no_temporary_behind (self, tmp_path: pathlib.Path) -> None:
+		target = tmp_path / "capture.wav"
+
+		with unittest.mock.patch("os.replace", side_effect=OSError("boom")):
+			with pytest.raises(OSError):
+				subsample.recorder._write_atomically(target, b"x" * 16)
+
+		assert list(tmp_path.iterdir()) == []
+
+	def test_a_good_write_lands (self, tmp_path: pathlib.Path) -> None:
+		target = tmp_path / "capture.wav"
+
+		subsample.recorder._write_atomically(target, b"audio")
+
+		assert target.read_bytes() == b"audio"
+		assert list(tmp_path.iterdir()) == [target]

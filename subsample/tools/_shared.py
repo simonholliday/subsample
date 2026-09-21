@@ -5,6 +5,7 @@ cli._main_impl, so they must wire the same process-wide analysis settings it
 does before writing any sidecar the player later trusts.
 """
 
+import glob
 import logging
 import pathlib
 import sys
@@ -64,3 +65,46 @@ def load_config_and_wire (
 	subsample.cache.set_analysis_config(cfg.analysis)
 
 	return cfg
+
+
+# The characters that make an argument a pattern rather than a name.
+_GLOB_CHARACTERS: typing.Final[frozenset[str]] = frozenset("*?[")
+
+
+def expanded_paths (arguments: typing.Sequence[str]) -> list[pathlib.Path]:
+
+	"""Every file the arguments name, expanding quoted patterns like `*.wav`.
+
+	An argument that matches nothing is reported if it looks like a pattern, and
+	otherwise passed through so the audio reader can produce the ordinary "file
+	not found" message rather than a cryptic system error.
+
+	A name that merely CONTAINS a pattern character is still a name.  `kick
+	[01].wav` is a perfectly ordinary file in a sample pack, and glob reads the
+	bracket as a character class and matches nothing — so the tools reported
+	"No files matched" for a file sitting right there.  A literal path that
+	exists therefore wins before the pattern question is asked at all.
+	"""
+
+	paths: list[pathlib.Path] = []
+
+	for argument in arguments:
+
+		# A file by that exact name settles it, brackets and all.
+		if pathlib.Path(argument).exists():
+			paths.append(pathlib.Path(argument))
+			continue
+
+		matches = sorted(glob.glob(argument))
+
+		if matches:
+			paths.extend(pathlib.Path(match) for match in matches)
+
+		elif any(character in argument for character in _GLOB_CHARACTERS):
+			print(f"No files matched: {argument}", file=sys.stderr)
+
+		else:
+			# Not a pattern and not there: let the reader say so properly.
+			paths.append(pathlib.Path(argument))
+
+	return paths

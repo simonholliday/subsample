@@ -1051,3 +1051,52 @@ class TestNonFiniteFloatSamples:
 
 		assert numpy.all(numpy.isfinite(scaled))
 		assert float(numpy.max(numpy.abs(scaled))) <= 10.0 ** (-1.0 / 20.0) + 1e-6
+
+
+class TestLossyFilesAreNotClippedOnImport:
+
+	"""A lossy codec reconstructs a waveform rather than replaying samples.
+
+	VORBIS, Opus and MP3 routinely decode a fraction of a dB above full scale
+	on a master that was already loud.  These were read as int16, so libsndfile
+	flattened the overshoot before anything in Subsample saw it, and the import
+	ceiling — the setting that exists for exactly this — never applied to them.
+	"""
+
+	def test_a_hot_ogg_is_scaled_rather_than_flattened (self, tmp_path: pathlib.Path) -> None:
+		previous = subsample.audio._FLOAT_IMPORT_CEILING_DBFS
+
+		try:
+			subsample.audio.set_float_import_ceiling(-1.0)
+
+			sample_rate = 44100
+			t = numpy.linspace(0.0, 0.5, sample_rate // 2, endpoint=False)
+			hot = (1.6 * numpy.sin(2.0 * numpy.pi * 220.0 * t)).astype(numpy.float32)
+
+			path = tmp_path / "loud.ogg"
+			soundfile.write(str(path), hot, sample_rate, format="OGG", subtype="VORBIS")
+
+			info = subsample.audio.read_audio_file(path)
+
+			assert info.bit_depth == 32, "read as float, so the overshoot survives to be scaled"
+
+			peak = float(numpy.max(numpy.abs(info.audio))) / float(2 ** 31)
+
+			assert peak == pytest.approx(10.0 ** (-1.0 / 20.0), abs=0.02)
+
+		finally:
+			subsample.audio.set_float_import_ceiling(previous)
+
+	def test_an_ordinary_wav_is_still_read_as_integers (self, tmp_path: pathlib.Path) -> None:
+
+		"""A full-scale integer sample is the format's own ceiling and may already
+		be clipped at source, so those are never scaled."""
+
+		sample_rate = 44100
+		t = numpy.linspace(0.0, 0.2, sample_rate // 5, endpoint=False)
+		tone = (0.9 * numpy.sin(2.0 * numpy.pi * 220.0 * t)).astype(numpy.float32)
+
+		path = tmp_path / "tone.wav"
+		soundfile.write(str(path), tone, sample_rate, subtype="PCM_16")
+
+		assert subsample.audio.read_audio_file(path).bit_depth == 16
