@@ -290,6 +290,15 @@ def _drain (
 				try:
 					results[index] = future.result()
 
+				except concurrent.futures.process.BrokenProcessPool:
+					# Re-raised for the handler below, which redoes the whole
+					# batch.  It has to be caught BEFORE the general case:
+					# BrokenProcessPool is a RuntimeError, so `except Exception`
+					# would swallow it, mark every remaining item as skipped, and
+					# leave the recovery below unreachable — one dead worker
+					# would empty the batch it was supposed to save.
+					raise
+
 				except Exception:
 					_log.exception("Analysis worker failed for item %d — skipping it", index)
 					results[index] = None

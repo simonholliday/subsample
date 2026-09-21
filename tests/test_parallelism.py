@@ -1,5 +1,6 @@
 """Tests for subsample.parallelism — the shared analysis-pool CPU policy."""
 
+import logging
 import os
 import threading
 
@@ -230,3 +231,41 @@ def test_forking_unsafe_with_a_live_thread () -> None:
 	finally:
 		release.set()
 		worker.join(timeout=5.0)
+
+
+_PARENT = os.getpid()
+
+
+def _dies_on_item_two (item: int) -> int:
+
+	"""Work that kills its worker on one item, as the OOM killer would.
+
+	Defined at module level so the pool can pickle it, and guarded on the pid so
+	the single-threaded retry can finish in this process.
+	"""
+
+	if item == 2 and os.getpid() != _PARENT:
+		os._exit(1)
+
+	return item * 10
+
+
+def test_a_dead_worker_does_not_empty_the_batch (caplog: pytest.LogCaptureFixture) -> None:
+
+	"""BrokenProcessPool is a RuntimeError, so the per-item `except Exception`
+	caught it first: every remaining item was logged as failed and set to None,
+	and the recovery written for exactly this case could never run.  One worker
+	killed by the OOM killer therefore lost the whole startup scan or import."""
+
+	if not (subsample.parallelism.analysis_worker_count(player_active=False) > 1
+	        and subsample.parallelism.can_fork_safely()):
+		pytest.skip("this machine runs the batch in-process, so no worker can die")
+
+	with caplog.at_level(logging.WARNING):
+		results = subsample.parallelism.map_analysis(
+			_dies_on_item_two, list(range(8)), player_active=False,
+		)
+
+	assert results == [0, 10, 20, 30, 40, 50, 60, 70]
+	assert any("pool died" in record.message for record in caplog.records), \
+		"the pool never died, so this proves nothing"
