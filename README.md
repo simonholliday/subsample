@@ -93,7 +93,7 @@ All four are the same workflow.
   shrink your sample library with no loss of quality. Existing WAV samples
   continue to load unchanged alongside any new FLAC captures.
 - **Visual sample previews.** Every capture gets a fixed 1024x256 `.preview.png`
-  thumbnail (waveform + 4-band frequency skyline + onset ticks + pitch/BPM
+  thumbnail (waveform + spectral band skyline + onset ticks + pitch/BPM
   badge) for browsing in an OS file manager, plus the compact data it is
   drawn from, kept in the analysis sidecar so a missing thumbnail can be
   redrawn without re-analysing.
@@ -113,7 +113,7 @@ All four are the same workflow.
 | | |
 |---|---|
 | **Live capture** | Adaptive noise floor, capture that keeps recording while analysis runs, S-curve fades |
-| **Analysis** | Spectral shape, sustained timbre, timbre dynamics, attack character, and band energy; cached `.analysis.json` sidecars |
+| **Analysis** | Spectral shape, sustained timbre, timbre dynamics, attack character, and spectral band energy; cached `.analysis.json` sidecars |
 | **Matching** | Cosine similarity, classification-free, ranked fallback, dynamic re-assignment |
 | **DSP processors** | Filters, dynamics, distortion, radio, vocoder, pitch, time-stretch, and quantise |
 | **Adaptive defaults** | Compressor, gate, transient shaper, distortion, envelope reshape - all auto-derive parameters from each sample |
@@ -124,7 +124,7 @@ All four are the same workflow.
 | **MIDI control** | Note on/off, Program Change for programs, CC binding for any numeric parameter |
 | **OSC** | Sender + receiver (optional dependency) |
 | **Audio formats in** | WAV, BWF, FLAC, AIFF, OGG, MP3/MPEG (libsndfile) |
-| **Channels** | Mono through 7.1, ITU-R BS.775 downmix, conservative upmix, per-instrument output routing |
+| **Audio channels** | Mono through 7.1, ITU-R BS.775 downmix, conservative upmix, per-instrument output routing |
 | **Audio precision** | End-to-end 32-bit float pipeline, 64-bit DSP for IIR filters and envelope followers |
 | **Latency** | Pre-rendered variants - playback is a memory copy into the mix buffer |
 | **Library mgmt** | Memory-bounded with FIFO eviction, persistent disk cache for variants, hot-loading from watched directories |
@@ -145,7 +145,7 @@ ambient level in real time, so it works equally well in a quiet studio and a
 noisy rehearsal space. Each captured sound is trimmed with smooth S-curve fades
 to avoid clicks.
 
-All channel formats are preserved end-to-end - a stereo microphone records and
+All audio channel formats are preserved end-to-end - a stereo microphone records and
 plays back in stereo, a quad recording keeps its four channels, and
 multichannel samples are automatically mapped to the output layout using
 standard ITU downmix coefficients. On multi-channel interfaces (e.g. Focusrite
@@ -169,7 +169,7 @@ Each captured sound is fingerprinted across five groups of acoustic measurements
 | Sustained timbre | Steady-state tonal colour |
 | Timbre dynamics | How the sound evolves over time |
 | Attack character | Transient signature |
-| Band energy | Per-band energy distribution and decay (drum-type signature) |
+| Spectral band energy | Per-band energy distribution and decay (drum-type signature) |
 
 Tonal sounds are identified by a pitch stability test - only
 samples with a single, confident, stable pitch are flagged for chromatic mapping.
@@ -269,7 +269,7 @@ The examples below are working YAML. Each one is a self-contained
 
 #### Step 1 - play one specific sample
 
-The simplest possible assignment: MIDI note 36 (on channel 10, the GM drum
+The simplest possible assignment: MIDI note 36 (on MIDI channel 10, the GM drum
 channel) always plays one named sample.
 
 ```yaml map.assignments
@@ -435,7 +435,7 @@ when you want to try something the tutorial didn't show.
 
 ### Map-level fields
 
-A map can set a default channel once, at the top level, instead of repeating it
+A map can set a default MIDI channel once, at the top level, instead of repeating it
 on every assignment:
 
 ```yaml map
@@ -448,7 +448,7 @@ assignments:
 
 This is what makes a map portable. A directory of samples with its own map at
 the top is a self-contained **sample set** you can copy between projects - and
-because the channel is stated in one place, a project can play the set on
+because the MIDI channel is stated in one place, a project can play the set on
 whatever channel it likes. An assignment may still declare its own `channel:`
 when one entry belongs somewhere else; that always wins.
 
@@ -471,7 +471,7 @@ the same way as the per-assignment field.
 | `gain` | no | Level offset in dB (default 0.0). Negative = quieter, positive = louder |
 | `pan` | no | Stereo position `-100` (hard left) to `100` (hard right), `0` = centre (default) - or a per-channel weight list for surround/asymmetric routing (`[50, 50]` = centre; ratios matter, not absolute values). Also `any` / a `{gte, lte}` range / `{position, variation}` for a fresh random position per note-on. Constant-power normalised at mix time. See Pan below |
 | `output` | no | Physical output channels (1-indexed) e.g. `[3, 4]` routes to outputs 3-4 |
-| `extract` | no | Collapse a multi-channel sample to one channel at playback: `omni`, `left`, `right`, `front`, `back`, `side`, `depth`, `height`, `channel.N`, or `{blend: [w1, w2, ...]}` for a weighted mix to mono (see Channel extraction below) |
+| `extract` | no | Collapse a multi-channel sample to a single audio channel at playback: `omni`, `left`, `right`, `front`, `back`, `side`, `depth`, `height`, `channel.N`, or `{blend: [w1, w2, ...]}` for a weighted mix to mono (see Channel extraction below) |
 | `velocity` | no | Velocity layering range - `[lo, hi]` filter only, or `{trigger: [lo, hi], rescale: …}` with optional in-band rescaling (see Velocity layering below) |
 | `stack` | no | `true` lets this sound play together with other `stack: true` assignments on the same note and velocity, instead of being rejected as an overlap (see Stacking below). Default `false` |
 | `template` | no | Inherit fields from one or more named templates (see Templates below). The assignment's own fields override the template's; lists (`process`) and nested blocks (`select`) are replaced wholesale, not merged |
@@ -621,7 +621,7 @@ any note form works, including your own names from a mounted definitions file
   natural release.
 - Every sounding copy is cut, not only the newest - a fast open-hat roll all damps
   together when the hat closes, the way one physical cymbal would.
-- Choke acts within a channel (a kit is one channel). Build a mutual group - like
+- Choke acts within one MIDI channel - a kit is one channel. Build a mutual group - like
   the three hi-hat articulations above - by listing the others (and `self`) on each
   member.
 - Choke works on the note, not the individual sound: if you deliberately `stack` an
@@ -712,7 +712,7 @@ form when you specifically want `_2`.
 
 GM names cover standard drums, but your own sample sets deserve their own
 vocabulary. A *definitions file* is a small YAML file, owned by your music
-project, that gives names to note, CC, channel, and program numbers - so your
+project, that gives names to note, CC, MIDI channel, and program numbers - so your
 map reads `notes: my.dawn_chorus_pheasant` instead of `notes: 60`, and the
 same file can name the same sounds in your sequencer. Neither tool depends on
 the other; they both read the same small file.
@@ -1023,7 +1023,7 @@ sample is picked.
 
 `beat_match` is the shape-based companion to `similarity`: where `similarity`
 ranks by spectral/timbral closeness to a reference sample, `beat_match` ranks
-by *rhythmic* closeness to a user-defined pattern.
+by *rhythmic* closeness to a beat pattern you supply.
 
 **Applies only to quantised samples.** `beat_match` scores the per-beat energy
 profile that `stretch_quantize` and `pad_quantize` produce as a by-product of
@@ -1043,10 +1043,10 @@ process:
   - stretch_quantize: { grid: 16 }
 ```
 
-**The pattern.** A list of numbers in `[0, 1]`, one per beat. Values are
+**The beat pattern.** A list of numbers in `[0, 1]`, one per beat. Values are
 relative - only the shape matters, not the absolute magnitudes. Examples:
 
-| Pattern | Intent |
+| Beat pattern | Intent |
 |---|---|
 | `[1, 0, 1, 0]` | energy on every other beat (back-beat feel) |
 | `[0, 1, 0, 1]` | energy on the off-beats |
@@ -1057,7 +1057,7 @@ relative - only the shape matters, not the absolute magnitudes. Examples:
 per-slot RMS computed after the quantise step. `beat_match` mean-pools that
 profile down to per-beat energy (so an 8th-note grid and a 16th-note grid
 both reduce to the same per-beat values - cross-grid invariance), then
-computes cosine similarity between the pattern and the profile over
+computes cosine similarity between the beat pattern and the profile over
 `min(len(pattern), len(beats))` elements (left-aligned). Samples with no
 quantised variant score `None` and are excluded.
 
@@ -1067,7 +1067,7 @@ quantised variant score `None` and are excluded.
 - Shape-sensitive, level-insensitive: `[1, 0, 1, 0]` perfectly matches a
   sample with energy `[0.5, 0, 0.5, 0]` (score 1.0).
 - Length mismatches are truncated left-aligned - no resampling, no padding.
-- Ints and floats are both accepted in the pattern list; values outside
+- Ints and floats are both accepted in the beat pattern list; values outside
   `[0, 1]` are rejected at parse time.
 
 #### Fallback chains
@@ -1409,7 +1409,7 @@ pan: 30      # a touch right
 ```
 
 For surround layouts or asymmetric routing, `pan` also accepts a list of
-per-channel weights. The values are **relative**, not percentages: only the
+weights, one per audio channel. The values are **relative**, not percentages: only the
 ratio between channels matters. `[50, 50]`, `[1, 1]`, and `[100, 100]` all
 produce centre. Either form is normalised to constant-power gains at mix
 time, so perceived loudness stays equal across pan positions.
@@ -1428,7 +1428,7 @@ pan: [100, 0]    # hard left (same as pan: -100)
 pan: [75, 25]    # left of centre (same as pan: -50)
 ```
 
-Channel order follows SMPTE: `[L, R]` for stereo; `[L, R, C, LFE, Ls, Rs]` for
+Audio channel order follows SMPTE: `[L, R]` for stereo; `[L, R, C, LFE, Ls, Rs]` for
 5.1; `[L, R, C, LFE, BL, BR, SL, SR]` for 7.1. Set `player.audio.channels` in
 config to match your output device (default: stereo). Samples of any channel
 count are automatically mapped to the output layout using ITU-R BS.775 downmix
@@ -1449,11 +1449,11 @@ pan: { position: -20, variation: 40 } # around a centre: -20, spread by ±20
 ```
 
 Positions use the same `-100`…`100` axis as the fixed form, and the draw is
-always **constant-power** - only the position is randomised, never the channel
+always **constant-power** - only the position is randomised, never the audio channel
 levels, so a mono sample is never louder or quieter for landing off-centre. A
 stereo sample with its content to one side is the exception, for the reason in
 [Pan](#pan) above: each strike lands at a different level, and an extreme draw
-can lose it. Use `extract:` to take a channel first, or keep the range narrow.
+can lose it. Use `extract:` to take an audio channel first, or keep the range narrow.
 It works on
 any output layout (the stereo position up/downmixes the same way a fixed pan does), and
 stacked layers on one note each draw independently. If you also set `output:` it
@@ -1673,7 +1673,7 @@ zone-tuned is for.
       name: { matches: "*lead*" }
 ```
 
-Multiple `zone-tuned` assignments on the same channel are allowed as long
+Multiple `zone-tuned` assignments on the same MIDI channel are allowed as long
 as their keyboard ranges don't overlap.
 
 #### Live re-derivation
@@ -1687,10 +1687,10 @@ Subsample re-derives the zones. There's no manual refresh step.
 | Condition | Behaviour |
 |---|---|
 | Zone-tuned assignment without `process: [- repitch: true]` | `ValueError` at load |
-| Regular `notes: 36` assignment on a channel already owned by a `zone-tuned` | `ValueError` at load |
-| Two `zone-tuned` on the same channel whose `range:` spans overlap | `ValueError` at load |
+| Regular `notes: 36` assignment on a MIDI channel already owned by a `zone-tuned` | `ValueError` at load |
+| Two `zone-tuned` on the same MIDI channel whose `range:` spans overlap | `ValueError` at load |
 | Unknown inner key under the dict form (e.g. typo `mdoe:`) | `ValueError` at load |
-| No matching pitched samples for a template | INFO log; the channel plays nothing until a matching sample is added |
+| No matching pitched samples for a template | INFO log; the MIDI channel plays nothing until a matching sample is added |
 | Sample's detected pitch falls outside the template's `range:` | Sample excluded from that template; logged at DEBUG |
 
 ### Extract - present a multi-channel sample as a sub-pattern
@@ -1717,7 +1717,7 @@ both outputs.
 ```
 
 When `extract:` is set and `pan:` is omitted, the mono extract is distributed
-equally across every output channel (constant-power) - the natural default for
+equally across every output audio channel (constant-power) - the natural default for
 a "collapsed to mono" signal. Explicit `pan:` still works as a per-output
 weighting if you want something other than uniform.
 
@@ -1726,7 +1726,7 @@ canonical answer for `omni` (zero-order, equal-weight) and for each cardinal
 first-order pickup pattern. The dispatch is automatic - the same YAML works
 for mono, stereo, quad, 5.1, 7.1, and Ambisonic B-format inputs.
 
-| Value      | Pattern                                | Stereo (2ch)      | B-format AmbiX (4ch) |
+| Value      | Pickup pattern                         | Stereo (2ch)      | B-format AmbiX (4ch) |
 |------------|----------------------------------------|-------------------|----------------------|
 | `omni`     | equal-energy sum / W / M of M/S        | `(L+R)/√2`        | **W** only           |
 | `side`     | left-right figure-eight                | `(L-R)/√2`        | **Y**                |
@@ -1739,7 +1739,7 @@ for mono, stereo, quad, 5.1, 7.1, and Ambisonic B-format inputs.
 | `channel.N`| literal Nth input channel (1-indexed)  | -                 | -                    |
 | `{blend: [w1, w2, …]}` | your own weighted sum to mono (signed, auto-normalised) | `w1·L + w2·R` | raw channels |
 
-Surround (quad / 5.1 / 7.1) inputs are also supported; each pattern uses the
+Surround (quad / 5.1 / 7.1) inputs are also supported; each pickup pattern uses the
 channels that carry the requested spatial information (e.g. `front` on 5.1
 sums FL+FR+FC, normalised). `omni` on 5.1 / 7.1 **excludes LFE** because LFE
 is band-limited and would dominate a full-range omni sum. Mono inputs are
@@ -1756,11 +1756,11 @@ the assignment and the offending sample; you fix the map or change the
 extract.
 
 The `channel.N` form is the escape hatch when you really do want a literal
-channel pick (e.g. `extract: channel.2` for the second input channel only).
+audio channel pick (e.g. `extract: channel.2` for the second input channel only).
 N is 1-indexed and rejected if it exceeds the input's channel count.
 
 **Blending two mics into mono.** `extract: { blend: [w1, w2, ...] }` sums the
-input channels with your own weights - one per channel - instead of a fixed
+input audio channels with your own weights - one per channel - instead of a fixed
 pattern. The weights are auto-normalised so their magnitudes add up to 1, which
 means changing the balance never changes the output level: you can dial the mix
 without re-touching your gain. A **negative** weight flips that channel's
@@ -1782,7 +1782,7 @@ taste - more of the bottom mic brings up the snare wires:
 ```
 
 Write the weights at any scale - `[7, -3]` and `[0.7, -0.3]` mean the same thing.
-The number of weights must match the sample's channel count, checked at map load.
+The number of weights must match the sample's audio channel count, checked at map load.
 
 ---
 
@@ -1836,7 +1836,7 @@ lobes and works best when listening from off-axis positions. Rotation
 (yaw/pitch/roll) is applied before the decoder and is project-wide - all
 ambisonic samples rotate together.
 
-Analysis runs on the W (omnidirectional) channel only, so spectral and
+Analysis runs on the W (omnidirectional) audio channel only, so spectral and
 rhythmic fingerprints reflect the sound-field sum rather than a
 directionally biased mix. Pad-quantise and beat-quantise work on
 ambisonic samples using Rubber Band's phase-coherent multichannel engine
@@ -1861,7 +1861,7 @@ folder is self-contained: copy it anywhere, share it between projects, keep it
 on a network drive, and it still works.
 
 Give the map a top-level `channel:` and the set becomes portable in the other
-sense too - a project can play it on whatever channel it likes without editing
+sense too - a project can play it on whatever MIDI channel it likes without editing
 it.
 
 A set may hold **several maps**, exposing different mappings over the same
@@ -1890,10 +1890,10 @@ maps:
 ```
 
 Point `player.midi_map` at that file and all three sets are live at once, each
-on its own channel. Only the samples those sets name are loaded - set
+on its own MIDI channel. Only the samples those sets name are loaded - set
 `library.directory: null` and nothing else is read at all.
 
-An entry is either a bare path (the set plays on the channel its own map
+An entry is either a bare path (the set plays on the MIDI channel its own map
 declares) or a mapping with `channel:` and `map:`. A bound `channel:` replaces
 the set's top-level default. An assignment that names its **own** `channel:`
 still wins - that is how one map deliberately spans several channels - and the
@@ -1911,7 +1911,7 @@ player:
 
 `midi_map` and `midi_maps` are mutually exclusive. Both forms go through the
 same loader, so identical bindings give identical results. Prefer the
-ensemble file when you want to name channels from a `definitions:` vocabulary
+ensemble file when you want to name MIDI channels from a `definitions:` vocabulary
 (`channel: my.kit`) or to reload while running - `definitions:` is a map-level
 feature `config.yaml` cannot see, and `config.yaml` is not watched for changes.
 
@@ -1920,7 +1920,7 @@ Rules worth knowing:
 - **Flat, one level.** A map included via `maps:` may not declare `maps:` of its
   own. Same rule as `map:` presets, and it means there are no cycles to worry
   about.
-- **One (channel, note) per set.** If two sets claim the same channel and note,
+- **One (MIDI channel, note) per set.** If two sets claim the same MIDI channel and note,
   the load fails naming both - a silent merge would fabricate a
   velocity-switched note out of two unrelated sets.
 - **No `programs:` inside an included set.** Program switching holds one active
@@ -2238,7 +2238,7 @@ happens before a note is played rather than when it is triggered.
 
 Every new sample is scored against every reference using cosine similarity on a
 composite feature vector built from five groups: spectral shape, sustained
-timbre, timbre dynamics, attack character, and band energy. Each group is independently normalised and scaled by a
+timbre, timbre dynamics, attack character, and spectral band energy. Each group is independently normalised and scaled by a
 configurable weight (`similarity.weight_*`), so you can emphasise whichever
 acoustic qualities matter most for your material.
 
@@ -2367,7 +2367,7 @@ automatically; see [Configuration](#configuration)).
    your devices: `player.audio.device` (output), and `player.midi_device`
    (or `player.virtual_midi_port` if a sequencer on the same machine will
    drive it). The GM kit map is already wired in by `--init`.
-3. **Play channel 10.** Run `subsample` again and play your controller or
+3. **Play MIDI channel 10.** Run `subsample` again and play your controller or
    sequencer on MIDI channel 10 - kick on 36, snare on 38, hi-hats on 42/46.
    Every GM drum note plays whichever of your samples sounds closest to that
    drum, through a pre-mixed channel strip. Load more samples and the kit
@@ -2378,7 +2378,7 @@ choose one (or auto-selects if only one is present). It calibrates ambient noise
 for a few seconds before listening for events.
 
 **File input mode:** Each file is processed at its native sample rate, bit depth,
-and channel count. Detected segments are saved to the output directory. The
+and audio channel count. Detected segments are saved to the output directory. The
 detector spends the first `detection.warmup_seconds` (default 1.0s) calibrating
 the ambient floor, so a hit inside that opening window is not captured - leave
 about a second of room tone at the start of an imported file. Lowering
@@ -2604,7 +2604,7 @@ weights - is optional and rarely needs changing.
 | `recorder.previews` | `true` | Emit a `.preview.png` thumbnail sidecar (1024x256) and embed the compact `preview` data it is drawn from in `.analysis.json`, so a missing thumbnail is redrawn without re-analysing. See [Sample previews](#sample-previews) |
 | `recorder.buffer.max_seconds` | `60` | Circular buffer length |
 | `player.enabled` | `false` | Enable the MIDI player |
-| `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit. May be an ensemble - a map declaring a `maps:` block that binds several sample sets to channels. See [Ensembles](#ensembles---several-sample-sets-at-once) |
+| `player.midi_map` | `none` | Path to MIDI routing map YAML; required for player. Use `midi-map-gm-drums.yaml` for a complete GM kit. May be an ensemble - a map declaring a `maps:` block that binds several sample sets to MIDI channels. See [Ensembles](#ensembles---several-sample-sets-at-once) |
 | `player.midi_maps` | `none` | Sample sets to play at once, keyed by MIDI channel (`10: "kit/midi-map.yaml"`). The config shorthand for an ensemble; mutually exclusive with `midi_map` |
 | `player.max_polyphony` | `8` | Headroom divisor, not a voice cap: per-voice gain = 1/max\_polyphony, so this many voices at full velocity sum to full scale. Voices are never cut off. Raise if clipping; lower for louder individual voices |
 | `player.limiter_threshold_db` | `-1.5` | Safety limiter threshold (dBFS); signals below this pass untouched. `0.0` disables the limiter |
@@ -2640,7 +2640,7 @@ weights - is optional and rarely needs changing.
 | `similarity.weight_timbre` | `1.0` | Weight for sustained MFCC timbre (coefficients 1-12) |
 | `similarity.weight_timbre_delta` | `0.5` | Weight for delta-MFCC timbre trajectory |
 | `similarity.weight_timbre_onset` | `1.0` | Weight for onset-weighted MFCC attack character |
-| `similarity.weight_band_energy` | `1.0` | Weight for the band energy group (4 per-band energy fractions + 4 decay rates) |
+| `similarity.weight_band_energy` | `1.0` | Weight for the spectral band energy group (4 per-band energy fractions + 4 decay rates) |
 | `transform.max_memory_mb` | auto | Memory budget (MB) for transform variants; overrides global split |
 | `transform.auto_pitch` | `true` | Pre-compute pitch variants for every MIDI note in the assigned range. Requires `rubberband-cli`. Disable if rubberband is unavailable or you prefer on-the-fly rendering (pitch still works, higher CPU at trigger time) |
 | `tempo.bpm` | `0.0` | Session tempo (BPM). Default for `stretch_quantize` / `pad_quantize` steps that carry no explicit `tempo:`, and the reference for the `duration_beats` selection filter. Only assignments that declare a quantise processor are quantised - there is no automatic stretch-every-rhythmic-sample behaviour. `0.0` means unset: such a quantise step is skipped, and a map that filters by `duration_beats` will not load. Also the fallback under `tempo.source: midi` until a MIDI clock arrives |
@@ -2765,8 +2765,8 @@ also produces two visual-preview artefacts alongside the audio and analysis
 sidecar:
 
 - **`<sample>.preview.png`** - a fixed 1024x256 raster thumbnail (RGB) for
-  browsing the library in an OS file manager.  The composition
-  layers a 4-band frequency skyline behind a mirrored waveform envelope, with
+  browsing the library in an OS file manager.  The layout
+  layers a skyline of four spectral bands behind a mirrored waveform envelope, with
   short vertical ticks at each detected onset and (when the sample is
   rhythmic) a dashed beat grid.  Stratum heights scale with each band's
   share of total energy (same four bands as `band_energy.energy_fractions`),
@@ -2775,7 +2775,7 @@ sidecar:
   so its temporal shape stays readable.  A bottom-right badge shows
   pitch (when tonal), BPM (when rhythmic), and duration.
 - **A `preview` block embedded in `<sample>.analysis.json`**:
-  the same composition's inputs (envelopes, band strata, onset/beat times,
+  the same image's inputs (envelopes, spectral band strata, onset/beat times,
   accent colour, badge text) in a compact form.  When a thumbnail goes
   missing, Subsample redraws it from this block at the next start-up instead
   of re-analysing the audio.
@@ -2788,7 +2788,7 @@ sidecar:
 
 Visual design (stroke weights, colours, layout) can be iterated later without
 any schema bump - the `preview` block stores the underlying data, not the
-rendered output.  Only a change in envelope resolution or band count
+rendered output.  Only a change in envelope resolution or spectral band count
 requires a `preview.version` bump.  A sample with no `preview` block still
 plays back and analyses identically.
 
@@ -3174,7 +3174,7 @@ Amplitude metadata:
 
 Noise-likeness:
 - **noisiness** - 0-to-1 rating of how noise-like the sample is across its whole
-  length; near 1 = wall-to-wall unpitched noise (radio static, a dead channel),
+  length; near 1 = wall-to-wall unpitched noise (static, a dead radio channel),
   near 0 = a clean hit or pitched tone. Computed as *stationarity* (the signal
   never gets quiet) times *lack of pitch*, so a held tone or a decaying hit both
   score low. Sustained unpitched textures (cymbal rolls, noise sweeps) score
@@ -3293,7 +3293,7 @@ subsample catalog --order similarity   # rows ordered by how alike they sound
   (nothing loud enough to be an event), `clipping_risk` (peak at digital full
   scale, possibly distorted), and `noisiness` (a 0-to-1 rating of how noise-like
   the sample is across its whole length - near 1 means wall-to-wall unpitched
-  noise like radio static or a dead channel, near 0 means a clean hit or a
+  noise like static or a dead radio channel, near 0 means a clean hit or a
   pitched tone). `noisiness` is aimed at captures that were triggered by a
   transient but are mostly noise thereafter; sustained *unpitched* textures
   (cymbal rolls, noise sweeps) also score high, so treat it as a
