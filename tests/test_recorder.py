@@ -221,7 +221,7 @@ class TestSampleProcessorQueueDepth:
 		# an 8-arg stub raised TypeError on every call, swallowed by the
 		# recorder's broad except, so this test never actually exercised the
 		# handoff and `received` stayed empty.
-		def on_complete (path, spectral, rhythm, pitch, timbre, level, band_energy, duration, raw_audio):
+		def on_complete (path, spectral, rhythm, pitch, timbre, level, band_energy, duration, raw_audio, **captured):
 			received.append(spectral)
 
 		with tempfile.TemporaryDirectory() as tmp:
@@ -666,3 +666,43 @@ class TestPreviewEmission:
 			sidecars = list(out_dir.glob("*.analysis.json"))
 			assert len(sidecars) == 1, "PNG must not be matched by the analysis.json glob"
 			assert sidecars[0].name == "single.wav.analysis.json"
+
+
+class TestWhatTheCaptureHandsOn:
+
+	"""What the recorder tells the callback about a finished capture.
+
+	The callback built the live SampleRecord, and the two things it was never
+	told are the two that cannot be recovered later: the channel format, so a
+	fresh ambisonic capture entered the library tagged "pcm" and played through
+	the plain mix instead of the decoder, and the loop points, so a loopable
+	capture had none until the next restart.
+	"""
+
+	def test_the_capture_carries_its_channel_format_and_loop (self) -> None:
+
+		"""Both arrive at the callback, whatever their values are for this take."""
+
+		handed: list[dict[str, typing.Any]] = []
+
+		def on_complete (
+			path, spectral, rhythm, pitch, timbre, level, band_energy, duration, raw_audio,
+			**captured,
+		):
+			handed.append(captured)
+
+		with tempfile.TemporaryDirectory() as tmp:
+			cfg = _make_config(pathlib.Path(tmp))
+			writer = subsample.recorder.SampleProcessor(
+				cfg, tests.helpers._make_params(), on_complete=on_complete,
+			)
+
+			writer.enqueue(
+				numpy.zeros((44100, 1), dtype=numpy.int16), datetime.datetime.now(),
+				filename_base="capture",
+			)
+			writer.shutdown()
+
+		assert len(handed) == 1
+		assert set(handed[0]) == {"channel_format", "loop"}
+		assert handed[0]["channel_format"] == "pcm"

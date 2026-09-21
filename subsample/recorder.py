@@ -96,24 +96,40 @@ def _compute_worker_count () -> int:
 	return subsample.parallelism.analysis_worker_count(player_active=False)
 
 
-# Callback type invoked after each recording is written and analyzed.
-# Receives the output path, all analysis results, the recording duration,
-# and the original capture-format PCM audio array for instrument sample storage.
-# Runs on a worker thread — use a queue to hand data back to the main thread safely.
-_OnCompleteCallback = typing.Callable[
-	[
-		pathlib.Path,
-		subsample.analysis.AnalysisResult,
-		subsample.analysis.RhythmResult,
-		subsample.analysis.PitchResult,
-		subsample.analysis.TimbreResult,
-		subsample.analysis.LevelResult,
-		subsample.analysis.BandEnergyResult,
-		float,           # duration in seconds
-		numpy.ndarray,   # original capture-format PCM (int16/int32, shape n_frames×channels)
-	],
-	None,
-]
+class _OnCompleteCallback(typing.Protocol):
+
+	"""What the recorder hands each finished capture to.
+
+	Receives the output path, all analysis results, the recording duration, and
+	the original capture-format PCM audio array for instrument sample storage.
+	Runs on a worker thread — use a queue to hand data back to the main thread
+	safely.
+
+	The last two arguments are what the recorder worked out about the capture
+	and wrote to its sidecar, and they are keyword-only so a callback that does
+	not care can leave them out: ``channel_format``, without which a fresh
+	ambisonic capture entered the library tagged "pcm" and played through the
+	plain mix instead of the decoder, and ``loop``, without which a loopable
+	capture had no loop points until the next restart.
+	"""
+
+	def __call__ (
+		self,
+		filepath:    pathlib.Path,
+		spectral:    subsample.analysis.AnalysisResult,
+		rhythm:      subsample.analysis.RhythmResult,
+		pitch:       subsample.analysis.PitchResult,
+		timbre:      subsample.analysis.TimbreResult,
+		level:       subsample.analysis.LevelResult,
+		band_energy: subsample.analysis.BandEnergyResult,
+		duration:    float,
+		audio:       numpy.ndarray,
+		*,
+		channel_format: str = "pcm",
+		loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
+	) -> None:
+
+		"""Take one finished capture."""
 
 
 def _format_filename (timestamp: datetime.datetime, fmt: str) -> str:
@@ -463,7 +479,10 @@ class SampleProcessor:
 				# message, which would hide a sample that never reached the
 				# library / similarity index / transform pipeline.
 				try:
-					self._on_complete(filepath, result, rhythm, pitch, timbre, level, band_energy, duration, req.audio)
+					self._on_complete(
+						filepath, result, rhythm, pitch, timbre, level, band_energy, duration, req.audio,
+						channel_format=channel_format_tag, loop=loop,
+					)
 				except Exception as exc:
 					_log.error(
 						"Sample handoff (on_complete) failed for %s: %s — the audio and "

@@ -764,6 +764,12 @@ def load_sidecar (
 				audio_path,
 				cached_version = cached_version,
 				with_preview   = with_preview,
+				# Carry the tag over, exactly as load_cache does.  Without it an
+				# ambisonic sample is re-analysed from the average of all its
+				# channels instead of W alone, and the sidecar is rewritten as
+				# "pcm" for good — so every version bump quietly downgraded a
+				# whole ambisonic library through this path.
+				channel_format = str(payload.get("channel_format", "pcm")),
 			)
 
 		_log.warning(

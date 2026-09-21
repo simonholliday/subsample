@@ -51,6 +51,7 @@ import subsample.config
 import subsample.detector
 import subsample.events
 import subsample.library
+import subsample.loopfind
 import subsample.osc
 import subsample.parallelism
 import subsample.player
@@ -2376,6 +2377,9 @@ def _make_on_complete (
 		band_energy: subsample.analysis.BandEnergyResult,
 		duration: float,
 		audio: numpy.ndarray,
+		*,
+		channel_format: str = "pcm",
+		loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
 	) -> None:
 
 		_log.info(
@@ -2419,6 +2423,12 @@ def _make_on_complete (
 			# Freshly-captured audio is at the recorder rate (== analysis rate),
 			# not resampled to the output rate.
 			audio_sample_rate = analysis_params.sample_rate,
+			# Both come from the recorder, which worked them out while writing the
+			# sidecar.  Without the tag a fresh ambisonic capture played through
+			# the plain mix instead of the decoder until the next restart, and
+			# without the loop a loopable one had no loop points.
+			channel_format    = channel_format,
+			loop              = loop,
 		)
 
 		_integrate_sample(record, instrument_library, similarity_matrix,

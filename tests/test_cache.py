@@ -719,6 +719,36 @@ class TestReanalyzePreservesChannelFormat:
 		new_payload = json.loads(sidecar.read_text())
 		assert new_payload["channel_format"] == "b_format_ambix"
 
+	def test_the_tag_survives_a_sidecar_load_too (self, tmp_path: pathlib.Path) -> None:
+
+		"""load_sidecar re-analysed without the tag, so it read the average of
+		all four channels instead of W alone and rewrote the sidecar as "pcm"
+		for good.  It is the path the startup scan, the watcher and the player
+		all take, so every version bump downgraded a whole ambisonic library
+		while load_cache was carefully guarding the same thing."""
+
+		wav = tmp_path / "ambi.wav"
+		tests.helpers._make_wav(wav, n_channels=4)
+
+		subsample.cache.save_cache(
+			wav, subsample.cache.compute_audio_md5(wav), tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(),
+			channels=4, channel_format="b_format_ambix",
+		)
+
+		sidecar = subsample.cache.cache_path(wav)
+		payload = json.loads(sidecar.read_text())
+		payload["analysis_version"] = "0"
+		sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+		result = subsample.cache.load_sidecar(sidecar)
+
+		assert result is not None
+		assert result.channel_format == "b_format_ambix"
+		assert json.loads(sidecar.read_text())["channel_format"] == "b_format_ambix"
+
 	def test_pcm_tag_survives_version_mismatch (self, tmp_path: pathlib.Path) -> None:
 		"""Regression guard: non-ambisonic samples still re-analyse as pcm."""
 		wav = tmp_path / "kick.wav"

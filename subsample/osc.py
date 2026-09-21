@@ -24,6 +24,7 @@ import numpy
 
 import subsample.analysis
 import subsample.library
+import subsample.loopfind
 
 
 _log = logging.getLogger(__name__)
@@ -61,6 +62,9 @@ class OscEventSender:
 		band_energy: subsample.analysis.BandEnergyResult,
 		duration: float,
 		audio: numpy.ndarray,
+		*,
+		channel_format: str = "pcm",
+		loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
 	) -> None:
 
 		"""Send /sample/captured when a new recording completes analysis.
