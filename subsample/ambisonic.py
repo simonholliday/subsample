@@ -152,17 +152,30 @@ def apply_biquad (audio: numpy.ndarray, bq: Biquad, channel_indices: tuple[int, 
 # target component (W is pressure: unit sum; X/Y/Z are velocity components
 # along each axis).
 #
-# The 0.5 scalar is the Gerzon-style normalisation: W matches SN3D unit
-# pressure sensitivity, and X/Y/Z are SN3D first-order components when the
-# capsules are matched cardioids.  Real-mic calibration applies on top.
+# W and the velocity components need DIFFERENT scalars, and using one for both
+# is what left this matrix wrong until 2026-09-21.  Work it through with the
+# model above: a matched cardioid responds 0.5 + 0.5·cos, and for a plane wave
+# from the front the four capsules read 0.7887, 0.7887, 0.2113, 0.2113.  A plain
+# 0.5 scalar then gives W = 1.0 but X = 0.5·(1.5774 − 0.4226) = 1/√3 = 0.577,
+# which is 4.8 dB below where SN3D puts it — every A-format capture was stored
+# with a flattened, overly omnidirectional sound field, and no amount of decoder
+# tuning downstream could put the energy back.
+#
+# So W keeps the pressure scalar and X/Y/Z carry √3 with it, which makes an
+# on-axis plane wave read X = W = 1 as SN3D requires.  Real-mic calibration
+# applies on top.
+
+_A_TO_B_VELOCITY: float = float(numpy.sqrt(3.0))
 
 _A_TO_B_GENERIC: numpy.ndarray = 0.5 * numpy.array([
-	# FLU  FRD  BLD  BRU       → AmbiX channel
-	[+1,  +1,  +1,  +1],     # W  (ACN 0)
-	[+1,  -1,  +1,  -1],     # Y  (ACN 1, left)
-	[+1,  -1,  -1,  +1],     # Z  (ACN 2, up)
-	[+1,  +1,  -1,  -1],     # X  (ACN 3, front)
-], dtype=numpy.float32)
+	# FLU  FRD  BLD  BRU                           → AmbiX channel
+	[+1,  +1,  +1,  +1],                          # W  (ACN 0, pressure)
+	[+1,  -1,  +1,  -1],                          # Y  (ACN 1, left)
+	[+1,  -1,  -1,  +1],                          # Z  (ACN 2, up)
+	[+1,  +1,  -1,  -1],                          # X  (ACN 3, front)
+], dtype=numpy.float32) * numpy.array(
+	[[1.0], [_A_TO_B_VELOCITY], [_A_TO_B_VELOCITY], [_A_TO_B_VELOCITY]], dtype=numpy.float32,
+)
 
 
 def a_to_b_matrix (mic: str) -> numpy.ndarray:
@@ -383,17 +396,36 @@ def _direction_cosines (azimuth_deg: float, elevation_deg: float) -> tuple[float
 	return (ce * math.cos(az), ce * math.sin(az), math.sin(el))
 
 
+# The order gain a first-order decode needs on its velocity terms, and leaving
+# it out is what made every decoder here one pattern too blunt until 2026-09-21.
+#
+# Mode matching evaluates N3D spherical harmonics at the speaker directions,
+# while an AmbiX signal is SN3D: for first order each is √3 times the other, and
+# the term carries the factor at both ends, so the velocity coefficient is 3.
+# Without it, "basic" produced 1 + cos — a cardioid with no anti-phase lobe at
+# all, which is what its own docstring said it would NOT be, and front-to-back
+# separation was 7 to 15 dB instead of the full null.
+_DECODE_ORDER_GAIN: float = 3.0
+
+
 def _first_order_shelf_gain (decoder_type: str) -> float:
 
 	"""Return the high-order weight g1 relative to g0=1 for a first-order decoder.
 
-	- basic:   g1 = 1      (unweighted velocity; flat energy, sharp lobes
-	                        but anti-phase backlobes for widely-spaced
-	                        speaker pairs).
-	- max_re:  g1 = 1/√3   (energy-vector maximisation — standard first-
-	                        order Max-rE weight).
-	- inphase: g1 = 1/2    (in-phase / cardioid weighting — no back-lobes,
-	                        wider perceived source).
+	Multiplied by _DECODE_ORDER_GAIN where it is used, so the pattern each one
+	produces for a plane wave is ``1 + (3 · g1) · cos``:
+
+	- basic:   g1 = 1      → 1 + 3cos.  Unweighted velocity: sharpest lobes, a
+	                         true null at ±70° and an anti-phase back lobe, which
+	                         is what a velocity decode means.
+	- max_re:  g1 = 1/√3   → 1 + √3cos.  Energy-vector maximisation, the standard
+	                         first-order Max-rE weight.
+	- inphase: g1 = 1/3    → 1 + cos.  A cardioid, which is the widest weight
+	                         that never goes negative — "in-phase" is precisely
+	                         the promise of no back lobe, so it is the largest
+	                         value that keeps it.  It was 1/2, which with the
+	                         order gain restored would put the rear speakers out
+	                         of phase and break that promise.
 	"""
 
 	if decoder_type == "basic":
@@ -401,7 +433,7 @@ def _first_order_shelf_gain (decoder_type: str) -> float:
 	if decoder_type == "max_re":
 		return 1.0 / math.sqrt(3.0)
 	if decoder_type == "inphase":
-		return 0.5
+		return 1.0 / 3.0
 
 	raise ValueError(
 		f"Unknown decoder type {decoder_type!r}.  "
@@ -476,10 +508,12 @@ def decoder_matrix (
 		az_deg, el_deg = angle
 		x, y, z = _direction_cosines(az_deg, el_deg)
 
+		velocity = g_w * _DECODE_ORDER_GAIN * g1
+
 		matrix[speaker_idx, ACN_W] = g_w
-		matrix[speaker_idx, ACN_Y] = g_w * g1 * y
-		matrix[speaker_idx, ACN_Z] = g_w * g1 * z
-		matrix[speaker_idx, ACN_X] = g_w * g1 * x
+		matrix[speaker_idx, ACN_Y] = velocity * y
+		matrix[speaker_idx, ACN_Z] = velocity * z
+		matrix[speaker_idx, ACN_X] = velocity * x
 
 	return matrix
 

@@ -46,16 +46,24 @@ class TestAToBMatrix:
 		mat = subsample.ambisonic.a_to_b_matrix("generic_tetrahedral")
 		numpy.testing.assert_allclose(mat[subsample.ambisonic.ACN_W], [0.5, 0.5, 0.5, 0.5])
 
-	def test_capsule_impulse_flu (self) -> None:
-		"""Injecting a unit impulse on the FLU capsule produces W,Y,Z,X = +0.5 each.
+	# W carries the pressure scalar and the velocity rows carry √3 with it, so an
+	# on-axis plane wave reads X = W as SN3D requires.  See the SN3D test below:
+	# these two pin the signs, that one pins the level.
+	_PRESSURE = 0.5
+	_VELOCITY = 0.5 * math.sqrt(3.0)
 
-		FLU direction is (+x, +y, +z) / √3 — so it contributes positively to
-		all velocity components.
+	def test_capsule_impulse_flu (self) -> None:
+		"""Injecting a unit impulse on the FLU capsule contributes positively to everything.
+
+		FLU direction is (+x, +y, +z) / √3 — so it adds to all three velocity
+		components as well as to pressure.
 		"""
 		mat = subsample.ambisonic.a_to_b_matrix("generic_tetrahedral")
 		capsule_impulse = numpy.array([1.0, 0.0, 0.0, 0.0], dtype=numpy.float32)
 		b = mat @ capsule_impulse
-		numpy.testing.assert_allclose(b, [0.5, 0.5, 0.5, 0.5])
+		numpy.testing.assert_allclose(
+			b, [self._PRESSURE, self._VELOCITY, self._VELOCITY, self._VELOCITY], rtol=1e-6,
+		)
 
 	def test_capsule_impulse_brd_not_in_our_order (self) -> None:
 		"""Sanity: the back-left-down (BLD) capsule, col 2, contributes +Y, -Z, -X, +W."""
@@ -63,7 +71,40 @@ class TestAToBMatrix:
 		capsule_impulse = numpy.array([0.0, 0.0, 1.0, 0.0], dtype=numpy.float32)
 		b = mat @ capsule_impulse
 		# BLD = (-x, +y, -z) / √3 → W +, Y +, Z -, X -
-		numpy.testing.assert_allclose(b, [0.5, 0.5, -0.5, -0.5])
+		numpy.testing.assert_allclose(
+			b, [self._PRESSURE, self._VELOCITY, -self._VELOCITY, -self._VELOCITY], rtol=1e-6,
+		)
+
+	@pytest.mark.parametrize(("axis", "direction", "channel"), [
+		("front", (1.0, 0.0, 0.0), 3),
+		("left",  (0.0, 1.0, 0.0), 1),
+		("up",    (0.0, 0.0, 1.0), 2),
+	])
+	def test_a_plane_wave_on_an_axis_reads_the_same_as_pressure (
+		self, axis: str, direction: tuple[float, float, float], channel: int,
+	) -> None:
+
+		"""The SN3D guarantee, and the one nothing checked.
+
+		A matched cardioid responds 0.5 + 0.5·cos, so a plane wave from the front
+		reads 0.7887 on the two forward capsules and 0.2113 on the two rear ones.
+		With one scalar for every row that gave W = 1 and X = 1/√3: **4.8 dB
+		low**, on every A-format capture, storing a flattened and overly
+		omnidirectional sound field that no decoder could restore."""
+
+		matrix = subsample.ambisonic.a_to_b_matrix("generic_tetrahedral")
+		capsules = [(1, 1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1)]
+		source = numpy.array(direction, dtype=numpy.float64)
+
+		a_format = numpy.array([
+			0.5 + 0.5 * (numpy.array(capsule, dtype=numpy.float64) / math.sqrt(3.0)).dot(source)
+			for capsule in capsules
+		], dtype=numpy.float32)
+
+		b_format = matrix @ a_format
+
+		assert b_format[0] == pytest.approx(1.0, abs=1e-5)
+		assert b_format[channel] == pytest.approx(b_format[0], abs=1e-5), axis
 
 	def test_nt_sf1_preset_matrix_same_as_generic (self) -> None:
 		"""NT-SF1 preset uses the same matrix as generic; correction is via EQ."""
@@ -135,6 +176,67 @@ class TestDecoderMatrix:
 			D = subsample.ambisonic.decoder_matrix(1, out_ch, decoder_type)
 			assert D.shape == (out_ch, 4)
 			assert D.dtype == numpy.float32
+
+	@staticmethod
+	def _front_plane_wave () -> numpy.ndarray:
+		"""A correctly normalised SN3D plane wave from straight ahead."""
+		return numpy.array([1.0, 0.0, 0.0, 1.0], dtype=numpy.float32)
+
+	def test_basic_is_a_velocity_decode_with_an_anti_phase_back_lobe (self) -> None:
+
+		"""What "basic" means, and what it did not do.
+
+		Mode matching needs the SN3D-to-N3D factor at both ends, so the velocity
+		coefficient is 3 and the pattern is 1 + 3cos.  Without it the pattern was
+		1 + cos — a cardioid, the shape "inphase" is supposed to have, with the
+		rear speakers in phase and no null anywhere.  Every decoder here was one
+		pattern too blunt."""
+
+		gains = subsample.ambisonic.decoder_matrix(1, 4, "basic") @ self._front_plane_wave()
+
+		assert gains[0] > 0.7
+		assert gains[2] < -0.1, "a velocity decode puts the rear speakers out of phase"
+
+	def test_inphase_never_puts_a_speaker_out_of_phase (self) -> None:
+
+		"""That is the whole promise of the name, so it is worth a test.
+
+		It is why the weight is 1/3 and not 1/2: with the order gain restored,
+		1/2 would give 1 + 1.5cos, which is negative behind."""
+
+		for out_channels in (2, 4, 6, 8):
+			matrix = subsample.ambisonic.decoder_matrix(1, out_channels, "inphase")
+
+			for azimuth in range(0, 360, 15):
+				radians = math.radians(azimuth)
+				wave = numpy.array(
+					[1.0, math.sin(radians), 0.0, math.cos(radians)], dtype=numpy.float32,
+				)
+
+				assert numpy.all((matrix @ wave) >= -1e-6), f"{out_channels}ch at {azimuth}°"
+
+	def test_each_mode_is_sharper_than_the_next (self) -> None:
+
+		"""basic 1 + 3cos, max_re 1 + √3cos, inphase 1 + cos: three patterns, in order."""
+
+		wave = self._front_plane_wave()
+		fronts = [
+			(subsample.ambisonic.decoder_matrix(1, 4, kind) @ wave)[0]
+			for kind in ("basic", "max_re", "inphase")
+		]
+
+		assert fronts[0] > fronts[1] > fronts[2]
+
+	@pytest.mark.parametrize("decoder_type", ["basic", "max_re", "inphase"])
+	def test_the_speaker_gains_still_sum_to_unit_pressure (self, decoder_type: str) -> None:
+
+		"""The velocity terms cancel in the sum whatever their weight, so the
+		reconstructed pressure is unity in every mode.  This is what says the
+		order gain sharpened the pattern rather than turning the output up."""
+
+		gains = subsample.ambisonic.decoder_matrix(1, 4, decoder_type) @ self._front_plane_wave()
+
+		assert float(gains.sum()) == pytest.approx(1.0, abs=1e-5)
 
 	def test_w_only_input_equal_speaker_output (self) -> None:
 		"""Unit W (with X=Y=Z=0) produces the same value on every active speaker."""
