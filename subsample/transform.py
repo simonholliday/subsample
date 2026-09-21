@@ -1038,7 +1038,11 @@ _VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
 # 2: stretch_quantize below full strength now moves each hit from where the
 #    tempo change puts it rather than from where it was recorded, so a partial
 #    strength renders differently for the same map (#1474).
-TRANSFORM_VERSION: str = "2"
+# 3: stretch_quantize snaps from where the tempo change puts each hit rather
+#    than from where it was recorded, so EVERY strength renders differently —
+#    at full strength the hits used to stay where they were played and only the
+#    tail was stretched.
+TRANSFORM_VERSION: str = "3"
 
 
 def variant_cache_key (
@@ -1650,15 +1654,22 @@ class TransformProcessor:
 			# at parse; only duplicate same-name steps could match twice.)
 			energy_profile: typing.Optional[GridEnergyProfile] = None
 
-			# Only describe a grid the render actually landed on.  Every quantize
-			# handler publishes segment bounds once it has snapped onsets, and
-			# every bail-out (source_bpm <= 0, amount <= 0, no beat map, too few
-			# onsets) returns before that — so bounds is the signal that the
-			# buffer really is grid-aligned.  Attaching a profile merely because
-			# the SPEC named a quantize step gave `order: beat_match` a
-			# grid-alignment score for an unquantized sample.
+			# Only describe a grid the render actually landed on.  Two things have
+			# to hold, and each catches a different way of being wrong:
+			#
+			#   - Segment bounds exist.  Every quantize handler publishes them
+			#     once it has snapped onsets, and the bail-outs that render
+			#     nothing (source_bpm <= 0, no beat map, too few onsets) return
+			#     before that.  Attaching a profile merely because the SPEC named
+			#     a quantize step gave `order: beat_match` a grid-alignment score
+			#     for an unquantized sample.
+			#   - The step actually snapped.  At strength 0 a stretch fills the
+			#     target tempo and deliberately leaves every hit where it fell
+			#     (#1474), so it publishes bounds for a buffer that is NOT grid
+			#     aligned.  Scoring that on grid alignment is the same
+			#     misattribution by another route.
 			for step in spec.steps if segment_bounds is not None else ():
-				if isinstance(step, (TimeStretch, PadQuantize)):
+				if isinstance(step, (TimeStretch, PadQuantize)) and step.amount > 0.0:
 					energy_profile = _compute_grid_energy_profile(
 						audio, self._output_sample_rate,
 						step.target_bpm, step.resolution,
@@ -2292,7 +2303,23 @@ def _fit_to_beats (
 		if point < target_span
 	]
 
-	snapped = _snap_onsets_to_grid(tuple(projected), inside or [0.0])
+	# A grid with no room for every hit is not used at all.  Eight eighth-notes
+	# cannot each have a quarter-note point of their own: the snapper would put
+	# four of them on the grid and pile the rest onto its last point, which
+	# distorts the take's own rhythm and renders the leftovers as segments of no
+	# length, so segment playback triggers silence for them.  Leaving every hit
+	# where the even stretch put it keeps the take's timing and still fills the
+	# span exactly, which is what the beat count was asked for.
+	if len(inside) < len(projected):
+		_log.debug(
+			"Time-stretch %s: %d hits will not fit %d grid points in %g beats — "
+			"filling the span without snapping",
+			record.name, len(projected), len(inside), beats,
+		)
+		snapped = list(projected)
+
+	else:
+		snapped = _snap_onsets_to_grid(tuple(projected), inside or [0.0])
 
 	# Partial quantize.  At 0 the hits stay where the even stretch put them and
 	# the sample still fills the span — the beat count is the point of the step,
@@ -2398,27 +2425,33 @@ def _apply_time_stretch (
 
 	# ── Build target grid and snap onsets ─────────────────────────────────
 
-	# Generous upper bound: twice the rebased duration or last onset, whichever
+	# Where each hit lands once the tempo change alone has been applied.  THIS is
+	# what gets snapped, not the recorded position: the grid is laid out at the
+	# TARGET tempo, so measuring a source-time position against it compares two
+	# different clocks.  At 60 into 120 BPM that left every hit where it was
+	# recorded and stretched only the tail; on a take long enough for the drift
+	# to pass half a grid step it snapped whole subdivisions late (#H1).
+	stretched = [time * duration_ratio for time in rebased]
+
+	# Generous upper bound: twice the stretched duration or last hit, whichever
 	# is larger, ensures the grid extends far enough for any stretch direction.
 	# min_points guarantees the greedy snapper never runs out of grid slots
 	# even when many tightly-spaced onsets each consume their own point.
 	audio_duration_sec = audio.shape[0] / sample_rate
-	max_grid_sec = max(rebased[-1], audio_duration_sec) * 2.0
+	max_grid_sec = max(stretched[-1], audio_duration_sec * duration_ratio) * 2.0
 
 	grid     = _build_quantize_grid(
 		step.target_bpm, step.resolution, max_grid_sec,
-		min_points=len(rebased) + 2,
+		min_points=len(stretched) + 2,
 	)
-	snapped  = _snap_onsets_to_grid(tuple(rebased), grid)
+	snapped  = _snap_onsets_to_grid(tuple(stretched), grid)
 
-	# Partial quantize: each hit moves from where the tempo change alone puts it,
-	# part of the way to its grid point.  Strength says how far a hit moves
-	# toward the grid, not whether the processor runs — so at 0 the sample is
-	# still stretched to the target tempo with its hits left where they fall,
-	# which is what the README has always described (#1474).  The beats path
-	# reads strength the same way.
+	# Partial quantize: each hit moves from where the tempo change put it, part
+	# of the way to its grid point.  Strength says how far a hit moves toward
+	# the grid, not whether the processor runs — so at 0 the sample is still
+	# stretched to the target tempo with its hits left where they fall, which is
+	# what the README has always described (#1474).
 	if step.amount < 1.0:
-		stretched = [time * duration_ratio for time in rebased]
 		snapped = [
 			start + step.amount * (grid_point - start)
 			for start, grid_point in zip(stretched, snapped)
@@ -2962,6 +2995,13 @@ def _apply_hpss (
 
 	Processes each channel independently via librosa.decompose.hpss on the
 	per-channel STFT, then reconstructs the selected component via istft.
+
+	A buffer of about three STFT frames or fewer (under ~34 ms at 44.1 kHz)
+	comes back entirely NaN: the median filters have nothing to work across.
+	Nothing downstream scrubs it, so it would reach the level measurement, the
+	cached variant and the voice mix, and NaN on the audio bus is worse than
+	silence.  Such a channel is passed through untouched, which is what
+	_apply_transient already does for the same case.
 	"""
 
 	n_frames, channels = audio.shape
@@ -2971,10 +3011,19 @@ def _apply_hpss (
 		D = librosa.stft(audio[:, ch])
 		harmonic_D, percussive_D = librosa.decompose.hpss(D)
 
-		if keep == "harmonic":
-			result[:, ch] = librosa.istft(harmonic_D, length=n_frames)
-		else:
-			result[:, ch] = librosa.istft(percussive_D, length=n_frames)
+		component = harmonic_D if keep == "harmonic" else percussive_D
+		separated = librosa.istft(component, length=n_frames)
+
+		if not numpy.all(numpy.isfinite(separated)):
+			_warn_once(
+				f"hpss-too-short:{keep}",
+				f"hpss: {n_frames} frames is too short to separate ({keep} kept) — "
+				"the audio is passed through unchanged",
+			)
+			result[:, ch] = audio[:, ch]
+			continue
+
+		result[:, ch] = separated
 
 	return result.astype(numpy.float32)
 

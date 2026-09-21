@@ -4887,3 +4887,141 @@ class TestPartialStrengthStillFollowsTheTempo:
 		numpy.testing.assert_array_equal(
 			subsample.transform._apply_time_stretch(audio, self.SR, record, step), audio,
 		)
+
+
+class TestStretchQuantizeMovesHitsToTheTargetTempo:
+
+	"""Where the hits actually land, which is what the processor is for.
+
+	The handler snapped each hit's RECORDED time against a grid laid out at the
+	TARGET tempo: two different clocks.  A 60 BPM take played at 120 left every
+	hit where it was, stretched only the tail, and the tests passed because they
+	asked whether each hit sat on *a* grid point rather than on the right one.
+	"""
+
+	SR = 44100
+
+	def _take (self, bpm: float, beats: int = 4) -> tuple[numpy.ndarray, typing.Any]:
+
+		"""A take at `bpm` with one hit on each of its beats."""
+
+		beat = 60.0 / bpm
+		hits = tuple(index * beat for index in range(beats))
+		frames = int((hits[-1] + beat) * self.SR)
+		audio = numpy.zeros((frames, 1), dtype=numpy.float32)
+		click = numpy.exp(-numpy.linspace(0.0, 10.0, int(0.02 * self.SR))).astype(numpy.float32)
+
+		for hit in hits:
+			start = int(hit * self.SR)
+			audio[start:start + click.size, 0] += click
+
+		return audio, _make_record(
+			audio=numpy.zeros((frames, 1), dtype=numpy.int16),
+			tempo_bpm=bpm, onset_times=hits, attack_times=hits,
+		)
+
+	def _landed (self, audio: numpy.ndarray, record: typing.Any, **fields: typing.Any) -> list[float]:
+		step = subsample.transform.TimeStretch(
+			target_bpm=fields.pop("target_bpm", 120.0),
+			resolution=fields.pop("resolution", 4),
+			amount=fields.pop("amount", 1.0),
+		)
+		subsample.transform._apply_time_stretch(audio, self.SR, record, step)
+
+		return [start / self.SR for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+	def test_halving_the_tempo_halves_the_spacing (self) -> None:
+
+		"""60 BPM played at 120: the beats are half a second apart, not one."""
+
+		audio, record = self._take(60.0)
+
+		assert self._landed(audio, record) == pytest.approx([0.0, 0.5, 1.0, 1.5], abs=0.005)
+
+	def test_doubling_the_tempo_doubles_the_spacing (self) -> None:
+		audio, record = self._take(240.0)
+
+		assert self._landed(audio, record, target_bpm=120.0) == pytest.approx(
+			[0.0, 0.5, 1.0, 1.5], abs=0.005,
+		)
+
+	def test_a_long_take_near_tempo_does_not_drift_a_subdivision (self) -> None:
+
+		"""The quiet version of the same fault.  A 118 BPM take at 120 drifts
+		about 1.7% a beat, and once that passes half a grid step every later hit
+		snapped a whole 16th late — 125 ms, and only from the ninth beat on, so
+		the take fell apart halfway through."""
+
+		audio, record = self._take(118.0, beats=16)
+		landed = self._landed(audio, record, resolution=16)
+
+		for index, start in enumerate(landed):
+			assert start == pytest.approx(index * 0.5, abs=0.005)
+
+	def test_strength_moves_hits_toward_the_grid_not_away_from_the_tempo (self) -> None:
+
+		"""Every strength stretches to the tempo; strength only decides how far a
+		hit then moves onto the grid.  It used to be the other way round: at 0 the
+		spacing was right and at 1 it was the recorded spacing."""
+
+		audio, record = self._take(60.0)
+
+		for amount in (0.0, 0.5, 1.0):
+			landed = self._landed(audio, record, amount=amount)
+
+			assert landed[-1] == pytest.approx(1.5, abs=0.02), f"strength {amount}"
+
+
+class TestShortBuffersAndDenseTakes:
+
+	"""Edge shapes the handlers used to answer with NaN or with silence."""
+
+	SR = 44100
+
+	@pytest.mark.parametrize("frames", [600, 1100, 2048])
+	@pytest.mark.parametrize("keep", ["harmonic", "percussive"])
+	def test_hpss_never_returns_nan (self, frames: int, keep: str) -> None:
+
+		"""Under about three STFT frames librosa's separation is all NaN, and
+		nothing downstream scrubs it: it reached the level measurement, the
+		cached variant and the voice mix.  NaN on the audio bus is worse than
+		silence, so such a buffer passes through untouched."""
+
+		audio = numpy.random.default_rng(3).normal(0.0, 0.2, (frames, 2)).astype(numpy.float32)
+		separated = subsample.transform._apply_hpss(audio, keep)
+
+		assert numpy.all(numpy.isfinite(separated))
+
+	def test_a_take_with_more_hits_than_grid_points_keeps_its_own_rhythm (self) -> None:
+
+		"""Eight eighth-notes cannot each have a quarter-note point.  The snapper
+		piled the leftovers onto its last point, which rendered them as segments
+		of no length: segment playback triggered silence for half the take."""
+
+		hits = tuple(index * 0.25 for index in range(8))
+		frames = int(2.0 * self.SR)
+		audio = numpy.zeros((frames, 1), dtype=numpy.float32)
+		click = numpy.exp(-numpy.linspace(0.0, 10.0, int(0.02 * self.SR))).astype(numpy.float32)
+
+		for hit in hits:
+			start = int(hit * self.SR)
+			audio[start:start + click.size, 0] += click
+
+		record = _make_record(
+			audio=numpy.zeros((frames, 1), dtype=numpy.int16),
+			tempo_bpm=120.0, onset_times=hits, attack_times=hits,
+		)
+		step = subsample.transform.TimeStretch(
+			target_bpm=120.0, resolution=4, amount=1.0, beats=4.0,
+		)
+		rendered = subsample.transform._apply_time_stretch(audio, self.SR, record, step)
+		bounds = subsample.transform._segment_bounds_local.bounds
+
+		assert [end > start for start, end in bounds] == [True] * 8
+		assert rendered.shape[0] == pytest.approx(2.0 * self.SR, abs=self.SR * 0.01)
+
+		# The take's own spacing, kept because the grid could not hold it.
+		landed = [start / self.SR for start, _end in bounds]
+
+		for index, start in enumerate(landed):
+			assert start == pytest.approx(index * 0.25, abs=0.01)
