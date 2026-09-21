@@ -56,7 +56,7 @@
 #     notes: drum.kick_1
 #     select:
 #       where:
-#         reference: samples/reference/GM36_BassDrum1.wav
+#         reference: GM36_BassDrum1
 #
 #   # 3. Play the oldest pitched sample across a keyboard range,
 #   #    pitch-shifted to each MIDI note
@@ -146,13 +146,13 @@
 #     notes: drum.hi_hat_open
 #     silenced_by: [self, drum.hi_hat_closed, drum.hi_hat_pedal]
 #     select:
-#       where: { reference: samples/reference/GM46_OpenHiHat.wav }
+#       where: { reference: GM46_OpenHiHat }
 #   - name: Ride
 #     channel: 10
 #     notes: drum.ride
 #     silenced_by: self               # single ride - a new hit damps the last
 #     select:
-#       where: { reference: samples/reference/GM51_RideCymbal1.wav }
+#       where: { reference: GM51_RideCymbal1 }
 #
 #   # 7. Templates - define shared fields once, inherit per assignment.
 #   #    `templates:` is a TOP-LEVEL section (a sibling of `assignments:`).
@@ -247,9 +247,10 @@ assignments:
 
 
   # --- B. Similarity match against a reference ---
-  # Reference samples live in samples/reference/.  The similarity
-  # engine ranks your library against the reference and plays the
-  # closest match.  When `reference:` is set and `order:` is omitted,
+  # A reference is named, not a path: the GM set ships inside Subsample
+  # and nothing is copied into your project.  The similarity engine ranks
+  # your library against the reference and plays the closest match.  A
+  # path still works, for a reference of your own.  When `reference:` is set and `order:` is omitted,
   # similarity desc is assumed automatically.
 
   # - name: Any kick
@@ -257,7 +258,7 @@ assignments:
   #   notes: drum.kick_1
   #   select:
   #     where:
-  #       reference: samples/reference/GM36_BassDrum1.wav
+  #       reference: GM36_BassDrum1
 
 
   # --- C. Newest capture on a keyboard, repitched ---
@@ -322,7 +323,7 @@ assignments:
   #   channel: 10
   #   notes: drum.kick_1
   #   select:
-  #     where: { reference: samples/reference/GM36_BassDrum1.wav }
+  #     where: { reference: GM36_BassDrum1 }
   #     pick: [1, 3]   # different kick on every hit, from your closest 3
 
   # - name: Any clap
@@ -414,7 +415,7 @@ assignments:
   #   notes: drum.kick_1
   #   select:
   #     - where: { name: my-favourite-kick }
-  #     - where: { reference: samples/reference/GM36_BassDrum1.wav }
+  #     - where: { reference: GM36_BassDrum1 }
 
 
   # --- J. Beat-pattern match ---
@@ -466,7 +467,7 @@ assignments:
   #   channel: 10
   #   notes: drum.kick_1
   #   select:
-  #     where: { reference: samples/reference/GM36_BassDrum1.wav }
+  #     where: { reference: GM36_BassDrum1 }
   #   extract: omni    # stereo source → mono, distributed equally to all outputs
 
 
@@ -495,7 +496,7 @@ assignments:
     notes: [drum.kick_1, drum.kick_2]
     select:
       where:
-        reference: samples/reference/GM36_BassDrum1.wav
+        reference: GM36_BassDrum1
       order: [{ by: similarity, dir: desc }]
 
 
@@ -507,7 +508,7 @@ assignments:
     notes: [drum.snare_1, drum.snare_2]
     select:
       where:
-        reference: samples/reference/GM38_AcousticSnare.wav
+        reference: GM38_AcousticSnare
       order: [{ by: similarity, dir: desc }]
     pan: [50, 87]      # per-channel weights; or a position: pan: 27 = a touch right
                        # (-100 hard left .. 0 centre .. 100 hard right)
@@ -521,7 +522,7 @@ assignments:
     notes: drum.side_stick
     select:
       where:
-        reference: samples/reference/GM37_SideStick.wav
+        reference: GM37_SideStick
       order: [{ by: similarity, dir: desc }]
 
 
@@ -533,7 +534,7 @@ assignments:
     notes: drum.hand_clap
     select:
       where:
-        reference: samples/reference/GM39_HandClap.wav
+        reference: GM39_HandClap
       order: [{ by: similarity, dir: desc }]
 
 
@@ -546,7 +547,7 @@ assignments:
     notes: [drum.high_tom, drum.high_mid_tom, drum.low_mid_tom, drum.low_tom, drum.high_floor_tom, drum.low_floor_tom]
     select:
       where:
-        reference: samples/reference/GM48_HiMidTom.wav
+        reference: GM48_HiMidTom
       order: [{ by: similarity, dir: desc }]
 
 
@@ -558,7 +559,7 @@ assignments:
     notes: [drum.hi_hat_closed, drum.hi_hat_pedal]
     select:
       where:
-        reference: samples/reference/GM42_ClosedHiHat.wav
+        reference: GM42_ClosedHiHat
       order: [{ by: similarity, dir: desc }]
     pan: [87, 50]
 
@@ -571,7 +572,7 @@ assignments:
     notes: drum.hi_hat_open
     select:
       where:
-        reference: samples/reference/GM46_OpenHiHat.wav
+        reference: GM46_OpenHiHat
       order: [{ by: similarity, dir: desc }]
     pan: [87, 50]
 
@@ -584,7 +585,7 @@ assignments:
     notes: [drum.crash_1, drum.crash_2, drum.splash_cymbal, drum.chinese_cymbal]
     select:
       where:
-        reference: samples/reference/GM49_CrashCymbal1.wav
+        reference: GM49_CrashCymbal1
       order: [{ by: similarity, dir: desc }]
 
 
@@ -596,7 +597,7 @@ assignments:
     notes: [drum.ride_1, drum.ride_2, drum.ride_bell]
     select:
       where:
-        reference: samples/reference/GM51_RideCymbal1.wav
+        reference: GM51_RideCymbal1
       order: [{ by: similarity, dir: desc }]
     pan: [25, 75]
 
@@ -609,7 +610,7 @@ assignments:
     notes: drum.cowbell
     select:
       where:
-        reference: samples/reference/GM56_Cowbell.wav
+        reference: GM56_Cowbell
       order: [{ by: similarity, dir: desc }]
     gain: -3.0
 
@@ -622,7 +623,7 @@ assignments:
     notes: drum.tambourine
     select:
       where:
-        reference: samples/reference/GM54_Tambourine.wav
+        reference: GM54_Tambourine
       order: [{ by: similarity, dir: desc }]
 
 
@@ -634,7 +635,7 @@ assignments:
     notes: drum.claves
     select:
       where:
-        reference: samples/reference/GM75_Claves.wav
+        reference: GM75_Claves
       order: [{ by: similarity, dir: desc }]
 
 

@@ -369,19 +369,35 @@ def _quantize_params (
 	return (bpm if bpm > 0 else None, grid)
 
 
+def _declares_beats (process: subsample.query.ProcessSpec) -> bool:
+
+	"""True when a stretch_quantize step declares a beat count at all, knob or number.
+
+	This is what the render gate asks, and it is deliberately not
+	``_quantize_beats(...) is not None``.  That reads the value, and a CC
+	binding with no ``default:`` rests unset and reads as None until the knob
+	moves — so a gate keyed on the value would drop the step before the knob
+	could ever raise it, and the knob would do nothing for the samples the beat
+	count exists for.  Whether a count is declared does not change with a
+	controller.
+	"""
+
+	step = next((s for s in process.steps if s.name == "stretch_quantize"), None)
+
+	return step is not None and step.get("beats") is not None
+
+
 def _quantize_beats (process: subsample.query.ProcessSpec) -> typing.Optional[float]:
 
-	"""The beat count a stretch_quantize step declares, or None when it declares none.
+	"""The beat count a stretch_quantize step is set to now, or None if it has no value yet.
 
-	Two things follow from a declared beat count, and both are decided here so
-	they cannot disagree: the step renders for a sample with no detected tempo
-	of its own, because it no longer consults one; and the variant built for
-	scoring has to carry the same count as the one that renders, or they are two
-	different variants and the score never finds its audio.
+	Used where an actual number is needed: the variant built for scoring has to
+	carry the same count as the one that renders, or they are two different
+	variants and the score never finds its audio.
 
-	A CC-bound count is read at the value the knob rests at, the same way the
-	tempo is — a binding resting unset reads as no beat count, which is what the
-	step does until the knob moves.
+	A CC-bound count reads at the value the knob rests at, the same way the
+	tempo does, and a binding resting unset reads as None — which is correct
+	here, and is why the gate asks ``_declares_beats`` instead.
 	"""
 
 	step = next((s for s in process.steps if s.name == "stretch_quantize"), None)
@@ -5285,7 +5301,7 @@ class MidiPlayer:
 			# A declared beat count sets the output length outright, so a sample
 			# with no tempo of its own — the case the count exists for — is no
 			# longer a reason to skip the step.
-			if record.rhythm.tempo_bpm > 0.0 or _quantize_beats(assignment.process) is not None:
+			if record.rhythm.tempo_bpm > 0.0 or _declares_beats(assignment.process):
 				bpm_for_spec, grid_for_spec = _quantize_params(assignment.process, "stretch_quantize", self._target_bpm)
 			else:
 				# DEBUG, not WARNING: on the trigger path this fires on EVERY
@@ -6376,7 +6392,7 @@ class MidiPlayer:
 				enqueued = self._enqueue_quantize_variants(
 					asgn, "stretch_quantize", note_picks, ranked,
 					eff_library, eff_transform,
-					require_tempo=_quantize_beats(asgn.process) is None,
+					require_tempo=not _declares_beats(asgn.process),
 				)
 
 				if enqueued > 0:

@@ -685,7 +685,12 @@ class TestInitConfig:
 		)
 		assert len(gm.note_map) > 0
 
-		template = subsample.player.load_midi_map(tmp_path / "midi-map.yaml", [])
+		# The template's active kit names the same packaged references the GM map
+		# does.  It used to point at `samples/reference/*.wav`, which an --init
+		# project has never had, so its twelve notes loaded and played nothing.
+		template = subsample.player.load_midi_map(
+			tmp_path / "midi-map.yaml", reference_library.names(),
+		)
 		assert (9, 36) in template.note_map
 
 		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)

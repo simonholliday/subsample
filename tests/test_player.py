@@ -11,6 +11,7 @@ import unittest.mock
 import mido
 import numpy
 import pytest
+import yaml
 
 import subsample.analysis
 import subsample.bank
@@ -2665,16 +2666,60 @@ assignments:
 	def test_default_map_parses (self) -> None:
 		"""The shipped midi-map.yaml.default parses without error."""
 		default_path = subsample.config.data_dir() / "midi-map.yaml.default"
-		note_map = subsample.player.load_midi_map(default_path, []).note_map
+		names = subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		).names()
+		note_map = subsample.player.load_midi_map(default_path, names).note_map
 
 		assert len(note_map) > 0
 		assert (9, 36) in note_map
 
-		# Path-based reference: resolved to absolute path at parse time.
+		# Named, not a path: the fingerprint ships inside the package, so the
+		# map works in a project that has copied nothing.
 		ref = note_map[(9, 36)][0][0].select[0].where.reference
-		assert ref is not None
-		assert "GM36_BassDrum1" in ref
-		assert "/" in ref  # path-based, not bare name
+		assert ref == "GM36_BassDrum1"
+
+	def test_every_reference_the_shipped_maps_name_is_one_that_ships (self) -> None:
+
+		"""A reference nothing ships is a note that loads and then plays silence.
+
+		The template's active drum kit pointed at `samples/reference/*.wav` for
+		all twelve of its assignments.  `--init` copies nothing there, so the map
+		loaded, the player logged a missing sidecar per note, and the kit a new
+		user is told to start from was silent.
+
+		Read from the YAML rather than the loaded map: a reference the loader
+		cannot resolve takes its whole assignment out of the note map, so a test
+		that walks what loaded sees nothing to complain about."""
+
+		def declared (node: typing.Any) -> typing.Iterator[str]:
+			"""Every `reference:` a mapping declares, at any depth."""
+
+			if isinstance(node, dict):
+				for key, value in node.items():
+					if key == "reference" and isinstance(value, str):
+						yield value
+					else:
+						yield from declared(value)
+
+			elif isinstance(node, list):
+				for item in node:
+					yield from declared(item)
+
+		names = set(subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		).names())
+
+		for shipped in ("midi-map.yaml.default", "midi-map-gm-drums.yaml"):
+			written = yaml.safe_load(
+				(subsample.config.data_dir() / shipped).read_text(encoding="utf-8"),
+			)
+			references = list(declared(written))
+
+			assert references, f"{shipped}: no reference at all, so this test proves nothing"
+
+			for reference in references:
+				assert reference in names, f"{shipped} names {reference!r}, which does not ship"
 
 	def test_default_pan_is_centre (self, tmp_path: pathlib.Path) -> None:
 		"""Omitted pan defaults to equal power across all output channels."""
@@ -9013,6 +9058,27 @@ class TestDeclaredBeatCount:
 		process = self._process({"beats": {"cc": 20, "min": 2, "max": 16, "default": 8}})
 
 		assert subsample.player._quantize_beats(process) == 8.0
+
+	def test_a_knob_still_opens_the_gate_for_a_sample_with_no_tempo (self) -> None:
+
+		"""The gate asks whether a count is declared, not what it reads now.
+
+		A CC binding with no `default:` rests unset, so reading its value gives
+		None — and a gate keyed on the value dropped the step before the knob
+		could ever raise it.  The knob then did nothing for exactly the samples
+		the beat count exists for."""
+
+		process = self._process({"beats": {"cc": 20, "min": 2, "max": 16}, "grid": 32})
+
+		assert subsample.player._declares_beats(process) is True
+		assert subsample.player._quantize_beats(process) is None
+
+		spec = subsample.transform.spec_from_process(
+			process, target_bpm=120.0, cc_omni={20: 100},
+		)
+
+		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
+		assert spec.steps[0].beats is not None
 
 	def test_the_scored_variant_carries_the_count_the_rendered_one_has (self) -> None:
 
