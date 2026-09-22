@@ -5,6 +5,8 @@ import pathlib
 import typing
 
 import numpy
+import unittest.mock
+
 import pytest
 
 import subsample.analysis
@@ -3142,3 +3144,121 @@ class TestIsPathLike:
 		assert not subsample.query.is_path_like("kick_1")
 		assert not subsample.query.is_path_like("foo.wav")     # extension alone is not a path
 		assert not subsample.query.is_path_like("BD0025")
+
+
+class TestSimilarityOrderingAndItsTies:
+
+	"""Clauses after `similarity` are tie-breakers, and its rules fail at load.
+
+	The fast path ignored every clause after the primary one, reasoning that
+	"the matrix returns unique scores; ties are not expected" — but exact ties
+	are ordinary, and a tie then fell back to whatever order the matrix happened
+	to hold.  The rules themselves raised inside query(), so a bad select loaded
+	fine and then aborted the candidate rebuild for every OTHER assignment.
+	"""
+
+	def test_a_later_clause_breaks_a_tie (self) -> None:
+		spec = subsample.query.parse_select([{
+			"where": {"reference": "BD"},
+			"order": [
+				{"by": "similarity", "dir": "desc"},
+				{"by": "duration", "dir": "asc"},
+			],
+		}], "test")[0]
+
+		tied = [
+			_make_record(sample_id=1, duration=3.0),
+			_make_record(sample_id=2, duration=1.0),
+			_make_record(sample_id=3, duration=2.0),
+		]
+
+		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		matrix.get_matches.return_value = [
+			subsample.similarity.RankedMatch(sample_id=1, score=0.5),
+			subsample.similarity.RankedMatch(sample_id=2, score=0.5),
+			subsample.similarity.RankedMatch(sample_id=3, score=0.5),
+		]
+
+		ranked = subsample.query.query(spec, tied, matrix)
+
+		assert [r.sample_id for r in ranked] == [2, 3, 1]
+
+	def test_a_real_difference_in_similarity_still_wins (self) -> None:
+
+		"""A tie-break must not reorder anything the primary clause decided."""
+
+		spec = subsample.query.parse_select([{
+			"where": {"reference": "BD"},
+			"order": [
+				{"by": "similarity", "dir": "desc"},
+				{"by": "duration", "dir": "asc"},
+			],
+		}], "test")[0]
+
+		samples = [
+			_make_record(sample_id=1, duration=9.0),
+			_make_record(sample_id=2, duration=1.0),
+		]
+
+		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		matrix.get_matches.return_value = [
+			subsample.similarity.RankedMatch(sample_id=1, score=0.9),
+			subsample.similarity.RankedMatch(sample_id=2, score=0.2),
+		]
+
+		assert [r.sample_id for r in subsample.query.query(spec, samples, matrix)] == [1, 2]
+
+	def test_similarity_after_another_clause_is_refused_at_load (self) -> None:
+		with pytest.raises(ValueError, match="only as the first order clause"):
+			subsample.query.parse_select([{
+				"where": {"reference": "BD"},
+				"order": [{"by": "duration"}, {"by": "similarity"}],
+			}], "test")
+
+	def test_similarity_without_a_reference_is_refused_at_load (self) -> None:
+		with pytest.raises(ValueError, match="needs where.reference"):
+			subsample.query.parse_select([{
+				"order": [{"by": "similarity", "dir": "desc"}],
+			}], "test")
+
+
+class TestUnpitchedSamplesAreNotLowPitched:
+
+	"""0.0 Hz is analysis saying it found no pitch, which is not a low pitch.
+
+	It passed every upper-bound pitch filter, so `where: {pitch: {lt: C3}}`
+	matched every piece of noise in the library, and it sorted first under
+	`order: pitch_asc`, so `pick: 1` handed back an unpitched hit instead of the
+	lowest-pitched sample.
+	"""
+
+	def test_an_unpitched_sample_fails_a_pitch_range (self) -> None:
+		spec = subsample.query.parse_select([{"where": {"pitch": {"lt": "C3"}}}], "test")[0]
+
+		noise = _make_record(sample_id=1, dominant_pitch_hz=0.0)
+		low   = _make_record(sample_id=2, dominant_pitch_hz=100.0)
+
+		assert [r.sample_id for r in subsample.query.query(spec, [noise, low], None)] == [2]
+
+	def test_an_unpitched_sample_does_not_sort_as_the_lowest (self) -> None:
+		spec = subsample.query.parse_select([{"order": [{"by": "pitch", "dir": "asc"}]}], "test")[0]
+
+		noise = _make_record(sample_id=1, dominant_pitch_hz=0.0)
+		low   = _make_record(sample_id=2, dominant_pitch_hz=80.0)
+		high  = _make_record(sample_id=3, dominant_pitch_hz=800.0)
+
+		ranked = [r.sample_id for r in subsample.query.query(spec, [noise, low, high], None)]
+
+		assert ranked[0] == 2
+		assert ranked[-1] == 1, "what cannot be scored parks at the end"
+
+	def test_a_pitch_filter_that_asks_for_nothing_still_matches_everything (self) -> None:
+
+		"""An empty range is not a filter, so an unpitched sample is not excluded
+		from a select that never mentioned pitch."""
+
+		spec = subsample.query.parse_select([{"where": {"duration": {"gte": 0.0}}}], "test")[0]
+
+		noise = _make_record(sample_id=1, dominant_pitch_hz=0.0)
+
+		assert [r.sample_id for r in subsample.query.query(spec, [noise], None)] == [1]

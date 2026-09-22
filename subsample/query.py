@@ -430,8 +430,16 @@ class WherePredicate:
 		if not self.tempo.contains(record.rhythm.tempo_bpm):
 			return False
 
-		if not self.pitch_hz.contains(record.pitch.dominant_pitch_hz):
-			return False
+		# 0.0 Hz is analysis saying it found no pitch at all, not a pitch below
+		# every bound — so an unpitched sample fails a pitch range rather than
+		# passing every upper bound.  `where: {pitch: {lt: C3}}` used to match
+		# every piece of noise in the library.
+		if not self.pitch_hz.is_empty():
+			if record.pitch.dominant_pitch_hz <= 0.0:
+				return False
+
+			if not self.pitch_hz.contains(record.pitch.dominant_pitch_hz):
+				return False
 
 		# quantized_beats and duration_beats consult external state (the variant
 		# beat-length resolver, and the session tempo, respectively).  Each is
@@ -619,7 +627,15 @@ def _register_scorer (
 
 # Per-sample field scorers — no external state required.
 _register_scorer("duration", lambda r, _p, _s: float(r.duration))
-_register_scorer("pitch",    lambda r, _p, _s: float(r.pitch.dominant_pitch_hz))
+# None rather than 0.0: the sort parks what a scorer cannot score at the end
+# whatever the direction, so `order: pitch_asc` stops handing back an unpitched
+# hit as the lowest-pitched sample in the pool.
+_register_scorer(
+	"pitch",
+	lambda r, _p, _s: (
+		float(r.pitch.dominant_pitch_hz) if r.pitch.dominant_pitch_hz > 0.0 else None
+	),
+)
 _register_scorer("onsets",   lambda r, _p, _s: float(r.rhythm.onset_count))
 _register_scorer("tempo",    lambda r, _p, _s: float(r.rhythm.tempo_bpm))
 _register_scorer("level",    lambda r, _p, _s: float(r.level.rms))
@@ -1408,6 +1424,50 @@ class Assignment:
 # Query execution
 # ---------------------------------------------------------------------------
 
+def _break_ties (
+	scored:  list[tuple[float, "subsample.library.SampleRecord"]],
+	clauses: tuple["OrderClause", ...],
+	state:   typing.Any,
+) -> None:
+
+	"""Order records of equal similarity by the clauses written after it, in place.
+
+	Only equal scores are reordered: the similarity ranking itself is what the
+	primary clause decided, and a tie-break that moved anything else would
+	quietly override it.  Records a scorer cannot score keep their place at the
+	end of their own tie group, the same "unknown sorts last" rule the general
+	path uses.
+	"""
+
+	def key (entry: tuple[float, "subsample.library.SampleRecord"]) -> tuple[tuple[int, float], ...]:
+		_score, record = entry
+		parts: list[tuple[int, float]] = []
+
+		for clause in clauses:
+			spec = _SCORERS.get(clause.by)
+			value = spec.fn(record, clause.params, state) if spec is not None else None
+
+			if value is None:
+				parts.append((1, 0.0))
+			else:
+				parts.append((0, -float(value) if clause.dir == "desc" else float(value)))
+
+		return tuple(parts)
+
+	start = 0
+
+	while start < len(scored):
+		stop = start + 1
+
+		while stop < len(scored) and scored[stop][0] == scored[start][0]:
+			stop += 1
+
+		if stop - start > 1:
+			scored[start:stop] = sorted(scored[start:stop], key=key)
+
+		start = stop
+
+
 def query (
 	select_spec:             SelectSpec,
 	samples:                 list["subsample.library.SampleRecord"],
@@ -1427,11 +1487,11 @@ def query (
 	When the *primary* order clause is ``{by: "similarity"}`` and
 	``where.reference`` is set, the similarity matrix is consulted directly
 	for a ranked list of sample IDs; ``where`` predicates are applied as
-	post-filters on that ranked list, preserving similarity order.  Any
-	secondary clauses after a primary ``similarity`` are ignored (the
-	matrix returns unique scores; ties are not expected).  Using
-	``similarity`` at a non-primary position raises ValueError — only the
-	primary fast path is supported.
+	post-filters on that ranked list, preserving similarity order.  Clauses
+	after a primary ``similarity`` break its ties, which are ordinary rather
+	than rare.  Using ``similarity`` at a non-primary position raises
+	ValueError — only the primary fast path is supported, and the parser
+	refuses it at load so a map cannot reach here holding one.
 
 	For all other cases, the sort composes per-clause keys across the
 	``order`` tuple.  Each scorer's ``on_missing`` policy determines
@@ -1498,16 +1558,25 @@ def query (
 		ranked = similarity_matrix.get_matches(where.reference)
 		by_id  = {r.sample_id: r for r in samples}
 
-		result: list["subsample.library.SampleRecord"] = []
+		scored: list[tuple[float, "subsample.library.SampleRecord"]] = []
+
 		for match in ranked:
 			record = by_id.get(match.sample_id)
 			if record is not None and where.matches(record, beats_resolver, bpm):
-				result.append(record)
+				scored.append((float(match.score), record))
 
 		if primary.dir == "asc":
-			result.reverse()
+			scored.reverse()
 
-		return result
+		# Clauses after `similarity` break its ties, as they do after any other
+		# scorer and as the README has always said.  They used to be ignored,
+		# on the reasoning that "the matrix returns unique scores; ties are not
+		# expected" — but similarity.py says exact ties are ordinary, and a tie
+		# then fell back to whatever order the matrix happened to hold.
+		if len(clauses) > 1 and scored:
+			_break_ties(scored, clauses[1:], state)
+
+		return [record for _score, record in scored]
 
 	# General path: validate scorer names, filter, compose multi-key sort.
 	valid_names = valid_order_names()
@@ -2775,6 +2844,26 @@ def _parse_select_spec (
 			)
 
 		pick = dataclasses.replace(pick, ascending=(order[0].dir == "asc"))
+
+	# The two `similarity` rules, checked here rather than inside query().
+	# Raising at query time meant a map loaded and then failed on every
+	# evaluation — and _rebuild_candidate_cache is not guarded per assignment,
+	# so one bad select aborted the rebuild for every OTHER assignment too, at
+	# player construction and on every library change.  A map that cannot work
+	# should say so when it loads.
+	for position, clause in enumerate(order):
+		if clause.by == "similarity" and position > 0:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'similarity' works only as "
+				f"the first order clause (found at position {position}).  Later clauses "
+				f"break its ties."
+			)
+
+	if order and order[0].by == "similarity" and where.reference is None:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: 'similarity' ordering needs "
+			f"where.reference — it ranks against a reference sample."
+		)
 
 	return SelectSpec(where=where, order=order, pick=pick)
 
