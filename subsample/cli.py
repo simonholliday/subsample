@@ -169,8 +169,10 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 		action="store_true",
 		help=(
 			"Create a complete starter project in the current directory - a "
-			"fully commented config.yaml, the ready-to-play GM drum kit map, "
-			"an editable map template, and the GM reference data - then exit. "
+			"fully commented config.yaml, the ready-to-play GM drum kit map, and "
+			"an editable map template - then exit.  The GM reference fingerprints "
+			"the kit matches against ship inside Subsample and are named, so "
+			"nothing is copied. "
 			"Refuses to overwrite existing files."
 		),
 	)
@@ -447,7 +449,12 @@ def _preload_midi_map (
 	try:
 		return _load_player_rules(cfg, reference_names)
 
-	except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+	# OSError rather than FileNotFoundError alone: `player.midi_map: samples`
+	# names a directory, a plausible mistake, and a map on a drive whose
+	# permissions have changed is another.  Both reached the user as a raw
+	# traceback, and on the watch-reload path as a traceback from a timer
+	# thread instead of "keeping the current map".
+	except (OSError, ValueError, yaml.YAMLError) as exc:
 		_log.error("Cannot load the MIDI map: %s", exc)
 
 		if path is not None and not path.exists():
@@ -1049,6 +1056,10 @@ def _load_bank (
 		disk_cache=variant_disk_cache,
 	)
 
+	# One pool per bank, each running from here, so each gets its own teardown
+	# for a Ctrl+C during the rest of startup.
+	_register_teardown(transform_manager.shutdown)
+
 	# For a `map:` preset, populate the (empty) library + similarity matrix
 	# from the preset's own path / directory references — these resolve
 	# relative to the preset folder (load_midi_map stamped the preset's
@@ -1142,7 +1153,7 @@ def _start_player (
 
 	When cfg.player.virtual_midi_port is set, Subsample creates a named virtual
 	MIDI input port and skips hardware device selection entirely. Otherwise, it
-	resolves a hardware device from config (substring match) or prompts the user
+	resolves a hardware device from config (whole name, then glob) or prompts the user
 	interactively. Runs until shutdown_event is set.
 
 	Args:
@@ -1182,7 +1193,7 @@ def _start_player (
 	else:
 		try:
 			midi_map_result = _load_player_rules(cfg, reference_library.names())
-		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+		except (OSError, ValueError, yaml.YAMLError) as exc:
 			# yaml.YAMLError (a plain indentation typo in a hand-edited map) is
 			# the commonest live-coding failure and is NOT a ValueError — catch
 			# it here too so the player thread reports one clean line instead of
@@ -1343,6 +1354,36 @@ def _start_player (
 		print(f"\nError starting player: {exc}", file=sys.stderr)
 
 
+# Teardown for subsystems that are already running when startup is interrupted.
+# Ctrl+C during the library scan — documented as possibly taking a minute — or
+# during the bank or reference load lands before the main loop's own handler
+# exists, so it used to print a traceback and leave transform workers running:
+# the interpreter then waited on their pool at exit, with nothing on screen
+# saying why.  Registered as each is started, run once on the way out.
+_STARTED: list[typing.Callable[[], None]] = []
+
+
+def _register_teardown (stop: typing.Callable[[], None]) -> None:
+
+	"""Remember something that must be stopped if startup is interrupted."""
+
+	_STARTED.append(stop)
+
+
+def _run_teardowns () -> None:
+
+	"""Stop everything that started, reporting rather than raising."""
+
+	while _STARTED:
+		stop = _STARTED.pop()
+
+		try:
+			stop()
+
+		except Exception as exc:
+			_log.warning("Shutdown step failed: %s", exc)
+
+
 def main () -> None:
 
 	"""Entry point — tool subcommands first, else the ambient audio sampler."""
@@ -1375,7 +1416,15 @@ def main () -> None:
 			print("\nInterrupted.", file=sys.stderr)
 			raise SystemExit(130)
 
-	_main_impl()
+	try:
+		_main_impl()
+
+	except KeyboardInterrupt:
+		# Startup was interrupted before the main loop's handler existed.  The
+		# loads it lands in are the long ones, so this is a normal thing to do.
+		print("\nInterrupted.", file=sys.stderr)
+		_run_teardowns()
+		raise SystemExit(130) from None
 
 
 def _main_impl () -> None:
@@ -1566,7 +1615,7 @@ def _main_impl () -> None:
 					f"  Program {defn.program:<3d}  : {defn.name!r} — "
 					f"{len(bank.instrument_library)} sample(s) from {source}"
 				)
-		except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+		except (OSError, ValueError, yaml.YAMLError) as exc:
 			# A bad `map:` preset path or malformed preset file must read as one
 			# clean line, not a raw traceback out of the main thread.
 			_log.error("Could not load program bank: %s", exc)
@@ -1709,6 +1758,10 @@ def _main_impl () -> None:
 				cfg=cfg.transform,
 				disk_cache=_variant_disk_cache,
 			)
+
+			# Its workers are running from here on, so a Ctrl+C during the rest
+			# of startup has something to stop.
+			_register_teardown(transform_manager.shutdown)
 
 			if len(instrument_library) > 0:
 				for _record in instrument_library.samples():
@@ -1933,7 +1986,7 @@ def _main_impl () -> None:
 				# ensemble re-merges every set it includes rather than
 				# reloading the ensemble file's own assignments alone.
 				result = _load_player_rules(cfg, reference_library.names())
-			except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+			except (OSError, ValueError, yaml.YAMLError) as exc:
 				_log.warning(
 					"MIDI map reload failed at parse time — keeping current "
 					"map: %s", exc,

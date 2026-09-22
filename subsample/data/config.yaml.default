@@ -560,7 +560,7 @@ analysis:
 # See midi-map-gm-drums.yaml for examples.
 
 # library:
-#   max_memory_mb: auto      # 60% of the global budget when unset (not a literal 100)
+#   max_memory_mb: 600.0     # a number in MB; leave the key out for 60% of the global budget
 #   # Maximum audio memory (MB) for in-memory library samples. When this
 #   # limit is exceeded, oldest samples are evicted (FIFO) to make room for new
 #   # ones - newest captures are always kept, oldest are dropped. WAV files on
@@ -620,7 +620,7 @@ analysis:
 # See the README's "Transforms" section for how the pipeline behaves.
 
 # transform:
-#   max_memory_mb: auto      # 35% of the global budget when unset (not a literal 50)
+#   max_memory_mb: 350.0     # a number in MB; leave the key out for 35% of the global budget
 #   # Memory budget (MB) for derivative audio.
 #   # Overrides the global max_memory_mb split for transform variants.
 #   # Eviction: parent-priority FIFO - all variants of the oldest parent are
@@ -646,7 +646,7 @@ analysis:
 #   # audio, transform spec, output sample rate, and analysis version.
 #   # Empty string or null disables disk caching.
 #
-#   max_disk_mb: 500.0
+#   max_disk_mb: 3000.0
 #   # Maximum disk space (MB) for cached variant files.  0 = disabled.
 #   # When unset, derived automatically as 3x the memory budget (e.g. ~3 GB
 #   # at the default 1024 MB auto budget) - set it explicitly on machines

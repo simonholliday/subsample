@@ -186,7 +186,8 @@ class PlayerConfig:
 	enabled: bool = False
 	midi_device: typing.Optional[str] = None
 	"""Name (or substring) of the MIDI input device for triggering playback.
-	Case-insensitive substring match. If omitted, auto-selects when only one
+	The whole name first, then a case-insensitive glob (subsample.devices).
+	If omitted, auto-selects when only one
 	MIDI input device is present, or shows an interactive menu for multiple.
 	Ignored when virtual_midi_port is set."""
 
@@ -645,7 +646,19 @@ def load_config (path: typing.Union[str, pathlib.Path, None] = None) -> Config:
 			# Caller explicitly passed the bundled default (test convenience).
 			_log.debug("Configuration: built-in defaults (explicit default path)")
 
-	return _build_config(raw)
+	try:
+		return _build_config(raw)
+
+	except (AttributeError, TypeError) as exc:
+		# A value of the wrong SHAPE rather than the wrong size: a scalar where a
+		# mapping belongs (`recorder.audio.input: 3`), a list where a number
+		# does.  Those reach the dataclasses as TypeError or AttributeError,
+		# which the CLI does not catch, so the user met a traceback instead of a
+		# sentence.  Every value the builder can read but not accept already
+		# raises ValueError naming its key.
+		raise ValueError(
+			f"config.yaml: a setting has the wrong shape — {exc}"
+		) from exc
 
 
 def data_dir () -> pathlib.Path:
@@ -968,6 +981,45 @@ def _section (
 	registry.append(tracker)
 
 	return tracker
+
+
+def _check_values (cfg: "Config") -> None:
+
+	"""Refuse a value the app cannot act on, naming the key and what it takes.
+
+	These all loaded happily and went wrong later, quietly: a detection
+	threshold below the noise floor records continuously, a start tempo of 0
+	divides, a negative budget is not a budget, a port above 65535 cannot be
+	bound, and NaN compares false against every limit so a memory cap made of
+	it never applies.  Checked here, together, because the coercions above are
+	spread through the builder and a reader should be able to see the whole
+	rule set at once.
+	"""
+
+	ranges: tuple[tuple[str, float, float, float], ...] = (
+		#  key                          value                        min      max
+		# How far ABOVE the room's background a sound must rise, so it is
+		# positive: at or below zero the trigger sits under the room itself and
+		# the detector records continuously.
+		("detection.threshold_db",      cfg.detection.threshold_db,     0.5,   120.0),
+		("detection.warmup_seconds",    cfg.detection.warmup_seconds,   0.0,  3600.0),
+		("analysis.start_bpm",          cfg.analysis.start_bpm,         1.0,  1000.0),
+		("tempo.bpm",                   cfg.tempo.bpm,                  0.0,  1000.0),
+		("library.max_memory_mb",       cfg.library.max_memory_mb,      0.0,  1_000_000.0),
+		("transform.max_memory_mb",     cfg.transform.max_memory_mb,    0.0,  1_000_000.0),
+		("transform.max_disk_mb",       cfg.transform.max_disk_mb,      0.0,  1_000_000.0),
+		("osc.send_port",               float(cfg.osc.send_port),       1.0,  65535.0),
+		("osc.receive_port",            float(cfg.osc.receive_port),    1.0,  65535.0),
+	)
+
+	for key, value, lowest, highest in ranges:
+		if not math.isfinite(value):
+			raise ValueError(f"config.yaml: {key} is {value}, which is not a number")
+
+		if not lowest <= value <= highest:
+			raise ValueError(
+				f"config.yaml: {key} is {value}, outside {lowest} to {highest}"
+			)
 
 
 def _build_config (
@@ -1596,7 +1648,12 @@ def _build_config (
 				tracker.label, ", ".join(unknown),
 			)
 
-	return Config(
+	# A value of the wrong SHAPE — `recorder.audio.input: 3` where a mapping is
+	# expected, a list where a number belongs — reaches the dataclass as a
+	# TypeError, which the CLI does not catch and the user meets as a traceback.
+	# Everything above raises ValueError for a value it can read but not accept;
+	# this makes the unreadable ones say the same kind of thing.
+	config = Config(
 		recorder=recorder,
 		detection=detection,
 		max_memory_mb=global_budget,
@@ -1609,3 +1666,7 @@ def _build_config (
 		osc=osc,
 		ambisonic=ambisonic,
 	)
+
+	_check_values(config)
+
+	return config

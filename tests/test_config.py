@@ -3,6 +3,7 @@
 import dataclasses
 import logging
 import pathlib
+import re
 import textwrap
 import typing
 import unittest.mock
@@ -1845,3 +1846,78 @@ class TestMidiMaps:
 	def test_non_mapping_rejected (self, tmp_path: pathlib.Path) -> None:
 		with pytest.raises(ValueError, match="must be a mapping"):
 			self._load(tmp_path, {"midi_maps": ["a/midi-map.yaml"]})
+
+
+class TestValuesTheAppCannotActOn:
+
+	"""A setting that cannot work should fail when it is read, naming itself.
+
+	Each of these loaded happily and went wrong later, quietly: a detection
+	threshold at or below the room records continuously, a start tempo of 0
+	divides, a negative budget is not a budget, a port above 65535 cannot be
+	bound, and NaN compares false against every limit, so a memory cap made of
+	it never applies to anything.
+	"""
+
+	def _config (self, tmp_path: pathlib.Path, extra: dict) -> pathlib.Path:
+		cfg: dict = {
+			"recorder": {"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1}},
+			"detection": {
+				"threshold_db": 12.0, "hold_seconds": 0.5,
+				"warmup_seconds": 1.0, "floor_adaptation": 0.1,
+			},
+		}
+
+		for section, values in extra.items():
+			cfg.setdefault(section, {})
+			cfg[section].update(values)
+
+		path = tmp_path / "config.yaml"
+		path.write_text(yaml.safe_dump(cfg))
+
+		return path
+
+	@pytest.mark.parametrize(("section", "values", "named"), [
+		("detection", {"threshold_db": 0.0},        "detection.threshold_db"),
+		("detection", {"threshold_db": -40.0},      "detection.threshold_db"),
+		("detection", {"warmup_seconds": -5.0},     "detection.warmup_seconds"),
+		("analysis",  {"start_bpm": 0.0},           "analysis.start_bpm"),
+		("tempo",     {"bpm": -120.0},              "tempo.bpm"),
+		("transform", {"max_disk_mb": -5.0},        "transform.max_disk_mb"),
+		("transform", {"max_memory_mb": float("nan")}, "transform.max_memory_mb"),
+		("osc",       {"send_port": 99999},         "osc.send_port"),
+	])
+	def test_it_is_refused_by_name (
+		self, tmp_path: pathlib.Path, section: str, values: dict, named: str,
+	) -> None:
+		path = self._config(tmp_path, {section: values})
+
+		with pytest.raises(ValueError, match=re.escape(named)):
+			subsample.config.load_config(path)
+
+	@pytest.mark.parametrize(("section", "values"), [
+		("library",   {"max_memory_mb": 600.0}),
+		("transform", {"max_memory_mb": 350.0, "max_disk_mb": 3000.0}),
+	])
+	def test_the_template_lines_load_when_uncommented (
+		self, tmp_path: pathlib.Path, section: str, values: dict,
+	) -> None:
+
+		"""config.yaml.default showed `max_memory_mb: auto`, which fails with
+		"could not convert string to float" the moment anybody uncomments it."""
+
+		assert subsample.config.load_config(self._config(tmp_path, {section: values})) is not None
+
+	def test_a_value_of_the_wrong_shape_reads_as_a_sentence (self, tmp_path: pathlib.Path) -> None:
+
+		"""`recorder.audio.input: 3` where a mapping belongs used to reach the
+		dataclasses as a TypeError, which the CLI does not catch — so the user
+		met a traceback rather than a line naming the file."""
+
+		path = tmp_path / "config.yaml"
+		path.write_text(yaml.safe_dump({
+			"recorder": {"audio": {"sample_rate": 48000, "input": 3}},
+		}))
+
+		with pytest.raises(ValueError, match="wrong shape"):
+			subsample.config.load_config(path)

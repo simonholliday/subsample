@@ -1598,3 +1598,96 @@ class TestDrainingCapturesOnTheWayOut:
 		"""Player-only and watcher-only runs have no capture queue at all."""
 
 		subsample.cli._drain_captures(None, poll=0.0)
+
+
+class TestAnUnreadableMapPathIsReported:
+
+	"""A map that cannot be read should say so, not raise a traceback.
+
+	Only FileNotFoundError was caught, so `player.midi_map: samples` — a
+	directory, and a plausible mistake — came out as a raw traceback, and on
+	the watch-reload path as a traceback from a timer thread rather than
+	"keeping the current map".
+	"""
+
+	def _config (self, tmp_path: pathlib.Path, map_path: pathlib.Path) -> typing.Any:
+		cfg = subsample.config.load_config(None)
+
+		return dataclasses.replace(
+			cfg,
+			player=dataclasses.replace(cfg.player, enabled=True, midi_map=str(map_path)),
+		)
+
+	def test_a_directory_where_a_map_should_be (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		directory = tmp_path / "samples"
+		directory.mkdir()
+
+		with caplog.at_level(logging.ERROR):
+			with pytest.raises(SystemExit):
+				subsample.cli._preload_midi_map(self._config(tmp_path, directory), [])
+
+		assert any("Cannot load the MIDI map" in record.message for record in caplog.records)
+
+	def test_a_map_that_cannot_be_read (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		unreadable = tmp_path / "locked.yaml"
+		unreadable.write_text("assignments: []\n", encoding="utf-8")
+		unreadable.chmod(0o000)
+
+		try:
+			with caplog.at_level(logging.ERROR):
+				with pytest.raises(SystemExit):
+					subsample.cli._preload_midi_map(self._config(tmp_path, unreadable), [])
+
+			assert any("Cannot load the MIDI map" in record.message for record in caplog.records)
+
+		finally:
+			unreadable.chmod(0o644)
+
+
+class TestAnInterruptedStartupStopsWhatItStarted:
+
+	"""Ctrl+C during the library scan used to print a traceback and hang.
+
+	Startup happens before the main loop's own handler exists, and the loads it
+	lands in are the long ones — the library scan is documented as possibly
+	taking a minute.  Transform workers were already running by then, so the
+	interpreter waited on their pool at exit with nothing on screen saying why.
+	"""
+
+	def test_teardowns_run_in_reverse_and_survive_a_failure (self) -> None:
+		stopped: list[str] = []
+
+		subsample.cli._STARTED.clear()
+		subsample.cli._register_teardown(lambda: stopped.append("first"))
+		subsample.cli._register_teardown(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+		subsample.cli._register_teardown(lambda: stopped.append("last"))
+
+		subsample.cli._run_teardowns()
+
+		assert stopped == ["last", "first"], "later subsystems stop first"
+		assert subsample.cli._STARTED == []
+
+	def test_an_interrupt_during_startup_exits_cleanly (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		stopped: list[str] = []
+
+		subsample.cli._STARTED.clear()
+		subsample.cli._register_teardown(lambda: stopped.append("workers"))
+
+		def _interrupted () -> None:
+			raise KeyboardInterrupt
+
+		monkeypatch.setattr(subsample.cli, "_main_impl", _interrupted)
+		monkeypatch.setattr(sys, "argv", ["subsample"])
+
+		with pytest.raises(SystemExit) as exit_info:
+			subsample.cli.main()
+
+		assert exit_info.value.code == 130
+		assert stopped == ["workers"], "the pool was stopped, not left to hang"
+		assert "Interrupted" in capsys.readouterr().err
