@@ -932,3 +932,42 @@ class TestMidiMapWatcher:
 		# A _fire() landing after stop() must not call the reload callback.
 		watcher._fire()
 		assert fired == []
+
+
+class TestACaptureIsIntegratedOnce:
+
+	"""recorder.directory and library.directory are the same by default.
+
+	With `library.watch: true`, the sidecar the recorder writes landed in the
+	watched directory and looked like somebody else's file, so the capture that
+	had just been integrated by its own callback was integrated a second time:
+	the first record evicted by path de-duplication, its variants re-baked, and
+	sample_loaded fired twice.  The watcher already suppresses sidecars it
+	writes itself; now it can be told about the recorder's too.
+	"""
+
+	def test_a_registered_sidecar_is_ignored_once (self, tmp_path: pathlib.Path) -> None:
+		loaded: list[pathlib.Path] = []
+
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=tmp_path,
+			known_sidecars=set(),
+			on_sample_loaded=lambda record: loaded.append(record),
+			target_sample_rate=None,
+			with_preview=False,
+		)
+
+		sidecar = tmp_path / "capture.wav.analysis.json"
+		watcher.note_self_written(sidecar)
+
+		watcher._on_sidecar_event(sidecar)
+
+		assert watcher._timers == {}, "ours, so no load was scheduled"
+
+		# One-shot: a later, genuinely external rewrite still triggers.
+		watcher._on_sidecar_event(sidecar)
+
+		assert list(watcher._timers) == [sidecar.resolve()]
+
+		for timer in watcher._timers.values():
+			timer.cancel()

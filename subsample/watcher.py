@@ -200,6 +200,28 @@ class InstrumentWatcher:
 	# Sidecar path — existing behaviour, unchanged
 	# ------------------------------------------------------------------
 
+	def note_self_written (self, sidecar_path: pathlib.Path) -> None:
+
+		"""Say that this sidecar is about to be written by us, not by somebody else.
+
+		The recorder writes its captures into a directory that is, by default,
+		the very directory this watches: `recorder.directory` and
+		`library.directory` are both `samples/captures`.  The capture is already
+		being integrated by the callback that produced it, so the sidecar
+		arriving as a move event integrated the same sample a second time — the
+		first record evicted by path de-duplication, its variants re-baked, and
+		`sample_loaded` fired twice.
+
+		Call this BEFORE the write.  Suppression is checked when the event
+		arrives, so registering afterwards is a race the writer loses.  It is
+		one-shot, exactly like the watcher's own writes: a later, genuinely
+		external regeneration of the same sidecar still triggers a load.
+		"""
+
+		with self._lock:
+			self._self_written_sidecars.add(sidecar_path.resolve())
+
+
 	def _on_sidecar_event (self, sidecar_path: pathlib.Path) -> None:
 
 		"""Schedule (or reschedule) a debounced load for the given sidecar path.

@@ -592,6 +592,8 @@ def _build_variant_lookup (
 	process: subsample.query.ProcessSpec,
 	transform_manager: typing.Optional[subsample.transform.TransformManager],
 	session_bpm: float,
+	cc_state: typing.Optional[dict[tuple[int, int], int]] = None,
+	cc_omni: typing.Optional[dict[int, int]] = None,
 ) -> typing.Optional[typing.Callable[[int], typing.Optional[subsample.transform.TransformResult]]]:
 
 	"""Shared core for the quantize-aware resolvers below.
@@ -608,27 +610,48 @@ def _build_variant_lookup (
 	if transform_manager is None:
 		return None
 
-	step: typing.Union[subsample.transform.TimeStretch, subsample.transform.PadQuantize]
+	spec: subsample.transform.TransformSpec
 
-	if process.has_stretch_quantize():
-		bpm, grid = _quantize_params(process, "stretch_quantize", session_bpm)
+	if process.has_stretch_quantize() or process.has_pad_quantize():
+		name = "stretch_quantize" if process.has_stretch_quantize() else "pad_quantize"
+		bpm, grid = _quantize_params(process, name, session_bpm)
+
 		if bpm is None or bpm <= 0:
 			return None
-		step = subsample.transform.TimeStretch(
-			target_bpm=float(bpm), resolution=int(grid), beats=_quantize_beats(process),
+
+		# The WHOLE chain, built the way the trigger builds it.  This used to be
+		# a bare quantize step at full strength, which is a different variant
+		# from the one a note plays whenever the map says anything else —
+		# `strength:`, a filter, a knob that has moved.  So `beat_match` ranked
+		# candidates on a render nobody would ever hear, and every candidate
+		# enqueued a rubberband render that was never played.
+		#
+		# repitch is left out: it depends on the note, and this scores an
+		# assignment rather than a note.  A chain with repitch therefore still
+		# looks up a variant the trigger will not use, which is the one case
+		# left and is no worse than it was.
+		spec = subsample.transform.spec_from_process(
+			process,
+			target_bpm=float(bpm),
+			resolution=int(grid),
+			cc_state=cc_state,
+			cc_omni=cc_omni,
 		)
-	elif process.has_pad_quantize():
-		bpm, grid = _quantize_params(process, "pad_quantize", session_bpm)
-		if bpm is None or bpm <= 0:
+
+		if not spec.steps:
 			return None
-		step = subsample.transform.PadQuantize(target_bpm=float(bpm), resolution=int(grid))
+
 	elif session_bpm > 0:
-		# Fall back to session-level stretch_quantize.
-		step = subsample.transform.TimeStretch(target_bpm=float(session_bpm), resolution=_DEFAULT_QUANTIZE_GRID)
+		# No quantize step in the map at all: the session-level stretch is a
+		# synthetic spec by construction, so it is built by hand.
+		spec = subsample.transform.TransformSpec(steps=(
+			subsample.transform.TimeStretch(
+				target_bpm=float(session_bpm), resolution=_DEFAULT_QUANTIZE_GRID,
+			),
+		))
+
 	else:
 		return None
-
-	spec = subsample.transform.TransformSpec(steps=(step,))
 
 	def _lookup (sample_id: int) -> typing.Optional[subsample.transform.TransformResult]:
 		return transform_manager.get_variant(sample_id, spec)
@@ -640,6 +663,8 @@ def _build_beats_resolver (
 	process: subsample.query.ProcessSpec,
 	transform_manager: typing.Optional[subsample.transform.TransformManager],
 	session_bpm: float,
+	cc_state: typing.Optional[dict[tuple[int, int], int]] = None,
+	cc_omni: typing.Optional[dict[int, int]] = None,
 ) -> typing.Optional[typing.Callable[[int], typing.Optional[float]]]:
 
 	"""Build a callable returning the quantized beat count for a sample.
@@ -652,7 +677,7 @@ def _build_beats_resolver (
 	no transform manager is available, or the effective BPM is 0.
 	"""
 
-	lookup = _build_variant_lookup(process, transform_manager, session_bpm)
+	lookup = _build_variant_lookup(process, transform_manager, session_bpm, cc_state, cc_omni)
 	if lookup is None:
 		return None
 
@@ -684,6 +709,8 @@ def _build_energy_profile_resolver (
 	process: subsample.query.ProcessSpec,
 	transform_manager: typing.Optional[subsample.transform.TransformManager],
 	session_bpm: float,
+	cc_state: typing.Optional[dict[tuple[int, int], int]] = None,
+	cc_omni: typing.Optional[dict[int, int]] = None,
 ) -> typing.Optional[typing.Callable[[int], typing.Optional[subsample.transform.GridEnergyProfile]]]:
 
 	"""Build a callable returning the full GridEnergyProfile for a sample.
@@ -696,7 +723,7 @@ def _build_energy_profile_resolver (
 	no transform manager is available, or the effective BPM is 0.
 	"""
 
-	lookup = _build_variant_lookup(process, transform_manager, session_bpm)
+	lookup = _build_variant_lookup(process, transform_manager, session_bpm, cc_state, cc_omni)
 	if lookup is None:
 		return None
 
@@ -2271,6 +2298,7 @@ def _resolve_path_references (
 	*,
 	with_preview: bool,
 	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None,
+	transform_manager: typing.Optional["subsample.transform.TransformManager"] = None,
 ) -> None:
 
 	"""Load references, instruments, and directory samples named by the MIDI map.
@@ -2382,7 +2410,11 @@ def _resolve_path_references (
 			)
 
 			if record is not None:
-				instrument_lib.add(record)
+				# Keep the eviction list.  Dropping it left every ranking and
+				# every cached score pointing at samples the library no longer
+				# holds, so a similarity select could return a dead id, and the
+				# variants of an evicted parent were never released.
+				evicted = instrument_lib.add(record)
 				# Rank the new sample against every reference too.  At startup
 				# this no-ops (references are added just below, and add() early-
 				# returns while the matrix has none) and the add_reference pass
@@ -2391,7 +2423,13 @@ def _resolve_path_references (
 				# loaded samples into their rankings — without it a similarity
 				# select silently never sees them until restart.
 				for matrix in matrices:
+					if evicted:
+						matrix.remove(evicted)
 					matrix.add(record)
+
+				if evicted and transform_manager is not None:
+					transform_manager.on_parent_evicted(evicted)
+
 				loaded += 1
 
 		if loaded > 0:
@@ -2453,12 +2491,18 @@ def _resolve_path_references (
 		if record is None:
 			continue
 
-		instrument_lib.add(record)
+		evicted = instrument_lib.add(record)
+
 		# Path-pinned instruments load AFTER the reference pass above, so the
 		# add_reference snapshot never saw them — rank them into every existing
 		# reference here, or a similarity-ordered pool would never include them.
 		for matrix in matrices:
+			if evicted:
+				matrix.remove(evicted)
 			matrix.add(record)
+
+		if evicted and transform_manager is not None:
+			transform_manager.on_parent_evicted(evicted)
 
 		_log.debug("Added path-based instrument from %s", path)
 
@@ -6084,11 +6128,15 @@ class MidiPlayer:
 		eff_transform  = self._effective_transform_manager
 		all_samples    = eff_library.samples()
 
+		# The same CC values a note-on would resolve with, so the variant that is
+		# scored is the variant that plays.
+		cc_state_now, cc_omni_now = self._snapshot_cc_state()
+
 		beats_resolver = _build_beats_resolver(
-			assignment.process, eff_transform, self._target_bpm,
+			assignment.process, eff_transform, self._target_bpm, cc_state_now, cc_omni_now,
 		)
 		energy_profile_resolver = _build_energy_profile_resolver(
-			assignment.process, eff_transform, self._target_bpm,
+			assignment.process, eff_transform, self._target_bpm, cc_state_now, cc_omni_now,
 		)
 
 		for select_spec in assignment.select:
@@ -6140,6 +6188,10 @@ class MidiPlayer:
 		eff_transform  = self._effective_transform_manager
 		all_samples    = eff_library.samples()
 
+		# One snapshot for the whole rebuild, so every assignment is ranked
+		# against the same CC values a note-on would resolve with.
+		cc_state_now, cc_omni_now = self._snapshot_cc_state()
+
 		ranked_by_assignment: dict[int, list[subsample.library.SampleRecord]] = {}
 		new_cache: dict[int, _Candidates] = {}
 		seen: set[int] = set()
@@ -6154,10 +6206,10 @@ class MidiPlayer:
 				seen.add(assignment_id)
 
 				beats_resolver = _build_beats_resolver(
-					assignment.process, eff_transform, self._target_bpm,
+					assignment.process, eff_transform, self._target_bpm, cc_state_now, cc_omni_now,
 				)
 				energy_profile_resolver = _build_energy_profile_resolver(
-					assignment.process, eff_transform, self._target_bpm,
+					assignment.process, eff_transform, self._target_bpm, cc_state_now, cc_omni_now,
 				)
 
 				ranked: list[subsample.library.SampleRecord] = []

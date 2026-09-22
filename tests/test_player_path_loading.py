@@ -10,6 +10,7 @@ import subsample.library
 import subsample.player
 import subsample.query
 import subsample.similarity
+import subsample.transform
 
 import tests.helpers
 
@@ -258,3 +259,47 @@ class TestPresetSelfContainedLoading:
 		loaded = list(library.samples())
 		assert loaded[0].filepath is not None
 		assert loaded[0].filepath.resolve() == (kick_dir / "k.wav").resolve()
+
+
+class TestEvictionsReachTheOtherSubsystems:
+
+	"""Loading path-pinned samples into a full library evicted older ones, and
+	said nothing to anybody.
+
+	`instrument_lib.add()` returns what it evicted, and this path threw that
+	away: the rankings and score caches kept pointing at samples the library no
+	longer held, so a similarity select could hand back a dead id, and the
+	variants of an evicted parent were never released.  `cli._integrate_sample`
+	has always done both.
+	"""
+
+	def test_an_evicted_sample_leaves_the_rankings (self, tmp_path: pathlib.Path) -> None:
+		matrix = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+		instrument_lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
+		manager = unittest.mock.MagicMock(spec=subsample.transform.TransformManager)
+
+		# The library reports that adding this one pushed two others out.
+		instrument_lib.add.return_value = [41, 42]
+		instrument_lib.find_by_path.return_value = None    # not already loaded
+		instrument_lib.samples.return_value = []
+
+		wav_path, _ = tests.helpers._write_wav_and_sidecar(tmp_path, "pinned")
+
+		# A path-pinned instrument: `name:` holding a path rather than a name.
+		assignment = subsample.query.Assignment(
+			name="pinned",
+			select=(subsample.query.SelectSpec(
+				where=subsample.query.WherePredicate(name_path=str(wav_path.resolve())),
+			),),
+		)
+		note_map: subsample.player.NoteMap = {
+			(9, 36): [(assignment, subsample.query.PickSpec(1, 1))],
+		}
+
+		subsample.player._resolve_path_references(
+			note_map, [matrix], instrument_lib,
+			with_preview=False, transform_manager=manager,
+		)
+
+		matrix.remove.assert_called_with([41, 42])
+		manager.on_parent_evicted.assert_called_with([41, 42])

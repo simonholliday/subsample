@@ -386,16 +386,31 @@ class TestSimilarityMatrix:
 		matrix.add(inst)
 		assert matrix.get_match("BD", 0) == inst.sample_id
 
-	def test_readding_same_id_is_rejected (self) -> None:
-		"""Re-adding an id would orphan a stale RankedMatch in every ranking
-		(remove() scans by id), so add() rejects a duplicate id."""
+	def test_readding_the_same_id_leaves_one_entry_not_two (self) -> None:
+
+		"""Adding a sample twice used to raise, and that raise had a victim.
+
+		A map load snapshots the library and scores it against each new
+		reference; a capture integrated between that snapshot and its own
+		`matrix.add` is in both, so it arrives here already scored.  The
+		exception then aborted the rest of that capture's integration — its
+		variants, the player update — over a sample that had been scored
+		correctly.  Re-adding has to be idempotent, and in particular must not
+		leave a second RankedMatch behind against one score row, because
+		remove() scans by id and would orphan it."""
 
 		matrix = self._matrix("BD")
 		inst = _make_record("I1", _make_spectral())
+
+		matrix.add(inst)
 		matrix.add(inst)
 
-		with pytest.raises(ValueError, match="already present"):
-			matrix.add(inst)
+		assert [m.sample_id for m in matrix._rankings["BD"]].count(inst.sample_id) == 1
+
+		matrix.remove([inst.sample_id])
+
+		assert matrix._rankings["BD"] == []
+		assert inst.sample_id not in matrix._scores
 
 	def test_get_match_case_insensitive (self) -> None:
 		matrix = self._matrix("BD")

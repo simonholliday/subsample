@@ -224,6 +224,7 @@ class SampleProcessor:
 		on_complete: typing.Optional[_OnCompleteCallback] = None,
 		warn_backlog: bool = True,
 		reserve_for_player: bool = False,
+		before_sidecar_write: typing.Optional[typing.Callable[[pathlib.Path], None]] = None,
 	) -> None:
 
 		"""Start the worker pool and ensure the output directory exists.
@@ -244,8 +245,16 @@ class SampleProcessor:
 			                 cores and leaves the rest for the real-time audio
 			                 thread. False (offline/bulk import, no player) keeps
 			                 the historical sizing.
+			before_sidecar_write: Called with the sidecar path just before it is
+			                 written.  A watcher on the same directory uses it to
+			                 recognise the file as ours, so a capture written
+			                 into a watched directory — the default layout — is
+			                 integrated once rather than twice.
 		"""
 
+		# Before, not after: the watcher checks suppression when the event
+		# arrives, so registering afterwards is a race the writer loses.
+		self._before_sidecar_write = before_sidecar_write
 		self._cfg             = cfg
 		self._analysis_params = analysis_params
 		self._on_complete     = on_complete
@@ -674,6 +683,9 @@ class SampleProcessor:
 		# nothing changes.  When preview data is supplied, it is embedded
 		# in the same sidecar so the PNG preview can be redrawn later
 		# without touching the audio.
+		if self._before_sidecar_write is not None:
+			self._before_sidecar_write(subsample.cache.cache_path(filepath))
+
 		subsample.cache.save_cache(
 			audio_path     = filepath,
 			audio_md5      = audio_md5,

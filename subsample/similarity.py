@@ -289,16 +289,22 @@ class SimilarityMatrix:
 		sid = record.sample_id
 
 		with self._lock:
-			# Re-adding an id would bisect.insort a second RankedMatch into every
-			# ranking while overwriting the single _scores row, so remove() (which
-			# scans by id) would later leave one stale match orphaned — the same
-			# desync bulk_add() guards against.  allocate_id is monotonic so this
-			# never happens in practice; reject loudly if it ever does.
+			# A sample can already be scored here without add() having run, so
+			# this cannot be an error.  A map load takes a snapshot of the
+			# library and scores it against each new reference in
+			# add_reference(); a capture integrated between that snapshot and
+			# this call is in both.  It used to raise, and the raise took the
+			# rest of that capture's integration with it — its variants, the
+			# player update — over a sample that had in fact been scored
+			# correctly.
+			#
+			# Dropping the old rows first is what keeps the guard that comment
+			# was about: re-inserting without removing would leave a second
+			# RankedMatch in every ranking against one _scores row, and remove()
+			# scans by id, so one match would later be orphaned.  Scoring is
+			# deterministic, so the rebuilt rows are identical.
 			if sid in self._scores:
-				raise ValueError(
-					f"add() called with sample_id {sid} already present — "
-					f"sample ids must be unique (allocate_id is monotonic)."
-				)
+				self._drop_locked(sid)
 
 			score_row: dict[str, float] = {}
 
@@ -376,14 +382,25 @@ class SimilarityMatrix:
 
 		with self._lock:
 			for sid in sample_ids:
-				ref_scores = self._scores.pop(sid, {})
+				self._drop_locked(sid)
 
-				for ref_name in ref_scores:
-					ranked = self._rankings.get(ref_name)
-					if ranked is None:
-						continue
+	def _drop_locked (self, sample_id: int) -> None:
 
-					ranked[:] = [m for m in ranked if m.sample_id != sid]
+		"""Take one sample out of every ranking and out of the score cache.
+
+		The caller holds the lock: it is a plain Lock rather than an RLock, so
+		this must never take it itself.
+		"""
+
+		ref_scores = self._scores.pop(sample_id, {})
+
+		for ref_name in ref_scores:
+			ranked = self._rankings.get(ref_name)
+
+			if ranked is None:
+				continue
+
+			ranked[:] = [m for m in ranked if m.sample_id != sample_id]
 
 	def get_match (
 		self,

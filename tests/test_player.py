@@ -9146,3 +9146,71 @@ class TestDeclaredBeatCount:
 		"""Nothing else changes: stretching by a ratio needs a tempo to be a ratio of."""
 
 		assert self._spec({"grid": 32}, tempo_bpm=0.0).steps == ()
+
+
+class TestTheScoredVariantIsThePlayedOne:
+
+	"""`beat_match` and `quantized_beats` look up a rendered variant by its spec.
+
+	That lookup used to ask for a bare quantize step at full strength, which is
+	a different variant from the one a note plays whenever the map says anything
+	else — a `strength:`, a filter after it, a knob that has moved.  So the
+	ranking was computed on a render nobody would hear, and every candidate
+	enqueued a rubberband render that was never played.
+	"""
+
+	@staticmethod
+	def _process (steps: list[typing.Any]) -> subsample.query.ProcessSpec:
+		return subsample.query.parse_process(steps, "test")
+
+	def _looked_up (self, process: subsample.query.ProcessSpec) -> subsample.transform.TransformSpec:
+		"""The spec the scorer asks the transform manager for."""
+
+		manager = unittest.mock.MagicMock(spec=subsample.transform.TransformManager)
+		manager.get_variant.return_value = None
+
+		lookup = subsample.player._build_variant_lookup(process, manager, 120.0)
+
+		assert lookup is not None
+		lookup(1)
+
+		spec = manager.get_variant.call_args[0][1]
+		assert isinstance(spec, subsample.transform.TransformSpec)
+
+		return spec
+
+	def test_a_partial_strength_is_the_variant_that_is_scored (self) -> None:
+		process = self._process([{"stretch_quantize": {"grid": 16, "strength": 0.4}}])
+
+		steps = self._looked_up(process).steps
+
+		assert len(steps) == 1
+		assert isinstance(steps[0], subsample.transform.TimeStretch)
+		assert steps[0].amount == pytest.approx(0.4)
+
+	def test_the_rest_of_the_chain_is_there_too (self) -> None:
+
+		"""A filter after the quantiser changes the render, so it changes which
+		variant the note plays — and therefore which one should be ranked."""
+
+		process = self._process([
+			{"stretch_quantize": {"grid": 16}},
+			{"filter_low": {"freq": 800.0}},
+		])
+
+		steps = self._looked_up(process).steps
+
+		assert [type(step).__name__ for step in steps] == ["TimeStretch", "LowPassFilter"]
+
+	def test_it_matches_what_the_trigger_would_build (self) -> None:
+
+		"""The two are the same call now, so they cannot drift apart."""
+
+		process = self._process([
+			{"stretch_quantize": {"tempo": 120, "grid": 8, "strength": 0.7}},
+			{"saturate": {"drive": 3.0}},
+		])
+
+		trigger = subsample.transform.spec_from_process(process, target_bpm=120.0, resolution=8)
+
+		assert self._looked_up(process) == trigger

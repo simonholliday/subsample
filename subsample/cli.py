@@ -761,6 +761,7 @@ def _run_recorder (
 	player_cell: typing.Optional[list[typing.Optional[subsample.player.MidiPlayer]]] = None,
 	app_events: typing.Optional[subsample.events.EventEmitter] = None,
 	processor_cell: typing.Optional[list[typing.Optional[subsample.recorder.SampleProcessor]]] = None,
+	before_sidecar_write: typing.Optional[typing.Callable[[pathlib.Path], None]] = None,
 ) -> None:
 
 	"""Set up an audio input device and run the real-time capture loop.
@@ -875,6 +876,7 @@ def _run_recorder (
 		analysis_params,
 		on_complete=on_complete_callback,
 		reserve_for_player=cfg.player.enabled,
+		before_sidecar_write=before_sidecar_write,
 	)
 
 	# Hand it to the shutdown path, which waits for whatever is still being
@@ -1726,6 +1728,24 @@ def _main_impl () -> None:
 	# _start_player sets this before calling player.run().
 	_player_cell: list[typing.Optional[subsample.player.MidiPlayer]] = [None]
 	_processor_cell: list[typing.Optional[subsample.recorder.SampleProcessor]] = [None]
+	# Declared before the subsystem threads because the recorder is handed the
+	# helper below, which reads this list when a capture is written — by which
+	# time the watchers further down have been added to it.
+	instrument_watchers: list[subsample.watcher.InstrumentWatcher] = []
+
+	def _capture_sidecar_is_ours (sidecar: pathlib.Path) -> None:
+
+		"""Tell every watcher a capture's sidecar is ours, before it is written.
+
+		recorder.directory and library.directory are the same by default, so
+		with library.watch on, the sidecar landing in the watched directory
+		looked like somebody else's file: the capture was integrated a second
+		time, its first record evicted by path de-duplication, its variants
+		re-baked and sample_loaded fired twice.
+		"""
+
+		for watcher in instrument_watchers:
+			watcher.note_self_written(sidecar)
 
 	# Subsystem threads are daemons: an interactive device-selection prompt
 	# blocks in input(), which Ctrl+C (delivered to the main thread) cannot
@@ -1742,7 +1762,7 @@ def _main_impl () -> None:
 				analysis_params, similarity_matrix,
 				shutdown_event, cfg.player.enabled,
 				transform_manager, _player_cell,
-				app_events, _processor_cell,
+				app_events, _processor_cell, _capture_sidecar_is_ours,
 			),
 			name="recorder",
 			daemon=True,
@@ -1776,7 +1796,6 @@ def _main_impl () -> None:
 	# on_watched_sample callback can reference all live subsystems.
 	# Only active when player is enabled — the watcher's purpose is to feed
 	# new samples into the playback pipeline.
-	instrument_watchers: list[subsample.watcher.InstrumentWatcher] = []
 
 	# A null library.directory has nothing to watch — the samples come from the
 	# MIDI map's own predicates, and those directories are not watched (a set on
@@ -1957,6 +1976,7 @@ def _main_impl () -> None:
 					target_sample_rate=reload_sr,
 					with_preview=cfg.recorder.previews,
 					reference_library=reference_library,
+					transform_manager=transform_manager,
 				)
 			except Exception as exc:
 				_log.warning(
