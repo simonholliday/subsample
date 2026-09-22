@@ -2,7 +2,8 @@
 
 Reads audio files in any format supported by soundfile (WAV, BWF, FLAC, AIFF,
 OGG, etc.), trims leading/trailing silence, applies safety fades to prevent
-clicks, re-encodes as standard PCM WAV, runs the full analysis pipeline, and
+clicks, re-encodes in the configured capture format (WAV, or FLAC when
+recorder.audio.audio_format is flac), runs the full analysis pipeline, and
 saves a sidecar JSON alongside each imported file.
 
 The target directory defaults to the configured recorder.directory from

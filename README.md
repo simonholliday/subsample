@@ -2338,7 +2338,8 @@ systemctl --user enable --now pipewire pipewire-pulse wireplumber
 pip install git+https://github.com/simonholliday/subsample.git
 
 # Create a project: a documented config, the ready-to-play GM drum kit map,
-# an editable map template, and the GM reference data the kit matches against
+# and an editable map template.  The GM reference fingerprints the kit matches
+# against ship inside Subsample and are named, so nothing is copied here
 mkdir my-project && cd my-project
 subsample --init
 
@@ -2956,9 +2957,10 @@ text editors are debounced into a single reload.
 ## Reference sample library
 
 Reference samples define the canonical sound classes you want to match against -
-kick drum, snare, hi-hat, etc. Each reference is represented by its
-`.analysis.json` sidecar file alongside the original audio. References are
-declared as path-based `where: { reference: ... }` predicates in the MIDI map:
+kick drum, snare, hi-hat, etc. Each reference is its `.analysis.json`
+fingerprint: the 47 GM references ship inside Subsample as fingerprints alone,
+with no audio, which is what lets a map name one and have it resolve on any
+machine. A reference is named in a `where: { reference: ... }` predicate:
 
 ```yaml map.assignments
 - name: Bass Drum
@@ -2969,9 +2971,10 @@ declared as path-based `where: { reference: ... }` predicates in the MIDI map:
       reference: GM36_BassDrum1
 ```
 
-During player startup, each path-based reference is loaded from its sidecar and
-added to the similarity matrix. If a WAV file exists but its `.analysis.json`
-sidecar is missing, Subsample generates it automatically - you can point at any
+During player startup, each reference is loaded from its sidecar and added to
+the similarity matrix. A path still works, for a reference of your own: if a WAV
+file exists but its `.analysis.json` sidecar is missing, Subsample generates it
+automatically - you can point at any
 WAV file as a reference without pre-processing. For every instrument sample,
 Subsample computes cosine similarity against every reference and maintains a
 ranked list per reference - most similar instrument first. When a sample is
@@ -3307,7 +3310,8 @@ the same thing here as in a `beat_match`/`similarity` MIDI-map query.
 
 Import audio files from any source (SDR captures, commercial sample packs, field
 recordings) directly into the capture library, bypassing the detection pipeline.
-Files are silence-trimmed, safety-faded, re-encoded as standard PCM WAV, fully
+Files are silence-trimmed, safety-faded, re-encoded in the configured capture
+format (WAV, or FLAC when `recorder.audio.audio_format: flac`), fully
 analysed, and saved with sidecar JSON. A large batch is fingerprinted across the
 machine's cores in parallel rather than one file at a time.
 
@@ -3321,7 +3325,8 @@ subsample import --force "/mnt/sdr/audio/2026-01-15/*.wav"
 - `--force` - overwrite existing files in target directory
 
 Handles WAV, BWF (Broadcast Wave Format), FLAC, AIFF, OGG, and any other format
-supported by libsndfile. BWF and non-WAV sources are re-encoded as standard PCM WAV
+supported by libsndfile. BWF and non-WAV sources are re-encoded in the configured
+capture format
 so the rest of the pipeline can load them reliably.
 
 ### Similarity report
@@ -3379,7 +3384,7 @@ PortAudio callback → raw PCM bytes → unpack_audio() → CircularBuffer
                                               trim_silence() → segment PCM
                                                                ↓
                                               SampleProcessor worker pool
-                                              (auto-scaled: (cpu_count - 2) / 2)
+                                              (auto-scaled: a share of the usable cores)
                                                                ↓
                            to_mono_float() → analyze_all() → WAV + sidecar + SampleRecord
 ```

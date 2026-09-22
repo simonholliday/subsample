@@ -644,9 +644,13 @@ def self_similarity_matrix (
 	"""Return the N×N cosine similarity matrix of records against themselves.
 
 	Entry [i, j] is the cosine similarity of records[i] and records[j] on the
-	weighted composite feature vector, in [0, 1] (the fingerprint is non-
-	negative, so no pair is anti-correlated).  The diagonal is ~1.0 for any
-	sample with a non-zero fingerprint, 0.0 for a degenerate (silent) one.
+	weighted composite feature vector.  Normally in [0, 1], but NOT bounded
+	there: the MFCC groups are signed, so a genuinely dissimilar pair can score
+	slightly below zero — -0.0835 has been measured.  The module docstring says
+	the same; this one claimed the fingerprint was non-negative, which is true
+	of the spectral groups alone.  Sort by descending score rather than
+	assuming a range.  The diagonal is ~1.0 for any sample with a non-zero
+	fingerprint, 0.0 for a degenerate (silent) one.
 
 	Memory is O(N²): a few thousand samples is fine (~36 MB at N=3000), but the
 	matrix grows quadratically — callers cataloging very large directories

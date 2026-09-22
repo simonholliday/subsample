@@ -6,11 +6,14 @@ recordings via enqueue() (submit() is the internal executor call); each
 worker independently runs the full pipeline:
   convert → analyze → write audio file (WAV or FLAC per audio_format) → save sidecar → invoke on_complete callback
 
-Worker count is auto-scaled from os.cpu_count() at construction time — no
-configuration needed. Two cores are reserved for audio threads (recorder +
-player callback); half the remainder are used for processing. This degrades
-gracefully to a single worker on a Raspberry Pi and scales up automatically
-on multi-core machines.
+Worker count comes from subsample.parallelism.analysis_worker_count(), which
+is the one place that decides it for every analysis pool in the app: a quarter
+of the usable cores while the player is live, so the audio thread keeps the
+rest, and three quarters otherwise. Usable means the cores this process is
+actually allowed (CPU affinity), not what the machine has. It degrades to a
+single worker on a Raspberry Pi and scales up automatically. This module used
+to carry its own formula — two cores reserved, half the remainder — and on a
+22-core machine the app's three formulas disagreed.
 
 SampleProcessor has no knowledge of similarity scoring, analysis formatting,
 or any other presentation concern. Those belong in the on_complete callback

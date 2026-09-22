@@ -826,9 +826,11 @@ def list_input_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:
 
 def find_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
 
-	"""Return the index of the first input device whose name contains *name*.
+	"""Return the index of the input device the name resolves to.
 
-	Matching is case-insensitive substring search (see _find_device_by_name).
+	Matching follows subsample.devices.match_device_names: the whole name first,
+	then a case-insensitive glob with an implicit `*` at each end.  Several
+	matches prompt over those devices, or raise when there is no terminal.
 	"""
 
 	return _find_device_by_name(pa, name, "input")
@@ -853,9 +855,11 @@ def list_output_devices (pa: pyaudio.PyAudio) -> list[DeviceInfo]:
 
 def find_output_device_by_name (pa: pyaudio.PyAudio, name: str) -> int:
 
-	"""Return the index of the first output device whose name contains *name*.
+	"""Return the index of the output device the name resolves to.
 
-	Matching is case-insensitive substring search (see _find_device_by_name).
+	Matching follows subsample.devices.match_device_names: the whole name first,
+	then a case-insensitive glob with an implicit `*` at each end.  Several
+	matches prompt over those devices, or raise when there is no terminal.
 	"""
 
 	return _find_device_by_name(pa, name, "output")
