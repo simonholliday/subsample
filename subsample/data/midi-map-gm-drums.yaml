@@ -51,7 +51,7 @@
 #   GM 82-87     extended percussion - not included
 #
 # See midi-map.yaml.default for a heavily-commented template if you
-# want to build your own map, and README.md section "MIDI map" for
+# want to build your own map, and https://subsystem.co/subsample/midi-map/ for
 # the full grammar reference.
 #
 # ===================================================================

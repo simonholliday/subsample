@@ -31,13 +31,14 @@
 #              aren't supported - use a list instead.
 #   Your names Mount a definitions file to name your own sounds:
 #              `definitions: { my: project.yaml }` then
-#              `notes: my.dawn_chorus_pheasant`.  See README
+#              `notes: my.dawn_chorus_pheasant`.  See
+#              https://subsystem.co/subsample/midi-map/the-definitions-file/
 #              "Naming your own sounds".
 #
 # Full grammar reference - every field, every predicate, every
 # processor parameter:
 #
-#   README.md, section "MIDI map"
+#   https://subsystem.co/subsample/midi-map/
 #
 # Quick feel for the shape - three minimal examples.  Each one is a
 # complete, working assignment.
@@ -74,7 +75,7 @@
 #   #    (vel 0-63) play a soft sample; hard hits (vel 64-127) play a
 #   #    different sample.  rescale: true remaps each layer's input
 #   #    velocity to the full 0-127 range so each sample still gets full
-#   #    dynamic expression.  See README "Velocity layering" for the dict
+#   #    dynamic expression.  See https://subsystem.co/subsample/midi-map/ for the dict
 #   #    form, custom rescale ranges, and validation rules.
 #   - name: Soft hat
 #     channel: 10
@@ -100,7 +101,7 @@
 #   #    boundaries meet at midpoints; the lowest sample extends down to
 #   #    the keyboard floor and the highest extends up to the ceiling.
 #   #    re-derived live whenever a new sample arrives, a program switches,
-#   #    or the MIDI map reloads.  See README "Zone-tuned" for details.
+#   #    or the MIDI map reloads.  See https://subsystem.co/subsample/midi-map/ for details.
 #   #
 #   #    a) Full keyboard:
 #   - name: Pitched library
@@ -140,7 +141,8 @@
 #   #    sound to be CUT, naming the note(s) that cut it with a fast ~10 ms damp
 #   #    (overriding release, so a one-shot that rings out still stops on cue).
 #   #    `self` makes a sound choke its own re-strikes (a single physical
-#   #    cymbal) and can sit in a list beside notes.  See README "Choke".
+#   #    cymbal) and can sit in a list beside notes.  See
+#   #    https://subsystem.co/subsample/midi-map/
 #   - name: Open Hi-Hat
 #     channel: 10
 #     notes: drum.hi_hat_open

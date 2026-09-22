@@ -2464,7 +2464,8 @@ def _apply_time_stretch (
 	# of the way to its grid point.  Strength says how far a hit moves toward
 	# the grid, not whether the processor runs — so at 0 the sample is still
 	# stretched to the target tempo with its hits left where they fall, which is
-	# what the README has always described (#1474).
+	# what the MIDI map reference describes (#1474):
+	# https://subsystem.co/subsample/midi-map/processing/
 	if step.amount < 1.0:
 		snapped = [
 			start + step.amount * (grid_point - start)

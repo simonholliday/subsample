@@ -283,9 +283,14 @@ class TestEveryReadmeExampleSaysWhatItIs:
 
 	def test_the_readme_holds_examples_to_check (self) -> None:
 
-		"""A change that stopped finding the blocks would pass every test below in silence."""
+		"""A change that stopped finding the blocks would pass every test below in silence.
 
-		assert len(_fenced()) > 50
+		Twenty when this was written: the README held sixty-one until the MIDI
+		map vocabulary moved to subsystem.co's generated reference, which took
+		its examples with it.  The number is a floor against the parser breaking,
+		not a target."""
+
+		assert len(_fenced()) > 20
 
 	@pytest.mark.parametrize(("number", "marker", "body"), _examples())
 	def test_a_block_says_what_it_is_an_example_of (
