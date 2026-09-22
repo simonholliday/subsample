@@ -186,7 +186,7 @@ def json_schema () -> dict[str, typing.Any]:
 	return {
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"title": "Subsample MIDI map",
-		"description": "The file that tells Subsample which sounds each MIDI note plays, how they are processed, and how they play. It holds assignments, and may add templates, programs, other maps to play at the same time, and definitions files that name notes, controllers, MIDI channels and programs.",
+		"description": "The file that tells Subsample which sounds each MIDI note plays, how they are processed, and how they play. It holds assignments, and may add templates, programs, other maps to play at the same time, and definitions files that name notes, controllers, MIDI channels and programs. Numbers are read as written, so a leading zero is just a leading zero: `036` is 36, and note numbers can be lined up in a column without changing which sound plays.",
 		"type": "object",
 		"properties": in_order(subsample.player.VALID_MAP_KEYS, _map_terms(), "map key"),
 		"additionalProperties": False,

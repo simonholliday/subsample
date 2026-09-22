@@ -62,7 +62,7 @@ def json_schema () -> dict[str, typing.Any]:
 	return {
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"title": "Subsample definitions file",
-		"description": "The file a music project keeps its own names in: the notes, controllers, MIDI channels and programs it works with, each given its number once. A MIDI map mounts the file under a prefix it chooses, with `definitions: {my: project.yaml}`, and then writes `my.kick` wherever it would write the number. Subsample reads the four sections below and leaves every other section alone, so the same file can name things for other tools without either tool knowing about the other.",
+		"description": "The file a music project keeps its own names in: the notes, controllers, MIDI channels and programs it works with, each given its number once. A MIDI map mounts the file under a prefix it chooses, with `definitions: {my: project.yaml}`, and then writes `my.kick` wherever it would write the number. Subsample reads the four sections below and leaves every other section alone, so the same file can name things for other tools without either tool knowing about the other. Numbers are read as written, so a leading zero is just a leading zero: `036` is 36, and note numbers can be lined up in a column without changing what they mean.",
 		"type": "object",
 		"properties": subsample.midi_map_schema.in_order(
 			subsample.definitions.CONSUMED_SECTIONS,

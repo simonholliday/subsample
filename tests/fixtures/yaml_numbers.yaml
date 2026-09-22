@@ -1,0 +1,21 @@
+# The numbers YAML 1.1 and YAML 1.2 disagree about.
+#
+# Shared with Subsequence, because a definitions file is one file format read
+# by both tools (decision 18 of subsequence#2991, subsample#3048).  Keep the
+# two copies identical and assert them to the same values in both repositories
+# - that agreement is the only thing that actually keeps the format one
+# format.
+#
+# Under PyYAML's default YAML 1.1 reading, five of these nine come out
+# different: 036 is 30, 042 is 34, 012345 is 5349, 0o42 is the string '0o42',
+# and 1:30 is 90.
+
+octal_looking:       036
+also_octal_looking:  042
+long_run:            012345
+explicit_octal:      0o42
+hexadecimal:         0x2A
+colon_pair:          1:30
+plain:               38
+negative:            -7
+real_float:          1.5

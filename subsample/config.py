@@ -16,6 +16,8 @@ import typing
 
 import yaml
 
+import subsample.yaml_numbers
+
 
 _log = logging.getLogger(__name__)
 
@@ -774,7 +776,7 @@ def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
 
 	try:
 		with path.open("r", encoding="utf-8") as fh:
-			data = yaml.safe_load(fh)
+			data = subsample.yaml_numbers.load(fh)
 	except yaml.YAMLError as exc:
 		raise ValueError(f"Config file {path} contains invalid YAML: {exc}") from exc
 

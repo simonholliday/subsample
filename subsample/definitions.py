@@ -37,6 +37,8 @@ import typing
 
 import yaml
 
+import subsample.yaml_numbers
+
 
 # The sections subsample reads.  Everything else in the file belongs to other
 # tools and is ignored without comment.
@@ -242,7 +244,7 @@ def _load_definitions_file (
 
 	try:
 		with path.open(encoding="utf-8") as fh:
-			raw = yaml.safe_load(fh)
+			raw = subsample.yaml_numbers.load(fh)
 	except (OSError, yaml.YAMLError) as exc:
 		raise ValueError(
 			f"definitions file {path} (prefix {prefix!r}) could not be "

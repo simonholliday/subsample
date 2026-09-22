@@ -78,6 +78,7 @@ import subsample.library
 import subsample.query
 import subsample.similarity
 import subsample.transform
+import subsample.yaml_numbers
 
 
 _log = logging.getLogger(__name__)
@@ -2859,7 +2860,7 @@ def load_midi_map (
 	midi_map_dir = path.parent
 
 	with path.open(encoding="utf-8") as fh:
-		raw = yaml.safe_load(fh)
+		raw = subsample.yaml_numbers.load(fh)
 
 	if raw is None:
 		_log.warning("MIDI map %s is empty — no notes will be mapped", path)
@@ -3389,7 +3390,7 @@ def is_ensemble (path: pathlib.Path) -> bool:
 
 	try:
 		with path.open(encoding="utf-8") as handle:
-			raw = yaml.safe_load(handle)
+			raw = subsample.yaml_numbers.load(handle)
 	except (OSError, yaml.YAMLError):
 		return False
 
@@ -3528,7 +3529,7 @@ def _read_ensemble_includes (
 		raise FileNotFoundError(f"MIDI map not found: {path}")
 
 	with path.open(encoding="utf-8") as handle:
-		raw = yaml.safe_load(handle)
+		raw = subsample.yaml_numbers.load(handle)
 
 	if not isinstance(raw, dict):
 		raise ValueError(
