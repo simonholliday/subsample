@@ -53,6 +53,14 @@ a sister application can implement it identically):
 Before this existed, matching took the FIRST substring match and used it
 silently, which resolved ambiguity by enumeration order — the same class of
 surprise the volatile numbering causes in the first place.
+
+**This prose has an executable half.**  ``tests/fixtures/device_matching.yaml``
+holds the cases, from names real backends reported, and Subsequence keeps an
+identical copy and asserts the same answers (#623).  A change to the rule
+changes that file in both repositories, or one of the two suites fails.
+``tests/test_devices_live.py`` checks the two promises above, that a whole name
+selects its device and that wildcarding the moving number still finds it,
+against whatever this machine's backends report (#331).
 """
 
 import fnmatch

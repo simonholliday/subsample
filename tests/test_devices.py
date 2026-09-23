@@ -21,12 +21,15 @@ AUDIO_NAMES = [
 	"HDA Intel PCH: ALC256 Analog (hw:1,0)",
 ]
 
+# rtmidi reports a hardware port under its own client's name, and only a port
+# rtmidi itself created (a virtual port) under "RtMidiIn Client".  Checked
+# against a real backend in tests/test_devices_live.py (#331).
 MIDI_NAMES = [
 	"RtMidiIn Client:Subsample Virtual MIDI 129:0",
-	"RtMidiIn Client:U6MIDI Pro Port 1 16:0",
-	"RtMidiIn Client:U6MIDI Pro Port 2 16:1",
-	"RtMidiIn Client:U6MIDI Pro Port 3 16:2",
-	"RtMidiIn Client:Midi Through Port-0 14:0",
+	"U6MIDI Pro:U6MIDI Pro Port 1 16:0",
+	"U6MIDI Pro:U6MIDI Pro Port 2 16:1",
+	"U6MIDI Pro:U6MIDI Pro Port 3 16:2",
+	"Midi Through:Midi Through Port-0 14:0",
 ]
 
 # Names PortAudio reports on the author's machine under PipeWire, where three of
@@ -130,7 +133,7 @@ class TestMatchDeviceNames:
 
 		assert len(self._matched("*U6MIDI Pro*", MIDI_NAMES)) == 3
 		assert self._matched("*U6MIDI Pro *:0", MIDI_NAMES) == [
-			"RtMidiIn Client:U6MIDI Pro Port 1 16:0",
+			"U6MIDI Pro:U6MIDI Pro Port 1 16:0",
 		]
 
 	def test_wildcard_covers_a_renumbered_midi_client (self) -> None:
