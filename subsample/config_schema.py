@@ -257,8 +257,8 @@ def json_schema () -> dict[str, typing.Any]:
 							"channels": _setting(
 								"integer",
 								"""
-								Number of input channels to capture.  `null` uses the
-								channel count the selected device reports.  Must be `4`
+								Number of input audio channels to capture.  `null` uses
+								as many as the selected device reports.  Must be `4`
 								when `ambisonic_format` is set.
 								""",
 								default=None,
@@ -303,7 +303,7 @@ def json_schema () -> dict[str, typing.Any]:
 							"ambisonic_format": _setting(
 								"string",
 								"""
-								Treats the four input channels as ambisonic, and stores
+								Treats the four input audio channels as ambisonic, and stores
 								each recording as first-order AmbiX B-format.  `a_generic`
 								is tetrahedral A-format with the capsules in the order
 								front-left-up, front-right-down, back-left-down, and
@@ -418,7 +418,7 @@ def json_schema () -> dict[str, typing.Any]:
 						followed by the path to a sample set's MIDI map, as in
 						`10: kits/home/midi-map.yaml`.  Gives the same result as an
 						ensemble map declaring the same `maps:` block.  Use an ensemble
-						map instead to name channels from a `definitions:` file, or to
+						map instead to name MIDI channels from a `definitions:` file, or to
 						reload the bindings while running, since Subsample does not
 						watch `config.yaml`.  Cannot be set together with `midi_map`.
 						Pair it with `library.directory: null` to load only the samples
@@ -513,7 +513,7 @@ def json_schema () -> dict[str, typing.Any]:
 							"channels": _setting(
 								"integer",
 								"""
-								Number of output channels, in SMPTE order.  `null` plays in
+								Number of output audio channels, in SMPTE order.  `null` plays in
 								stereo.  Set it to the interface's output count when the
 								MIDI map routes instruments to separate outputs.  Subsample
 								refuses to start when the device has fewer outputs.
@@ -738,9 +738,8 @@ def json_schema () -> dict[str, typing.Any]:
 					"weight_band_energy": _similarity_weight(
 						"""
 						Weight of the band energy group: how a sound's energy and decay
-						divide between the bass, low-mid, high-mid, and high frequency
-						bands.  Raise it for drum libraries, and lower it for pitched
-						instruments.
+						divide between the bass, low-mid, high-mid, and high spectral bands.
+						Raise it for drum libraries, and lower it for pitched instruments.
 						""",
 						default=1.0,
 					),
