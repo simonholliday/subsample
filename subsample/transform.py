@@ -1042,7 +1042,12 @@ _VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
 #    than from where it was recorded, so EVERY strength renders differently —
 #    at full strength the hits used to stay where they were played and only the
 #    tail was stretched.
-TRANSFORM_VERSION: str = "3"
+# 4: pad_quantize's first segment starts at the crop point rather than at the
+#    attack, so the faded-in lead the crop keeps in front of the first hit
+#    survives, and its target moves back by the same margin (M8, f683d82).
+#    That shipped in v0.5.0 without this bump, so a disk cache written under
+#    v0.4.1 went on serving the old renders (#3255).
+TRANSFORM_VERSION: str = "4"
 
 
 def variant_cache_key (

@@ -2510,6 +2510,39 @@ class TestVariantDiskCache:
 		assert loaded.level.rms == pytest.approx(result.level.rms, abs=1e-5)
 		assert loaded.duration == pytest.approx(result.duration, abs=1e-3)
 
+	def test_a_render_cached_under_an_earlier_version_is_not_served (
+		self,
+		tmp_path: pathlib.Path,
+		monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""The upgrade case TRANSFORM_VERSION exists for (#3255).
+
+		The disk cache outlives an upgrade, which is the whole reason the
+		version is in the key: a render stored under an earlier version must
+		miss.  v0.5.0 changed pad_quantize's output and kept the version at
+		"3", so a render cached under v0.4.1 was served with the old audio.
+		"""
+
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
+		)
+		result = self._make_result()
+		spec = result.key.spec
+		current = subsample.transform.TRANSFORM_VERSION
+
+		monkeypatch.setattr(subsample.transform, "TRANSFORM_VERSION", "3")
+		cache.put("test_md5", spec, result)
+
+		assert cache.get("test_md5", spec, result.key) is not None, (
+			"the render did not read back under the version it was stored with"
+		)
+
+		monkeypatch.setattr(subsample.transform, "TRANSFORM_VERSION", current)
+
+		assert current != "3", "v0.5.0's pad_quantize change still has no version of its own"
+		assert cache.get("test_md5", spec, result.key) is None
+
 	def test_miss_returns_none (self, tmp_path: pathlib.Path) -> None:
 		"""Non-existent key returns None."""
 		cache = subsample.transform.VariantDiskCache(
