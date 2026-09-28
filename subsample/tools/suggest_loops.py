@@ -73,6 +73,19 @@ def _render (path: pathlib.Path, loop: subsample.loopfind.LoopPoints, audio: num
 	soundfile.write(str(out_dir / f"{path.stem}_loop_butt.wav"), butt, sr)
 
 
+# What the output means, printed at the end of --help and published with it on
+# subsystem.co's command-line reference (#3843).  The help formatter keeps
+# these lines as written, so they are wrapped by hand, within 79 columns.
+_OUTPUT: typing.Final[str] = """\
+output:
+  A line for each sample tried: where its loop starts and ends in seconds, the
+  loop's length, the crossfade across its join, junction_flux, near 1 for a
+  seamless join and higher for an audible jump, and the tail left after the
+  loop for the note's release.  A sample with no clean loop plays without
+  looping.
+"""
+
+
 def parser () -> argparse.ArgumentParser:
 
 	"""Build the parser for `subsample loops`, without parsing anything.
@@ -84,6 +97,8 @@ def parser () -> argparse.ArgumentParser:
 	command = argparse.ArgumentParser(
 		prog="subsample loops",
 		description="Find and audition loop points for loop-candidate samples",
+		epilog=_OUTPUT,
+		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
 	command.add_argument("paths", type=pathlib.Path, nargs="+", help="Audio files or directories")
 	command.add_argument(

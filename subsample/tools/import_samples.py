@@ -308,6 +308,16 @@ def _import_file (
 	return True
 
 
+# What the output means, printed at the end of --help and published with it on
+# subsystem.co's command-line reference (#3843).  The help formatter keeps
+# these lines as written, so they are wrapped by hand, within 79 columns.
+_OUTPUT: typing.Final[str] = """\
+output:
+  A line for each file imported: its name, its length in seconds, and its peak
+  and loudness (rms) in dBFS.  A file not imported says why.
+"""
+
+
 def parser () -> argparse.ArgumentParser:
 
 	"""Build the parser for `subsample import`, without parsing anything.
@@ -319,6 +329,8 @@ def parser () -> argparse.ArgumentParser:
 	command = argparse.ArgumentParser(
 		prog="subsample import",
 		description="Import pre-trimmed audio files into the Subsample capture library.",
+		epilog=_OUTPUT,
+		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
 	command.add_argument(
 		"--to",

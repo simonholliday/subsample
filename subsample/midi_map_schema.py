@@ -208,7 +208,7 @@ def _map_terms () -> dict[str, typing.Any]:
 			"examples": [10],
 		},
 		"programs": {
-			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names.",
+			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names. Each program is selected by its Program Change number alone, so a map holds up to 128, and Bank Select messages are not read. Each keeps its own samples in memory, and one too large for `library.max_memory_mb` is reported at startup, since switching to it then reloads samples from disk. A change to this block, to `program_channel` or `default_program`, or to a preset's own file takes a restart.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/program"},
 			"examples": [[
@@ -248,7 +248,7 @@ def _map_terms () -> dict[str, typing.Any]:
 			}]],
 		},
 		"maps": {
-			"description": "Other maps to play at the same time, each on its own MIDI channel, which makes this map an ensemble. A map included here may not include maps of its own.",
+			"description": "Other maps to play at the same time, each on its own MIDI channel, which makes this map an ensemble. A map included here may not include maps or declare programs of its own, and two maps may not claim the same note on the same MIDI channel. Only this file is watched for edits, so a change to an included map takes a restart.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/included_map"},
 			"examples": [["drums.yaml", {"map": "bass.yaml", "channel": 2}]],
@@ -393,7 +393,7 @@ def _assignment_terms () -> dict[str, typing.Any]:
 			"examples": ["Kick"],
 		},
 		"template": {
-			"description": "The template, or the templates in order, that the assignment starts from. A later template overrides an earlier one, and the assignment's own fields override them all.",
+			"description": "The template, or the templates in order, that the assignment starts from. A later template overrides an earlier one, and the assignment's own fields override them all. A template the map does not define is refused, with the list of those it does.",
 			"anyOf": [
 				{"type": "string"},
 				{"type": "array", "items": {"type": "string"}, "minItems": 1},
@@ -1226,7 +1226,7 @@ def _program () -> dict[str, typing.Any]:
 			"examples": ["kits/acoustic"],
 		},
 		"map": {
-			"description": "A whole map, with its own assignments and samples, relative to this map. It may not declare programs of its own.",
+			"description": "A whole map, with its own assignments and samples, relative to this map. Its own paths resolve from its own folder, so a kit's folder works as one unit, and a switch to the program changes the assignments and the samples together. It may not declare programs of its own.",
 			"type": "string",
 			"minLength": 1,
 			"examples": ["kits/808-kit.yaml"],
@@ -1257,7 +1257,7 @@ def _included_map () -> dict[str, typing.Any]:
 			"examples": ["drums.yaml"],
 		},
 		"channel": {
-			"description": "The MIDI channel to play the map on, in place of the one it declares. An assignment that names its own MIDI channel keeps it.",
+			"description": "The MIDI channel to play the map on, in place of the one it declares. An assignment that names its own MIDI channel keeps it, with a warning.",
 			"$ref": "#/$defs/channel",
 			"examples": [2],
 		},

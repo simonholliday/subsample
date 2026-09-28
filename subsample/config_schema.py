@@ -43,8 +43,12 @@ def json_schema () -> dict[str, typing.Any]:
 			Subsample reads `config.yaml` from the directory it runs in, or the file
 			named with `--config`, and lays it over the defaults in the
 			`config.yaml.default` file it ships.  A file needs only the settings it
-			changes.  Relative paths resolve against the directory Subsample runs in,
-			and a key Subsample does not read is reported by name at start-up and
+			changes: a section merges setting by setting, so a file that sets
+			`recorder.audio.device` keeps every other recorder setting, while a
+			value or a list replaces the default whole.  `subsample --init` writes
+			a `config.yaml` holding every setting with its comment, to edit from.
+			Relative paths resolve against the directory Subsample runs in, and a
+			key Subsample does not read is reported by name at start-up and
 			ignored.
 		"""),
 		"type": "object",
@@ -66,9 +70,20 @@ def json_schema () -> dict[str, typing.Any]:
 			),
 			"osc": _section(
 				"""
-				Open Sound Control (OSC): Subsample sends a message when a sample is
-				captured or loaded, and can receive requests to import audio files.
-				Requires the optional `python-osc` package.
+				Open Sound Control (OSC): Subsample tells other software about its
+				samples, and can take audio files from it.  It sends
+				`/sample/captured` when a new recording has been analysed, with its
+				file path, its duration in seconds, `pitch_hz`, `pitch_class`, its
+				tempo in BPM and its number of onsets; and `/sample/loaded` when a
+				sample joins the library from a capture, the watched directory or an
+				import, with its name, duration, `pitch_hz` and `pitch_class`.
+				`pitch_hz` is 0 when no pitch is heard, and `pitch_class`, 0 to 11
+				counting from C, is the pitch class holding most of the sound's
+				energy, or -1 for a sound too short or too quiet to measure.  With
+				`receive_enabled`, a `/sample/import` message naming an audio file
+				has Subsample analyse the file where it is and add it to the library
+				until the next restart; to keep it, put it in `library.directory` as
+				well.  Requires the optional `python-osc` package.
 				""",
 				{
 					"enabled": _setting(
@@ -217,7 +232,11 @@ def json_schema () -> dict[str, typing.Any]:
 						"""
 						Writes a visual preview of every captured or imported sample:
 						a `.preview.png` thumbnail beside the audio, and the data it is
-						drawn from inside the `.analysis.json` sidecar.  Set `false` to
+						drawn from inside the `.analysis.json` sidecar, from which a
+						missing thumbnail is redrawn at the next start-up without
+						analysing the audio again.  A file manager shows the thumbnail
+						as a file of its own, not as the audio file's icon, since
+						Subsample never writes into an audio file.  Set `false` to
 						write neither.
 						""",
 						default=True,
@@ -231,14 +250,21 @@ def json_schema () -> dict[str, typing.Any]:
 								Input device to capture from, matched against device names
 								without regard to case.  The value may use wildcards: `*`
 								matches any run of characters and `?` matches one, and it
-								may match anywhere in the name.  Use `*` for a number the
-								system assigns at each start, such as the card index in
-								`hw:2,0`.  A device's full name selects that device, even
+								may match anywhere in the name.  A name can carry a number
+								the system assigns at each start, such as the card index in
+								`hw:2,0`: write `*` for that number and keep the one after
+								it, which does not move, as in `hw:*,0`.  Prefer `*` to `?`,
+								which stops matching once the number has two digits.  On
+								Linux with PipeWire, the names beginning `alsa_input.usb-`
+								are built from the device's own identity and hold no number
+								that moves.  A device's full name selects that device, even
 								where a longer name contains it.  When the value matches
-								several devices, Subsample asks which to use.  `null`
-								selects the only input device when there is one, and
-								otherwise asks.  `subsample --list-devices` prints the
-								names.
+								several devices, Subsample asks which to use, offering only
+								those; when it matches none, it warns and asks from every
+								input device.  With no terminal to ask in, it lists the
+								devices and stops rather than waiting.  `null` selects the
+								only input device when there is one, and otherwise asks.
+								`subsample --list-devices` prints the names.
 								""",
 								default=None,
 								nullable=True,
@@ -296,8 +322,9 @@ def json_schema () -> dict[str, typing.Any]:
 								lossless and smaller, and supports 16 and 24-bit: under
 								`flac`, a 32-bit imported file is still written as `.wav`,
 								and live capture with `bit_depth: 32` is refused at
-								start-up.  Samples already in the library load whatever
-								this is set to.
+								start-up, so under `flac` a folder fed from mixed sources
+								holds both kinds.  Samples already in the library load
+								whatever this is set to.
 								""",
 								default="wav",
 								enum=["wav", "flac"],
@@ -424,7 +451,10 @@ def json_schema () -> dict[str, typing.Any]:
 						reload the bindings while running, since Subsample does not
 						watch `config.yaml`.  Cannot be set together with `midi_map`.
 						Pair it with `library.directory: null` to load only the samples
-						the sets name.
+						the sets name.  A relative path resolves from the directory
+						Subsample runs in.  The rules of an ensemble's `maps:` hold:
+						two sets may not claim the same note on the same MIDI channel,
+						and a set may not declare `maps:` or `programs:` of its own.
 						""",
 						default=None,
 						nullable=True,
@@ -434,7 +464,15 @@ def json_schema () -> dict[str, typing.Any]:
 						"""
 						Reloads the MIDI map when its file changes, so an edit takes
 						effect on the next note without a restart.  Several saves in
-						quick succession count as one change.  Requires `midi_map`.
+						quick succession count as one change, and a map that fails to
+						load is reported while the one already loaded keeps playing.
+						Only the file `midi_map` names is watched: an edit to a set an
+						ensemble includes, or to a `definitions:` file, needs a
+						restart, and so does a change to `programs:`,
+						`program_channel:` or `default_program:`.  Watching relies on
+						the file system's notice of a change, which does not cross
+						machines, so a map on a network drive edited from another
+						machine is not reloaded.  Requires `midi_map`.
 						""",
 						default=False,
 					),
@@ -457,7 +495,10 @@ def json_schema () -> dict[str, typing.Any]:
 						case: `*` matches any run of characters and `?` matches one.
 						On Linux a MIDI device's name carries a client number that
 						changes between runs, so use `*` for it and keep the port
-						number after the colon.  `null` selects the only MIDI input
+						number after the colon.  An interface with several ports lists
+						a name for each, so without the port the value matches them all
+						and asks which at every start; `*U6MIDI Pro *:0` names one port
+						for good.  `null` selects the only MIDI input
 						when there is one, and otherwise asks.  Ignored when
 						`virtual_midi_port` is set.
 						""",
@@ -554,7 +595,10 @@ def json_schema () -> dict[str, typing.Any]:
 						"""
 						How far, in dB, a sound must rise above the room's background
 						level to start a recording.  Lower values catch quieter sounds
-						and trigger more often on noise.  Raise it in a noisy room.
+						and trigger more often on noise.  The background itself wanders
+						by several dB from moment to moment, most of all in a quiet
+						room, so a value inside that wander starts recordings that hold
+						nothing.  Raise it in a noisy room.
 						""",
 						default=12.0,
 					),
@@ -630,8 +674,10 @@ def json_schema () -> dict[str, typing.Any]:
 						fade to silence.  Use it with `release_threshold_db` to cut a
 						take of spaced hits apart.  A sound with a slow or two-stage
 						attack can read its own second transient as a new hit, so raise
-						`hold_seconds` to cover the attack.  `null` turns re-triggering
-						off.
+						`hold_seconds` to cover the attack.  Keep it above the
+						background's own wander: a small rise can be met by the noise a
+						tail decays into, which saves a sample of nothing, or a real hit
+						with silence in front of it.  `null` turns re-triggering off.
 						""",
 						default=None,
 						nullable=True,
@@ -654,7 +700,8 @@ def json_schema () -> dict[str, typing.Any]:
 						Subsample to keep it.  A recording peaking below it is
 						discarded, which stops a quiet room's own noise being saved as
 						a sample.  Set it below the peak of the quietest sound you want
-						to keep.  `null` keeps every recording.
+						to keep, and lower it first if real sounds go missing.  `null`
+						keeps every recording.
 						""",
 						default=None,
 						nullable=True,
@@ -786,6 +833,9 @@ def json_schema () -> dict[str, typing.Any]:
 						that ships with Subsample, so a name such as `GM46_OpenHiHat`
 						resolves on any machine.  Set it to a directory of your own
 						references, whose names then replace the built-in ones.  A
+						reference is the `.analysis.json` sidecar Subsample writes
+						beside an audio file it analyses, named after that file without
+						its extension, and a map may write the name in any case.  A
 						reference given as a path is not affected.
 						""",
 						default=None,
@@ -795,10 +845,15 @@ def json_schema () -> dict[str, typing.Any]:
 						"boolean",
 						"""
 						Loads audio files that appear in `library.directory` while
-						Subsample runs, without a restart.  Subsample waits until a
-						file stops growing, analyses it when it has no sidecar, and adds
-						it to the library.  Only the top level of the directory is
-						watched.  Requires `library.directory` and `player.enabled`.
+						Subsample runs, without a restart, whatever wrote them: another
+						Subsample, a DAW or a script.  Subsample waits until a file
+						stops growing, analyses it when it has no sidecar, and adds it
+						to the library; a file that arrives with its sidecar, as
+						another Subsample's captures do, is not analysed again.  A file
+						deleted or renamed away leaves the library too.  Only the top
+						level of the directory is watched, and the files read are WAV,
+						FLAC, AIFF, OGG and MP3.  Requires `library.directory` and
+						`player.enabled`.
 						""",
 						default=False,
 					),

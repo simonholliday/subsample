@@ -197,6 +197,43 @@ def _analyze_file (
 	return True
 
 
+# What the output means, printed at the end of --help and published with it on
+# subsystem.co's command-line reference (#3843).  The help formatter keeps
+# these lines as written, so they are wrapped by hand, within 79 columns.
+_OUTPUT: typing.Final[str] = """\
+output:
+  rhythm     the tempo in BPM, and the beats, pulses and onsets found
+  attacks    each hit's start in seconds, and its level in dB against the
+             loudest hit, which reads 0.0dB; a hit far below the rest is a
+             ghost note
+  spectral   the length in seconds, then measures from 0 to 1:
+               flatness    0 tonal, 1 noisy
+               attack      0 instant, 1 a gradual build
+               release     0 a sudden stop, 1 a long decay
+               centroid    0 bassy, 1 bright
+               bandwidth   0 a pure tone, 1 spectrally complex
+               zcr         how often the wave crosses zero: 0 smooth, 1 noisy
+               harmonic    0 percussive, 1 harmonic
+               contrast    0 a flat spectrum, 1 strong spectral peaks
+               voiced      the share of the sound with a detected pitch
+               log_attack  0 an instant onset, 1 a very slow one
+               flux        0 a steady spectrum, 1 a fast-changing one
+               rolloff     0 energy low down, 1 energy reaching the top
+               slope       0 bass-heavy, 0.5 about flat, 1 treble-heavy
+  pitch      the pitch in Hz and its pitch class (chroma), or none;
+             pitch_conf, from 0 to 1, is how sure the pitch is, stability is
+             how far it wanders in semitones, and voiced_frames how many
+             frames hold a pitch
+  level      the peak, the loudness (rms) and, when it can be measured, the
+             room's floor, in dBFS, and the crest factor, peak over loudness,
+             in dB; rms sets the playback gain
+  noisiness  from 0, a clean hit or tone, to 1, noise from end to end such as
+             static; a sustained unpitched sound scores high too
+  loop       the loop found, its length and crossfade, and junction_flux,
+             near 1 for a seamless join; none when there is no clean loop
+"""
+
+
 def parser () -> argparse.ArgumentParser:
 
 	"""Build the parser for `subsample analyze`, without parsing anything.
@@ -207,7 +244,12 @@ def parser () -> argparse.ArgumentParser:
 
 	command = argparse.ArgumentParser(
 		prog="subsample analyze",
-		description="Analyse audio files and print their detected metrics (rhythm, spectral, pitch, level, loop).",
+		description=(
+			"Analyse audio files and print their detected metrics (rhythm, spectral,\n"
+			"pitch, level, loop)."
+		),
+		epilog=_OUTPUT,
+		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
 	command.add_argument(
 		"files",

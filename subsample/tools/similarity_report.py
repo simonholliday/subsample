@@ -23,6 +23,17 @@ import subsample.similarity
 import subsample.tools._shared
 
 
+# What the output means, printed at the end of --help and published with it on
+# subsystem.co's command-line reference (#3843).  The help formatter keeps
+# these lines as written, so they are wrapped by hand, within 79 columns.
+_OUTPUT: typing.Final[str] = """\
+output:
+  For each reference, the library samples most like it, best first: the rank,
+  the sample's number in this run, how alike the two sound, where 1 is the
+  same, the sample's name and its file.
+"""
+
+
 def parser () -> argparse.ArgumentParser:
 
 	"""Build the parser for `subsample similar`, without parsing anything.
@@ -34,6 +45,8 @@ def parser () -> argparse.ArgumentParser:
 	command = argparse.ArgumentParser(
 		prog="subsample similar",
 		description="Show the top-N most similar instrument samples for each reference",
+		epilog=_OUTPUT,
+		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
 	command.add_argument(
 		"--top",

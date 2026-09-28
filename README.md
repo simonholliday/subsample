@@ -1405,8 +1405,9 @@ When `osc.enabled` is true, Subsample sends two events:
 | `/sample/captured` | A new live recording has been analysed | `filepath:str, duration:float, pitch_hz:float, pitch_class:int, tempo_bpm:float, onset_count:int` |
 | `/sample/loaded` | A sample has been added to the instrument library (live capture, hot-load, or OSC import) | `name:str, duration:float, pitch_hz:float, pitch_class:int` |
 
-`pitch_class` is `0..11` for tonal samples (C=0, C#=1, ..., B=11) or `-1`
-when no stable pitch is detected. `pitch_hz` is `0.0` when unpitched.
+`pitch_class` is `0..11` (C=0, C#=1, ..., B=11), the pitch class holding most
+of the sound's energy whether or not it is pitched, or `-1` for a sound too
+short or too quiet to measure. `pitch_hz` is `0.0` when no pitch is heard.
 
 ### Incoming messages
 

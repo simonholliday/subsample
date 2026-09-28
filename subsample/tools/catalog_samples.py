@@ -495,6 +495,46 @@ def _emission_plan (
 	return [(index, None) for index in range(len(loaded))]
 
 
+# What the output means, printed at the end of --help and published with it on
+# subsystem.co's command-line reference (#3843).  The help formatter keeps
+# these lines as written, so they are wrapped by hand, within 79 columns.
+_OUTPUT: typing.Final[str] = """\
+columns:
+  pitched        passes the stable-pitch test, so `pitched: true` selects it
+                 and it can be re-pitched across a keyboard
+  quantizable    has at least two hits, so `stretch_quantize` and
+                 `pad_quantize` can align them to a beat grid
+  loopable       holds a steady sound worth looping while a key is held, so
+                 `loopable: true` selects it; loop_ms is the loop found,
+                 blank when no clean loop point was found
+  impact_ms      how far into the file the loudest event begins: 0 for a
+                 struck drum, later for a hi-hat pedal or a shaker drawn
+                 back before the beat
+  impact_pre_db  the level before that event, against the sample's peak;
+                 near 0 dB, the file holds several events of similar
+                 loudness
+  pitch_hz, pitch_confidence, pitch_stability_st, voiced_fraction,
+  voiced_frame_count, harmonic_ratio, duration_s
+                 the seven measures the stable-pitch test reads, to see why
+                 a sample passes or fails it
+  snr_db         how far the loudest moment rises above the quiet ones; low
+                 means room tone with no real event in it
+  near_silent    nothing in it is loud enough to be an event
+  clipping_risk  it peaks at digital full scale, and may be distorted
+  noisiness      from 0, a clean hit or tone, to 1, noise from end to end;
+                 a sustained unpitched sound scores high too
+  band_sub_bass, band_low_mid, band_high_mid, band_presence
+                 each spectral band's share of the sound's energy
+  group, group_size, group_keeper
+                 with --group: the pile of near-identical takes a sample is
+                 in, how many takes it holds, and yes for the suggested take
+                 to keep, the loudest, whose clipping_risk is worth a look
+
+The capability columns run the tests the player runs, so they show the pool a
+MIDI map would draw from.
+"""
+
+
 def parser () -> argparse.ArgumentParser:
 
 	"""Build the parser for `subsample catalog`, without parsing anything.
@@ -505,7 +545,12 @@ def parser () -> argparse.ArgumentParser:
 
 	command = argparse.ArgumentParser(
 		prog="subsample catalog",
-		description="Write a CSV of every sample's detected properties, or list samples matching a capability filter",
+		description=(
+			"Write a CSV of every sample's detected properties, or list samples\n"
+			"matching a capability filter"
+		),
+		epilog=_OUTPUT,
+		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
 	command.add_argument(
 		"directory",
