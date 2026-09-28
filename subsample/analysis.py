@@ -110,6 +110,17 @@ warnings.filterwarnings("ignore", message="n_fft=", category=UserWarning)
 # MFCC computation still succeeds — affected coefficients are zero — and the
 # impact on similarity matching for these edge-case samples is negligible.
 warnings.filterwarnings("ignore", message="Empty filters detected in mel frequency basis", category=UserWarning)
+# librosa 1.0 compiles two of its numba functions, behind a spectrogram's
+# magnitudes and its phase, the first time each kind of number reaches them.
+# Analysis threads that start together can each compile the same one, and
+# numba warns for every compile after the first; the repeat has no effect, as
+# numba's own message says.  A cut printed it several times, and nothing a
+# user can set stops it.
+warnings.filterwarnings(
+	"ignore",
+	message="Compilation requested for previously compiled argument types",
+	module="numba",
+)
 
 
 # Bump this string whenever the analysis algorithm changes in a way that

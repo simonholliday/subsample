@@ -1,6 +1,9 @@
 """Tests for subsample.analysis."""
 
 import math
+import subprocess
+import sys
+import typing
 
 import numpy
 import pytest
@@ -2382,3 +2385,47 @@ class TestAttackLevels:
 		last = (take.size - 1) / self.SR
 
 		assert len(subsample.analysis.attack_levels(take, (0.1, last), self.SR)) == 2
+
+
+class TestNumbaRecompileWarning:
+
+	"""Analysis threads that race to compile one of librosa's numba functions print nothing.
+
+	Each case runs in a fresh Python, because pytest resets the warning filters
+	after collecting, which takes out the ones analysis sets when imported.
+	"""
+
+	# Asking numba to compile a type it has already compiled is exactly what the
+	# second of two racing threads does, so this reaches the warning every time
+	# rather than whenever a race happens to fall that way.
+	_ASK_TWICE: typing.Final[str] = "\n".join((
+		"import numba",
+		"import numpy",
+		"@numba.vectorize(nopython=True)",
+		"def square (x):",
+		"\treturn x * x",
+		"square(numpy.ones(3))",
+		"square.add('float64(float64)')",
+	))
+
+	_WARNING: typing.Final[str] = "Compilation requested for previously compiled argument types"
+
+	def _stderr (self, first: str) -> str:
+
+		"""Run *first*, then compile one type twice, in a fresh Python; return what it printed."""
+
+		result = subprocess.run(
+			[sys.executable, "-W", "default", "-c", f"{first}\n{self._ASK_TWICE}"],
+			capture_output=True, text=True, check=True,
+		)
+
+		return result.stderr
+
+	def test_numba_warns_on_its_own (self) -> None:
+
+		"""Without Subsample the warning is printed, so the next test cannot pass for want of one."""
+
+		assert self._WARNING in self._stderr("")
+
+	def test_importing_analysis_silences_it (self) -> None:
+		assert self._WARNING not in self._stderr("import subsample.analysis")
