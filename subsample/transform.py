@@ -870,7 +870,7 @@ class TransformCache:
 			if new_bytes > self._max_bytes:
 				_log.warning(
 					"Transform variant for sample %d (%d bytes) exceeds budget (%d bytes); "
-					"stored anyway — consider raising transform.max_memory_mb",
+					"stored anyway - consider raising transform.max_memory_mb",
 					sample_id, new_bytes, self._max_bytes,
 				)
 
@@ -1153,7 +1153,7 @@ class VariantDiskCache:
 				header = f.read(_VARIANT_HEADER_SIZE)
 
 				if len(header) < _VARIANT_HEADER_SIZE:
-					_log.warning("Variant cache: unreadable file %s — discarded; it will be re-rendered when needed", path.name)
+					_log.warning("Variant cache: unreadable file %s - discarded; it will be re-rendered when needed", path.name)
 					path.unlink(missing_ok=True)
 					return None
 
@@ -1162,12 +1162,12 @@ class VariantDiskCache:
 				)
 
 				if magic not in (_VARIANT_MAGIC, _VARIANT_MAGIC_V1):
-					_log.warning("Variant cache: unreadable file %s — discarded; it will be re-rendered when needed", path.name)
+					_log.warning("Variant cache: unreadable file %s - discarded; it will be re-rendered when needed", path.name)
 					path.unlink(missing_ok=True)
 					return None
 
 				if sample_rate != self._sample_rate:
-					_log.debug("Variant cache: sample rate mismatch in %s — ignoring", path.name)
+					_log.debug("Variant cache: sample rate mismatch in %s - ignoring", path.name)
 					return None
 
 				# Bound the allocation by the file's actual size BEFORE trusting
@@ -1177,14 +1177,14 @@ class VariantDiskCache:
 				actual_size = path.stat().st_size
 
 				if expected_bytes > actual_size:
-					_log.warning("Variant cache: unreadable file %s — discarded; it will be re-rendered when needed", path.name)
+					_log.warning("Variant cache: unreadable file %s - discarded; it will be re-rendered when needed", path.name)
 					path.unlink(missing_ok=True)
 					return None
 
 				body = f.read(expected_bytes)
 
 				if len(body) < expected_bytes:
-					_log.warning("Variant cache: unreadable file %s — discarded; it will be re-rendered when needed", path.name)
+					_log.warning("Variant cache: unreadable file %s - discarded; it will be re-rendered when needed", path.name)
 					path.unlink(missing_ok=True)
 					return None
 
@@ -1622,7 +1622,7 @@ class TransformProcessor:
 				if handler is None:
 					raise NotImplementedError(
 						f"No handler registered for {type(step).__name__}. "
-						"Add an entry to TransformProcessor._HANDLERS — see the "
+						"Add an entry to TransformProcessor._HANDLERS - see the "
 						"'How to add a new transform type' guide in transform.py."
 					)
 
@@ -1749,7 +1749,7 @@ class TransformProcessor:
 				if self._on_idle is not None:
 					self._on_idle(completed)
 				else:
-					_log.info("Transform queue idle — %d variant(s) processed", completed)
+					_log.info("Transform queue idle - %d variant(s) processed", completed)
 
 # ---------------------------------------------------------------------------
 # TransformManager
@@ -2081,7 +2081,7 @@ def _apply_pitch (
 		# variant falling back to raw playback.
 		_warn_once(
 			f"repitch_unpitched:{record.sample_id}",
-			f"repitch: sample {record.name!r} has no stable pitch to shift from — "
+			f"repitch: sample {record.name!r} has no stable pitch to shift from - "
 			f"playing it at its native pitch (the rest of the process chain still applies)",
 		)
 		return audio
@@ -2334,7 +2334,7 @@ def _fit_to_beats (
 	# span exactly, which is what the beat count was asked for.
 	if len(inside) < len(projected):
 		_log.debug(
-			"Time-stretch %s: %d hits will not fit %d grid points in %g beats — "
+			"Time-stretch %s: %d hits will not fit %d grid points in %g beats - "
 			"filling the span without snapping",
 			record.name, len(projected), len(inside), beats,
 		)
@@ -3040,7 +3040,7 @@ def _apply_hpss (
 		if not numpy.all(numpy.isfinite(separated)):
 			_warn_once(
 				f"hpss-too-short:{keep}",
-				f"hpss: {n_frames} frames is too short to separate ({keep} kept) — "
+				f"hpss: {n_frames} frames is too short to separate ({keep} kept) - "
 				"the audio is passed through unchanged",
 			)
 			result[:, ch] = audio[:, ch]
@@ -3329,7 +3329,7 @@ def _apply_distort (
 		wet = numpy.repeat(driven[::factor], factor, axis=0)[:n_frames]
 
 	else:
-		_log.warning("Unknown distortion mode %r — returning unchanged", mode)
+		_log.warning("Unknown distortion mode %r - returning unchanged", mode)
 		return audio
 
 	# Level compensation: restore pre-distortion peak.
@@ -4052,7 +4052,7 @@ def _apply_vocoder (
 	try:
 		carrier_mono = _load_carrier(step.carrier_path, sample_rate)
 	except (OSError, soundfile.SoundFileError) as exc:
-		_log.warning("Vocoder: could not load carrier %r: %s — returning dry", step.carrier_path, exc)
+		_log.warning("Vocoder: could not load carrier %r: %s - returning dry", step.carrier_path, exc)
 		_segment_bounds_local.fell_back = True
 		return audio
 
@@ -4060,7 +4060,7 @@ def _apply_vocoder (
 	# at the tile step / trip sosfiltfilt's padlen check — return dry with a
 	# clear message instead of a generic worker traceback.
 	if len(carrier_mono) == 0:
-		_log.warning("Vocoder: carrier %r decoded to zero frames — returning dry", step.carrier_path)
+		_log.warning("Vocoder: carrier %r decoded to zero frames - returning dry", step.carrier_path)
 		_segment_bounds_local.fell_back = True
 		return audio
 
@@ -4075,7 +4075,7 @@ def _apply_vocoder (
 	car_filters = _build_filter_bank(step.bands, sample_rate, semitone_shift=step.formant_shift)
 
 	if not mod_filters or not car_filters:
-		_log.warning("Vocoder: could not build filter bank — returning dry")
+		_log.warning("Vocoder: could not build filter bank - returning dry")
 		return audio
 
 	n_bands = min(len(mod_filters), len(car_filters))
@@ -4341,7 +4341,7 @@ def spec_from_process (
 				_warn_once(
 					"stretch_quantize-no-tempo",
 					"stretch_quantize: no tempo available (no explicit 'tempo:' "
-					"and tempo.bpm is 0 in config.yaml) — step skipped",
+					"and tempo.bpm is 0 in config.yaml) - step skipped",
 				)
 
 		elif proc.name == "filter_low":
@@ -4498,7 +4498,7 @@ def spec_from_process (
 				_warn_once(
 					"pad_quantize-no-tempo",
 					"pad_quantize: no tempo available (no explicit 'tempo:' "
-					"and tempo.bpm is 0 in config.yaml) — step skipped",
+					"and tempo.bpm is 0 in config.yaml) - step skipped",
 				)
 
 		elif proc.name == "vocoder":
@@ -4514,7 +4514,7 @@ def spec_from_process (
 					else:
 						_warn_once(
 							"vocoder-no-reference-path",
-							"vocoder carrier: reference but no reference path available — skipped",
+							"vocoder carrier: reference but no reference path available - skipped",
 						)
 						continue
 				else:
@@ -4532,10 +4532,10 @@ def spec_from_process (
 				# in code reaches here.
 				_warn_once(
 					"vocoder-no-carrier",
-					"vocoder requires a 'carrier' parameter — skipped",
+					"vocoder requires a 'carrier' parameter - skipped",
 				)
 
 		else:
-			_log.warning("Unknown processor %r — skipped", proc.name)
+			_log.warning("Unknown processor %r - skipped", proc.name)
 
 	return TransformSpec(steps=tuple(steps))

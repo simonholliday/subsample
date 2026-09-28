@@ -300,7 +300,7 @@ def _drain (
 					raise
 
 				except Exception:
-					_log.exception("Analysis worker failed for item %d — skipping it", index)
+					_log.exception("Analysis worker failed for item %d - skipping it", index)
 					results[index] = None
 
 	except concurrent.futures.process.BrokenProcessPool:
@@ -308,7 +308,7 @@ def _drain (
 		# a full PCM buffer).  Everything still pending is lost, so redo the
 		# batch in-process rather than returning a half-empty library.
 		_log.warning(
-			"Analysis worker pool died — retrying %d item(s) single-threaded",
+			"Analysis worker pool died - retrying %d item(s) single-threaded",
 			len(items),
 		)
 
@@ -317,7 +317,7 @@ def _drain (
 				results[index] = func(item)
 
 			except Exception:
-				_log.exception("Analysis failed for item %d — skipping it", index)
+				_log.exception("Analysis failed for item %d - skipping it", index)
 				results[index] = None
 
 	return results

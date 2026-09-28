@@ -866,7 +866,7 @@ def _parse_pan_weights (weights_raw: typing.Any, assignment_name: str) -> typing
 		)
 
 	if float(numpy.sum(weight_arr)) == 0.0:
-		_log.warning("Assignment %r: all pan weights are zero — note will be silent", assignment_name)
+		_log.warning("Assignment %r: all pan weights are zero - note will be silent", assignment_name)
 
 	return weight_arr
 
@@ -1179,7 +1179,7 @@ def _parse_release (
 		if unknown:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: unknown release key(s) "
-				f"{sorted(unknown)} — valid: {sorted(allowed)}"
+				f"{sorted(unknown)} - valid: {sorted(allowed)}"
 			)
 
 		time  = _parse_release_time(time_raw, assignment_name, definitions) if time_raw is not None else None
@@ -1196,7 +1196,7 @@ def _parse_release (
 
 	raise ValueError(
 		f"MIDI map assignment {assignment_name!r}: release must be a number of "
-		f"milliseconds, true, or a mapping — got {type(raw).__name__}"
+		f"milliseconds, true, or a mapping - got {type(raw).__name__}"
 	)
 
 
@@ -1247,7 +1247,7 @@ def _parse_release_time (
 		except (TypeError, ValueError) as exc:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: malformed release time "
-				f"cc mapping {raw!r} — {exc}"
+				f"cc mapping {raw!r} - {exc}"
 			) from exc
 
 		# Same finiteness contract as the scalar branch below: .inf/.nan would
@@ -1304,7 +1304,7 @@ def _parse_release_time (
 
 	raise ValueError(
 		f"MIDI map assignment {assignment_name!r}: release time must be a "
-		f"non-negative number of milliseconds or a {{cc: ...}} mapping — "
+		f"non-negative number of milliseconds or a {{cc: ...}} mapping - "
 		f"got {type(raw).__name__}"
 	)
 
@@ -1332,7 +1332,7 @@ def _parse_loop_float (
 	if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw < 0.0:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: loop {field} must be a "
-			f"finite number >= 0 — got {raw!r}"
+			f"finite number >= 0 - got {raw!r}"
 		)
 
 	return float(raw)
@@ -1356,14 +1356,14 @@ def _parse_loop_override (
 	if not isinstance(raw, dict):
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: 'loop' must be a block with "
-			f"start/end/crossfade keys — got {type(raw).__name__}"
+			f"start/end/crossfade keys - got {type(raw).__name__}"
 		)
 
 	unknown = set(raw).difference(LOOP_INNER_KEYS)
 	if unknown:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: unknown loop key(s) "
-			f"{sorted(unknown)} — expected start, end, crossfade"
+			f"{sorted(unknown)} - expected start, end, crossfade"
 		)
 
 	start = _parse_loop_float(raw.get("start"),     assignment_name, "start")
@@ -1402,7 +1402,7 @@ def _parse_mode (
 	if "one_shot" in raw:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: 'one_shot' is no longer "
-			f"supported — use 'mode:'.  'one_shot: true' → 'mode: one_shot' "
+			f"supported - use 'mode:'.  'one_shot: true' → 'mode: one_shot' "
 			f"(plays to the end, ignores note-off); 'one_shot: false' → "
 			f"'mode: gated' (note-off releases).  'mode: loop' holds a seamless "
 			f"loop while the key is held."
@@ -1417,13 +1417,13 @@ def _parse_mode (
 		if not isinstance(mode_raw, str) or mode_raw not in subsample.query.VALID_MODES:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: invalid mode {mode_raw!r} "
-				f"— expected one of {sorted(subsample.query.VALID_MODES)}"
+				f"- expected one of {sorted(subsample.query.VALID_MODES)}"
 			)
 		mode = mode_raw
 		if loop_override is not None and mode != "loop":
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: a 'loop:' block implies "
-				f"'mode: loop', but 'mode: {mode}' was set — remove one of them"
+				f"'mode: loop', but 'mode: {mode}' was set - remove one of them"
 			)
 
 	# The stored loop points live in the sample's own (forward) timeline, so any
@@ -1440,7 +1440,7 @@ def _parse_mode (
 	):
 		_log.warning(
 			"MIDI map assignment %r: 'mode: loop' with repitch, time/pad-quantize, or "
-			"reverse is not supported yet — playing gated (no loop).  The loop points "
+			"reverse is not supported yet - playing gated (no loop).  The loop points "
 			"live in the sample's own timeline and would not survive the transform.",
 			assignment_name,
 		)
@@ -1671,7 +1671,7 @@ def _validate_velocity_layers (note_map: NoteMap) -> None:
 					raise ValueError(
 						f"MIDI map ch{ch + 1} note {note}: velocity ranges of "
 						f"assignments {asgn_a.name!r} [{lo_a}, {hi_a}] and "
-						f"{asgn_b.name!r} [{lo_b}, {hi_b}] overlap — overlapping "
+						f"{asgn_b.name!r} [{lo_b}, {hi_b}] overlap - overlapping "
 						f"layers create an ambiguous trigger.  Adjust ranges so "
 						f"each velocity maps to exactly one layer, or set "
 						f"``stack: true`` on both to sound them together."
@@ -1695,7 +1695,7 @@ def _validate_velocity_layers (note_map: NoteMap) -> None:
 
 		if gaps:
 			_log.warning(
-				"MIDI map ch%d note %d: velocity coverage has gap(s) %s — "
+				"MIDI map ch%d note %d: velocity coverage has gap(s) %s - "
 				"velocities in these range(s) will not trigger any layer",
 				ch + 1, note,
 				", ".join(f"[{lo}, {hi}]" for lo, hi in gaps),
@@ -1736,7 +1736,7 @@ def _validate_zone_assignments (
 		]
 		raise ValueError(
 			f"MIDI map: channel(s) {[c + 1 for c in offenders]!r} have both "
-			f"zone-tuned templates and manual note assignments — zone-tuned "
+			f"zone-tuned templates and manual note assignments - zone-tuned "
 			f"owns its channel exclusively.  Offending zone-tuned "
 			f"assignment(s): {offending_zone_names!r}"
 		)
@@ -1763,7 +1763,7 @@ def _validate_zone_assignments (
 				raise ValueError(
 					f"MIDI map ch{ch + 1}: zone-tuned keyboard ranges of "
 					f"templates {a.name!r} [{lo_a}, {hi_a}] and "
-					f"{b.name!r} [{lo_b}, {hi_b}] overlap — adjust ranges so "
+					f"{b.name!r} [{lo_b}, {hi_b}] overlap - adjust ranges so "
 					f"each MIDI note belongs to exactly one zone-tuned template."
 				)
 
@@ -1848,7 +1848,7 @@ def _validate_choke_targets (note_map: "NoteMap") -> None:
 				if (ch, killer_note) not in mapped:
 					_log.warning(
 						"MIDI map assignment %r: silenced_by note %d has no "
-						"assignment on channel %d — the choke will only fire if "
+						"assignment on channel %d - the choke will only fire if "
 						"that note is played anyway (typo?).",
 						assignment.name, killer_note, ch + 1,
 					)
@@ -2074,7 +2074,7 @@ def _parse_note_spec (
 		if "." in lo_str or "." in hi_str:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: "
-				f"range syntax (a..b) is not supported for symbolic notes — "
+				f"range syntax (a..b) is not supported for symbolic notes - "
 				f"use a list instead, e.g. [drum.kick_1, drum.snare_1]"
 			)
 		lo = _parse_single_note(lo_str.strip(), assignment_name, namespaces)
@@ -2082,7 +2082,7 @@ def _parse_note_spec (
 
 		if lo > hi:
 			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: note range {notes_raw!r} — "
+				f"MIDI map assignment {assignment_name!r}: note range {notes_raw!r} - "
 				f"start ({lo}) must be <= end ({hi})"
 			)
 
@@ -2093,7 +2093,7 @@ def _parse_note_spec (
 	if isinstance(notes_raw, bool):
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: 'notes' value "
-			f"{notes_raw!r} is not a note — use a number, note name, "
+			f"{notes_raw!r} is not a note - use a number, note name, "
 			f"or drum.<name>"
 		)
 
@@ -2154,14 +2154,14 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 
 		if subsample.cache.ensure_sample_assets(path, with_preview=False) is None:
 			_log.warning(
-				"Could not generate sidecar for %s — this reference will be skipped",
+				"Could not generate sidecar for %s - this reference will be skipped",
 				path.name,
 			)
 			return None
 
 	if not sidecar_path.exists():
 		_log.warning(
-			"Reference sample sidecar not found for %s — this reference will be skipped",
+			"Reference sample sidecar not found for %s - this reference will be skipped",
 			path,
 		)
 		return None
@@ -2169,7 +2169,7 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 	result = subsample.cache.load_sidecar(sidecar_path)
 	if result is None:
 		_log.warning(
-			"Failed to load analysis sidecar for %s — this reference will be skipped",
+			"Failed to load analysis sidecar for %s - this reference will be skipped",
 			path,
 		)
 		return None
@@ -2224,7 +2224,7 @@ def _load_instrument_from_path (
 
 	if not path.exists():
 		_log.warning(
-			"Instrument sample audio not found: %s — this sample will be skipped",
+			"Instrument sample audio not found: %s - this sample will be skipped",
 			path,
 		)
 		return None
@@ -2232,7 +2232,7 @@ def _load_instrument_from_path (
 	result = subsample.cache.ensure_sample_assets(path, with_preview=with_preview)
 	if result is None:
 		_log.warning(
-			"Failed to load or analyze %s — this sample will be skipped",
+			"Failed to load or analyze %s - this sample will be skipped",
 			path,
 		)
 		return None
@@ -2241,7 +2241,7 @@ def _load_instrument_from_path (
 	audio = subsample.library.load_wav_audio(path, target_sample_rate)
 	if audio is None:
 		_log.warning(
-			"Failed to load audio from %s — this sample will be skipped",
+			"Failed to load audio from %s - this sample will be skipped",
 			path,
 		)
 		return None
@@ -2382,7 +2382,7 @@ def _resolve_path_references (
 		directory = pathlib.Path(dir_path)
 
 		if not directory.is_dir():
-			_log.warning("MIDI map directory predicate: %s is not a directory — skipped", dir_path)
+			_log.warning("MIDI map directory predicate: %s is not a directory - skipped", dir_path)
 			continue
 
 		loaded = 0
@@ -2393,7 +2393,7 @@ def _resolve_path_references (
 				if p.is_file() and p.suffix.lower() in subsample.cache.AUDIO_EXTENSIONS
 			)
 		except (PermissionError, OSError) as exc:
-			_log.warning("Cannot read directory %s: %s — skipped", dir_path, exc)
+			_log.warning("Cannot read directory %s: %s - skipped", dir_path, exc)
 			continue
 
 		for audio_path in audio_paths:
@@ -2481,7 +2481,7 @@ def _resolve_path_references (
 		existing_id = instrument_lib.find_by_path(path)
 		if existing_id is not None:
 			_log.debug(
-				"Instrument sample %s already in library (id %d) — skipping load from %s",
+				"Instrument sample %s already in library (id %d) - skipping load from %s",
 				path.stem, existing_id, path,
 			)
 			continue
@@ -2624,7 +2624,7 @@ def _validate_assignment_extracts (
 			for fmt, ch_count in equivalent_to_omni:
 				_log.warning(
 					"MIDI map assignment %r: extract %r on %s %dch input is "
-					"equivalent to 'omni' — this format carries no spatial "
+					"equivalent to 'omni' - this format carries no spatial "
 					"information beyond mono.",
 					assignment.name, assignment.extract.kind, fmt, ch_count,
 				)
@@ -2664,7 +2664,7 @@ def _parse_templates (templates_raw: typing.Any) -> dict[str, dict[str, typing.A
 		if "template" in body:
 			raise ValueError(
 				f"MIDI map template {name!r}: templates may not use 'template' "
-				f"themselves — inheritance is one level deep"
+				f"themselves - inheritance is one level deep"
 			)
 
 	return templates_raw
@@ -2863,7 +2863,7 @@ def load_midi_map (
 		raw = subsample.yaml_numbers.load(fh)
 
 	if raw is None:
-		_log.warning("MIDI map %s is empty — no notes will be mapped", path)
+		_log.warning("MIDI map %s is empty - no notes will be mapped", path)
 		return MidiMapResult(
 			note_map={},
 			bank_definitions=[],
@@ -2960,7 +2960,7 @@ def load_midi_map (
 		if not bank_definitions:
 			raise ValueError(
 				f"MIDI map {path}: 'default_program' is set but there are no "
-				f"'programs:' — remove default_program or add a programs block."
+				f"'programs:' - remove default_program or add a programs block."
 			)
 		declared = {d.program for d in bank_definitions}
 		if default_bank not in declared:
@@ -2986,11 +2986,11 @@ def load_midi_map (
 			raise ValueError(
 				f"MIDI map {path}: 'assignments:' is required because program(s) "
 				f"{directory_programs!r} use 'directory:' (they reuse the top-level "
-				f"assignments) — add an 'assignments:' block or give those programs "
+				f"assignments) - add an 'assignments:' block or give those programs "
 				f"their own 'map:'"
 			)
 		if needs_top_assignments:
-			_log.warning("MIDI map %s has no assignments — no notes will be mapped", path)
+			_log.warning("MIDI map %s has no assignments - no notes will be mapped", path)
 		return MidiMapResult(
 			note_map={},
 			bank_definitions=bank_definitions,
@@ -3058,7 +3058,7 @@ def load_midi_map (
 			except (TypeError, ValueError) as exc:
 				raise ValueError(
 					f"MIDI map assignment {name!r} (#{assignment_index}): "
-					f"invalid 'channel' value {channel_raw!r} — {exc}"
+					f"invalid 'channel' value {channel_raw!r} - {exc}"
 				) from exc
 
 		# Reject out-of-range channels at load, exactly as program_channel does
@@ -3107,7 +3107,7 @@ def load_midi_map (
 			# are absolute paths resolved at parse time)
 			if ref is not None and "/" not in ref and ref.upper() not in reference_set:
 				_log.warning(
-					"MIDI map assignment %r: reference %r not in reference library — skipping",
+					"MIDI map assignment %r: reference %r not in reference library - skipping",
 					name, ref,
 				)
 				valid = False
@@ -3127,7 +3127,7 @@ def load_midi_map (
 			if any(not spec.where.quantized_beats.is_empty() for spec in select_specs):
 				_log.warning(
 					"MIDI map assignment %r: a where.quantized_beats filter has no "
-					"stretch_quantize/pad_quantize step to measure against — the note "
+					"stretch_quantize/pad_quantize step to measure against - the note "
 					"will never match a sample.  Add a quantize step or drop the filter.",
 					name,
 				)
@@ -3143,7 +3143,7 @@ def load_midi_map (
 		if release is not None and mode == "one_shot":
 			_log.warning(
 				"MIDI map assignment %r: 'release' is ignored because mode is "
-				"one_shot — a play-to-end voice never receives note-off.  Use "
+				"one_shot - a play-to-end voice never receives note-off.  Use "
 				"mode: gated or mode: loop to use release.",
 				name,
 			)
@@ -3231,7 +3231,7 @@ def load_midi_map (
 			if stack:
 				raise ValueError(
 					f"MIDI map assignment {name!r}: ``stack`` is not supported "
-					f"on zone-tuned assignments — a zone-tuned channel maps one "
+					f"on zone-tuned assignments - a zone-tuned channel maps one "
 					f"sample per note, so there is nothing to stack with.  Remove "
 					f"``stack`` or use manual ``notes:`` assignments to stack."
 				)
@@ -3243,7 +3243,7 @@ def load_midi_map (
 			if silenced_by is not None:
 				raise ValueError(
 					f"MIDI map assignment {name!r}: ``silenced_by`` (choke) is not "
-					f"supported on zone-tuned assignments — it would make the whole "
+					f"supported on zone-tuned assignments - it would make the whole "
 					f"keyboard range monophonic.  Use manual ``notes:`` assignments "
 					f"for choke groups."
 				)
@@ -3255,7 +3255,7 @@ def load_midi_map (
 			if len(select_specs) > 1:
 				_log.warning(
 					"MIDI map assignment %r: zone-tuned assignments use only the "
-					"first select spec — the %d fallback spec(s) are ignored (a "
+					"first select spec - the %d fallback spec(s) are ignored (a "
 					"fallback firing mid-pattern would reshuffle the keyboard layout).",
 					name, len(select_specs) - 1,
 				)
@@ -3467,7 +3467,7 @@ def load_ensemble (
 		if is_ensemble(include_path):
 			raise ValueError(
 				f"MIDI map {include_path} is included by {label} but declares its "
-				f"own 'maps:' — ensembles are flat, one level only.  Move the "
+				f"own 'maps:' - ensembles are flat, one level only.  Move the "
 				f"nested sets up into {label}."
 			)
 
@@ -3484,7 +3484,7 @@ def load_ensemble (
 		if result.bank_definitions:
 			raise ValueError(
 				f"MIDI map {include_path} is included by {label} but declares "
-				f"'programs:' — program switching is not supported inside an "
+				f"'programs:' - program switching is not supported inside an "
 				f"included set.  Use it in the ensemble itself, or load the "
 				f"set on its own."
 			)
@@ -3572,7 +3572,7 @@ def _merge_into (
 			raise ValueError(
 				f"MIDI channel {channel + 1} note {note} is claimed by both "
 				f"{existing!r} and {source_label!r}.  Each included set needs its "
-				f"own channel — bind one of them elsewhere in the ensemble."
+				f"own channel - bind one of them elsewhere in the ensemble."
 			)
 
 		claimed_by[key] = source_label
@@ -3750,7 +3750,7 @@ def select_midi_device (devices: list[str]) -> str:
 			f"{len(devices)} MIDI input devices are available and there is no "
 			f"terminal to choose on:\n"
 			f"{subsample.devices.format_device_list(devices)}\n"
-			f"Set player.midi_device in config.yaml — a wildcard covers a changing "
+			f"Set player.midi_device in config.yaml - a wildcard covers a changing "
 			f"client id (e.g. '*U6MIDI Pro *:0')."
 		)
 
@@ -3881,7 +3881,7 @@ def _uses_beat_filter (
 
 _BEAT_FILTER_NO_TEMPO_MESSAGE = (
 	"A MIDI map assignment filters by duration_beats, but no session tempo is "
-	"set.  Set tempo.bpm in config.yaml — it is the fallback even under "
+	"set.  Set tempo.bpm in config.yaml - it is the fallback even under "
 	"tempo.source: midi, which still needs a tempo before the first clock arrives."
 )
 
@@ -4419,7 +4419,7 @@ class MidiPlayer:
 					)
 				except ValueError:
 					_log.warning(
-						"Configured audio output device %r not found — prompting for selection",
+						"Configured audio output device %r not found - prompting for selection",
 						self._output_device_name,
 					)
 					output_device_index = subsample.audio.select_output_device(output_devices)
@@ -4443,7 +4443,7 @@ class MidiPlayer:
 			if self._output_channels > device_max_out:
 				raise ValueError(
 					f"player.audio.channels = {self._output_channels} exceeds the output "
-					f"device {device_name!r} capability ({device_max_out} channel(s)) — "
+					f"device {device_name!r} capability ({device_max_out} channel(s)) - "
 					f"lower player.audio.channels, or route within {device_max_out} channels."
 				)
 
@@ -4514,7 +4514,7 @@ class MidiPlayer:
 			except OSError as exc:
 				if "frames_per_buffer" in open_kwargs:
 					_log.error(
-						"PortAudio rejected buffer_frames=%d (%s) — falling back "
+						"PortAudio rejected buffer_frames=%d (%s) - falling back "
 						"to the device default.  Lower or omit player.audio."
 						"buffer_frames in config.yaml.",
 						self._buffer_frames, exc,
@@ -4635,7 +4635,7 @@ class MidiPlayer:
 			if now - self._last_callback_error_warn >= 5.0:
 				self._last_callback_error_warn = now
 				_log.error(
-					"Audio callback failed — emitting silence for this buffer",
+					"Audio callback failed - emitting silence for this buffer",
 					exc_info=True,
 				)
 
@@ -4681,7 +4681,7 @@ class MidiPlayer:
 			if now - self._last_xrun_warn >= 5.0:
 				self._last_xrun_warn = now
 				_log.warning(
-					"Audio xrun: %d output underflow(s) — buffer_frames=%s is too low for "
+					"Audio xrun: %d output underflow(s) - buffer_frames=%s is too low for "
 					"this machine to sustain; raise it if you hear clicks.",
 					self._xrun_count,
 					self._buffer_frames if self._buffer_frames is not None else "device-default",
@@ -4836,7 +4836,7 @@ class MidiPlayer:
 			if now - self._last_clip_warn >= 5.0:
 				self._last_clip_warn = now
 				_log.warning(
-					"Audio clipping: post-limiter peak=%.3f (%.1f dBFS) exceeds ceiling %.3f — "
+					"Audio clipping: post-limiter peak=%.3f (%.1f dBFS) exceeds ceiling %.3f - "
 					"raise player.max_polyphony above %d to reduce per-voice level",
 					peak_abs,
 					20.0 * numpy.log10(peak_abs),
@@ -4943,7 +4943,7 @@ class MidiPlayer:
 		"""
 
 		_log.info(
-			"MIDI clock: tempo is now %g BPM — re-baking quantized variants",
+			"MIDI clock: tempo is now %g BPM - re-baking quantized variants",
 			bpm,
 		)
 
@@ -4987,7 +4987,7 @@ class MidiPlayer:
 		self._clock_warned_bpm = bpm
 
 		_log.warning(
-			"MIDI clock is %g BPM but tempo.bpm is %g — quantized samples "
+			"MIDI clock is %g BPM but tempo.bpm is %g - quantized samples "
 			"and beat-based selection will not track your sequence.  Set "
 			"tempo.source: midi to follow the clock, or update tempo.bpm.",
 			bpm, self._target_bpm,
@@ -5161,7 +5161,7 @@ class MidiPlayer:
 								self._segment_counters.clear()
 
 						_log.error(
-							"Program %d (%s) rules failed to apply — staying on the "
+							"Program %d (%s) rules failed to apply - staying on the "
 							"previous program: %s",
 							msg.program, bank.name, exc,
 						)
@@ -5355,7 +5355,7 @@ class MidiPlayer:
 				# unthrottled per-trigger WARNING would spam the
 				# latency-critical path.
 				_log.debug(
-					"stretch_quantize %s: sample %r has no detected tempo — "
+					"stretch_quantize %s: sample %r has no detected tempo - "
 					"playing without beat-quantizing",
 					assignment.name, record.name,
 				)
@@ -5536,7 +5536,7 @@ class MidiPlayer:
 				self._loop_collapsed_warned.add((note, channel))
 				_log.warning(
 					"Loop collapsed to nothing after clamping to the rendered "
-					"sample on note %d ch %d — the picked sample is shorter than "
+					"sample on note %d ch %d - the picked sample is shorter than "
 					"its loop start; playing gated instead.",
 					note, channel + 1,
 				)
@@ -5702,7 +5702,7 @@ class MidiPlayer:
 		if assignment.mode == "loop" and loop_cfg is None and id(assignment) not in self._loop_unavailable_warned:
 			self._loop_unavailable_warned.add(id(assignment))
 			_log.warning(
-				"MIDI map assignment %r: sample %r has no usable loop — playing gated "
+				"MIDI map assignment %r: sample %r has no usable loop - playing gated "
 				"(held then released) instead of looping.",
 				assignment.name, record.name,
 			)
@@ -5890,7 +5890,7 @@ class MidiPlayer:
 
 				if require_tempo and record.rhythm.tempo_bpm <= 0.0:
 					_log.warning(
-						"%s %s: sample %r (pick %d) has no detected tempo — "
+						"%s %s: sample %r (pick %d) has no detected tempo - "
 						"will not be beat-quantized",
 						step_name, asgn.name, record.name, rank,
 					)
@@ -5990,14 +5990,14 @@ class MidiPlayer:
 				else:
 					_log.debug(
 						"zone-tuned %r: sample %r detected at MIDI %d is "
-						"outside range [%d, %d] — excluded",
+						"outside range [%d, %d] - excluded",
 						template.name, record.name, centre_midi, lo_note, hi_note,
 					)
 
 			if not pitched:
 				_log.info(
 					"zone-tuned %r: no matching pitched samples in range [%d, %d] "
-					"— no notes materialised on ch%d",
+					"- no notes materialised on ch%d",
 					template.name, lo_note, hi_note, template.channel + 1,
 				)
 				continue
@@ -6033,7 +6033,7 @@ class MidiPlayer:
 				if zone_lo > zone_hi:
 					_log.warning(
 						"Zone-tuned %s: sample %r shares its detected pitch "
-						"(MIDI %d) with its neighbours and received no keys — "
+						"(MIDI %d) with its neighbours and received no keys - "
 						"it will not be playable on this channel",
 						template.name, record.name, centre_midi,
 					)
@@ -6415,7 +6415,7 @@ class MidiPlayer:
 
 				if not subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
 					_log.warning(
-						"Pitched %s: best match %r has no stable pitch — skipping pitch variants",
+						"Pitched %s: best match %r has no stable pitch - skipping pitch variants",
 						asgn.name, record.name,
 					)
 
@@ -6534,7 +6534,7 @@ class MidiPlayer:
 			self.update_assignments()
 		except Exception as exc:
 			_log.error(
-				"Could not refresh note assignments during %s — playback "
+				"Could not refresh note assignments during %s - playback "
 				"continues with the previous set: %s",
 				context, exc,
 			)
@@ -6572,7 +6572,7 @@ class MidiPlayer:
 			for idx in routing:
 				if idx >= self._output_channels:
 					_log.warning(
-						"%s: output index %d exceeds device channel count (%d) — "
+						"%s: output index %d exceeds device channel count (%d) - "
 						"using default routing",
 						label, idx + 1, self._output_channels,
 					)

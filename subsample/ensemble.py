@@ -125,7 +125,7 @@ def parse_map_includes (
 			except (TypeError, ValueError) as exc:
 				raise ValueError(
 					f"MIDI map maps[{index}]: invalid 'channel' value "
-					f"{channel_raw!r} — {exc}"
+					f"{channel_raw!r} - {exc}"
 				) from exc
 
 			if not (1 <= channel <= 16):
@@ -140,7 +140,7 @@ def parse_map_includes (
 			if channel in seen_channels:
 				raise ValueError(
 					f"MIDI map maps[{index}]: channel {channel} is already bound "
-					f"to {seen_channels[channel]!r} — each included set needs its "
+					f"to {seen_channels[channel]!r} - each included set needs its "
 					f"own channel"
 				)
 
@@ -188,7 +188,7 @@ def _split_entry (
 	unknown = set(entry).difference(VALID_INCLUDE_KEYS)
 	if unknown:
 		raise ValueError(
-			f"MIDI map maps[{index}]: unknown key(s) {sorted(unknown)} — valid "
+			f"MIDI map maps[{index}]: unknown key(s) {sorted(unknown)} - valid "
 			f"keys: {sorted(VALID_INCLUDE_KEYS)}"
 		)
 

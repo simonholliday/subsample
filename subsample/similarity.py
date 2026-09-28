@@ -212,7 +212,7 @@ class SimilarityMatrix:
 
 		if self._scores:
 			raise ValueError(
-				"bulk_add() called on a non-empty SimilarityMatrix — "
+				"bulk_add() called on a non-empty SimilarityMatrix - "
 				"this would desync _scores and _rankings. "
 				"Only call bulk_add() on a freshly constructed matrix."
 			)

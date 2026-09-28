@@ -258,7 +258,7 @@ class InstrumentLibrary:
 		if sample_bytes > self._max_bytes > 0:
 			_log.warning(
 				"Instrument sample #%d (%s) is %.1f MB which exceeds the memory "
-				"limit of %.1f MB — added anyway",
+				"limit of %.1f MB - added anyway",
 				record.sample_id, record.name,
 				sample_bytes / (1024 * 1024), self._max_bytes / (1024 * 1024),
 			)
@@ -476,7 +476,7 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 	"""
 
 	if not directory.exists():
-		_log.warning("Reference directory not found: %s — library will be empty", directory)
+		_log.warning("Reference directory not found: %s - library will be empty", directory)
 		return ReferenceLibrary([])
 
 	sidecar_paths = sorted(directory.glob(f"*{subsample.cache.SIDECAR_SUFFIX}"))
@@ -726,7 +726,7 @@ def load_instrument_library (
 	lib = InstrumentLibrary(max_memory_bytes)
 
 	if not directory.exists():
-		_log.warning("Instrument directory not found: %s — library will be empty", directory)
+		_log.warning("Instrument directory not found: %s - library will be empty", directory)
 		return lib
 
 	# Tidy up before working.  Orphan sweep runs unconditionally so the
@@ -820,7 +820,7 @@ def load_instrument_library (
 		)
 		_log.warning(
 			"Instrument library: %d sample(s) totalling %.1f MB exceed the memory "
-			"limit of %.1f MB — %d were evicted (FIFO), so some are unavailable at "
+			"limit of %.1f MB - %d were evicted (FIFO), so some are unavailable at "
 			"note-on.  Raise library.max_memory_mb to keep them all resident.",
 			loaded, total_audio_bytes / (1024 * 1024), lib._max_bytes / (1024 * 1024),
 			loaded - len(lib),

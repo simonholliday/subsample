@@ -139,7 +139,7 @@ def parse_banks (
 		unknown = set(entry).difference(VALID_PROGRAM_KEYS)
 		if unknown:
 			raise ValueError(
-				f"MIDI map programs[{idx}]: unknown key(s) {sorted(unknown)} — "
+				f"MIDI map programs[{idx}]: unknown key(s) {sorted(unknown)} - "
 				f"valid keys: name, directory, map, program (a typo like 'prgoram' "
 				f"would otherwise silently fall back to the list index)"
 			)
@@ -335,13 +335,13 @@ class BankManager:
 		with self._lock:
 
 			if self._active.program == program:
-				_log.debug("Bank switch to program %d — already active (%s)", program, self._active.name)
+				_log.debug("Bank switch to program %d - already active (%s)", program, self._active.name)
 				return True
 
 			bank = self._banks.get(program)
 
 			if bank is None:
-				_log.warning("Bank switch to program %d — no bank mapped to this program", program)
+				_log.warning("Bank switch to program %d - no bank mapped to this program", program)
 				return False
 
 			old_name = self._active.name
@@ -402,6 +402,6 @@ class BankManager:
 				first = new_map[min(new_map)]
 				self._active = first
 				_log.info(
-					"Active bank program %d removed during reload — switched to %s (program %d)",
+					"Active bank program %d removed during reload - switched to %s (program %d)",
 					old_program, first.name, first.program,
 				)

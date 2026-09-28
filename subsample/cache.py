@@ -233,7 +233,7 @@ def compute_loop (
 		# find_loop is DSP over arbitrary audio; a failure here must not lose the
 		# analysis that has already been computed — just mark the sample unloopable.
 		_log.warning(
-			"Loop search failed (%s: %s) — treating as unloopable",
+			"Loop search failed (%s: %s) - treating as unloopable",
 			type(exc).__name__, exc,
 		)
 		return None
@@ -484,7 +484,7 @@ def _reanalyze_and_save (
 		# ingest paths — `subsample import` and the watcher — already reject it;
 		# rejecting here makes all three agree.
 		if len(mono) == 0:
-			_log.warning("Skipping %s — the file contains no audio frames", audio_path.name)
+			_log.warning("Skipping %s - the file contains no audio frames", audio_path.name)
 			return None
 
 		params = subsample.analysis.compute_params(file_info.sample_rate)
@@ -512,7 +512,7 @@ def _reanalyze_and_save (
 			)
 	except Exception as exc:
 		_log.warning(
-			"Could not analyze %s — skipping (%s: %s)",
+			"Could not analyze %s - skipping (%s: %s)",
 			audio_path.name, type(exc).__name__, exc,
 		)
 		return None
@@ -677,7 +677,7 @@ def ensure_sample_assets (
 			# a warn-only path would re-warn on every startup and never heal.
 			# Full re-analysis rewrites a coherent sidecar + PNG.
 			_log.info(
-				"Preview block in %s is unreadable — re-analyzing to heal it",
+				"Preview block in %s is unreadable - re-analyzing to heal it",
 				sidecar.name,
 			)
 			return _reanalyze_and_save(
@@ -704,7 +704,7 @@ def ensure_sample_assets (
 		# would be skipped on EVERY startup (the sidecar never looks stale).
 		# Re-analyse from the audio to rewrite a coherent sidecar.
 		_log.info(
-			"Sidecar %s parsed but is structurally invalid — re-analyzing to heal it",
+			"Sidecar %s parsed but is structurally invalid - re-analyzing to heal it",
 			sidecar.name,
 		)
 		return _reanalyze_and_save(

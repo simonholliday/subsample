@@ -476,7 +476,7 @@ def render_radio (
 	guard_rms = _max_windowed_rms(numpy.mean(wet ** 2, axis=1), float(sample_rate))
 	if guard_rms < 0.02:
 		_log.warning(
-			"radio: mode=%r demod=%r recovered no signal (loudest-window rms %.2e) — output muted",
+			"radio: mode=%r demod=%r recovered no signal (loudest-window rms %.2e) - output muted",
 			mode, demod, guard_rms,
 		)
 		return (audio * numpy.float32(1.0 - mix)).astype(numpy.float32)

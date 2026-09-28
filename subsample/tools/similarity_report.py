@@ -96,7 +96,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 	reference_library = subsample.library.load_reference_library(reference_dir)
 
 	if len(reference_library) == 0:
-		print("No reference samples found — nothing to compare against.", file=sys.stderr)
+		print("No reference samples found - nothing to compare against.", file=sys.stderr)
 		return 1
 
 	# library.directory may be null — a project assembled from shared sample sets
@@ -104,7 +104,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 	if cfg.library.directory is None:
 		print(
 			"library.directory is null, so there are no instrument samples to "
-			"rank — set it to the directory you want to report on.",
+			"rank - set it to the directory you want to report on.",
 			file=sys.stderr,
 		)
 		return 1
@@ -117,7 +117,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 	)
 
 	if len(instrument_library) == 0:
-		print("No instrument samples found — nothing to rank.", file=sys.stderr)
+		print("No instrument samples found - nothing to rank.", file=sys.stderr)
 		return 1
 
 	# --- Build similarity matrix ---

@@ -203,7 +203,7 @@ class OscReceiver:
 		"""Dispatch a /sample/import message to the on_import callback."""
 
 		if not args:
-			_log.warning("OSC /sample/import received with no arguments — ignoring")
+			_log.warning("OSC /sample/import received with no arguments - ignoring")
 			return
 
 		file_path = str(args[0])

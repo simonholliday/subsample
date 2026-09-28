@@ -332,7 +332,7 @@ def route_to_device (
 		if logical_out > device_channels:
 			raise ValueError(
 				f"Logical output count ({logical_out}) exceeds device channels "
-				f"({device_channels}) — cannot route without an explicit output map"
+				f"({device_channels}) - cannot route without an explicit output map"
 			)
 		result = numpy.zeros((device_channels, in_ch), dtype=numpy.float32)
 		result[:logical_out, :] = logical_matrix
@@ -550,7 +550,7 @@ def build_extract_matrix (
 		if len(weights) != in_channels:
 			raise ValueError(
 				f"extract 'blend': {len(weights)} weight(s) for a {in_channels}-"
-				f"channel input — exactly one weight per input channel is required"
+				f"channel input - exactly one weight per input channel is required"
 			)
 
 		total = float(sum(abs(w) for w in weights))
@@ -590,7 +590,7 @@ def build_extract_matrix (
 
 		raise ValueError(
 			f"extract {extract_spec.kind!r}: not available for PCM {layout_name} "
-			f"input ({in_channels} channels) — this pattern requires spatial "
+			f"input ({in_channels} channels) - this pattern requires spatial "
 			f"information not present in {layout_name}. "
 			f"Available extracts for {layout_name}: {available}, or channel.<n>"
 		)

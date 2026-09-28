@@ -341,7 +341,7 @@ def read_audio_file (
 		supported = "WAV, FLAC, AIFF, OGG, MP3/MPEG"
 
 		raise ValueError(
-			f"Unsupported audio format: {path.name} — "
+			f"Unsupported audio format: {path.name} - "
 			f"convert to a supported format ({supported}) and try again"
 		) from exc
 
@@ -403,7 +403,7 @@ def create_pyaudio () -> pyaudio.PyAudio:
 			raise OSError(
 				f"Could not initialise the audio backend ({exc}).  Is a sound "
 				f"server running?  Subsample needs PipeWire, PulseAudio or JACK "
-				f"— on a headless box try `pw-jack subsample`."
+				f"- on a headless box try `pw-jack subsample`."
 			) from exc
 
 
@@ -617,7 +617,7 @@ def get_device_channels (pa: pyaudio.PyAudio, device_index: int) -> int:
 
 	if ch <= 0:
 		raise ValueError(
-			f"Device {info['name']!r} reports no input channels — "
+			f"Device {info['name']!r} reports no input channels - "
 			"it may be an output-only device."
 		)
 
@@ -643,7 +643,7 @@ def get_output_device_channels (pa: pyaudio.PyAudio, device_index: int) -> int:
 
 	if ch <= 0:
 		raise ValueError(
-			f"Device {info['name']!r} reports no output channels — "
+			f"Device {info['name']!r} reports no output channels - "
 			"it may be an input-only device."
 		)
 
@@ -791,7 +791,7 @@ def _select_device (devices: list[DeviceInfo], direction: str, empty_hint: str) 
 			f"{len(devices)} audio {direction} devices are available and there is "
 			f"no terminal to choose on:\n"
 			f"{subsample.devices.format_device_list(names)}\n"
-			f"Set the device in config.yaml — a wildcard covers a changing index "
+			f"Set the device in config.yaml - a wildcard covers a changing index "
 			f"(e.g. 'SC-U: USB Audio (hw:*,0)')."
 		)
 

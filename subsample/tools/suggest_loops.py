@@ -129,7 +129,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		assets = subsample.cache.ensure_sample_assets(path, with_preview=False)
 
 		if assets is None:
-			print(f"{path.name}: unreadable — skipped", file=sys.stderr)
+			print(f"{path.name}: unreadable - skipped", file=sys.stderr)
 			continue
 
 		if not args.all and not subsample.analysis.is_loopable(assets.spectral, assets.level, assets.duration):
@@ -141,7 +141,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		try:
 			audio, sr = soundfile.read(str(path), always_2d=False, dtype="float32")
 		except (OSError, soundfile.SoundFileError) as exc:
-			print(f"{path.name}: could not read audio — {exc}", file=sys.stderr)
+			print(f"{path.name}: could not read audio - {exc}", file=sys.stderr)
 			continue
 
 		# Prefer the STORED loop — computed on the mono/mid at analysis time, it is

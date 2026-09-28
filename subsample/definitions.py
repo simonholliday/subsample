@@ -120,7 +120,7 @@ class Definitions:
 			if prefix_l == "drum":
 				raise ValueError(
 					f"{context}: 'drum.*' names are GM drum NOTE names and "
-					f"cannot name a {section} value — use a mounted "
+					f"cannot name a {section} value - use a mounted "
 					f"definitions file instead"
 				)
 			if not self.tables:
@@ -130,7 +130,7 @@ class Definitions:
 				)
 			raise ValueError(
 				f"{context}: unknown definitions prefix {prefix!r} in "
-				f"'{prefix}.{name}' — mounted prefixes: "
+				f"'{prefix}.{name}' - mounted prefixes: "
 				f"{', '.join(sorted(self.tables))}"
 			)
 
@@ -140,7 +140,7 @@ class Definitions:
 			hint = ""
 			for other, other_table in sections.items():
 				if other != section and name_l in other_table:
-					hint = f" — note: {name_l!r} is defined in section {other!r}"
+					hint = f" - note: {name_l!r} is defined in section {other!r}"
 					break
 
 			valid = sorted(table)
@@ -212,7 +212,7 @@ def load_definitions (
 		if prefix in reserved_prefixes:
 			raise ValueError(
 				f"{map_label}: definitions prefix {prefix!r} is reserved "
-				f"for the built-in GM drum names — choose another prefix"
+				f"for the built-in GM drum names - choose another prefix"
 			)
 
 		if not isinstance(path_raw, str) or not path_raw.strip():
@@ -285,7 +285,7 @@ def _load_definitions_file (
 				raise ValueError(
 					f"definitions file {path}: section {section!r}: name "
 					f"{name!r} must match [a-z][a-z0-9_]* (lowercase "
-					f"letters, digits, underscores — no dots)"
+					f"letters, digits, underscores - no dots)"
 				)
 
 			# bool is an int subclass — reject it first so `x: true` fails

@@ -355,14 +355,14 @@ class InstrumentWatcher:
 
 		if attempt >= _MAX_RETRIES:
 			_log.warning(
-				"Watcher: giving up on %s after %d attempts (%s) — "
+				"Watcher: giving up on %s after %d attempts (%s) - "
 				"sample will be picked up on next restart",
 				sidecar_path.name, _MAX_RETRIES, reason,
 			)
 			return
 
 		_log.debug(
-			"Watcher: %s — retrying in %.1fs (attempt %d/%d)",
+			"Watcher: %s - retrying in %.1fs (attempt %d/%d)",
 			reason, _RETRY_DELAY_SECONDS, attempt + 1, _MAX_RETRIES,
 		)
 
@@ -489,13 +489,13 @@ class InstrumentWatcher:
 		# library.  The grace/load path below re-analyses it via ensure_sample_assets.
 		if sidecar.exists() and subsample.cache.sidecar_matches_audio(audio_path):
 			_log.debug(
-				"Watcher: fresh sidecar already exists for %s — skipping audio path",
+				"Watcher: fresh sidecar already exists for %s - skipping audio path",
 				audio_path.name,
 			)
 			return
 
 		_log.debug(
-			"Watcher: no fresh sidecar for %s — waiting %.1fs grace period",
+			"Watcher: no fresh sidecar for %s - waiting %.1fs grace period",
 			audio_path.name, _SIDECAR_GRACE_SECONDS,
 		)
 
@@ -560,7 +560,7 @@ class InstrumentWatcher:
 
 		if sidecar.exists() and subsample.cache.sidecar_matches_audio(audio_path):
 			_log.debug(
-				"Watcher: fresh sidecar appeared for %s during grace — skipping",
+				"Watcher: fresh sidecar appeared for %s during grace - skipping",
 				audio_path.name,
 			)
 			return
@@ -576,13 +576,13 @@ class InstrumentWatcher:
 
 			if stability_checks >= _STABILITY_MAX_CHECKS:
 				_log.warning(
-					"Watcher: %s still changing size after %d checks — giving up",
+					"Watcher: %s still changing size after %d checks - giving up",
 					audio_path.name, _STABILITY_MAX_CHECKS,
 				)
 				return
 
 			_log.debug(
-				"Watcher: %s size changed (%d → %d) — rechecking in %.1fs "
+				"Watcher: %s size changed (%d → %d) - rechecking in %.1fs "
 				"(check %d/%d)",
 				audio_path.name, prev_size, current_size,
 				_STABILITY_CHECK_SECONDS, stability_checks + 1,
@@ -604,12 +604,12 @@ class InstrumentWatcher:
 			return
 
 		if current_size == 0:
-			_log.debug("Watcher: %s is empty — skipping", audio_path.name)
+			_log.debug("Watcher: %s is empty - skipping", audio_path.name)
 			return
 
 		# 3. File is stable — analyze and load.
 		_log.info(
-			"Watcher: new audio file %s (no sidecar) — analyzing",
+			"Watcher: new audio file %s (no sidecar) - analyzing",
 			audio_path.name,
 		)
 
@@ -625,7 +625,7 @@ class InstrumentWatcher:
 
 		if result is None:
 			_log.warning(
-				"Watcher: could not analyze %s — skipping",
+				"Watcher: could not analyze %s - skipping",
 				audio_path.name,
 			)
 
@@ -640,7 +640,7 @@ class InstrumentWatcher:
 
 		if audio is None:
 			_log.warning(
-				"Watcher: could not read audio from %s — skipping",
+				"Watcher: could not read audio from %s - skipping",
 				audio_path.name,
 			)
 			return

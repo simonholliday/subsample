@@ -1775,7 +1775,7 @@ def _parse_name_operator_dict (
 		if op_value.lower().endswith(_AUDIO_EXTS):
 			_log.warning(
 				"MIDI map assignment %r: name pattern %r ends in an audio "
-				"extension, but patterns match the extensionless filename stem — "
+				"extension, but patterns match the extensionless filename stem - "
 				"it will match nothing.  Drop the extension (e.g. '*kick*').",
 				assignment_name, op_value,
 			)
@@ -1857,7 +1857,7 @@ def _parse_where (
 				raise ValueError(
 					f"MIDI map assignment {assignment_name!r}: field "
 					f"{field!r} has both legacy ({key!r}) and new-form "
-					f"constraints — use one form or the other, not both."
+					f"constraints - use one form or the other, not both."
 				)
 			range_kwargs[field][op] = _coerce_range_value(
 				field, key, value, assignment_name,
@@ -1875,7 +1875,7 @@ def _parse_where (
 				raise ValueError(
 					f"MIDI map assignment {assignment_name!r}: field "
 					f"{key!r} has both new-form and legacy "
-					f"({'/'.join(sorted(legacy_pair))}) constraints — use "
+					f"({'/'.join(sorted(legacy_pair))}) constraints - use "
 					f"one form or the other, not both."
 				)
 
@@ -1893,7 +1893,7 @@ def _parse_where (
 
 					raise ValueError(
 						f"MIDI map assignment {assignment_name!r}: {key!r} has an "
-						f"empty operator block — give at least one of "
+						f"empty operator block - give at least one of "
 						f"{', '.join(sorted(operators))}{scalar}."
 					)
 				for op, op_value in value.items():
@@ -1993,7 +1993,7 @@ def _parse_where (
 					f"{', '.join(sorted(_valid_where_keys()))}."
 				)
 			_log.warning(
-				"MIDI map assignment %r: unknown where predicate %r — ignored",
+				"MIDI map assignment %r: unknown where predicate %r - ignored",
 				assignment_name, key,
 			)
 
@@ -2149,7 +2149,7 @@ def _parse_order_clause (
 
 		_log.warning(
 			"MIDI map assignment %r: order entry for 'by: %s' has unknown key(s) %s "
-			"— ignored (valid keys: %s)",
+			"- ignored (valid keys: %s)",
 			assignment_name, by, unknown, valid,
 		)
 
@@ -2309,7 +2309,7 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 		)
 	elif unknown:
 		_log.warning(
-			"MIDI map assignment %r: unknown velocity 'pick' key(s) %s ignored — "
+			"MIDI map assignment %r: unknown velocity 'pick' key(s) %s ignored - "
 			"valid keys: %s",
 			assignment_name, sorted(unknown),
 			", ".join(sorted(VALID_VELOCITY_PICK_KEYS)),
@@ -2458,7 +2458,7 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 			)
 		elif unknown:
 			_log.warning(
-				"MIDI map assignment %r: unknown 'pick' operator(s) %s ignored — "
+				"MIDI map assignment %r: unknown 'pick' operator(s) %s ignored - "
 				"valid operators: %s",
 				assignment_name, sorted(unknown),
 				", ".join(sorted(VALID_PICK_OPERATORS)),
@@ -2494,13 +2494,13 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 		if gte_val is not None and gt_val is not None:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: pick cannot combine "
-				f"'gte' and 'gt' — use one lower bound"
+				f"'gte' and 'gt' - use one lower bound"
 			)
 
 		if lte_val is not None and lt_val is not None:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: pick cannot combine "
-				f"'lte' and 'lt' — use one upper bound"
+				f"'lte' and 'lt' - use one upper bound"
 			)
 
 		if eq_val is not None:
@@ -2635,7 +2635,7 @@ def parse_pan_spec (raw: typing.Any, assignment_name: str) -> PanSpec:
 		)
 	elif unknown:
 		_log.warning(
-			"MIDI map assignment %r: unknown random-pan key(s) %s ignored — valid "
+			"MIDI map assignment %r: unknown random-pan key(s) %s ignored - valid "
 			"keys: %s",
 			assignment_name, sorted(unknown), ", ".join(sorted(VALID_PAN_KEYS)),
 		)
@@ -2648,7 +2648,7 @@ def parse_pan_spec (raw: typing.Any, assignment_name: str) -> PanSpec:
 	if has_range and has_sugar:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: random pan cannot combine "
-			f"'gte'/'lte' with 'position'/'variation' — use one form"
+			f"'gte'/'lte' with 'position'/'variation' - use one form"
 		)
 
 	# position/variation sugar: a centre spread by ± half the variation.  The
@@ -2762,7 +2762,7 @@ def _parse_select_spec (
 		)
 	elif unknown:
 		_log.warning(
-			"MIDI map assignment %r: unknown 'select' key(s) %s ignored — valid "
+			"MIDI map assignment %r: unknown 'select' key(s) %s ignored - valid "
 			"keys: order, order_by, pick, where (filters like directory:/name:/"
 			"duration: nest under 'where:').",
 			assignment_name, sorted(unknown),
@@ -2820,7 +2820,7 @@ def _parse_select_spec (
 	if where.reference is not None and order and order[0].by != "similarity":
 		_log.warning(
 			"MIDI map assignment %r: 'where.reference' is set but the primary "
-			"order is %r, not 'similarity' — the reference does not affect "
+			"order is %r, not 'similarity' - the reference does not affect "
 			"selection ranking (it still works as a vocoder 'carrier: reference').",
 			assignment_name, order[0].by,
 		)
@@ -2862,7 +2862,7 @@ def _parse_select_spec (
 	if order and order[0].by == "similarity" and where.reference is None:
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: 'similarity' ordering needs "
-			f"where.reference — it ranks against a reference sample."
+			f"where.reference - it ranks against a reference sample."
 		)
 
 	return SelectSpec(where=where, order=order, pick=pick)
@@ -2924,7 +2924,7 @@ def parse_select (
 				raise ValueError(
 					f"MIDI map assignment {assignment_name!r}: a 'pick: velocity' "
 					f"fallback chain must order every spec in the SAME direction "
-					f"(all 'quietest' or all 'loudest') — mixing them inverts the "
+					f"(all 'quietest' or all 'loudest') - mixing them inverts the "
 					f"velocity-to-sample mapping when a fallback wins"
 				)
 
@@ -3266,7 +3266,7 @@ def parse_process (
 
 						_log.warning(
 							"MIDI map assignment %r: processor %r has no parameter %r "
-							"— ignored (valid parameters: %s)",
+							"- ignored (valid parameters: %s)",
 							assignment_name, proc_name_str, k_str, valid,
 						)
 						continue
@@ -3279,7 +3279,7 @@ def parse_process (
 							f"MIDI map assignment {assignment_name!r}: "
 							f"processor {proc_name_str!r} has duplicate "
 							f"parameter {canonical_param!r} (possibly from "
-							f"mixing legacy and new-form names) — use one, "
+							f"mixing legacy and new-form names) - use one, "
 							f"not both."
 						)
 
@@ -3305,7 +3305,7 @@ def parse_process (
 									f"such as {{cc: 74, min: 200, max: 16000}}."
 								)
 
-							_log.warning("%s is a mapping without a 'cc' key — ignored", cc_context)
+							_log.warning("%s is a mapping without a 'cc' key - ignored", cc_context)
 							continue
 
 						unknown_cc_keys = sorted(str(key) for key in v if str(key) not in CC_BINDING_KEYS)
@@ -3402,7 +3402,7 @@ def parse_process (
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: "
 			f"{' and '.join(repr(n) for n in quantize_names[:2])} cannot be "
-			f"combined in one process chain — a chain may beat-align a sample "
+			f"combined in one process chain - a chain may beat-align a sample "
 			f"only once.  Keep a single quantize step."
 		)
 

@@ -734,7 +734,7 @@ def deserialize_from_sidecar (payload: dict[str, typing.Any]) -> PreviewData:
 		if version != PREVIEW_VERSION:
 			raise ValueError(
 				f"preview schema version {version} does not match current "
-				f"{PREVIEW_VERSION} — the sidecar's preview block is regenerated "
+				f"{PREVIEW_VERSION} - the sidecar's preview block is regenerated "
 				"automatically on the next library load"
 			)
 

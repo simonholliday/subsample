@@ -346,7 +346,7 @@ class SampleProcessor:
 
 		if backed_up:
 			_log.warning(
-				"sample-processor backlog: %d in-flight — processing may be falling behind captures",
+				"sample-processor backlog: %d in-flight - processing may be falling behind captures",
 				depth,
 			)
 
@@ -446,7 +446,7 @@ class SampleProcessor:
 				if b_peak > 1.0:
 					_log.warning(
 						"ambisonic conversion clipped (peak %+.1f dBFS after %s "
-						"processing) — reduce input gain to leave conversion headroom",
+						"processing) - reduce input gain to leave conversion headroom",
 						20.0 * math.log10(b_peak), ambisonic_format,
 					)
 
@@ -479,7 +479,7 @@ class SampleProcessor:
 			# 0.99997) — a `>= 1.0` test only ever fired on the negative rail.
 			if req.filename_base is None and level.peak >= 0.999:
 				_log.warning(
-					"input clipped (peak %.1f dBFS) — reduce input gain to avoid distortion",
+					"input clipped (peak %.1f dBFS) - reduce input gain to avoid distortion",
 					20.0 * math.log10(level.peak),
 				)
 
@@ -531,14 +531,14 @@ class SampleProcessor:
 					)
 				except Exception as exc:
 					_log.error(
-						"Sample handoff (on_complete) failed for %s: %s — the audio and "
+						"Sample handoff (on_complete) failed for %s: %s - the audio and "
 						"analysis were written, but the sample was NOT integrated into the "
 						"live library",
 						filepath, exc, exc_info=True,
 					)
 
 		except Exception as exc:
-			_log.error("Failed to process recording: %s — WAV may be intact", exc, exc_info=True)
+			_log.error("Failed to process recording: %s - WAV may be intact", exc, exc_info=True)
 
 	def _write_audio_file (
 		self,

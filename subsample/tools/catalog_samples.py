@@ -613,7 +613,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		if cfg.library.directory is None:
 			print(
 				"library.directory is null, so there is no default directory to "
-				"catalogue — pass one explicitly, e.g. "
+				"catalogue - pass one explicitly, e.g. "
 				"`subsample catalog path/to/samples`.",
 				file=sys.stderr,
 			)
@@ -643,7 +643,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		if two_pass and loaded:
 			if len(loaded) > 6000:
 				print(
-					f"Note: comparing {len(loaded)} samples pairwise is O(N²) in memory — "
+					f"Note: comparing {len(loaded)} samples pairwise is O(N²) in memory - "
 					f"this may be slow.",
 					file=sys.stderr,
 				)

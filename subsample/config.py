@@ -659,7 +659,7 @@ def load_config (path: typing.Union[str, pathlib.Path, None] = None) -> Config:
 		# sentence.  Every value the builder can read but not accept already
 		# raises ValueError naming its key.
 		raise ValueError(
-			f"config.yaml: a setting has the wrong shape — {exc}"
+			f"config.yaml: a setting has the wrong shape - {exc}"
 		) from exc
 
 
@@ -823,7 +823,7 @@ def _parse_midi_maps (
 	for channel, map_path in raw.items():
 		if isinstance(channel, bool) or not isinstance(channel, int):
 			raise ValueError(
-				f"player.midi_maps key {channel!r} is not a MIDI channel — keys "
+				f"player.midi_maps key {channel!r} is not a MIDI channel - keys "
 				f"must be whole numbers 1-16"
 			)
 
@@ -842,7 +842,7 @@ def _parse_midi_maps (
 
 	if not parsed:
 		raise ValueError(
-			"player.midi_maps is empty — remove it, or list at least one "
+			"player.midi_maps is empty - remove it, or list at least one "
 			"channel and the sample set map it should play"
 		)
 
@@ -896,7 +896,7 @@ def _require_bool (
 	if not isinstance(value, bool):
 		raise ValueError(
 			f"Config key '{section_name}.{key}' must be true or false "
-			f'(got {value!r}) — remove the quotes if you wrote "true" or "false".'
+			f'(got {value!r}) - remove the quotes if you wrote "true" or "false".'
 		)
 
 	return value
@@ -1058,13 +1058,13 @@ def _build_config (
 	# ------------------------------------------------------------------
 	if "output" in raw:
 		raise ValueError(
-			"The `output:` section has moved into `recorder:` — "
+			"The `output:` section has moved into `recorder:` - "
 			"`output.directory` is now `recorder.directory` and "
 			"`output.filename_format` is now `recorder.filename_format`."
 		)
 	if "instrument" in raw:
 		raise ValueError(
-			"The `instrument:` section is now called `library:` — rename the "
+			"The `instrument:` section is now called `library:` - rename the "
 			"section (its keys are unchanged: library.directory, "
 			"library.max_memory_mb, library.watch)."
 		)
@@ -1075,7 +1075,7 @@ def _build_config (
 	):
 		if old_key in detection_raw:
 			raise ValueError(
-				f"`detection.{old_key}` is now `detection.{new_key}` — rename the key."
+				f"`detection.{old_key}` is now `detection.{new_key}` - rename the key."
 			)
 	for old_key, new_key in (
 		("trim_pre_samples", "trim_pre_ms"),
@@ -1084,12 +1084,12 @@ def _build_config (
 		if old_key in detection_raw:
 			raise ValueError(
 				f"`detection.{old_key}` is now `detection.{new_key}` and is measured "
-				"in milliseconds, not samples — at 44100 Hz divide the old value by "
+				"in milliseconds, not samples - at 44100 Hz divide the old value by "
 				"44.1 (the old defaults, 10 and 90 samples, are now 0.25 and 2.0 ms)."
 			)
 	if "chunk_size" in audio_raw:
 		raise ValueError(
-			"`recorder.audio.chunk_size` is now `recorder.audio.buffer_frames` — "
+			"`recorder.audio.chunk_size` is now `recorder.audio.buffer_frames` - "
 			"rename the key."
 		)
 
@@ -1278,7 +1278,7 @@ def _build_config (
 	# one would make the other's edits look like they had no effect.
 	if player_midi_map is not None and player_midi_maps is not None:
 		raise ValueError(
-			"player.midi_map and player.midi_maps are mutually exclusive — "
+			"player.midi_map and player.midi_maps are mutually exclusive - "
 			"midi_maps already binds every set to a channel.  To add rules of "
 			"your own alongside them, put the maps: block in an ensemble file "
 			"with its own assignments: and point midi_map at that instead."
@@ -1646,7 +1646,7 @@ def _build_config (
 		if unknown:
 			_log.warning(
 				"config.yaml: unknown key(s) in %s section ignored: %s "
-				"— check spelling against config.yaml.default",
+				"- check spelling against config.yaml.default",
 				tracker.label, ", ".join(unknown),
 			)
 
