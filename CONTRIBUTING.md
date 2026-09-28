@@ -1,11 +1,11 @@
 # Contributing to Subsample
 
 This file is for people changing Subsample's code, and subsystem.co does not
-publish it. For using Subsample, see [https://subsystem.co/subsample/](https://subsystem.co/subsample/).
+publish it. For using Subsample, see [https://subsystem.co/subsample](https://subsystem.co/subsample).
 
 ## Tests
 
-For working on Subsample itself (everything above works from a plain
+For working on Subsample itself (everything in the README works from a plain
 `pip install` - no clone needed): clone the repo, install editable with the
 dev extras, and run the suite.
 
@@ -25,7 +25,7 @@ mypy subsample
 
 ## Maintainer scripts
 
-The remaining scripts in `scripts/` are maintainer tools and need a repo
+The scripts in `scripts/` are maintainer tools and need a repo
 checkout: `measure_midi_latency.py` and `measure_handler_timing.py` (the
 latency guards described under [Measuring latency](#measuring-latency)),
 `regen_previews_png.py` (regenerate preview thumbnails after a format bump),

@@ -229,14 +229,16 @@ def json_schema () -> dict[str, typing.Any]:
 								"string",
 								"""
 								Input device to capture from, matched against device names
-								without regard to case.  The value is a pattern: `*`
-								matches any run of characters, `?` matches one, and the
-								pattern may match anywhere in the name.  Use `*` for a
-								number the system assigns at each start, such as the card
-								index in `hw:2,0`.  When the pattern matches several
-								devices, Subsample asks which to use.  `null` selects the
-								only input device when there is one, and otherwise asks.
-								`subsample --list-devices` prints the names.
+								without regard to case.  The value may use wildcards: `*`
+								matches any run of characters and `?` matches one, and it
+								may match anywhere in the name.  Use `*` for a number the
+								system assigns at each start, such as the card index in
+								`hw:2,0`.  A device's full name selects that device, even
+								where a longer name contains it.  When the value matches
+								several devices, Subsample asks which to use.  `null`
+								selects the only input device when there is one, and
+								otherwise asks.  `subsample --list-devices` prints the
+								names.
 								""",
 								default=None,
 								nullable=True,
@@ -451,8 +453,8 @@ def json_schema () -> dict[str, typing.Any]:
 						"string",
 						"""
 						MIDI input to play from, matched the same way as
-						`recorder.audio.device`: a pattern, without regard to case,
-						where `*` matches any run of characters and `?` matches one.
+						`recorder.audio.device`, with wildcards and without regard to
+						case: `*` matches any run of characters and `?` matches one.
 						On Linux a MIDI device's name carries a client number that
 						changes between runs, so use `*` for it and keep the port
 						number after the colon.  `null` selects the only MIDI input
@@ -737,8 +739,9 @@ def json_schema () -> dict[str, typing.Any]:
 					),
 					"weight_band_energy": _similarity_weight(
 						"""
-						Weight of the band energy group: how a sound's energy and decay
-						divide between the bass, low-mid, high-mid, and high spectral bands.
+						Weight of the spectral band energy group: how a sound's energy
+						and decay divide between the bass, low-mid, high-mid, and high
+						spectral bands.
 						Raise it for drum libraries, and lower it for pitched instruments.
 						""",
 						default=1.0,

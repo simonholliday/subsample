@@ -138,10 +138,10 @@ All four are the same workflow.
 
 ## Documentation
 
-**Full documentation: [https://subsystem.co/subsample/](https://subsystem.co/subsample/)**
+**Full documentation: [https://subsystem.co/subsample](https://subsystem.co/subsample)**
 
-- Configuration reference: [https://subsystem.co/subsample/configuration/](https://subsystem.co/subsample/configuration/)
-- MIDI map reference: [https://subsystem.co/subsample/midi-map/](https://subsystem.co/subsample/midi-map/)
+- Configuration reference: [https://subsystem.co/subsample/configuration](https://subsystem.co/subsample/configuration)
+- MIDI map reference: [https://subsystem.co/subsample/midi-map](https://subsystem.co/subsample/midi-map)
 
 Both are generated from the code that reads these files, so they describe the
 release you have rather than a copy kept by hand.
@@ -329,7 +329,7 @@ The library's samples are ranked against that reference by their acoustic
 fingerprint; the top-ranked match plays.
 (When `reference` is set and no `order` is given,
 `order: [{ by: similarity, dir: desc }]` is assumed - see
-see [choosing a sample](https://subsystem.co/subsample/midi-map/choosing-a-sample/).)
+[choosing a sample](https://subsystem.co/subsample/midi-map/choosing-a-sample).)
 
 #### Step 3 - rule-based selection
 
@@ -377,7 +377,7 @@ the sample flows through top to bottom.
 
 Every processor accepts `true` for sensible defaults, or a dict for
 fine-grained control. All the parameters of every processor are documented in
-the [processing reference](https://subsystem.co/subsample/midi-map/processing/).
+the [processing reference](https://subsystem.co/subsample/midi-map/processing).
 
 #### Step 5 - lock a loop to your session tempo
 
@@ -445,7 +445,7 @@ when you want to try something the tutorial didn't show.
 ---
 
 Every field a map accepts is documented term by term in the
-[MIDI map reference](https://subsystem.co/subsample/midi-map/). What follows is
+[MIDI map reference](https://subsystem.co/subsample/midi-map). What follows is
 the part that teaches rather than lists: a tutorial, the GM kit, templates,
 sample sets, ensembles and programs.
 
@@ -585,7 +585,7 @@ The MIDI map can optionally declare multiple **programs** (presets) that are all
 loaded at startup. Switch between them at runtime using MIDI Program Change
 messages - no restart, no disk I/O, instant switching. A `program:` number may
 also be a name from a mounted definitions file (`program: my.brushes` - see
-[the definitions file](https://subsystem.co/subsample/midi-map/the-definitions-file/)):
+[the definitions file](https://subsystem.co/subsample/midi-map/the-definitions-file)):
 
 ```yaml map
 programs:
@@ -1029,7 +1029,7 @@ Everything else - chunk sizes, buffer lengths, transform settings, similarity
 weights - is optional and rarely needs changing.
 
 Every setting, with its type, default, limits and an example, is in the
-[configuration reference](https://subsystem.co/subsample/configuration/). It is
+[configuration reference](https://subsystem.co/subsample/configuration). It is
 generated from the code that reads your `config.yaml`, and the shipped
 `config.yaml.default` is checked against it on every build.
 

@@ -1,7 +1,7 @@
 # Architecture
 
 This file is for people changing Subsample's code, and subsystem.co does not
-publish it. For using Subsample, see [https://subsystem.co/subsample/](https://subsystem.co/subsample/).
+publish it. For using Subsample, see [https://subsystem.co/subsample](https://subsystem.co/subsample).
 
 Subsample is built around three concurrent pipelines that interact through
 thread-safe shared state.

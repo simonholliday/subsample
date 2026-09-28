@@ -58,6 +58,7 @@ include = ["subsample*"]
 subsample = ["py.typed", "data/*.yaml*", "data/reference/*.json", "data/reference/*.md"]
 
 [project.urls]
+Documentation = "https://subsystem.co/subsample"
 Repository = "https://github.com/simonholliday/subsample"
 Issues = "https://github.com/simonholliday/subsample/issues"
 

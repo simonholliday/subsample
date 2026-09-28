@@ -287,7 +287,7 @@ player:
   # binds several sample sets to MIDI channels so they all play at once.
   # Mutually exclusive with midi_maps below.
   #
-  # Every term a map accepts: https://subsystem.co/subsample/midi-map/
+  # Every term a map accepts: https://subsystem.co/subsample/midi-map
 
   # midi_maps:
   #   10: "/mnt/shared/Home Kit 2026-07/midi-map.yaml"
