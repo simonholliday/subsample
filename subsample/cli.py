@@ -137,10 +137,10 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 		type=pathlib.Path,
 		metavar="FILE",
 		help=(
-			"WAV files to process through the detection pipeline before "
-			"starting live capture. Segments are written to the configured "
-			"output directory and named after the source file "
-			"(e.g. recording_1.wav, recording_2.wav, …)."
+			"Audio files to cut into samples, written to the configured output "
+			"directory and named after the source file (e.g. recording_1.wav, "
+			"recording_2.wav, …). Subsample exits once they are done, without "
+			"starting live capture."
 		),
 	)
 	parser.add_argument(
