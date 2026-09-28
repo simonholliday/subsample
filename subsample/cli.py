@@ -204,7 +204,8 @@ def _list_devices () -> None:
 
 	Same names and format as the interactive pickers, so a name seen here can
 	be pasted (whole, or any substring) straight into recorder.audio.device,
-	player.audio.device, or player.midi_device in config.yaml.
+	player.audio.device, or player.midi_device in config.yaml.  Where no MIDI
+	system can be opened, it says why in place of the MIDI list.
 	"""
 
 	pa = subsample.audio.create_pyaudio()
@@ -227,7 +228,15 @@ def _list_devices () -> None:
 		print("  (none found)")
 
 	print("MIDI inputs (player.midi_device):")
-	midi_names = subsample.player.list_midi_input_devices()
+
+	try:
+		midi_names = subsample.player.list_midi_input_devices()
+	except subsample.player.MidiUnavailableError as exc:
+		# In place of the list, as "(none found)" is for audio, so the check
+		# ends as cleanly as it does on a machine with no sound card.
+		print(f"  {exc}")
+		return
+
 	for i, name in enumerate(midi_names):
 		print(f"  [{i}] {name}")
 	if not midi_names:
@@ -1285,6 +1294,12 @@ def _start_player (
 				device_name = subsample.player.select_midi_device(devices)
 		else:
 			device_name = subsample.player.select_midi_device(devices)
+
+	except subsample.player.MidiUnavailableError as exc:
+		# Worded as the virtual-port path words it, which meets the same
+		# failure when it opens its port.
+		print(f"\nError starting player: {exc}", file=sys.stderr)
+		return
 
 	except ValueError as exc:
 		print(f"Error opening MIDI device: {exc}", file=sys.stderr)

@@ -580,6 +580,28 @@ class TestListDevices:
 		assert "MIDI inputs" in out and "Fake Keys 1" in out
 		fake_pa.terminate.assert_called_once()
 
+	def test_no_midi_system_is_said_in_place_of_the_list (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+
+		"""Was a traceback and exit 1, on a machine with no ALSA sequencer."""
+
+		monkeypatch.setattr(subsample.audio, "create_pyaudio", lambda: unittest.mock.MagicMock())
+		monkeypatch.setattr(subsample.audio, "list_input_devices", lambda pa: [])
+		monkeypatch.setattr(subsample.audio, "list_output_devices", lambda pa: [])
+
+		def no_midi_system () -> list[str]:
+			raise subsample.player.MidiUnavailableError("No MIDI system could be opened: for this test.")
+
+		monkeypatch.setattr(subsample.player, "list_midi_input_devices", no_midi_system)
+
+		subsample.cli._list_devices()
+
+		assert capsys.readouterr().out.endswith(
+			"MIDI inputs (player.midi_device):\n"
+			"  No MIDI system could be opened: for this test.\n"
+		)
+
 	def test_list_devices_through_main_runs_before_config (
 		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 	) -> None:

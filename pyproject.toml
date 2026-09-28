@@ -73,6 +73,10 @@ module = ["mido", "mido.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = ["rtmidi", "rtmidi.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["pyrubberband", "pyrubberband.*"]
 ignore_missing_imports = true
 

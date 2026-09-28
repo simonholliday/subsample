@@ -48,10 +48,14 @@ midi-map.yaml by --init) for the format specification.
 
 import collections
 import dataclasses
+import getpass
 import logging
 import math
+import os
 import pathlib
+import platform
 import random
+import sys
 import threading
 import time
 import typing
@@ -59,6 +63,7 @@ import typing
 import mido
 import numpy
 import pyaudio
+import rtmidi
 import yaml
 
 import pymididefs.drums
@@ -3738,15 +3743,100 @@ class _Voice:
 	arithmetic beyond an index.  None when not looping or crossfade is 0."""
 
 
+# The ALSA sequencer, the part of the Linux kernel that carries MIDI between
+# programs.  rtmidi opens it before it can list or open a single port.
+_ALSA_SEQUENCER: typing.Final[pathlib.Path] = pathlib.Path("/dev/snd/seq")
+
+
+class MidiUnavailableError (OSError):
+
+	"""No MIDI system could be opened here, so no MIDI input can be listed or opened.
+
+	The message is one line for the user as it stands: why, and what to do
+	about it on this platform.
+	"""
+
+
+def _no_midi_system (exc: Exception) -> MidiUnavailableError:
+
+	"""Say why rtmidi could not open a MIDI system here, and what to do about it.
+
+	rtmidi says only that it could not create its client.  On Linux the cause
+	is nearly always the ALSA sequencer: missing where the sound modules were
+	never loaded, in a container not given the host's /dev/snd, and under WSL,
+	whose kernel has none; or present but closed to this account.
+	"""
+
+	opening = "No MIDI system could be opened: "
+
+	if sys.platform == "linux":
+
+		if not _ALSA_SEQUENCER.exists():
+
+			if "microsoft" in platform.uname().release.lower():
+				return MidiUnavailableError(
+					opening + "WSL has no ALSA sequencer, so MIDI cannot reach Subsample here. "
+					"Cutting a recording works without one."
+				)
+
+			return MidiUnavailableError(
+				opening + f"this machine has no ALSA sequencer ({_ALSA_SEQUENCER}). "
+				"Load it with 'sudo modprobe snd-seq', or in a container, pass the host's /dev/snd through."
+			)
+
+		if not os.access(_ALSA_SEQUENCER, os.R_OK | os.W_OK):
+			return MidiUnavailableError(opening + _sequencer_closed_to_this_account())
+
+	return MidiUnavailableError(opening + f'rtmidi reports "{str(exc) or type(exc).__name__}"')
+
+
+def _sequencer_closed_to_this_account () -> str:
+
+	"""Say how to join the group the ALSA sequencer belongs to, naming this account and that group."""
+
+	# grp exists only on Unix, and this is reached only on Linux.
+	import grp
+
+	gid = _ALSA_SEQUENCER.stat().st_gid
+
+	try:
+		group = grp.getgrgid(gid).gr_name
+	except KeyError:
+		# A container can own the device by a group it has no name for, and
+		# usermod takes a group's number as readily as its name.
+		group = str(gid)
+
+	try:
+		account = getpass.getuser()
+	except (KeyError, OSError):
+		# A container can run as an account with no name at all.  The shell
+		# fills $USER in, which is all the command needs.
+		return (
+			f"this account may not use the ALSA sequencer ({_ALSA_SEQUENCER}). "
+			f"Add it to the '{group}' group with 'sudo usermod -aG {group} $USER', then log in again."
+		)
+
+	return (
+		f"account '{account}' may not use the ALSA sequencer ({_ALSA_SEQUENCER}). "
+		f"Add it to the '{group}' group with 'sudo usermod -aG {group} {account}', then log in again."
+	)
+
+
 def list_midi_input_devices () -> list[str]:
 
 	"""Return the names of all available MIDI input devices.
 
-	Uses mido's default backend (rtmidi). Returns an empty list if no
-	MIDI devices are connected or the backend is unavailable.
+	Uses mido's default backend (rtmidi).  Returns an empty list when the MIDI
+	system is there but no device is connected.
+
+	Raises:
+		MidiUnavailableError: If no MIDI system could be opened on this machine.
 	"""
 
-	return list(mido.get_input_names())
+	try:
+		return list(mido.get_input_names())
+	except rtmidi.SystemError as exc:
+		raise _no_midi_system(exc) from exc
 
 
 def find_midi_device_by_name (name: str) -> str:
@@ -3771,9 +3861,10 @@ def find_midi_device_by_name (name: str) -> str:
 	Raises:
 		ValueError: If nothing matches, listing all available device names; or if
 		            several match with no terminal to choose on.
+		MidiUnavailableError: If no MIDI system could be opened on this machine.
 	"""
 
-	available: list[str] = [str(d) for d in mido.get_input_names()]
+	available: list[str] = [str(d) for d in list_midi_input_devices()]
 	matches = subsample.devices.match_device_names(name, available)
 
 	if not matches:
@@ -4642,21 +4733,28 @@ class MidiPlayer:
 			# analysis pool is no longer safe from this process.
 			subsample.parallelism.note_native_subsystem_started()
 
-			if self._virtual_midi_port is not None:
-				port_label = self._virtual_midi_port
-				port = mido.open_input(
-					self._virtual_midi_port,
-					virtual=True,
-					callback=self._safe_handle_message,
-				)
-				_log.info("MIDI player opened virtual port: %s", port_label)
-			else:
-				port_label = self._device_name
-				port = mido.open_input(
-					self._device_name,
-					callback=self._safe_handle_message,
-				)
-				_log.info("MIDI player opened hardware port: %s", port_label)
+			# Opening a port is where rtmidi first reaches for a MIDI system on
+			# the virtual path, which lists no devices beforehand.  The label is
+			# set only once a port is open, so the teardown below does not
+			# report closing one that never opened.
+			try:
+				if self._virtual_midi_port is not None:
+					port = mido.open_input(
+						self._virtual_midi_port,
+						virtual=True,
+						callback=self._safe_handle_message,
+					)
+					port_label = self._virtual_midi_port
+					_log.info("MIDI player opened virtual port: %s", port_label)
+				else:
+					port = mido.open_input(
+						self._device_name,
+						callback=self._safe_handle_message,
+					)
+					port_label = self._device_name
+					_log.info("MIDI player opened hardware port: %s", port_label)
+			except rtmidi.SystemError as exc:
+				raise _no_midi_system(exc) from exc
 
 			# Block until shutdown is signalled.  All MIDI work happens on
 			# rtmidi's callback thread; this thread is now purely a lifecycle

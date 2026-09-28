@@ -1,16 +1,22 @@
 """Tests for subsample.player — MIDI device selection and MidiPlayer lifecycle."""
 
 import dataclasses
+import getpass
 import logging
+import os
 import pathlib
+import platform
 import random
+import sys
 import threading
+import types
 import typing
 import unittest.mock
 
 import mido
 import numpy
 import pytest
+import rtmidi
 import yaml
 
 import subsample.analysis
@@ -250,6 +256,116 @@ class TestListMidiInputDevices:
 
 		assert result == []
 
+	def test_no_midi_system_says_why (self) -> None:
+
+		"""rtmidi's error where a machine has no MIDI system was a traceback."""
+
+		failure = rtmidi.SystemError("MidiInAlsa::initialize: error creating ALSA sequencer client object.")
+
+		with unittest.mock.patch("mido.get_input_names", side_effect=failure):
+			with pytest.raises(subsample.player.MidiUnavailableError, match="^No MIDI system could be opened: ") as caught:
+				subsample.player.list_midi_input_devices()
+
+		assert caught.value.__cause__ is failure
+
+
+# ---------------------------------------------------------------------------
+# what a machine with no MIDI system is told
+# ---------------------------------------------------------------------------
+
+class TestNoMidiSystem:
+
+	"""Why no MIDI system could be opened, and the step that fixes it, per platform."""
+
+	_RTMIDI_SAYS: typing.Final[str] = "MidiInAlsa::initialize: error creating ALSA sequencer client object."
+
+	def _message (self) -> str:
+		return str(subsample.player._no_midi_system(rtmidi.SystemError(self._RTMIDI_SAYS)))
+
+	def _on_linux (self, monkeypatch: pytest.MonkeyPatch, sequencer: pathlib.Path, release: str = "6.8.0-139-generic") -> None:
+
+		"""Stand in for a Linux machine whose ALSA sequencer is at *sequencer*."""
+
+		monkeypatch.setattr(sys, "platform", "linux")
+		monkeypatch.setattr(platform, "uname", lambda: types.SimpleNamespace(release=release))
+		monkeypatch.setattr(subsample.player, "_ALSA_SEQUENCER", sequencer)
+
+	def test_no_sequencer (self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+		self._on_linux(monkeypatch, tmp_path / "seq")
+
+		assert self._message() == (
+			f"No MIDI system could be opened: this machine has no ALSA sequencer ({tmp_path / 'seq'}). "
+			"Load it with 'sudo modprobe snd-seq', or in a container, pass the host's /dev/snd through."
+		)
+
+	def test_wsl (self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+
+		"""modprobe cannot help under WSL, whose kernel has no sound modules to load."""
+
+		self._on_linux(monkeypatch, tmp_path / "seq", release="5.15.153.1-microsoft-standard-WSL2")
+
+		assert self._message() == (
+			"No MIDI system could be opened: WSL has no ALSA sequencer, so MIDI cannot reach Subsample here. "
+			"Cutting a recording works without one."
+		)
+
+	def test_sequencer_closed_to_this_account (self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+
+		"""The group named is the one the device belongs to, whatever this system calls it."""
+
+		grp = pytest.importorskip("grp")
+		sequencer = tmp_path / "seq"
+		sequencer.touch()
+		group = grp.getgrgid(sequencer.stat().st_gid).gr_name
+		self._on_linux(monkeypatch, sequencer)
+		monkeypatch.setattr(os, "access", lambda path, mode: False)
+		monkeypatch.setattr(getpass, "getuser", lambda: "si")
+
+		assert self._message() == (
+			f"No MIDI system could be opened: account 'si' may not use the ALSA sequencer ({sequencer}). "
+			f"Add it to the '{group}' group with 'sudo usermod -aG {group} si', then log in again."
+		)
+
+	def test_an_account_with_no_name_is_left_to_the_shell (
+		self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+	) -> None:
+
+		"""A container can run as a number with no name, and getuser() then raises."""
+
+		pytest.importorskip("grp")
+		sequencer = tmp_path / "seq"
+		sequencer.touch()
+		self._on_linux(monkeypatch, sequencer)
+		monkeypatch.setattr(os, "access", lambda path, mode: False)
+
+		def no_name () -> str:
+			raise OSError("No username set in the environment")
+
+		monkeypatch.setattr(getpass, "getuser", no_name)
+
+		message = self._message()
+
+		assert "this account may not use the ALSA sequencer" in message
+		assert "'sudo usermod -aG " in message and " $USER', then log in again." in message
+
+	def test_a_usable_sequencer_leaves_rtmidi_to_say_what_failed (
+		self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+	) -> None:
+		sequencer = tmp_path / "seq"
+		sequencer.touch()
+		self._on_linux(monkeypatch, sequencer)
+
+		assert self._message() == f'No MIDI system could be opened: rtmidi reports "{self._RTMIDI_SAYS}"'
+
+	def test_elsewhere_rtmidi_says_what_failed (self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+
+		"""No ALSA advice off Linux, where a missing /dev/snd/seq means nothing."""
+
+		monkeypatch.setattr(sys, "platform", "darwin")
+		monkeypatch.setattr(subsample.player, "_ALSA_SEQUENCER", tmp_path / "seq")
+
+		assert self._message() == f'No MIDI system could be opened: rtmidi reports "{self._RTMIDI_SAYS}"'
+
 
 # ---------------------------------------------------------------------------
 # find_midi_device_by_name
@@ -317,6 +433,16 @@ class TestFindMidiDeviceByName:
 		with self._patch(["Device A", "Device B"]):
 			with pytest.raises(ValueError, match="Device A"):
 				subsample.player.find_midi_device_by_name("nope")
+
+	def test_no_midi_system_is_not_a_device_not_found (self) -> None:
+
+		"""A ValueError here sends the player to a device menu, which has nothing to offer."""
+
+		failure = rtmidi.SystemError("MidiInAlsa::initialize: error creating ALSA sequencer client object.")
+
+		with unittest.mock.patch("mido.get_input_names", side_effect=failure):
+			with pytest.raises(subsample.player.MidiUnavailableError):
+				subsample.player.find_midi_device_by_name("Launchpad")
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +702,32 @@ class TestMidiCallbackMode:
 
 		assert captured_kwargs.get("virtual") is True
 		assert captured_kwargs.get("callback") == player._safe_handle_message
+
+	def test_no_midi_system_at_open_says_why_and_closes_audio (
+		self,
+		caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""The virtual path lists no devices first, so opening its port is where
+		a machine with no MIDI system fails; the audio opened just before is
+		still closed, and no port is reported closed that never opened."""
+
+		shutdown_event = threading.Event()
+		shutdown_event.set()
+		mock_pa = self._make_mock_pyaudio()
+		failure = rtmidi.SystemError("MidiInAlsa::initialize: error creating ALSA sequencer client object.")
+
+		with unittest.mock.patch("mido.open_input", side_effect=failure):
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+				player = self._make_player(shutdown_event)
+
+				with caplog.at_level(logging.INFO, logger="subsample.player"):
+					with pytest.raises(subsample.player.MidiUnavailableError, match="^No MIDI system could be opened: "):
+						player.run()
+
+		mock_pa.open.return_value.close.assert_called_once()
+		mock_pa.terminate.assert_called_once()
+		assert "closed port" not in caplog.text
 
 	def test_safe_handle_message_swallows_exception (
 		self,
