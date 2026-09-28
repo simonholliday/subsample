@@ -125,7 +125,12 @@ def parser () -> argparse.ArgumentParser:
 
 	command = argparse.ArgumentParser(
 		prog="subsample",
-		description="Ambient audio sample recorder and analyser",
+		# RawDescriptionHelpFormatter (for the epilog's command list) prints
+		# this unwrapped, so the line break is written in.
+		description=(
+			"A sampler that cuts separate sounds out of a live input or a recording,\n"
+			"sorts them by how they sound, and plays them from MIDI."
+		),
 		epilog=_tool_epilog(),
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
