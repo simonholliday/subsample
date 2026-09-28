@@ -46,7 +46,6 @@ import subsample.audio
 import subsample.bank
 import subsample.cache
 import subsample.buffer
-import subsample.ensemble
 import subsample.config
 import subsample.detector
 import subsample.events
@@ -468,7 +467,7 @@ def _preload_midi_map (
 	path = pathlib.Path(cfg.player.midi_map) if cfg.player.midi_map is not None else None
 
 	try:
-		return _load_player_rules(cfg, reference_names)
+		return subsample.player.load_configured_map(cfg, reference_names)
 
 	# OSError rather than FileNotFoundError alone: `player.midi_map: samples`
 	# names a directory, a plausible mistake, and a map on a drive whose
@@ -492,52 +491,6 @@ def _preload_midi_map (
 			_log.error("player.midi_map = %r (%s)", cfg.player.midi_map, path.resolve())
 
 		raise SystemExit(1)
-
-
-def _load_player_rules (
-	cfg:             subsample.config.Config,
-	reference_names: list[str],
-) -> subsample.player.MidiMapResult:
-
-	"""Load the player's rules from whichever of the three surfaces is in use.
-
-	One place decides, so the startup pre-load and the player thread can never
-	disagree about what is being played:
-
-	  - ``player.midi_maps:``      several sample sets bound to channels in the
-	                               config; assembled into an ensemble here.
-	  - ``player.midi_map:`` with a ``maps:`` block — an ensemble file, which
-	                               may also carry assignments of its own.
-	  - ``player.midi_map:`` plain a single map, the original behaviour.
-
-	The config and ensemble-file forms run through the same merge, so they
-	produce identical rules for the same set of bindings.
-	"""
-
-	strict = cfg.player.strict_midi_map
-
-	if cfg.player.midi_maps is not None:
-		includes = [
-			subsample.ensemble.MapInclude(
-				# Relative paths resolve from the working directory here, not
-				# from a map file — config.yaml is what named them.
-				map_path=str(pathlib.Path(map_path).resolve()),
-				channel=channel,
-			)
-			for channel, map_path in sorted(cfg.player.midi_maps.items())
-		]
-
-		return subsample.player.load_ensemble(
-			None, reference_names, strict=strict, includes=includes,
-		)
-
-	assert cfg.player.midi_map is not None
-	path = pathlib.Path(cfg.player.midi_map)
-
-	if subsample.player.is_ensemble(path):
-		return subsample.player.load_ensemble(path, reference_names, strict=strict)
-
-	return subsample.player.load_midi_map(path, reference_names, strict=strict)
 
 
 def _start_watcher (watcher: typing.Any, description: str) -> bool:
@@ -1213,7 +1166,7 @@ def _start_player (
 		midi_map_result = preloaded_midi_map_result
 	else:
 		try:
-			midi_map_result = _load_player_rules(cfg, reference_library.names())
+			midi_map_result = subsample.player.load_configured_map(cfg, reference_library.names())
 		except (OSError, ValueError, yaml.YAMLError) as exc:
 			# yaml.YAMLError (a plain indentation typo in a hand-edited map) is
 			# the commonest live-coding failure and is NOT a ValueError — catch
@@ -2007,7 +1960,7 @@ def _main_impl () -> None:
 				# Reload through the same resolver startup used, so editing a
 				# ensemble re-merges every set it includes rather than
 				# reloading the ensemble file's own assignments alone.
-				result = _load_player_rules(cfg, reference_library.names())
+				result = subsample.player.load_configured_map(cfg, reference_library.names())
 			except (OSError, ValueError, yaml.YAMLError) as exc:
 				_log.warning(
 					"MIDI map reload failed at parse time - keeping current "

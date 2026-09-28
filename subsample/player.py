@@ -3581,6 +3581,88 @@ def _merge_into (
 	zone_templates.extend(result.zone_templates)
 
 
+def load_configured_map (
+	cfg:             subsample.config.Config,
+	reference_names: typing.Optional[list[str]] = None,
+) -> MidiMapResult:
+
+	"""Load the MIDI map a configuration names, the way a run loads it.
+
+	The one place that decides which of the three ways of naming a map is in
+	use, so a run's startup, its reload when the map is edited, and anything
+	outside Subsample that checks a map (subsystem.co's guide, #3865) cannot
+	disagree about what a map means:
+
+	  - ``player.midi_maps:``      several sample sets bound to MIDI channels in
+	                               the configuration, merged as an ensemble.
+	  - ``player.midi_map:`` naming a file with a ``maps:`` block: an ensemble
+	                               file, which may carry assignments of its own.
+	  - ``player.midi_map:`` naming a plain map.
+
+	A map's ``definitions:`` files are loaded with it.  ``player.enabled`` is
+	not consulted: a map means the same whether or not the player is on.
+	Relative paths resolve from the current directory, as a run's do.  No
+	audio and no sample library is read, so the result says what each
+	assignment selects, not which samples it would pick.  A ``programs:`` entry
+	naming a preset map is only declared here (``bank_definitions``): a run
+	loads that map when it builds the program, with the program's samples.
+
+	Whatever a run only warns about is logged through the same loggers a run
+	uses, and not raised.
+
+	Args:
+		cfg:             A loaded configuration (subsample.config.load_config).
+		reference_names: The reference fingerprints a map may name.  None loads
+		                 them as a run does, from config.reference_directory(cfg);
+		                 a run passes the names it has already loaded.
+
+	Returns:
+		The rules the player is given.
+
+	Raises:
+		ValueError:     If the configuration names no map, or a map is refused:
+		                a schema error, an unknown key while
+		                player.strict_midi_map is on, a note claimed twice.
+		OSError:        If a map, an included map or a definitions file cannot
+		                be read.
+		yaml.YAMLError: If one of those files is not valid YAML.
+	"""
+
+	if cfg.player.midi_maps is None and cfg.player.midi_map is None:
+		raise ValueError(
+			"The configuration names no MIDI map: set player.midi_map, or player.midi_maps"
+		)
+
+	if reference_names is None:
+		reference_names = subsample.library.load_reference_library(
+			subsample.config.reference_directory(cfg),
+		).names()
+
+	strict = cfg.player.strict_midi_map
+
+	if cfg.player.midi_maps is not None:
+		includes = [
+			subsample.ensemble.MapInclude(
+				# Relative paths resolve from the working directory here, not
+				# from a map file: config.yaml is what named them.
+				map_path=str(pathlib.Path(map_path).resolve()),
+				channel=channel,
+			)
+			for channel, map_path in sorted(cfg.player.midi_maps.items())
+		]
+
+		return load_ensemble(None, reference_names, strict=strict, includes=includes)
+
+	# The first check leaves player.midi_map as the only way here.
+	assert cfg.player.midi_map is not None
+	path = pathlib.Path(cfg.player.midi_map)
+
+	if is_ensemble(path):
+		return load_ensemble(path, reference_names, strict=strict)
+
+	return load_midi_map(path, reference_names, strict=strict)
+
+
 @dataclasses.dataclass
 class _Voice:
 

@@ -1539,13 +1539,14 @@ class TestReferenceDirectoryResolution:
 		assert subsample.cli._reference_directory(self._cfg("my/refs")) == pathlib.Path("my/refs")
 
 
-class TestLoadPlayerRules:
+class TestLoadConfiguredMap:
 
-	"""_load_player_rules — the one place that decides which surface is in use.
+	"""subsample.player.load_configured_map: the one place that decides which surface is in use.
 
-	Startup pre-loads the rules for bank detection and the player thread reuses
-	that result, so both must resolve identically; routing in two places would
-	let them disagree about what is being played.
+	Startup pre-loads the rules for bank detection, the player thread reuses
+	that result, the map watcher reloads through it, and subsystem.co's guide
+	checker loads every map example with it (#3865).  Routing in two places
+	would let them disagree about what is being played.
 	"""
 
 	_SET = """channel: {channel}
@@ -1567,13 +1568,13 @@ assignments:
 		cfg = subsample.config.load_config(subsample.config._locate_default_config())
 
 		return dataclasses.replace(
-			cfg, player=dataclasses.replace(cfg.player, enabled=True, **player),
+			cfg, player=dataclasses.replace(cfg.player, **{"enabled": True, **player}),
 		)
 
 	def test_plain_map (self, tmp_path: pathlib.Path) -> None:
 		path = self._write_set(tmp_path / "kit.yaml", channel=10, note=42)
 
-		result = subsample.cli._load_player_rules(
+		result = subsample.player.load_configured_map(
 			self._cfg(midi_map=str(path)), ["BD0025"],
 		)
 
@@ -1592,7 +1593,7 @@ assignments:
 			encoding="utf-8",
 		)
 
-		result = subsample.cli._load_player_rules(
+		result = subsample.player.load_configured_map(
 			self._cfg(midi_map=str(ensemble)), ["BD0025"],
 		)
 
@@ -1603,7 +1604,7 @@ assignments:
 		a = self._write_set(tmp_path / "setA" / "midi-map.yaml", channel=10, note=42)
 		b = self._write_set(tmp_path / "setB" / "kit.yaml", channel=10, note=38)
 
-		result = subsample.cli._load_player_rules(
+		result = subsample.player.load_configured_map(
 			self._cfg(midi_map=None, midi_maps={10: str(a), 12: str(b)}), ["BD0025"],
 		)
 
@@ -1622,10 +1623,10 @@ assignments:
 			encoding="utf-8",
 		)
 
-		from_file = subsample.cli._load_player_rules(
+		from_file = subsample.player.load_configured_map(
 			self._cfg(midi_map=str(ensemble)), ["BD0025"],
 		)
-		from_config = subsample.cli._load_player_rules(
+		from_config = subsample.player.load_configured_map(
 			self._cfg(midi_map=None, midi_maps={10: str(a), 12: str(b)}), ["BD0025"],
 		)
 
@@ -1655,6 +1656,99 @@ assignments:
 
 		assert with_names is not None and (9, 42) in with_names.note_map
 		assert without is not None and without.note_map == {}
+
+	def test_resolves_reference_names_as_a_run_does (self, tmp_path: pathlib.Path) -> None:
+
+		"""Given no names, it loads the references a run would, so a map naming
+		one of the bundled General MIDI fingerprints keeps its assignment."""
+
+		path = tmp_path / "kit.yaml"
+		path.write_text(
+			"channel: 10\nassignments:\n  - name: Hat\n    notes: 42\n"
+			"    select:\n      where: { reference: GM42_ClosedHiHat }\n",
+			encoding="utf-8",
+		)
+
+		result = subsample.player.load_configured_map(self._cfg(midi_map=str(path)))
+
+		assert (9, 42) in result.note_map
+
+	def test_loads_whether_or_not_the_player_is_on (self, tmp_path: pathlib.Path) -> None:
+
+		"""A guide shows a map before the player is turned on."""
+
+		path = self._write_set(tmp_path / "kit.yaml", channel=10, note=42)
+
+		result = subsample.player.load_configured_map(
+			self._cfg(enabled=False, midi_map=str(path)), ["BD0025"],
+		)
+
+		assert (9, 42) in result.note_map
+
+	def test_relative_paths_resolve_from_the_current_directory (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		self._write_set(tmp_path / "kit.yaml", channel=10, note=42)
+		monkeypatch.chdir(tmp_path)
+
+		result = subsample.player.load_configured_map(self._cfg(midi_map="kit.yaml"), ["BD0025"])
+
+		assert (9, 42) in result.note_map
+
+	def test_no_map_named_is_refused (self) -> None:
+
+		"""Nothing to load is an error here, where the run instead leaves the player off."""
+
+		with pytest.raises(ValueError, match="names no MIDI map"):
+			subsample.player.load_configured_map(self._cfg(midi_map=None, midi_maps=None), [])
+
+	def test_a_map_the_run_refuses_raises (self, tmp_path: pathlib.Path) -> None:
+
+		path = tmp_path / "kit.yaml"
+		path.write_text(
+			"channel: 10\nassignments:\n  - name: Hat\n    notes: 42\n"
+			"    select:\n      pick: velocity\n",
+			encoding="utf-8",
+		)
+
+		with pytest.raises(ValueError, match="order"):
+			subsample.player.load_configured_map(self._cfg(midi_map=str(path)), [])
+
+	def test_what_the_run_only_warns_about_is_logged (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A reference the map names but nobody has is skipped with a warning, as
+		in a run; a checker counting warnings as failures sees it."""
+
+		path = self._write_set(tmp_path / "kit.yaml", channel=10, note=42)
+		caplog.set_level(logging.WARNING, logger="subsample")
+
+		result = subsample.player.load_configured_map(self._cfg(midi_map=str(path)), [])
+
+		assert result.note_map == {}
+		assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+	def test_the_run_loads_through_it (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""The startup pre-load reaches this function, so the run and a checker agree."""
+
+		sentinel = unittest.mock.sentinel.rules
+		calls: list[typing.Any] = []
+
+		def load (cfg: subsample.config.Config, names: typing.Optional[list[str]] = None) -> typing.Any:
+			calls.append(names)
+			return sentinel
+
+		monkeypatch.setattr(subsample.player, "load_configured_map", load)
+
+		result = subsample.cli._preload_midi_map(self._cfg(midi_map="kit.yaml"), ["BD0025"])
+
+		assert result is sentinel
+		assert calls == [["BD0025"]]
 
 
 class TestDrainingCapturesOnTheWayOut:
