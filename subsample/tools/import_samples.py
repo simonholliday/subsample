@@ -344,7 +344,7 @@ def parser () -> argparse.ArgumentParser:
 		"files",
 		nargs="*",
 		metavar="FILE",
-		help="Audio files or glob patterns to import",
+		help="Audio files to import. A name may use wildcards, as in '*.wav'.",
 	)
 	return command
 

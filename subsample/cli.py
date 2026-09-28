@@ -158,8 +158,9 @@ def parser () -> argparse.ArgumentParser:
 		action="store_true",
 		help=(
 			"List the audio input, audio output, and MIDI input devices on "
-			"this machine, then exit. Any name shown can be used (or "
-			"substring-matched) in config.yaml's device settings."
+			"this machine, then exit. Any name shown can be used in "
+			"config.yaml's device settings, whole or in part, with wildcards "
+			"for a number that changes."
 		),
 	)
 	command.add_argument(

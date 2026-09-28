@@ -512,7 +512,7 @@ def parser () -> argparse.ArgumentParser:
 		type=pathlib.Path,
 		nargs="?",
 		default=None,
-		help="Sample directory to catalog (default: library.directory from config.yaml)",
+		help="Sample directory to catalogue (default: library.directory from config.yaml)",
 	)
 	command.add_argument(
 		"-o", "--output",
@@ -534,7 +534,7 @@ def parser () -> argparse.ArgumentParser:
 	command.add_argument(
 		"--quantizable",
 		action="store_true",
-		help="Instead of a CSV, list the paths of samples with enough hits to quantize to a beat grid",
+		help="Instead of a CSV, list the paths of samples with enough hits to quantise to a beat grid",
 	)
 	command.add_argument(
 		"--loopable",

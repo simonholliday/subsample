@@ -207,13 +207,13 @@ def parser () -> argparse.ArgumentParser:
 
 	command = argparse.ArgumentParser(
 		prog="subsample analyze",
-		description="Analyze audio files and print their detected metrics (rhythm, spectral, pitch, level, loop).",
+		description="Analyse audio files and print their detected metrics (rhythm, spectral, pitch, level, loop).",
 	)
 	command.add_argument(
 		"files",
 		nargs="+",
 		metavar="FILE",
-		help="Audio files or quoted glob patterns to analyze",
+		help="Audio files to analyse. A name may use wildcards, as in '*.wav'.",
 	)
 	command.add_argument(
 		"--config",
