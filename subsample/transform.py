@@ -105,8 +105,11 @@ How to add a new transform type
 6.  Wire auto-enqueue logic in TransformManager.on_sample_added() if the
     transform should fire automatically when new samples arrive.
 
-7.  Update README.md (user-facing) and README-AGENTS.md (agent-facing) to
-    document the new transform type.
+7.  Document it where each reader looks.  Its user-facing words go in its
+    declaration in subsample/processors.py, from which subsystem.co generates
+    the published reference, so README.md needs no edit.  How it changes the
+    pipeline goes in docs/architecture.md, and anything an agent needs goes in
+    README-AGENTS.md.
 """
 
 import collections

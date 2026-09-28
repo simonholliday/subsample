@@ -617,7 +617,7 @@ analysis:
 # persisted to disk (variant_cache_dir) for faster startup.
 #
 # Pitch shifting and time-stretching are active (requires rubberband-cli).
-# See the README's "Transforms" section for how the pipeline behaves.
+# See "Transforms" in docs/architecture.md for how the pipeline behaves.
 
 # transform:
 #   max_memory_mb: 350.0     # a number in MB; leave the key out for 35% of the global budget
