@@ -903,7 +903,9 @@ Subsample ships its defaults built in and deep-merges your `config.yaml` on
 top. Your config only needs the settings you want to change - everything else
 is inherited from the defaults automatically. `subsample --init` writes a
 starter `config.yaml` with every setting present and documented, ready to
-edit.
+edit. A section or setting written twice, such as a second `player:` at the
+end of the file, is refused at start-up, naming both lines: add the setting to
+the section already there.
 
 ### Naming a device that keeps moving
 

@@ -292,3 +292,138 @@ maps:
 		config = subsample.config.load_config(path)
 
 		assert config.osc.send_port == 12000, "012000 was read as octal"
+
+
+# ---------------------------------------------------------------------------
+# A key written twice (#3872)
+# ---------------------------------------------------------------------------
+
+_FIX: typing.Final[str] = "Write it once, with everything from both."
+
+
+class TestAKeyWrittenTwice:
+
+	"""YAML says a mapping's keys are unique; PyYAML kept the second and dropped the first."""
+
+	def test_a_second_player_section_in_config_yaml (self, tmp_path: pathlib.Path) -> None:
+
+		"""A player: block added at the end of the file --init wrote lost its
+		map line, and the player then would not start for want of a map."""
+
+		path = _write(tmp_path, "config.yaml", (
+			"player:\n"
+			"  midi_map: midi-map-gm-drums.yaml\n"
+			"\n"
+			"player:\n"
+			"  enabled: true\n"
+		))
+
+		with pytest.raises(ValueError) as caught:
+			subsample.config.load_config(path)
+
+		assert str(caught.value) == f"Config file {path}: 'player' is written twice, on lines 1 and 4. {_FIX}"
+
+	def test_the_loader_names_the_file_the_key_and_both_lines (self, tmp_path: pathlib.Path) -> None:
+		path = _write(tmp_path, "any.yaml", "a: 1\nb: 2\na: 3\n")
+
+		with path.open(encoding="utf-8") as handle:
+			with pytest.raises(subsample.yaml_numbers.DuplicateKeyError) as caught:
+				subsample.yaml_numbers.load(handle)
+
+		error = caught.value
+		assert (error.key, error.first_line, error.second_line) == ("a", 1, 3)
+		assert str(error) == f"{path}: 'a' is written twice, on lines 1 and 3. {_FIX}"
+
+	def test_it_is_reported_wherever_a_malformed_file_is (self) -> None:
+
+		"""Every caller catches yaml.YAMLError already, a watched map's reload included."""
+
+		assert issubclass(subsample.yaml_numbers.DuplicateKeyError, yaml.YAMLError)
+
+	def test_a_nested_key_is_named_by_its_path (self) -> None:
+		with pytest.raises(subsample.yaml_numbers.DuplicateKeyError) as caught:
+			subsample.yaml_numbers.load("player:\n  audio:\n    device: a\n    device: b\n")
+
+		assert caught.value.key == "player.audio.device"
+
+	def test_a_key_in_a_list_item_is_named_from_the_item (self) -> None:
+		with pytest.raises(subsample.yaml_numbers.DuplicateKeyError) as caught:
+			subsample.yaml_numbers.load("assignments:\n  - name: Kick\n    notes: 36\n    notes: 38\n")
+
+		assert (caught.value.key, caught.value.first_line, caught.value.second_line) == ("notes", 3, 4)
+
+	def test_keys_compare_as_the_values_they_read_as (self) -> None:
+
+		"""036 is thirty-six here, so it is the same note as 36."""
+
+		with pytest.raises(subsample.yaml_numbers.DuplicateKeyError) as caught:
+			subsample.yaml_numbers.load("notes:\n  36: kick\n  036: snare\n")
+
+		assert caught.value.key == "notes.036"
+
+	def test_the_first_in_reading_order_is_named (self) -> None:
+		with pytest.raises(subsample.yaml_numbers.DuplicateKeyError) as caught:
+			subsample.yaml_numbers.load("player:\n  enabled: true\n  enabled: false\nplayer: {}\n")
+
+		assert caught.value.key == "player.enabled"
+
+	def test_the_same_key_in_two_sections_is_not_a_repeat (self) -> None:
+		assert subsample.yaml_numbers.load("recorder:\n  enabled: false\nplayer:\n  enabled: true\n") == {
+			"recorder": {"enabled": False},
+			"player":   {"enabled": True},
+		}
+
+	def test_a_merge_may_be_overridden (self) -> None:
+
+		"""The keys a merge brings in are there to be written over."""
+
+		loaded = subsample.yaml_numbers.load(
+			"base: &base\n  gain: 1\n  pan: 0\nkick:\n  <<: *base\n  gain: 2\n"
+		)
+
+		assert loaded["kick"] == {"gain": 2, "pan": 0}
+
+	def test_one_anchor_used_twice_is_not_a_repeat (self) -> None:
+		loaded = subsample.yaml_numbers.load("a: &x\n  k: 1\nb: *x\nc: *x\n")
+
+		assert loaded == {"a": {"k": 1}, "b": {"k": 1}, "c": {"k": 1}}
+
+	def test_a_midi_map (self, tmp_path: pathlib.Path) -> None:
+
+		"""A second assignments: list dropped the first."""
+
+		path = _write(tmp_path, "midi-map.yaml", (
+			"assignments:\n"
+			"  - name: Kick\n"
+			"    notes: 36\n"
+			"    select:\n"
+			"      where:\n"
+			"        reference: BD0025\n"
+			"assignments:\n"
+			"  - name: Snare\n"
+			"    notes: 38\n"
+			"    select:\n"
+			"      where:\n"
+			"        reference: BD0025\n"
+		))
+
+		with pytest.raises(subsample.yaml_numbers.DuplicateKeyError) as caught:
+			subsample.player.load_midi_map(path, ["BD0025"])
+
+		assert str(caught.value) == f"{path}: 'assignments' is written twice, on lines 1 and 7. {_FIX}"
+
+	def test_an_ensemble_map (self, tmp_path: pathlib.Path) -> None:
+		path = _write(tmp_path, "ensemble.yaml", "maps:\n  - map: a.yaml\n    channel: 10\nmaps: []\n")
+
+		with pytest.raises(subsample.yaml_numbers.DuplicateKeyError, match="'maps' is written twice, on lines 1 and 4"):
+			subsample.player._read_ensemble_includes(path, strict=False)
+
+	def test_a_definitions_file (self, tmp_path: pathlib.Path) -> None:
+		_write(tmp_path, "defs.yaml", "notes:\n  kick: 36\nnotes:\n  snare: 38\n")
+
+		with pytest.raises(ValueError) as caught:
+			subsample.definitions.load_definitions(
+				{"my": "defs.yaml"}, tmp_path, reserved_prefixes=frozenset({"drum"}),
+			)
+
+		assert str(caught.value).endswith(f"(prefix 'my'): 'notes' is written twice, on lines 1 and 3. {_FIX}")

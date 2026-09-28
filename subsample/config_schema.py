@@ -49,7 +49,8 @@ def json_schema () -> dict[str, typing.Any]:
 			a `config.yaml` holding every setting with its comment, to edit from.
 			Relative paths resolve against the directory Subsample runs in, and a
 			key Subsample does not read is reported by name at start-up and
-			ignored.
+			ignored.  A section or setting written twice, such as a second
+			`player:`, is refused, naming both lines.
 		"""),
 		"type": "object",
 		"properties": {

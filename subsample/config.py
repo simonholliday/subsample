@@ -777,6 +777,8 @@ def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
 	try:
 		with path.open("r", encoding="utf-8") as fh:
 			data = subsample.yaml_numbers.load(fh)
+	except subsample.yaml_numbers.DuplicateKeyError as exc:
+		raise ValueError(f"Config file {path}: {exc.problem}") from exc
 	except yaml.YAMLError as exc:
 		raise ValueError(f"Config file {path} contains invalid YAML: {exc}") from exc
 

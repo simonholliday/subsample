@@ -245,6 +245,8 @@ def _load_definitions_file (
 	try:
 		with path.open(encoding="utf-8") as fh:
 			raw = subsample.yaml_numbers.load(fh)
+	except subsample.yaml_numbers.DuplicateKeyError as exc:
+		raise ValueError(f"definitions file {path} (prefix {prefix!r}): {exc.problem}") from exc
 	except (OSError, yaml.YAMLError) as exc:
 		raise ValueError(
 			f"definitions file {path} (prefix {prefix!r}) could not be "

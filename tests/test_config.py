@@ -1045,24 +1045,18 @@ class TestAmbisonicConfig:
 	def test_explicit_ambisonic_yaml_parsed (self, tmp_path: pathlib.Path) -> None:
 		"""Explicit ambisonic section + ambisonic_format field are parsed."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    channels: 4\n"
-				"    ambisonic_format: a_nt_sf1\n"
-				"\nambisonic:\n"
-				"  decoder: max_re\n"
-				"  yaw_degrees: 30.0\n"
-				"  pitch_degrees: -10.0\n"
-				"  roll_degrees: 5.0\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    channels: 4\n"
+			"    ambisonic_format: a_nt_sf1\n"
+			"\nambisonic:\n"
+			"  decoder: max_re\n"
+			"  yaw_degrees: 30.0\n"
+			"  pitch_degrees: -10.0\n"
+			"  roll_degrees: 5.0\n"
+		)
 
 		cfg = subsample.config.load_config(user_config)
 
@@ -1076,19 +1070,13 @@ class TestAmbisonicConfig:
 	def test_invalid_ambisonic_format_rejected (self, tmp_path: pathlib.Path) -> None:
 		"""An unknown ambisonic_format raises a clear ValueError."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    channels: 4\n"
-				"    ambisonic_format: not_a_format\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    channels: 4\n"
+			"    ambisonic_format: not_a_format\n"
+		)
 
 		with pytest.raises(ValueError, match="ambisonic_format"):
 			subsample.config.load_config(user_config)
@@ -1096,19 +1084,13 @@ class TestAmbisonicConfig:
 	def test_ambisonic_format_requires_four_channels (self, tmp_path: pathlib.Path) -> None:
 		"""Setting ambisonic_format with channels != 4 raises ValueError."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    channels: 2\n"
-				"    ambisonic_format: a_generic\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    channels: 2\n"
+			"    ambisonic_format: a_generic\n"
+		)
 
 		with pytest.raises(ValueError, match="channels: 4"):
 			subsample.config.load_config(user_config)
@@ -1119,19 +1101,13 @@ class TestAmbisonicConfig:
 		deferred to the first capture on a worker thread.
 		"""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    channels: null\n"
-				"    ambisonic_format: a_generic\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    channels: null\n"
+			"    ambisonic_format: a_generic\n"
+		)
 
 		with pytest.raises(ValueError, match="auto-detect is not accepted"):
 			subsample.config.load_config(user_config)
@@ -1139,17 +1115,11 @@ class TestAmbisonicConfig:
 	def test_invalid_decoder_rejected (self, tmp_path: pathlib.Path) -> None:
 		"""Unknown ambisonic.decoder value raises ValueError."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nambisonic:\n"
-				"  decoder: telepathy\n"
-			)
+		user_config.write_text(
+			"ambisonic:\n"
+			"  decoder: telepathy\n"
+		)
 
 		with pytest.raises(ValueError, match="ambisonic.decoder"):
 			subsample.config.load_config(user_config)
@@ -1157,17 +1127,11 @@ class TestAmbisonicConfig:
 	def test_higher_max_order_rejected (self, tmp_path: pathlib.Path) -> None:
 		"""max_order > 1 raises ValueError (higher orders not yet implemented)."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nambisonic:\n"
-				"  max_order: 2\n"
-			)
+		user_config.write_text(
+			"ambisonic:\n"
+			"  max_order: 2\n"
+		)
 
 		with pytest.raises(ValueError, match="max_order must be 1"):
 			subsample.config.load_config(user_config)
@@ -1187,19 +1151,13 @@ class TestAudioFormatConfig:
 	def test_explicit_flac_parsed (self, tmp_path: pathlib.Path) -> None:
 		"""Setting audio_format: flac in YAML is parsed correctly."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    bit_depth: 16\n"
-				"    audio_format: flac\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    bit_depth: 16\n"
+			"    audio_format: flac\n"
+		)
 
 		cfg = subsample.config.load_config(user_config)
 
@@ -1208,19 +1166,13 @@ class TestAudioFormatConfig:
 	def test_case_insensitive (self, tmp_path: pathlib.Path) -> None:
 		"""Uppercase values are normalised to lowercase."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    bit_depth: 16\n"
-				"    audio_format: FLAC\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    bit_depth: 16\n"
+			"    audio_format: FLAC\n"
+		)
 
 		cfg = subsample.config.load_config(user_config)
 
@@ -1229,18 +1181,12 @@ class TestAudioFormatConfig:
 	def test_invalid_value_rejected (self, tmp_path: pathlib.Path) -> None:
 		"""Anything other than wav/flac raises ValueError."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    audio_format: mp3\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    audio_format: mp3\n"
+		)
 
 		with pytest.raises(ValueError, match="audio_format"):
 			subsample.config.load_config(user_config)
@@ -1252,19 +1198,13 @@ class TestAudioFormatConfig:
 		the first capture.
 		"""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    bit_depth: 32\n"
-				"    audio_format: flac\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    bit_depth: 32\n"
+			"    audio_format: flac\n"
+		)
 
 		with pytest.raises(ValueError, match="bit_depth of 16 or 24"):
 			subsample.config.load_config(user_config)
@@ -1272,19 +1212,13 @@ class TestAudioFormatConfig:
 	def test_flac_with_16bit_accepted (self, tmp_path: pathlib.Path) -> None:
 		"""audio_format: flac with bit_depth: 16 is a valid combination."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    bit_depth: 16\n"
-				"    audio_format: flac\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    bit_depth: 16\n"
+			"    audio_format: flac\n"
+		)
 
 		cfg = subsample.config.load_config(user_config)
 
@@ -1294,19 +1228,13 @@ class TestAudioFormatConfig:
 	def test_flac_with_24bit_accepted (self, tmp_path: pathlib.Path) -> None:
 		"""audio_format: flac with bit_depth: 24 is a valid combination."""
 
-		import shutil
-
-		default = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(
-				"\nrecorder:\n"
-				"  audio:\n"
-				"    bit_depth: 24\n"
-				"    audio_format: flac\n"
-			)
+		user_config.write_text(
+			"recorder:\n"
+			"  audio:\n"
+			"    bit_depth: 24\n"
+			"    audio_format: flac\n"
+		)
 
 		cfg = subsample.config.load_config(user_config)
 
@@ -1329,14 +1257,8 @@ class TestPreviewsConfig:
 	def test_explicit_false_parsed (self, tmp_path: pathlib.Path) -> None:
 		"""Setting recorder.previews: false in YAML is parsed correctly."""
 
-		import shutil
-
-		default     = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write("\nrecorder:\n  previews: false\n")
+		user_config.write_text("recorder:\n  previews: false\n")
 
 		cfg = subsample.config.load_config(user_config)
 
@@ -1345,14 +1267,8 @@ class TestPreviewsConfig:
 	def test_explicit_true_parsed (self, tmp_path: pathlib.Path) -> None:
 		"""Setting recorder.previews: true is idempotent with the default."""
 
-		import shutil
-
-		default     = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write("\nrecorder:\n  previews: true\n")
+		user_config.write_text("recorder:\n  previews: true\n")
 
 		cfg = subsample.config.load_config(user_config)
 
@@ -1372,14 +1288,8 @@ class TestBufferFrames:
 
 	def _load_with_buffer_frames (self, tmp_path: pathlib.Path, value: typing.Any) -> "subsample.config.Config":
 
-		import shutil
-
-		default     = subsample.config._locate_default_config()
 		user_config = tmp_path / "config.yaml"
-		shutil.copy(default, user_config)
-
-		with user_config.open("a") as fh:
-			fh.write(f"\nplayer:\n  audio:\n    buffer_frames: {value}\n")
+		user_config.write_text(f"player:\n  audio:\n    buffer_frames: {value}\n")
 
 		return subsample.config.load_config(user_config)
 
