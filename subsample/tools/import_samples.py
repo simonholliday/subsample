@@ -308,18 +308,19 @@ def _import_file (
 	return True
 
 
-def main (argv: typing.Optional[list[str]] = None) -> int:
+def parser () -> argparse.ArgumentParser:
 
-	"""Import pre-trimmed audio files into the Subsample capture library."""
+	"""Build the parser for `subsample import`, without parsing anything.
 
-	subsample.tools._shared.configure_logging()
+	Kept apart from main() so that subsystem.co can generate the command-line
+	reference from it without running the tool (#3020).
+	"""
 
-
-	parser = argparse.ArgumentParser(
+	command = argparse.ArgumentParser(
 		prog="subsample import",
 		description="Import pre-trimmed audio files into the Subsample capture library.",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--to",
 		type=str,
 		default=None,
@@ -327,29 +328,38 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		help="Target directory (default: recorder.directory from config.yaml). "
 		     "Import to the instrument directory to make samples immediately playable.",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--force",
 		action="store_true",
 		help="Overwrite existing files in target directory",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--config",
 		type=pathlib.Path,
 		default=None,
 		metavar="PATH",
 		help="Path to config.yaml (default: auto-discover as per main app)",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"files",
 		nargs="*",
 		metavar="FILE",
 		help="Audio files or glob patterns to import",
 	)
+	return command
 
-	args = parser.parse_args(argv)
+
+def main (argv: typing.Optional[list[str]] = None) -> int:
+
+	"""Import pre-trimmed audio files into the Subsample capture library."""
+
+	subsample.tools._shared.configure_logging()
+
+	command = parser()
+	args = command.parse_args(argv)
 
 	if not args.files:
-		parser.print_usage(sys.stderr)
+		command.print_usage(sys.stderr)
 		return 1
 
 	# Resolve target directory

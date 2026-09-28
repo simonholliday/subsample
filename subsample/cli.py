@@ -113,25 +113,23 @@ def _tool_epilog () -> str:
 	return "\n".join(lines)
 
 
-def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
+def parser () -> argparse.ArgumentParser:
 
-	"""Parse command-line arguments.
+	"""Build the parser for `subsample` itself, without parsing anything.
 
-	Args:
-		argv: Argument list to parse; None (default) reads sys.argv.
-
-	Returns:
-		Namespace with 'files' (a possibly empty list of pathlib.Path),
-		'config' (an explicit config path or None), and 'init' (bool).
+	Building is kept apart from parsing so that subsystem.co can read every
+	option and its help without running Subsample, and generate the published
+	command-line reference from them (#3020).  Each tool subcommand in
+	_TOOL_COMMANDS has a parser() of its own, for the same reason.
 	"""
 
-	parser = argparse.ArgumentParser(
+	command = argparse.ArgumentParser(
 		prog="subsample",
 		description="Ambient audio sample recorder and analyser",
 		epilog=_tool_epilog(),
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
-	parser.add_argument(
+	command.add_argument(
 		"files",
 		nargs="*",
 		type=pathlib.Path,
@@ -143,7 +141,7 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 			"starting live capture."
 		),
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--config",
 		type=pathlib.Path,
 		default=None,
@@ -155,7 +153,7 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 			"so one shared config can serve several project folders."
 		),
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--list-devices",
 		action="store_true",
 		help=(
@@ -164,7 +162,7 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 			"substring-matched) in config.yaml's device settings."
 		),
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--init",
 		action="store_true",
 		help=(
@@ -176,7 +174,23 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 			"Refuses to overwrite existing files."
 		),
 	)
-	return parser.parse_args(argv)
+	return command
+
+
+def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
+
+	"""Parse command-line arguments.
+
+	Args:
+		argv: Argument list to parse; None (default) reads sys.argv.
+
+	Returns:
+		Namespace with 'files' (a possibly empty list of pathlib.Path),
+		'config' (an explicit config path or None), and 'list_devices' and
+		'init' (both bool).
+	"""
+
+	return parser().parse_args(argv)
 
 
 def _list_devices () -> None:
@@ -1431,9 +1445,10 @@ def _main_impl () -> None:
 
 	"""Run the ambient audio sampler.
 
-	Processes any input files first (if given on the command line), then
-	loads libraries and starts the recorder and/or player as configured.
-	Both run as threads; the main thread coordinates shutdown on Ctrl+C.
+	Given input files on the command line, cuts them into samples and exits.
+	Otherwise loads libraries and starts the recorder and/or player as
+	configured.  Both run as threads; the main thread coordinates shutdown on
+	Ctrl+C.
 	"""
 
 	logging.basicConfig(

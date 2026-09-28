@@ -73,33 +73,44 @@ def _render (path: pathlib.Path, loop: subsample.loopfind.LoopPoints, audio: num
 	soundfile.write(str(out_dir / f"{path.stem}_loop_butt.wav"), butt, sr)
 
 
-def main (argv: typing.Optional[list[str]] = None) -> int:
+def parser () -> argparse.ArgumentParser:
 
-	"""Report (and optionally render) loop points for loop-candidate samples."""
+	"""Build the parser for `subsample loops`, without parsing anything.
 
-	subsample.tools._shared.configure_logging()
+	Kept apart from main() so that subsystem.co can generate the command-line
+	reference from it without running the tool (#3020).
+	"""
 
-	parser = argparse.ArgumentParser(
+	command = argparse.ArgumentParser(
 		prog="subsample loops",
 		description="Find and audition loop points for loop-candidate samples",
 	)
-	parser.add_argument("paths", type=pathlib.Path, nargs="+", help="Audio files or directories")
-	parser.add_argument(
+	command.add_argument("paths", type=pathlib.Path, nargs="+", help="Audio files or directories")
+	command.add_argument(
 		"--render", type=pathlib.Path, default=None, metavar="DIR",
 		help="Also write audition WAVs (crossfaded + butt-joint) to DIR",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--all", action="store_true",
 		help="Try every file, not only those the is_loopable gate passes",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--config",
 		type=pathlib.Path,
 		default=None,
 		metavar="PATH",
 		help="Path to config.yaml (default: auto-discover as per main app)",
 	)
-	args = parser.parse_args(argv)
+	return command
+
+
+def main (argv: typing.Optional[list[str]] = None) -> int:
+
+	"""Report (and optionally render) loop points for loop-candidate samples."""
+
+	subsample.tools._shared.configure_logging()
+
+	args = parser().parse_args(argv)
 
 	# ensure_sample_assets heals missing/stale sidecars, so wire the float
 	# ceiling and analysis tempo priors from config first — a sidecar this tool

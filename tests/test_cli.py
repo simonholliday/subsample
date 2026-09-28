@@ -1,6 +1,8 @@
 """Tests for subsample.cli — argument parsing and detection pipeline helpers."""
 
+import argparse
 import dataclasses
+import importlib
 import logging
 import math
 import pathlib
@@ -430,6 +432,117 @@ class TestToolDispatch:
 			subsample.cli.main()
 
 		assert excinfo.value.code == 2
+
+
+# Each command's parser as subsystem.co reads it (#3020): the module that builds
+# it, the command it names, and every argument it accepts, in the order --help
+# lists them.  An option appears as its flags, a positional as its name.
+_PARSERS: dict[str, tuple[str, list[str]]] = {
+	"subsample.cli": (
+		"subsample",
+		["-h", "--help", "files", "--config", "--list-devices", "--init"],
+	),
+	"subsample.tools.analyze_file": (
+		"subsample analyze",
+		["-h", "--help", "files", "--config"],
+	),
+	"subsample.tools.catalog_samples": (
+		"subsample catalog",
+		[
+			"-h", "--help", "directory", "-o", "--output", "--full", "--pitched",
+			"--quantizable", "--loopable", "--group", "--similarity-threshold",
+			"--order", "--config",
+		],
+	),
+	"subsample.tools.import_samples": (
+		"subsample import",
+		["-h", "--help", "--to", "--force", "--config", "files"],
+	),
+	"subsample.tools.similarity_report": (
+		"subsample similar",
+		["-h", "--help", "--top", "--config", "--reference-dir"],
+	),
+	"subsample.tools.suggest_loops": (
+		"subsample loops",
+		["-h", "--help", "paths", "--render", "--all", "--config"],
+	),
+}
+
+
+def _arguments (command: argparse.ArgumentParser) -> list[str]:
+
+	"""Return every argument a parser accepts: an option's flags, a positional's name."""
+
+	names: list[str] = []
+
+	# _actions is private, but it is what subsystem.co's probe walks, as every
+	# argparse documentation tool does, so this sees what the site sees.
+	for action in command._actions:
+		names.extend(action.option_strings or [action.dest])
+
+	return names
+
+
+class TestParsers:
+
+	"""Every command builds its parser in parser(), which subsystem.co reads (#3020).
+
+	The site generates the command-line reference from these without running
+	Subsample, so each must carry exactly what its command accepts, and main()
+	must parse with it rather than with a parser of its own.
+	"""
+
+	@pytest.mark.parametrize("module_name", list(_PARSERS))
+	def test_parser_carries_the_arguments_its_command_accepts (self, module_name: str) -> None:
+
+		"""Each parser() names its command and accepts the arguments it always has."""
+
+		prog, expected = _PARSERS[module_name]
+		command = importlib.import_module(module_name).parser()
+
+		assert isinstance(command, argparse.ArgumentParser)
+		assert command.prog == prog
+		assert _arguments(command) == expected
+
+	def test_every_tool_command_has_a_parser (self) -> None:
+
+		"""A tool added to the dispatch table comes with a parser() and a row above.
+
+		subsystem.co names each parser() by its module, so a new tool is also a
+		line to add on the site's side.
+		"""
+
+		tool_modules = {module for module, _description in subsample.cli._TOOL_COMMANDS.values()}
+
+		assert tool_modules == set(_PARSERS) - {"subsample.cli"}
+
+		for name, (module_name, _description) in subsample.cli._TOOL_COMMANDS.items():
+			assert _PARSERS[module_name][0] == f"subsample {name}"
+
+	@pytest.mark.parametrize("module_name", [name for name in _PARSERS if name != "subsample.cli"])
+	def test_tool_main_parses_with_its_parser (
+		self, module_name: str, capsys: pytest.CaptureFixture[str],
+	) -> None:
+
+		"""A tool's --help is its parser()'s help, so main() parses with nothing else."""
+
+		module = importlib.import_module(module_name)
+
+		with pytest.raises(SystemExit) as excinfo:
+			module.main(["--help"])
+
+		assert excinfo.value.code == 0
+		assert capsys.readouterr().out == module.parser().format_help()
+
+	def test_run_mode_parses_with_its_parser (self, capsys: pytest.CaptureFixture[str]) -> None:
+
+		"""`subsample --help` is subsample.cli.parser()'s help."""
+
+		with pytest.raises(SystemExit) as excinfo:
+			subsample.cli._parse_args(["--help"])
+
+		assert excinfo.value.code == 0
+		assert capsys.readouterr().out == subsample.cli.parser().format_help()
 
 
 class TestListDevices:

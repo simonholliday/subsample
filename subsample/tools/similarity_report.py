@@ -23,29 +23,33 @@ import subsample.similarity
 import subsample.tools._shared
 
 
-def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
+def parser () -> argparse.ArgumentParser:
 
-	"""Parse command-line arguments."""
+	"""Build the parser for `subsample similar`, without parsing anything.
 
-	parser = argparse.ArgumentParser(
+	Kept apart from parsing so that subsystem.co can generate the
+	command-line reference from it without running the tool (#3020).
+	"""
+
+	command = argparse.ArgumentParser(
 		prog="subsample similar",
 		description="Show the top-N most similar instrument samples for each reference",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--top",
 		type=int,
 		default=5,
 		metavar="N",
 		help="Number of top matches to show per reference (default: 5)",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--config",
 		type=pathlib.Path,
 		default=None,
 		metavar="PATH",
 		help="Path to config.yaml (default: auto-discover as per main app)",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--reference-dir",
 		type=pathlib.Path,
 		default=None,
@@ -55,7 +59,14 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 			"(default: library.reference_directory, or the GM set bundled with Subsample)"
 		),
 	)
-	return parser.parse_args(argv)
+	return command
+
+
+def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
+
+	"""Parse command-line arguments."""
+
+	return parser().parse_args(argv)
 
 
 def main (argv: typing.Optional[list[str]] = None) -> int:

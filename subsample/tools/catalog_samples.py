@@ -495,56 +495,60 @@ def _emission_plan (
 	return [(index, None) for index in range(len(loaded))]
 
 
-def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
+def parser () -> argparse.ArgumentParser:
 
-	"""Parse command-line arguments."""
+	"""Build the parser for `subsample catalog`, without parsing anything.
 
-	parser = argparse.ArgumentParser(
+	Kept apart from parsing so that subsystem.co can generate the
+	command-line reference from it without running the tool (#3020).
+	"""
+
+	command = argparse.ArgumentParser(
 		prog="subsample catalog",
 		description="Write a CSV of every sample's detected properties, or list samples matching a capability filter",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"directory",
 		type=pathlib.Path,
 		nargs="?",
 		default=None,
 		help="Sample directory to catalog (default: library.directory from config.yaml)",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"-o", "--output",
 		type=pathlib.Path,
 		default=None,
 		metavar="FILE",
 		help="Write output to FILE instead of stdout",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--full",
 		action="store_true",
 		help="Include every stored property (chroma profile, MFCC timbre vectors, per-band decay rates)",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--pitched",
 		action="store_true",
 		help="Instead of a CSV, list the paths of samples that pass the stable-pitch test (re-pitchable)",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--quantizable",
 		action="store_true",
 		help="Instead of a CSV, list the paths of samples with enough hits to quantize to a beat grid",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--loopable",
 		action="store_true",
 		help="Instead of a CSV, list the paths of samples that could sustain a held-note loop",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--group",
 		action="store_true",
 		help="Cluster near-duplicate samples (same sound recorded repeatedly) and add "
 		     "group/group_size/group_keeper columns, biggest pile first, suggested keeper "
 		     "first; in paths mode, emit only each group's keeper (deduplicated)",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--similarity-threshold",
 		type=float,
 		default=0.98,
@@ -552,21 +556,28 @@ def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
 		help="Cosine-similarity cutoff (0..1) for --group; higher groups only near-identical "
 		     "samples, lower groups more loosely (default: 0.98)",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--order",
 		choices=("name", "similarity"),
 		default="name",
 		help="Row/path order: 'name' (default) or 'similarity' (nearest-neighbour chain so "
 		     "alike samples are adjacent for auditioning). Ignored when --group is set",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--config",
 		type=pathlib.Path,
 		default=None,
 		metavar="PATH",
 		help="Path to config.yaml (default: auto-discover as per main app)",
 	)
-	return parser.parse_args(argv)
+	return command
+
+
+def _parse_args (argv: typing.Optional[list[str]] = None) -> argparse.Namespace:
+
+	"""Parse command-line arguments."""
+
+	return parser().parse_args(argv)
 
 
 def main (argv: typing.Optional[list[str]] = None) -> int:

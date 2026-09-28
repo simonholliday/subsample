@@ -197,30 +197,41 @@ def _analyze_file (
 	return True
 
 
-def main (argv: typing.Optional[list[str]] = None) -> int:
+def parser () -> argparse.ArgumentParser:
 
-	"""Analyze one or more audio files and print their metrics."""
+	"""Build the parser for `subsample analyze`, without parsing anything.
 
-	subsample.tools._shared.configure_logging()
+	Kept apart from main() so that subsystem.co can generate the command-line
+	reference from it without running the tool (#3020).
+	"""
 
-	parser = argparse.ArgumentParser(
+	command = argparse.ArgumentParser(
 		prog="subsample analyze",
 		description="Analyze audio files and print their detected metrics (rhythm, spectral, pitch, level, loop).",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"files",
 		nargs="+",
 		metavar="FILE",
 		help="Audio files or quoted glob patterns to analyze",
 	)
-	parser.add_argument(
+	command.add_argument(
 		"--config",
 		type=pathlib.Path,
 		default=None,
 		metavar="PATH",
 		help="Path to config.yaml (default: auto-discover as per main app)",
 	)
-	args = parser.parse_args(argv)
+	return command
+
+
+def main (argv: typing.Optional[list[str]] = None) -> int:
+
+	"""Analyze one or more audio files and print their metrics."""
+
+	subsample.tools._shared.configure_logging()
+
+	args = parser().parse_args(argv)
 
 	# Wire the float ceiling and analysis tempo priors from config: analyze
 	# writes a sidecar the player later trusts, so it must analyse at the same

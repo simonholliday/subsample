@@ -5,4 +5,9 @@ analyze_file (`subsample analyze`), similarity_report (`subsample similar`),
 and suggest_loops (`subsample loops`).  Each module exposes
 `main(argv) -> int`; subsample.cli routes the first CLI argument here before
 falling through to the run-mode parser.
+
+Each module also exposes `parser()`, which builds its argument parser without
+parsing anything, and main() parses with it.  subsystem.co reads those, and
+subsample.cli.parser(), to generate the published command-line reference, so
+an option's help is published as written (#3020).
 """
