@@ -2935,7 +2935,7 @@ class TestBeatMatchParseValidation:
 
 	def test_omitted_dir_defaults_to_best_match_first (self) -> None:
 		"""Match-quality scorers default desc (best first) when dir is
-		omitted — the README's own beat_match example relies on this; the
+		omitted — a beat_match example written without dir relies on this; the
 		generic asc default would rank WORST matches first."""
 
 		specs = subsample.query.parse_select(

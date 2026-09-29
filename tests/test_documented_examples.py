@@ -5,6 +5,11 @@ Subsample accepts the value.  These prove the other half: that the schema
 declares the form the example is written in.  A reference generated from the
 schema can then be trusted to describe the file the README teaches.
 
+The README holds no YAML example since the guide on subsystem.co took its
+walk-throughs (#3978), and the guide's examples are checked when the site is
+built, by Subsample's own loaders.  These checks stay for the shipped maps below
+and for any example the README gains.
+
 Every YAML block in README.md says what it is an example of, in the word after
 the language on its opening fence:
 
@@ -280,17 +285,6 @@ def _valid (
 # ---------------------------------------------------------------------------
 
 class TestEveryReadmeExampleSaysWhatItIs:
-
-	def test_the_readme_holds_examples_to_check (self) -> None:
-
-		"""A change that stopped finding the blocks would pass every test below in silence.
-
-		Twenty when this was written: the README held sixty-one until the MIDI
-		map vocabulary moved to subsystem.co's generated reference, which took
-		its examples with it.  The number is a floor against the parser breaking,
-		not a target."""
-
-		assert len(_fenced()) > 20
 
 	@pytest.mark.parametrize(("number", "marker", "body"), _examples())
 	def test_a_block_says_what_it_is_an_example_of (

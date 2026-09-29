@@ -8792,8 +8792,8 @@ class TestGainStaging:
 	def test_pan_position_does_not_change_output_power (self) -> None:
 		"""Constant power: total energy is identical wherever the note is panned.
 
-		This is what README's random-pan section promises — "a note is never
-		louder or quieter for landing off-centre".
+		This is what random pan promises: a note is never louder or quieter
+		for landing off-centre.
 		"""
 
 		player = _make_player_for_mix_matrix()

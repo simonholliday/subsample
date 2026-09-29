@@ -34,7 +34,7 @@ from a SoundFont).
 
 ### Measuring latency
 
-Two included scripts measure the [software parts](README.md#latency) on your own hardware. MIDI
+Two included scripts measure the [software parts](https://subsystem.co/subsample/guide/playing-live#where-the-delay-comes-from) on your own hardware. MIDI
 dispatch:
 
 ```bash

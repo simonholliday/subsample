@@ -574,7 +574,8 @@ analysis:
 #   # by its audio file; subsample regenerates missing `.analysis.json` and
 #   # `.preview.png` sidecars at startup, and automatically deletes any
 #   # sidecar/PNG whose audio counterpart has gone away.
-#   # Overridden when programs: is declared in the MIDI map (see README).
+#   # Overridden when programs: is declared in the MIDI map (see
+#   # https://subsystem.co/subsample/guide/several-kits-at-once#switching-kits).
 #   # Default: samples/captures - the same place the recorder writes
 #   # (recorder.directory), so every new capture joins the playable library
 #   # and the library persists and grows across sessions.  Point it
