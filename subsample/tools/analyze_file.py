@@ -230,7 +230,8 @@ output:
   noisiness  from 0, a clean hit or tone, to 1, noise from end to end such as
              static; a sustained unpitched sound scores high too
   loop       the loop found, its length and crossfade, and junction_flux,
-             near 1 for a seamless join; none when there is no clean loop
+             about 1 or below for a seamless join and higher as the join
+             grows audible; none when there is no clean loop
 """
 
 

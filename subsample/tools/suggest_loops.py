@@ -79,10 +79,10 @@ def _render (path: pathlib.Path, loop: subsample.loopfind.LoopPoints, audio: num
 _OUTPUT: typing.Final[str] = """\
 output:
   A line for each sample tried: where its loop starts and ends in seconds, the
-  loop's length, the crossfade across its join, junction_flux, near 1 for a
-  seamless join and higher for an audible jump, and the tail left after the
-  loop for the note's release.  A sample with no clean loop plays without
-  looping.
+  loop's length, the crossfade across its join, junction_flux, about 1 or
+  below for a seamless join and higher as the join grows audible, and the
+  tail left after the loop for the note's release.  A sample with no clean
+  loop plays without looping.
 """
 
 

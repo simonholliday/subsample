@@ -87,15 +87,16 @@ _SSM_LEVEL_PENALTY: typing.Final[float] = 0.03   # score per dB of level jump
 _SSM_LENGTH_BONUS:  typing.Final[float] = 0.01   # gentle tiebreak toward longer
 
 # Flux selection: SSM proposes _CANDIDATE_K loops; each junction is rendered and
-# scored by its spectral-flux ratio (see _junction_flux — ~1 is seamless, higher
-# is a more audible wrap).  Among the candidates whose junction is within
-# _FLUX_TOLERANCE of the cleanest, the LONGEST is kept ("prefer the longest clean
-# loop"; a longer loop hides its repetition better).  If even the cleanest
-# junction exceeds _FAIL_MUSICAL_FLUX the sample has no clean loop and find_loop
-# returns None — better a gated one-shot than a buzzing loop.  Thresholds were
-# ear-calibrated on a labelled corpus: every clean loop scored <= 1.75 and the
-# one that audibly could not loop (detuned-oscillator filter sweep) scored >=
-# 2.6, so the 2.2 cut sits in a wide empty margin, not on a knife edge.
+# scored by its spectral-flux ratio (see _junction_flux — ~1 or below is
+# seamless, higher is a more audible wrap).  Among the candidates whose junction
+# is within _FLUX_TOLERANCE of the cleanest, the LONGEST is kept ("prefer the
+# longest clean loop"; a longer loop hides its repetition better).  If even the
+# cleanest junction exceeds _FAIL_MUSICAL_FLUX the sample has no clean loop and
+# find_loop returns None — better a gated one-shot than a buzzing loop.
+# Thresholds were ear-calibrated on a labelled corpus: every clean loop scored
+# <= 1.75 and the one that audibly could not loop (detuned-oscillator filter
+# sweep) scored >= 2.6, so the 2.2 cut sits in a wide empty margin, not on a
+# knife edge.
 _CANDIDATE_K:        typing.Final[int]   = 10
 _FLUX_TOLERANCE:     typing.Final[float] = 0.10
 _FAIL_MUSICAL_FLUX:  typing.Final[float] = 2.2
@@ -121,13 +122,14 @@ class LoopPoints:
 	crossfade:     Crossfade length in frames, blended into the loop body just
 	               before end (linear).  A realtime player uses this by moving a
 	               cursor; nothing else.
-	junction_flux: Spectral-flux ratio at the raw (un-crossfaded) wrap: ~1 is
-	               seamless, higher is a more audible discontinuity.  This is the
-	               measure the loop was SELECTED by and it tracks the ear where
-	               waveform correlation did not (a filter-swept junction can
-	               correlate well yet jump in brightness).  Reported when
-	               auditioning; a value near _FAIL_MUSICAL_FLUX is a borderline
-	               loop.
+	junction_flux: Spectral-flux ratio at the raw (un-crossfaded) wrap: ~1 or
+	               below is seamless (a very steady sound reads well below 1,
+	               since its own change sits at the floor), higher is a more
+	               audible discontinuity.  This is the measure the loop was
+	               SELECTED by and it tracks the ear where waveform correlation
+	               did not (a filter-swept junction can correlate well yet jump
+	               in brightness).  Reported when auditioning; a value near
+	               _FAIL_MUSICAL_FLUX is a borderline loop.
 	"""
 
 	start:         int
@@ -280,7 +282,8 @@ def _junction_flux (mono: numpy.ndarray, start: int, end: int, sample_rate: int)
 	Plays the loop straight (no crossfade) for a few laps and measures, at each
 	wrap, how far the spectral flux spikes above the loop's own median flux.  ~1
 	means the wrap is indistinguishable from the loop's natural frame-to-frame
-	change (seamless); a higher ratio is an audible jump.  This succeeds where
+	change (seamless), and a very steady sound reads well below 1, its median
+	held up by the floor; a higher ratio is an audible jump.  This succeeds where
 	waveform correlation fails: it sees a brightness or level step even when the
 	two ends line up in phase, and it works on noise textures that never
 	correlate at all — which is why it, not NCC, selects the loop.
