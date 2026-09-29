@@ -242,3 +242,27 @@ def _write_wav_and_sidecar (
 	_make_wav(wav_path, n_frames=n_frames)
 	sidecar_path = _write_sidecar(directory, audio_stem)
 	return wav_path, sidecar_path
+
+
+def _hit_starts (rendered: numpy.ndarray, sample_rate: int) -> list[float]:
+
+	"""Where each hit starts in rendered audio, in seconds.
+
+	A hit starts where the level first reaches 0.05 after at least 100 ms
+	below it, which is where the ear hears it for the taps and clicks these
+	tests render.
+	"""
+
+	level  = numpy.abs(rendered[:, 0])
+	quiet  = int(0.1 * sample_rate)
+	starts: list[float] = []
+	last   = -quiet
+
+	for index in numpy.flatnonzero(level >= 0.05):
+
+		if index - last >= quiet:
+			starts.append(index / sample_rate)
+
+		last = int(index)
+
+	return starts

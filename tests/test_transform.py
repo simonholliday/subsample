@@ -64,30 +64,6 @@ def _make_pcm_audio (
 	return numpy.zeros((n_frames, channels), dtype=numpy.int16)
 
 
-def _hit_starts (rendered: numpy.ndarray, sample_rate: int) -> list[float]:
-
-	"""Where each hit starts in rendered audio, in seconds.
-
-	A hit starts where the level first reaches 0.05 after at least 100 ms
-	below it, which is where the ear hears it for the taps and clicks these
-	tests render.
-	"""
-
-	level  = numpy.abs(rendered[:, 0])
-	quiet  = int(0.1 * sample_rate)
-	starts: list[float] = []
-	last   = -quiet
-
-	for index in numpy.flatnonzero(level >= 0.05):
-
-		if index - last >= quiet:
-			starts.append(index / sample_rate)
-
-		last = int(index)
-
-	return starts
-
-
 def _make_record (
 	sample_id: int = 1,
 	audio: typing.Optional[numpy.ndarray] = None,
@@ -1541,7 +1517,7 @@ class TestTimeStretchHandler:
 		wanted   = [start / sr for start, _end in subsample.transform._segment_bounds_local.bounds]
 
 		assert wanted == pytest.approx([0.5 * index for index in range(len(taps))], abs=0.001)
-		assert _hit_starts(rendered, sr) == pytest.approx(wanted, abs=0.005)
+		assert tests.helpers._hit_starts(rendered, sr) == pytest.approx(wanted, abs=0.005)
 
 	def test_crop_fade_in_applied (self) -> None:
 
@@ -4784,7 +4760,7 @@ class TestStretchQuantizeToABeatCount:
 		rendered = self._rendered(audio, record)
 		wanted   = [start / self.SR for start, _end in subsample.transform._segment_bounds_local.bounds]
 
-		assert _hit_starts(rendered, self.SR) == pytest.approx(wanted, abs=0.005)
+		assert tests.helpers._hit_starts(rendered, self.SR) == pytest.approx(wanted, abs=0.005)
 
 	def test_a_hit_moves_by_no_more_than_half_a_grid_interval (self) -> None:
 

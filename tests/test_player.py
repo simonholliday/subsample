@@ -20,6 +20,7 @@ import rtmidi
 import yaml
 
 import subsample.analysis
+import subsample.audio
 import subsample.bank
 import subsample.ensemble
 import subsample.config
@@ -1941,6 +1942,258 @@ class TestReleaseThreadingThroughTrigger:
 		assert voice.release_curve == 1
 
 
+class TestAQuantisedSoundLoopsOverItsBars:
+
+	"""mode: loop on a quantised sound loops over its whole bars (#3877).
+
+	A quantiser lays the sound out on the beat, so the loop a musician means
+	needs no points found in the audio: it runs from the first beat to the end
+	of the bar that holds the last hit, in bars of four beats, or over the beats
+	a stretch_quantize fitted the sound to, and what rings past its end carries
+	on under the next pass.
+	"""
+
+	_RATE = 48000
+	_BEAT = 24000     # frames in a beat at 120 BPM
+
+	@classmethod
+	def _render (
+		cls,
+		steps:  tuple[typing.Any, ...],
+		hits:   tuple[int, ...],
+		frames: int = 200000,
+		audio:  typing.Optional[numpy.ndarray] = None,
+	) -> subsample.transform.TransformResult:
+
+		"""A render of ``frames`` frames by ``steps``, its hits starting at ``hits``."""
+
+		spec   = subsample.transform.TransformSpec(steps=steps)
+		bounds = tuple(
+			(start, hits[index + 1] if index + 1 < len(hits) else frames)
+			for index, start in enumerate(hits)
+		)
+
+		return subsample.transform.TransformResult(
+			key=subsample.transform.TransformKey(sample_id=1, spec=spec),
+			audio=audio if audio is not None else numpy.zeros((frames, 2), dtype=numpy.float32),
+			duration=frames / cls._RATE,
+			level=subsample.analysis.LevelResult(peak=0.5, rms=0.1),
+			segment_bounds=bounds or None,
+		)
+
+	def _loop_frames (self, step: typing.Any, hits: tuple[int, ...]) -> typing.Optional[int]:
+		return subsample.player._bar_loop_frames(self._render((step,), hits), self._RATE)
+
+	# --- how long the loop is ---------------------------------------------
+
+	def test_the_loop_ends_at_the_end_of_the_bar_holding_the_last_hit (self) -> None:
+		stretch = subsample.transform.TimeStretch(target_bpm=120.0)
+
+		assert self._loop_frames(stretch, (0, self._BEAT, 3 * self._BEAT)) == 4 * self._BEAT
+		assert self._loop_frames(stretch, (0, 5 * self._BEAT)) == 8 * self._BEAT
+
+	def test_a_hit_a_frame_short_of_a_bar_line_is_on_it (self) -> None:
+
+		"""A hit's frame is its grid time truncated, so one planned for the bar
+		line can fall a frame short of it; it still starts the next bar."""
+
+		stretch = subsample.transform.TimeStretch(target_bpm=120.0)
+
+		assert self._loop_frames(stretch, (0, 4 * self._BEAT - 1)) == 8 * self._BEAT
+
+	def test_a_sound_fitted_to_beats_loops_over_them (self) -> None:
+		fitted = subsample.transform.TimeStretch(target_bpm=120.0, beats=6.0)
+
+		assert self._loop_frames(fitted, (0, 5 * self._BEAT)) == 6 * self._BEAT
+
+	def test_pad_quantize_loops_over_its_bars_too (self) -> None:
+		padded = subsample.transform.PadQuantize(target_bpm=120.0)
+
+		assert self._loop_frames(padded, (0, 2 * self._BEAT)) == 4 * self._BEAT
+
+	def test_a_sound_of_one_hit_loops_over_one_bar (self) -> None:
+		stretch = subsample.transform.TimeStretch(target_bpm=120.0)
+
+		assert self._loop_frames(stretch, ()) == 4 * self._BEAT
+
+	def test_a_render_no_quantiser_made_has_no_bars (self) -> None:
+
+		"""What a note falls back to while the quantised sound is still rendering."""
+
+		assert subsample.player._bar_loop_frames(self._render((), (0,)), self._RATE) is None
+
+	# --- how it wraps -------------------------------------------------------
+
+	def test_the_first_pass_plays_as_rendered (self) -> None:
+		audio = numpy.random.default_rng(1).standard_normal((1500, 2)).astype(numpy.float32)
+
+		buffer, start, end = subsample.player._ring_on(audio, 1000)
+
+		assert (start, end) == (1000, 2000)
+		assert numpy.array_equal(buffer[:1000], audio[:1000])
+
+	def test_a_sound_shorter_than_its_bars_is_padded_to_the_bar_line (self) -> None:
+		audio = numpy.ones((600, 2), dtype=numpy.float32)
+
+		buffer, start, end = subsample.player._ring_on(audio, 1000)
+
+		assert (start, end) == (0, 1000)
+		assert numpy.array_equal(buffer[:600], audio)
+		assert not buffer[600:].any()
+
+	@pytest.mark.parametrize("frames", [1000, 1500, 2300, 3999])
+	def test_held_it_sounds_like_the_pattern_played_again_and_again (self, frames: int) -> None:
+
+		"""Through the audio callback, pass after pass, tails and all: the wrap
+		lands exactly where playing the pattern again would, so it cannot click."""
+
+		period  = 1000
+		passes  = 7
+		pattern = (numpy.random.default_rng(frames).standard_normal((frames, 2)) * 0.02).astype(numpy.float32)
+
+		expected = numpy.zeros((passes * period + frames, 2), dtype=numpy.float32)
+
+		for index in range(passes):
+			expected[index * period : index * period + frames] += pattern
+
+		buffer, start, end = subsample.player._ring_on(pattern, period)
+		player = subsample.player.MidiPlayer(
+			"Test Device", threading.Event(),
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map={}, sample_rate=44100, bit_depth=16,
+		)
+		player._voices.append(subsample.player._Voice(
+			audio=buffer, note=36, channel=9,
+			looping=True, loop_start=start, loop_end=end,
+		))
+
+		heard = b"".join(player._audio_callback(None, 64, None, 0)[0] for _ in range(passes * period // 64))
+		played = numpy.frombuffer(heard, dtype=numpy.int16).reshape(-1, 2)
+		wanted = numpy.frombuffer(
+			subsample.audio.float32_to_pcm_bytes(expected[: len(played)], 16), dtype=numpy.int16,
+		).reshape(-1, 2)
+
+		assert numpy.abs(played.astype(numpy.int32) - wanted).max() <= 1
+
+	def test_a_tapped_loop_quantised_and_held_keeps_every_tap_on_the_beat (self) -> None:
+
+		"""The guide's example (#3876): two bars of taps recorded a little loose
+		at 100 BPM, quantised to 120 and held.  Rendered for real, its bars are
+		two, and every tap of the first pass and the looping one is on the beat."""
+
+		sr    = 44100
+		taps  = (0.0, 0.605, 1.197, 1.803, 2.399, 3.004, 3.604, 4.209)
+		t     = numpy.arange(int(0.5 * sr)) / sr
+		tap   = (0.6 * numpy.sin(2 * numpy.pi * 180.0 * t) * numpy.exp(-t / 0.050)).astype(numpy.float32)
+		audio = numpy.zeros((int(4.8 * sr), 1), dtype=numpy.float32)
+
+		for start in taps:
+			index = int(start * sr)
+			audio[index:index + tap.size, 0] += tap
+
+		record = unittest.mock.MagicMock()
+		record.name   = "taps"
+		record.rhythm = subsample.analysis.RhythmResult(
+			tempo_bpm=100.0, beat_times=(), pulse_curve=numpy.zeros(0, dtype=numpy.float32),
+			pulse_peak_times=(), onset_times=taps, attack_times=taps, onset_count=len(taps),
+		)
+		step     = subsample.transform.TimeStretch(target_bpm=120.0, resolution=16)
+		rendered = subsample.transform._apply_time_stretch(audio, sr, record, step)
+		result   = self._render((step,), (), audio=rendered, frames=rendered.shape[0])
+		result   = dataclasses.replace(result, segment_bounds=subsample.transform._segment_bounds_local.bounds)
+
+		period = subsample.player._bar_loop_frames(result, sr)
+
+		assert period == 4 * sr     # two bars of four beats at 120 BPM
+
+		# Three passes as a held voice plays them: the buffer to the loop's end,
+		# then the loop again and again.
+		buffer, start, end = subsample.player._ring_on(rendered, period)
+		held = buffer[:end]
+
+		while held.shape[0] < 3 * period:
+			held = numpy.concatenate([held, buffer[start:end]])
+
+		assert tests.helpers._hit_starts(held[: 3 * period], sr) == pytest.approx(
+			[0.5 * beat for beat in range(24)], abs=0.005,
+		)
+
+	# --- a note on the key ----------------------------------------------------
+
+	def _trigger (self, variant: typing.Optional[subsample.transform.TransformResult]) -> subsample.player._Voice:
+
+		"""Drive _trigger_one for a quantised mode: loop assignment, serving
+		``variant`` when given and the unquantised base sound when not."""
+
+		rendered = numpy.full((110000, 2), 0.01, dtype=numpy.float32)
+		record = unittest.mock.MagicMock()
+		record.audio          = numpy.zeros((100, 2), dtype=numpy.int16)
+		record.channel_format = "pcm"
+		record.name           = "taps"
+
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+		player._voices              = []
+		player._voices_lock         = threading.Lock()
+		player._state_lock          = threading.Lock()
+		player._last_played         = {}
+		player._output_sample_rate  = self._RATE
+		player._loop_collapsed_warned = set()
+		player._resolve_sample_id.return_value = 1
+		player._effective_instrument_library.get.return_value = record
+		player._resolve_release.return_value = (1234, 1, False)
+		player._append_voice = lambda *a, **k: subsample.player.MidiPlayer._append_voice(player, *a, **k)
+		player._looped_on_its_bars = lambda *a: subsample.player.MidiPlayer._looped_on_its_bars(player, *a)
+		player._build_trigger_spec.return_value = subsample.transform.TransformSpec(
+			steps=(subsample.transform.TimeStretch(target_bpm=120.0),),
+		)
+		player._effective_transform_manager.get_variant.return_value = variant
+		player._select_segment.return_value = (rendered, 0.5)
+		player._get_mix_matrix.return_value = numpy.eye(2, dtype=numpy.float32)
+		player._render_float.return_value = rendered
+
+		base = unittest.mock.MagicMock()
+		base.audio = rendered; base.level = 0.5; base.segment_bounds = None; base.duration = 1.0
+		player._effective_transform_manager.get_base.return_value = base
+
+		assignment = subsample.query.Assignment(
+			name="Taps", select=(),
+			process=subsample.query.ProcessSpec(steps=(subsample.query.ProcessorStep("stretch_quantize"),)),
+			mode="loop",
+		)
+
+		subsample.player.MidiPlayer._trigger_one(
+			player, mido.Message("note_on", channel=9, note=36, velocity=100),
+			assignment, subsample.query.PickSpec(1, 1), 100,
+		)
+
+		player._resolve_loop.assert_not_called()
+		assert len(player._voices) == 1
+
+		return typing.cast(subsample.player._Voice, player._voices[0])
+
+	def test_a_held_note_loops_the_render_over_its_bars (self) -> None:
+
+		"""Hits on beats 1 and 4 make one bar, and the render rings past it, so
+		the voice plays the first pass, then loops the second with its tail."""
+
+		variant = self._render(
+			(subsample.transform.TimeStretch(target_bpm=120.0),), (0, 3 * self._BEAT), frames=110000,
+		)
+
+		voice = self._trigger(variant)
+
+		assert voice.looping
+		assert (voice.loop_start, voice.loop_end) == (4 * self._BEAT, 8 * self._BEAT)
+		assert voice.loop_crossfade == 0
+		assert len(voice.audio) == 4 * self._BEAT + 110000
+
+	def test_a_note_before_the_render_is_ready_plays_gated (self) -> None:
+		voice = self._trigger(None)
+
+		assert not voice.looping
+
+
 # ---------------------------------------------------------------------------
 # max_polyphony and target_rms
 # ---------------------------------------------------------------------------
@@ -2596,10 +2849,67 @@ assignments:
 		asgn = self._first_assignment(tmp_path, "    mode: loop")
 		assert asgn.release == subsample.query.ReleaseSpec(time=None, curve="cosine")
 
-	def test_loop_with_stretch_falls_back_to_gated (self, tmp_path: pathlib.Path) -> None:
-		"""mode: loop + a timeline-altering step is deferred to gated in v1."""
+	@pytest.mark.parametrize("quantiser", ["stretch_quantize", "pad_quantize"])
+	def test_loop_with_a_quantiser_loops_over_its_bars (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture, quantiser: str,
+	) -> None:
+
+		"""A quantised sound keeps mode: loop, with no warning: the player loops
+		it over the whole bars its render lays out (#3877)."""
+
+		caplog.set_level(logging.WARNING, logger="subsample")
+
 		asgn = self._first_assignment(
-			tmp_path, "    mode: loop\n    process:\n      - stretch_quantize: { grid: 16 }",
+			tmp_path, f"    mode: loop\n    process:\n      - {quantiser}: {{ grid: 16 }}",
+		)
+
+		assert asgn.mode == "loop"
+		assert asgn.loop is None
+		assert not any("mode: loop" in record.getMessage() for record in caplog.records)
+
+	def test_a_bare_loop_block_beside_a_quantiser_loops (self, tmp_path: pathlib.Path) -> None:
+		asgn = self._first_assignment(
+			tmp_path, "    loop: {}\n    process:\n      - stretch_quantize: { grid: 16 }",
+		)
+		assert asgn.mode == "loop"
+
+	@pytest.mark.parametrize(("points", "named"), [
+		("{ start: 0.5, end: 2.0 }", "'start' or 'end'"),
+		("{ crossfade: 20 }", "'crossfade'"),
+		("{ start: 0.5, end: 2.0, crossfade: 20 }", "'start', 'end' or 'crossfade'"),
+	])
+	def test_loop_points_beside_a_quantiser_are_refused (
+		self, tmp_path: pathlib.Path, points: str, named: str,
+	) -> None:
+
+		"""Its bars set the loop, so points written for another timeline would mislead."""
+
+		with pytest.raises(ValueError, match=f"may not set {named} - leave them out"):
+			subsample.player.load_midi_map(
+				self._mode_map(tmp_path, f"    loop: {points}\n    process:\n      - stretch_quantize: {{ grid: 16 }}"),
+				["BD0025"],
+			)
+
+	def test_loop_with_a_quantise_segment_falls_back_to_gated (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""One hit per note has no bars to loop over."""
+
+		caplog.set_level(logging.WARNING, logger="subsample")
+
+		asgn = self._first_assignment(
+			tmp_path,
+			"    mode: loop\n    process:\n      - stretch_quantize: { grid: 16, segment: round_robin }",
+		)
+
+		assert asgn.mode == "gated"
+		assert any("no bars to loop" in record.getMessage() for record in caplog.records)
+
+	def test_loop_with_repitch_and_a_quantiser_falls_back_to_gated (self, tmp_path: pathlib.Path) -> None:
+		asgn = self._first_assignment(
+			tmp_path,
+			"    mode: loop\n    process:\n      - stretch_quantize: { grid: 16 }\n      - repitch: true",
 		)
 		assert asgn.mode == "gated"
 		assert asgn.loop is None

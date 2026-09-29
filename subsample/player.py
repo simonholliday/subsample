@@ -1327,6 +1327,17 @@ LOOP_INNER_KEYS: typing.Final[tuple[str, ...]] = ("start", "end", "crossfade")
 # of times per buffer.  Below this it is a buzz, not a loop — play gated instead.
 _MIN_LOOP_SECONDS: typing.Final[float] = 0.005
 
+# The processors that lay a sound out on the beat.  In mode: loop their render
+# loops over its whole bars (#3877), counted in bars of _BEATS_PER_BAR unless
+# stretch_quantize fitted the sound to a number of beats of its own.
+_QUANTISERS: typing.Final[tuple[str, ...]] = ("stretch_quantize", "pad_quantize")
+_BEATS_PER_BAR: typing.Final[int] = 4
+
+# How near a bar line a hit may land and still count as on it.  A hit's frame
+# in the render is its grid time truncated to a whole frame, so one planned
+# for a bar line can fall a frame short of it.
+_BAR_LINE_TOLERANCE_SECONDS: typing.Final[float] = 0.001
+
 
 def _parse_loop_float (
 	raw:             typing.Any,
@@ -1403,10 +1414,13 @@ def _parse_mode (
 	- ``mode:`` must be one of query.VALID_MODES; default one_shot.
 	- a ``loop: {...}`` block implies ``mode: loop``; a contradicting explicit
 	  ``mode:`` is an error.
-	- ``mode: loop`` combined with a timeline-altering step (repitch, time/pad
-	  quantize, or reverse) is deferred in v1: warn and fall back to gated,
-	  dropping the loop — the stored points are in the sample's own frames and
-	  would not survive the transform.
+	- ``mode: loop`` combined with repitch or reverse is deferred: warn and fall
+	  back to gated, dropping the loop — the stored points are in the sample's
+	  own frames and would not survive the transform.
+	- ``mode: loop`` with stretch_quantize or pad_quantize loops over the
+	  quantised sound's whole bars (#3877), which the render sets, so a
+	  ``loop:`` block may not set points of its own; with a quantise
+	  ``segment``, which plays one hit per note, it falls back to gated.
 	"""
 
 	if "one_shot" in raw:
@@ -1436,28 +1450,144 @@ def _parse_mode (
 				f"'mode: loop', but 'mode: {mode}' was set - remove one of them"
 			)
 
+	if mode != "loop":
+		return mode, loop_override
+
 	# The stored loop points live in the sample's own (forward) timeline, so any
-	# step that re-times or re-orders that timeline invalidates them — defer such
-	# an assignment to gated at load.  This is the COMPLETE set of timeline-
-	# altering processors: repitch and time/pad-quantize re-time, reverse mirrors.
-	# Every other process step preserves the timeline and loops correctly on its
-	# variant, so any future timeline-altering processor MUST be added here.
-	if mode == "loop" and (
-		process.has_repitch()
-		or process.has_stretch_quantize()
-		or process.has_pad_quantize()
-		or process.has_reverse()
-	):
+	# step that re-times or re-orders that timeline invalidates them.  This is
+	# the COMPLETE set of timeline-altering processors: repitch and the two
+	# quantisers re-time, reverse mirrors.  Every other process step preserves
+	# the timeline and loops correctly on its variant, so any future timeline-
+	# altering processor MUST be added here.  repitch and reverse are deferred
+	# to gated at load.
+	if process.has_repitch() or process.has_reverse():
 		_log.warning(
-			"MIDI map assignment %r: 'mode: loop' with repitch, time/pad-quantize, or "
-			"reverse is not supported yet - playing gated (no loop).  The loop points "
-			"live in the sample's own timeline and would not survive the transform.",
+			"MIDI map assignment %r: 'mode: loop' with repitch or reverse is not "
+			"supported yet - playing gated (no loop).  The loop points live in the "
+			"sample's own timeline and would not survive the transform.",
 			assignment_name,
 		)
-		mode          = "gated"
-		loop_override = None
+		return "gated", None
+
+	# A quantiser lays the sound out on the beat, so its loop is the whole bars
+	# of that layout, found in the render at each note (_bar_loop_frames), and
+	# the points a map could write belong to another timeline.
+	if _quantises(process):
+		written = [
+			f"'{key}'"
+			for key in LOOP_INNER_KEYS
+			if loop_override is not None and getattr(loop_override, key) is not None
+		]
+
+		if written:
+			listed = written[0] if len(written) == 1 else f"{', '.join(written[:-1])} or {written[-1]}"
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: a quantised sound loops over "
+				f"its whole bars, so its 'loop:' may not set {listed} - leave them out."
+			)
+
+		if any(
+			step.name in _QUANTISERS and step.get("segment", "")
+			for step in process.steps
+		):
+			_log.warning(
+				"MIDI map assignment %r: 'mode: loop' with a quantise 'segment' plays "
+				"one hit per note, which has no bars to loop - playing gated (no loop).",
+				assignment_name,
+			)
+			return "gated", None
 
 	return mode, loop_override
+
+
+def _quantises (process: subsample.query.ProcessSpec) -> bool:
+
+	"""True when a process lays the sound out on the beat, so its loop is its bars."""
+
+	return process.has_stretch_quantize() or process.has_pad_quantize()
+
+
+def _bar_loop_frames (
+	result:      "subsample.transform.TransformResult",
+	sample_rate: int,
+) -> typing.Optional[int]:
+
+	"""How long a quantised render's loop is, in its frames: its whole bars.
+
+	The loop runs from the first beat, where the quantiser puts the first hit,
+	to the end of the bar that holds the last hit, in bars of _BEATS_PER_BAR
+	beats; a sound stretch_quantize fitted to a number of beats loops over
+	exactly those (#3877).  The hits and the tempo are the render's own, so a
+	note that falls back to an earlier render loops that render's bars.
+
+	Args:
+		result:      A rendered variant.
+		sample_rate: The rate its audio is at, which its hit positions count in.
+
+	Returns:
+		The loop's length, or None when no quantiser made the render: the base
+		variant a note falls back to while the quantised one renders.
+	"""
+
+	step = next(
+		(
+			step for step in reversed(result.key.spec.steps)
+			if isinstance(step, (subsample.transform.TimeStretch, subsample.transform.PadQuantize))
+		),
+		None,
+	)
+
+	if step is None or step.target_bpm <= 0.0:
+		return None
+
+	beat_frames = 60.0 / step.target_bpm * sample_rate
+
+	if isinstance(step, subsample.transform.TimeStretch) and step.beats is not None and step.beats > 0.0:
+		return max(1, round(step.beats * beat_frames))
+
+	# A render of one hit publishes no hit positions: its hit is at the start.
+	last_hit   = result.segment_bounds[-1][0] if result.segment_bounds else 0
+	bar_frames = _BEATS_PER_BAR * beat_frames
+	bars       = math.floor((last_hit + _BAR_LINE_TOLERANCE_SECONDS * sample_rate) / bar_frames) + 1
+
+	return max(1, round(bars * bar_frames))
+
+
+def _ring_on (
+	audio:  numpy.ndarray,
+	period: int,
+) -> tuple[numpy.ndarray, int, int]:
+
+	"""Lay a sound out to loop every ``period`` frames, with what rings past the end ringing on.
+
+	What sounds past the loop's end carries on under the next pass, as when a
+	pattern is played again, so each pass overlaps the ones before it.  The
+	buffer holds the first pass as it is, then passes with the earlier ones'
+	tails added, until every tail that reaches that far has joined in, then
+	what the last of them leaves ringing.  From that last pass on the sound
+	repeats exactly, so it loops with no crossfade and no click, and a voice
+	released from it plays on into the tails (#3877).
+
+	Args:
+		audio:  The rendered sound, shape (n_frames, channels).
+		period: The loop's length in frames.  Positive.
+
+	Returns:
+		(buffer, loop_start, loop_end), the loop counted in the buffer's frames.
+	"""
+
+	frames     = audio.shape[0]
+	passes     = max(1, math.ceil(frames / period))
+	loop_start = (passes - 1) * period
+	loop_end   = passes * period
+
+	# A sound shorter than its bars is padded with silence to the bar line.
+	buffer = numpy.zeros((max(loop_start + frames, loop_end), audio.shape[1]), dtype=audio.dtype)
+
+	for index in range(passes):
+		buffer[index * period : index * period + frames] += audio
+
+	return buffer, loop_start, loop_end
 
 
 def _parse_silenced_by (
@@ -5765,6 +5895,30 @@ class MidiPlayer:
 
 		return start, end, crossfade
 
+	def _looped_on_its_bars (
+		self,
+		rendered: numpy.ndarray,
+		result:   "subsample.transform.TransformResult",
+	) -> tuple[numpy.ndarray, typing.Optional[tuple[int, int, int]]]:
+
+		"""Lay a quantised sound out to loop over its whole bars (#3877).
+
+		Returns the voice's buffer and its loop as _append_voice takes it, or the
+		render as it is and no loop, so the note plays gated, when no quantiser
+		made the render.  The passes a held note overlaps may peak above the
+		render's own anti-clip ceiling, as a pattern played again does, and the
+		mix bus's limiter takes that.
+		"""
+
+		period = _bar_loop_frames(result, self._output_sample_rate)
+
+		if period is None:
+			return rendered, None
+
+		buffer, start, end = _ring_on(rendered, period)
+
+		return buffer, (start, end, 0)
+
 	def _append_voice (
 		self,
 		audio:          numpy.ndarray,
@@ -5980,11 +6134,14 @@ class MidiPlayer:
 		# no clean loop exists → play gated + warn once).  A loop assignment may
 		# carry a time-PRESERVING process (filter, saturate, …) and then loops on
 		# the variant buffer, which stays frame-aligned with the stored points;
-		# timeline-ALTERING steps (repitch, quantize, reverse) are deferred to
-		# gated at load (_parse_mode), so loop_cfg never meets a re-timed buffer.
-		loop_cfg = self._resolve_loop(assignment, record)
+		# repitch and reverse are deferred to gated at load (_parse_mode), so
+		# loop_cfg never meets a re-timed buffer.  A quantised sound loops over
+		# its whole bars instead, which only its render can say, so its loop is
+		# laid out on each buffer below (_looped_on_its_bars, #3877).
+		bar_loop = assignment.mode == "loop" and _quantises(assignment.process)
+		loop_cfg = None if bar_loop else self._resolve_loop(assignment, record)
 
-		if assignment.mode == "loop" and loop_cfg is None and id(assignment) not in self._loop_unavailable_warned:
+		if assignment.mode == "loop" and not bar_loop and loop_cfg is None and id(assignment) not in self._loop_unavailable_warned:
 			self._loop_unavailable_warned.add(id(assignment))
 			_log.warning(
 				"MIDI map assignment %r: sample %r has no usable loop - playing gated "
@@ -6017,6 +6174,10 @@ class MidiPlayer:
 						)
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
+
+						if bar_loop:
+							rendered, loop_cfg = self._looped_on_its_bars(rendered, variant)
+
 						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
 						with self._state_lock:
 							self._last_played[state_key] = variant
@@ -6042,6 +6203,10 @@ class MidiPlayer:
 						)
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
+
+						if bar_loop:
+							rendered, loop_cfg = self._looped_on_its_bars(rendered, prev)
+
 						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
 						_log.debug(
 							"note %d (vel %d → %d) → %r → %r (previous variant)  (%.2fs)",
@@ -6050,6 +6215,8 @@ class MidiPlayer:
 						return
 
 			# Fall back to the base variant (float32, peak-normalised, no DSP).
+			# A quantised sound has no bars here to loop over, so it plays gated
+			# until its render is ready.
 			base = eff_transform.get_base(sample_id)
 
 			if base is not None:
