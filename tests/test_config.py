@@ -1831,3 +1831,51 @@ class TestValuesTheAppCannotActOn:
 
 		with pytest.raises(ValueError, match="wrong shape"):
 			subsample.config.load_config(path)
+
+
+class TestHomeFolderInPaths:
+
+	"""`~` at the start of a path in config.yaml stands for the home folder (#3888).
+
+	It was read as a folder named `~`, so `recorder.directory: ~/Sync/captures`
+	made one inside the project.
+	"""
+
+	def _load (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, text: str) -> subsample.config.Config:
+
+		"""Load *text* as config.yaml with the home folder at tmp_path/home."""
+
+		monkeypatch.setenv("HOME", str(tmp_path / "home"))
+		path = tmp_path / "config.yaml"
+		path.write_text(text, encoding="utf-8")
+
+		return subsample.config.load_config(path)
+
+	def test_every_path_setting (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+		home = tmp_path / "home"
+		cfg  = self._load(tmp_path, monkeypatch, (
+			"recorder:\n  directory: ~/Sync/captures\n"
+			"library:\n  directory: ~/Sync/captures\n  reference_directory: ~/references\n"
+			"transform:\n  variant_cache_dir: ~/cache\n"
+			"player:\n  midi_map: ~/maps/kit.yaml\n"
+		))
+
+		assert cfg.recorder.directory == str(home / "Sync/captures")
+		assert cfg.library.directory == str(home / "Sync/captures")
+		assert cfg.library.reference_directory == str(home / "references")
+		assert cfg.transform.variant_cache_dir == str(home / "cache")
+		assert cfg.player.midi_map == str(home / "maps/kit.yaml")
+
+	def test_an_ensemble_of_maps (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+		cfg = self._load(tmp_path, monkeypatch, "player:\n  midi_maps:\n    10: ~/maps/kit.yaml\n")
+
+		assert cfg.player.midi_maps == {10: str(tmp_path / "home" / "maps/kit.yaml")}
+
+	def test_only_a_leading_tilde (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		"""A relative path still resolves where Subsample runs, and a `~` inside a name is a letter."""
+
+		cfg = self._load(tmp_path, monkeypatch, "recorder:\n  directory: takes/~old\nlibrary:\n  directory: samples\n")
+
+		assert cfg.recorder.directory == "takes/~old"
+		assert cfg.library.directory == "samples"

@@ -1000,8 +1000,9 @@ subsample --config ../config.yaml     # an explicit file, wherever you keep it
 
 The directory you run from is the project folder: relative paths in the
 config - `player.midi_map`, `library.directory`, `recorder.directory` - all
-resolve against it, whichever config file is in use. That supports both ways
-of laying out a multi-track project:
+resolve against it, whichever config file is in use; `~` at the start of a
+path stands for your home folder. That supports both ways of laying out a
+multi-track project:
 
 - **A config per track:** each track folder holds its own `config.yaml`,
   MIDI map, and samples; `cd track-01 && subsample`.

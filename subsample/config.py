@@ -795,6 +795,20 @@ def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
 	return data
 
 
+def _home_expanded (path: str) -> str:
+
+	"""Read a ``~`` at the start of a path setting as the home folder, as a shell does.
+
+	Without it, ``recorder.directory: ~/Sync/captures`` made a folder named
+	``~`` inside the project.  Only config.yaml's own paths are read this way:
+	a map's paths resolve from the map's folder, which keeps a shared map
+	portable.  os.path rather than pathlib, since it leaves the path as written
+	where there is no home folder to find, instead of raising.
+	"""
+
+	return os.path.expanduser(path)
+
+
 def _parse_midi_maps (
 	raw: typing.Any,
 ) -> typing.Optional[dict[int, str]]:
@@ -840,7 +854,7 @@ def _parse_midi_maps (
 				f"mapper file (got {map_path!r})"
 			)
 
-		parsed[channel] = map_path
+		parsed[channel] = _home_expanded(map_path)
 
 	if not parsed:
 		raise ValueError(
@@ -1241,7 +1255,7 @@ def _build_config (
 		buffer=buffer,
 		enabled=_require_bool(recorder_raw, "enabled", True, "recorder"),
 		previews=_require_bool(recorder_raw, "previews", True, "recorder"),
-		directory=str(_require(recorder_raw, "directory", "recorder")),
+		directory=_home_expanded(str(_require(recorder_raw, "directory", "recorder"))),
 		filename_format=str(_require(recorder_raw, "filename_format", "recorder")),
 	)
 
@@ -1373,7 +1387,7 @@ def _build_config (
 		max_polyphony=player_max_polyphony,
 		limiter_threshold_db=player_limiter_threshold_db,
 		limiter_ceiling_db=player_limiter_ceiling_db,
-		midi_map=player_midi_map,
+		midi_map=(None if player_midi_map is None else _home_expanded(player_midi_map)),
 		midi_maps=player_midi_maps,
 		watch_midi_map=_require_bool(player_raw, "watch_midi_map", False, "player"),
 		strict_midi_map=_require_bool(player_raw, "strict_midi_map", True, "player"),
@@ -1466,10 +1480,10 @@ def _build_config (
 	directory_raw = library_raw.get("directory", "samples/captures")
 	library = LibraryConfig(
 		max_memory_mb=float(library_raw.get("max_memory_mb", 100.0)),
-		directory=(None if directory_raw is None else str(directory_raw)),
+		directory=(None if directory_raw is None else _home_expanded(str(directory_raw))),
 		watch=_require_bool(library_raw, "watch", False, "library"),
 		reference_directory=(
-			None if reference_directory_raw is None else str(reference_directory_raw)
+			None if reference_directory_raw is None else _home_expanded(str(reference_directory_raw))
 		),
 	)
 
@@ -1526,7 +1540,7 @@ def _build_config (
 		max_memory_mb       = float(transform_raw.get("max_memory_mb", 50.0)),
 		auto_pitch          = _require_bool(transform_raw, "auto_pitch", True, "transform"),
 		quantize_resolution = quantize_resolution,
-		variant_cache_dir   = str(transform_raw.get("variant_cache_dir", "samples/variant-cache") or ""),
+		variant_cache_dir   = _home_expanded(str(transform_raw.get("variant_cache_dir", "samples/variant-cache") or "")),
 		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),
 	)
 

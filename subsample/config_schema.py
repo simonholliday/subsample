@@ -47,8 +47,9 @@ def json_schema () -> dict[str, typing.Any]:
 			`recorder.audio.device` keeps every other recorder setting, while a
 			value or a list replaces the default whole.  `subsample --init` writes
 			a `config.yaml` holding every setting with its comment, to edit from.
-			Relative paths resolve against the directory Subsample runs in, and a
-			key Subsample does not read is reported by name at start-up and
+			Relative paths resolve against the directory Subsample runs in, and
+			`~` at the start of a path stands for your home folder.  A key
+			Subsample does not read is reported by name at start-up and
 			ignored.  A section or setting written twice, such as a second
 			`player:`, is refused, naming both lines.
 		"""),
