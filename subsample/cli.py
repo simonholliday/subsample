@@ -1045,6 +1045,7 @@ def _load_bank (
 			target_sample_rate=output_sample_rate,
 			with_preview=cfg.recorder.previews,
 			reference_library=reference_library,
+			zone_templates=preset.zone_templates,
 		)
 		subsample.player._validate_assignment_extracts(preset.note_map, instrument_library)
 
@@ -1232,6 +1233,7 @@ def _start_player (
 			target_sample_rate=effective_output_sr,
 			with_preview=cfg.recorder.previews,
 			reference_library=reference_library,
+			zone_templates=midi_map_result.zone_templates,
 		)
 
 		# Validate `extract:` directives now that all candidate samples are
@@ -2057,6 +2059,7 @@ def _main_impl () -> None:
 					with_preview=cfg.recorder.previews,
 					reference_library=reference_library,
 					transform_manager=transform_manager,
+					zone_templates=result.zone_templates,
 				)
 			except Exception as exc:
 				_log.warning(

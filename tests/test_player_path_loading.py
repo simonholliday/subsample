@@ -6,6 +6,7 @@ import unittest.mock
 
 import pytest
 
+import subsample.config
 import subsample.library
 import subsample.player
 import subsample.query
@@ -259,6 +260,66 @@ class TestPresetSelfContainedLoading:
 		loaded = list(library.samples())
 		assert loaded[0].filepath is not None
 		assert loaded[0].filepath.resolve() == (kick_dir / "k.wav").resolve()
+
+
+class TestZoneTunedSelectsLoadWhatTheyName:
+
+	"""A zone-tuned assignment's select named samples and references nobody loaded.
+
+	Zone-tuned assignments are held apart from the note map, as templates, and
+	_resolve_path_references walked only the note map, so a zone-tuned preset,
+	whose library starts empty, played nothing (#3971).
+	"""
+
+	_ZONE = (
+		"channel: 1\nassignments:\n  - name: Keys\n    notes: zone-tuned\n"
+		"    select:\n      where: {where}\n"
+		"    process:\n      - repitch: true\n"
+	)
+
+	def _resolve (
+		self,
+		tmp_path:   pathlib.Path,
+		where:      str,
+		references: typing.Optional[subsample.library.ReferenceLibrary] = None,
+	) -> tuple[subsample.library.InstrumentLibrary, unittest.mock.MagicMock]:
+
+		"""Load a map of one zone-tuned assignment, then what it names."""
+
+		map_path = tmp_path / "keys.yaml"
+		map_path.write_text(self._ZONE.format(where=where), encoding="utf-8")
+		result = subsample.player.load_midi_map(
+			map_path, references.names() if references is not None else [],
+		)
+
+		assert result.note_map == {} and len(result.zone_templates) == 1
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=4 * 1024 * 1024)
+		matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
+
+		subsample.player._resolve_path_references(
+			result.note_map, [matrix], library, with_preview=False,
+			reference_library=references, zone_templates=result.zone_templates,
+		)
+
+		return library, matrix
+
+	def test_its_directory_loads (self, tmp_path: pathlib.Path) -> None:
+		(tmp_path / "Keys").mkdir()
+		tests.helpers._write_wav_and_sidecar(tmp_path / "Keys", "k")
+
+		library, _matrix = self._resolve(tmp_path, "{ directory: Keys }")
+
+		assert len(library) == 1
+
+	def test_its_named_reference_reaches_the_rankings (self, tmp_path: pathlib.Path) -> None:
+		references = subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		)
+
+		_library, matrix = self._resolve(tmp_path, "{ reference: GM42_ClosedHiHat }", references)
+
+		matrix.add_reference.assert_called_once()
 
 
 class TestEvictionsReachTheOtherSubsystems:

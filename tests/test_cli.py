@@ -17,6 +17,7 @@ import pytest
 
 import subsample.analysis
 import subsample.audio
+import subsample.bank
 import subsample.buffer
 import subsample.cli
 import subsample.config
@@ -1915,21 +1916,18 @@ class TestPresetsLoadWithTheirMap:
 			for record in caplog.records
 		)
 
-	def test_a_run_builds_the_program_from_the_rules_the_map_loaded (
-		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-	) -> None:
+	def _build_program (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, preset: str,
+	) -> tuple[subsample.bank.Bank, subsample.player.MidiMapResult]:
 
-		"""The preset is parsed once, and its samples load from its own folder."""
+		"""Build program 3 as a run does, from a preset beside a folder of one sample."""
 
 		monkeypatch.setattr(subsample.cli, "_STARTED", [])
 
 		kit = tmp_path / "kits" / "brushes"
 		(kit / "Snare").mkdir(parents=True)
 		tests.helpers._write_wav_and_sidecar(kit / "Snare", "s")
-		self._write(kit / "midi-map.yaml", (
-			"channel: 10\nassignments:\n  - name: Snare\n    notes: 38\n"
-			"    select:\n      where: { directory: Snare }\n"
-		))
+		self._write(kit / "midi-map.yaml", preset)
 		path = self._write_programs(tmp_path / "map.yaml", "kits/brushes/midi-map.yaml")
 
 		cfg = TestLoadConfiguredMap._cfg(midi_map=str(path))
@@ -1943,9 +1941,40 @@ class TestPresetsLoadWithTheirMap:
 			cfg.recorder.audio.sample_rate, tmp_path,
 		)
 
+		return bank, result
+
+	def test_a_run_builds_the_program_from_the_rules_the_map_loaded (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""The preset is parsed once, and its samples load from its own folder."""
+
+		bank, result = self._build_program(tmp_path, monkeypatch, (
+			"channel: 10\nassignments:\n  - name: Snare\n    notes: 38\n"
+			"    select:\n      where: { directory: Snare }\n"
+		))
+
 		try:
 			assert bank.note_map is result.presets[3].note_map
-			assert bank.directory == kit
+			assert bank.directory == tmp_path / "kits" / "brushes"
+			assert len(bank.instrument_library) == 1
+
+		finally:
+			bank.transform_manager.shutdown()
+
+	def test_a_zone_tuned_preset_loads_its_samples (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""Its library starts empty, and only its zone-tuned select names them (#3971)."""
+
+		bank, _result = self._build_program(tmp_path, monkeypatch, (
+			"channel: 1\nassignments:\n  - name: Snare\n    notes: zone-tuned\n"
+			"    select:\n      where: { directory: Snare }\n"
+			"    process:\n      - repitch: true\n"
+		))
+
+		try:
 			assert len(bank.instrument_library) == 1
 
 		finally:

@@ -2310,11 +2310,13 @@ def _resolve_path_references (
 	with_preview: bool,
 	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None,
 	transform_manager: typing.Optional["subsample.transform.TransformManager"] = None,
+	zone_templates: tuple["ZoneTemplate", ...] = (),
 ) -> None:
 
 	"""Load references, instruments, and directory samples named by the MIDI map.
 
-	Scans all assignments in the note map for:
+	Scans all assignments in the note map, and every zone-tuned assignment,
+	for:
 	  - Path-based references → loaded and added to similarity matrices
 	  - NAMED references → looked up in reference_library and added to the
 	    matrices, so a map can write ``reference: GM46_OpenHiHat`` and resolve it
@@ -2344,6 +2346,11 @@ def _resolve_path_references (
 		                     reference predicates.  None skips them (they were
 		                     already reported at parse time by load_midi_map,
 		                     which validates every name against this same list).
+		zone_templates:      The map's zone-tuned assignments, which are held
+		                     apart from the note map.  Nothing else loads what
+		                     their selects name (#3971): a preset's library
+		                     starts empty, and library.directory may not hold
+		                     the folder a zone-tuned select names.
 	"""
 
 	# Collect unique paths for references, instruments, and directories.
@@ -2354,10 +2361,11 @@ def _resolve_path_references (
 	inst_paths: set[str] = set()
 	dir_paths: set[str] = set()
 
-	# Extract unique assignments from the note map.  Each (channel, note)
-	# now holds a list of velocity layers; iterate the layers and dedupe
-	# Assignment identities so an assignment shared across notes (or across
-	# layers on the same note) is only processed once.
+	# Every select chain the map holds.  Each (channel, note) holds a list of
+	# velocity layers; iterate the layers and dedupe Assignment identities so
+	# an assignment shared across notes (or across layers on the same note)
+	# is only processed once.
+	chains: list[tuple[subsample.query.SelectSpec, ...]] = []
 	seen_assignments: set[int] = set()
 
 	for entries in note_map.values():
@@ -2367,23 +2375,28 @@ def _resolve_path_references (
 				continue
 			seen_assignments.add(assignment_id)
 
-			# All three collections must walk EVERY spec in the assignment's
-			# select chain — a fallback chain's primary spec is just as able
-			# to carry a path/directory predicate as its last.
-			for select_spec in assignment.select:
-				ref = select_spec.where.reference
-				if ref is not None:
-					if subsample.query.is_path_like(ref):
-						ref_paths.add(ref)
-					else:
-						ref_names.add(ref)
+			chains.append(assignment.select)
 
-				name_path = select_spec.where.name_path
-				if name_path is not None:
-					inst_paths.add(name_path)
+	chains.extend(template.select for template in zone_templates)
 
-				if select_spec.where.directory is not None:
-					dir_paths.add(select_spec.where.directory)
+	# All three collections must walk EVERY spec in a select chain — a
+	# fallback chain's primary spec is just as able to carry a path/directory
+	# predicate as its last.
+	for select in chains:
+		for select_spec in select:
+			ref = select_spec.where.reference
+			if ref is not None:
+				if subsample.query.is_path_like(ref):
+					ref_paths.add(ref)
+				else:
+					ref_names.add(ref)
+
+			name_path = select_spec.where.name_path
+			if name_path is not None:
+				inst_paths.add(name_path)
+
+			if select_spec.where.directory is not None:
+				dir_paths.add(select_spec.where.directory)
 
 	# Load samples from directory predicates into the instrument library.
 	# This must happen before reference loading so that directory samples
