@@ -9,7 +9,10 @@
 #      midi-map.yaml; point `player.midi_map:` at it when you want
 #      to build your own map (the scaffold wires the GM kit map by
 #      default)
-#   2. Uncomment any of the EXAMPLES below to try them
+#   2. Uncomment any of the EXAMPLES below to try them.  One on a note
+#      the ACTIVE kit already plays, as the kicks on 36 and the clap on
+#      39 do, is refused beside it: comment out that ACTIVE assignment
+#      first
 #   3. Delete or comment out the ACTIVE assignments at the bottom
 #      if you don't want the default drum kit + pitched keyboard
 #   4. Save - Subsample reloads the map automatically when
@@ -48,7 +51,7 @@
 #     notes: drum.kick_1
 #     select:
 #       where:
-#         name: 2026-03-24_14-37-14
+#         name: 2026-03-24_14-37-14-120
 #
 #   # 2. Find the best kick in your library by similarity
 #   - name: Any kick
@@ -244,7 +247,7 @@ assignments:
   #   notes: drum.kick_1
   #   select:
   #     where:
-  #       name: 2026-03-24_14-37-14
+  #       name: 2026-03-24_14-37-14-120
 
 
   # --- B. Similarity match against a reference ---

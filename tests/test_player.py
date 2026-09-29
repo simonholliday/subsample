@@ -7,6 +7,7 @@ import os
 import pathlib
 import platform
 import random
+import re
 import sys
 import threading
 import types
@@ -3182,6 +3183,61 @@ assignments:
 
 			for reference in references:
 				assert reference in names, f"{shipped} names {reference!r}, which does not ship"
+
+	def test_the_template_names_every_note_an_example_shares_with_its_kit (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+
+		"""Its step 2 says to uncomment an example to try it, beside the ACTIVE kit.
+
+		Six examples play a note the kit already plays, and a map holding both
+		is refused, so the map did not load and nothing said why (#3980).  Step
+		2 now names the notes that need the kit's assignment commented out
+		first; each example is uncommented in turn beside the kit, and any
+		refused must be on one of those notes.
+		"""
+
+		lines = (subsample.config.data_dir() / "midi-map.yaml.default").read_text(encoding="utf-8").split("\n")
+		names = subsample.library.load_reference_library(
+			subsample.config.data_dir() / "reference",
+		).names()
+
+		first = next(index for index, line in enumerate(lines) if line.startswith("  # EXAMPLES"))
+		last = next(index for index, line in enumerate(lines) if line.startswith("  # ACTIVE"))
+		starts = [index for index in range(first, last) if lines[index].startswith("  # - name:")]
+		refused: list[str] = []
+
+		for start in starts:
+			end = start + 1
+
+			while end < last and lines[end].startswith("  #   "):
+				end += 1
+
+			trial = [
+				line.replace("  # ", "  ", 1) if start <= index < end else line
+				for index, line in enumerate(lines)
+			]
+			path = tmp_path / f"example-{start}.yaml"
+			path.write_text("\n".join(trial), encoding="utf-8")
+
+			try:
+				subsample.player.load_midi_map(path, names)
+			except ValueError as exc:
+				refused.append(str(exc))
+
+		assert len(starts) >= 10, "the EXAMPLES section was not found, so this test proves nothing"
+		assert refused, "no example collides with the kit any more: step 2 can stop naming notes"
+
+		# The steps as a reader reads them, their comment marks and line breaks gone.
+		how_to = " ".join(
+			line.lstrip("#").strip()
+			for line in lines[:next(index for index, line in enumerate(lines) if "Conventions:" in line)]
+		)
+
+		for problem in refused:
+			note = re.search(r"note (\d+):", problem)
+			assert note is not None, problem
+			assert f"on {note.group(1)}" in how_to, f"step 2 does not name note {note.group(1)}: {problem}"
 
 	def test_default_pan_is_centre (self, tmp_path: pathlib.Path) -> None:
 		"""Omitted pan defaults to equal power across all output channels."""
