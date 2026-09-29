@@ -460,7 +460,7 @@ def _quantise_parameters (extra: tuple[Parameter, ...] = ()) -> tuple[Parameter,
 			legacy_names=("amount",),
 			examples=(0.7,),
 			title="Strength",
-			description="How far each hit moves toward the grid. At 1 every hit lands on the grid, and lower values move each one partway, for a looser feel.",
+			description="How far each hit moves toward the grid. At 1 every hit lands on the grid, and lower values move each one partway, for a looser feel. At 0, `stretch_quantize` still stretches the sound to the tempo and leaves each hit where that puts it, and `pad_quantize` leaves the sound as it is.",
 		),
 		Parameter(
 			name="segment", forms=("choice", "integer"),

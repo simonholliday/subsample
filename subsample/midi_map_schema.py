@@ -208,7 +208,7 @@ def _map_terms () -> dict[str, typing.Any]:
 			"examples": [10],
 		},
 		"programs": {
-			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names. Each program is selected by its Program Change number alone, so a map holds up to 128, and Bank Select messages are not read. A switch changes the kit on every MIDI channel at once: a `directory:` program's samples serve all of this map's assignments, and a `map:` preset's assignments replace all of them, so a MIDI channel the preset does not play falls silent until the next switch. Each keeps its own samples in memory, and one too large for `library.max_memory_mb` is reported at startup, since switching to it then reloads samples from disk. A change to this block, to `program_channel` or `default_program`, or to a preset's own file takes a restart.",
+			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names. Each program is selected by its Program Change number alone, so a map holds up to 128, and Bank Select messages are not read. A switch changes the kit on every MIDI channel at once: a `directory:` program's samples serve all of this map's assignments, and a `map:` preset's assignments replace all of them, so a MIDI channel the preset does not play falls silent until the next switch. Each keeps its own samples in memory, and one too large for `library.max_memory_mb` is reported at startup, since switching to it then reloads samples from disk. A switch to a program whose assignments fail to apply keeps the previous program playing, and the log says why. A change to this block, to `program_channel` or `default_program`, or to a preset's own file takes a restart.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/program"},
 			"examples": [[
@@ -248,7 +248,7 @@ def _map_terms () -> dict[str, typing.Any]:
 			}]],
 		},
 		"maps": {
-			"description": "Other maps to play at the same time, each on its own MIDI channel, which makes this map an ensemble. A map included here may not include maps or declare programs of its own, and two maps may not claim the same note on the same MIDI channel. Only this file is watched for edits, so a change to an included map takes a restart.",
+			"description": "Other maps to play at the same time, each on its own MIDI channel, which makes this map an ensemble. A map included here may not include maps or declare programs of its own; this file may declare `programs:`. Two maps may not claim the same note on the same MIDI channel. Only this file is watched for edits, so a change to an included map takes a restart.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/included_map"},
 			"examples": [["drums.yaml", {"map": "bass.yaml", "channel": 2}]],
@@ -1220,7 +1220,7 @@ def _program () -> dict[str, typing.Any]:
 			"examples": [1],
 		},
 		"directory": {
-			"description": "A directory of samples for the map's own assignments to choose from while the program is active, relative to where Subsample runs.",
+			"description": "A directory of samples for the map's own assignments to choose from while the program is active, relative to where Subsample runs. A select by `name` plays nothing in a program whose directory lacks that sound, while a select by rules takes the closest there.",
 			"type": "string",
 			"minLength": 1,
 			"examples": ["kits/acoustic"],

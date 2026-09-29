@@ -509,7 +509,10 @@ columns:
                  blank when no clean loop point was found
   impact_ms      how far into the file the loudest event begins: 0 for a
                  struck drum, later for a hi-hat pedal or a shaker drawn
-                 back before the beat
+                 back before the beat; a sequencer can trigger the note that
+                 much early so the hit lands on the beat, and Subsample's own
+                 playback ignores it; it varies from take to take, so use
+                 each sample's own
   impact_pre_db  the level before that event, against the sample's peak;
                  near 0 dB, the file holds several events of similar
                  loudness
@@ -532,6 +535,14 @@ columns:
 
 The capability columns run the tests the player runs, so they show the pool a
 MIDI map would draw from.
+
+It reads the directory and every directory within it.  The first run over
+files without sidecars analyses each, as a start-up does, and keeps the
+results as sidecars, so later runs are quick; progress goes to stderr and the
+data to stdout.
+
+--pitched, --quantizable and --loopable combine: a path is listed when it
+passes every one given.
 """
 
 

@@ -328,7 +328,10 @@ def parser () -> argparse.ArgumentParser:
 
 	command = argparse.ArgumentParser(
 		prog="subsample import",
-		description="Import pre-trimmed audio files into the Subsample capture library.",
+		description=(
+			"Import pre-trimmed audio files into the Subsample capture library.\n"
+			"It reads WAV, BWF, FLAC, AIFF, OGG and anything else libsndfile can read."
+		),
 		epilog=_OUTPUT,
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)

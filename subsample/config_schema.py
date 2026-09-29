@@ -77,8 +77,10 @@ def json_schema () -> dict[str, typing.Any]:
 				`/sample/captured` when a new recording has been analysed, with its
 				file path, its duration in seconds, `pitch_hz`, `pitch_class`, its
 				tempo in BPM and its number of onsets; and `/sample/loaded` when a
-				sample joins the library from a capture, the watched directory or an
-				import, with its name, duration, `pitch_hz` and `pitch_class`.
+				sample joins the library from a capture, the watched directory or a
+				`/sample/import` message, with its name, duration, `pitch_hz` and
+				`pitch_class`.  The path and the name are strings, `pitch_class` and
+				the number of onsets are whole numbers, and the rest are decimals.
 				`pitch_hz` is 0 when no pitch is heard, and `pitch_class`, 0 to 11
 				counting from C, is the pitch class holding most of the sound's
 				energy, or -1 for a sound too short or too quiet to measure.  With
@@ -238,8 +240,13 @@ def json_schema () -> dict[str, typing.Any]:
 						missing thumbnail is redrawn at the next start-up without
 						analysing the audio again.  A file manager shows the thumbnail
 						as a file of its own, not as the audio file's icon, since
-						Subsample never writes into an audio file.  Set `false` to
-						write neither.
+						Subsample never writes into an audio file.  The thumbnail, 1024
+						by 256 pixels, draws the waveform over the sound's four spectral
+						bands, each as tall as its share of the energy, so a kick sits
+						low and a cymbal high; a tick marks each onset, dashed lines
+						mark the beats of a rhythmic sound, and a badge in the corner
+						gives its pitch, tempo and length.  Set `false` to write
+						neither.
 						""",
 						default=True,
 					),
@@ -280,7 +287,11 @@ def json_schema () -> dict[str, typing.Any]:
 							),
 							"bit_depth": _setting(
 								"integer",
-								"Bits per sample, for capture and for the files Subsample writes.",
+								"""
+								Bits per sample, for live capture and the samples cut from
+								it.  A recording read from a file keeps its own bit depth and
+								sample rate, as an imported file does.
+								""",
 								default=16,
 								enum=[16, 24, 32],
 							),
@@ -436,7 +447,9 @@ def json_schema () -> dict[str, typing.Any]:
 						plays.  The player does not start without it or `midi_maps`.
 						The map may be an ensemble, declaring a `maps:` block that
 						binds several sample sets to MIDI channels.  Cannot be set
-						together with `midi_maps`.
+						together with `midi_maps`.  With the player on, a map that is
+						missing or cannot be read stops Subsample as it starts, with
+						`Cannot load the MIDI map` and the full path it looked at.
 						""",
 						default=None,
 						nullable=True,
@@ -464,8 +477,9 @@ def json_schema () -> dict[str, typing.Any]:
 					"watch_midi_map": _setting(
 						"boolean",
 						"""
-						Reloads the MIDI map when its file changes, so an edit takes
-						effect on the next note without a restart.  Several saves in
+						Reloads the MIDI map about half a second after its file
+						changes, so an edit takes effect on the next note without a
+						restart.  Several saves in
 						quick succession count as one change, and a map that fails to
 						load is reported while the one already loaded keeps playing.
 						Only the file `midi_map` names is watched: an edit to a set an
@@ -474,7 +488,9 @@ def json_schema () -> dict[str, typing.Any]:
 						`program_channel:` or `default_program:`.  Watching relies on
 						the file system's notice of a change, which does not cross
 						machines, so a map on a network drive edited from another
-						machine is not reloaded.  Requires `midi_map`.
+						machine is not reloaded.  A reload also warns of any `map:`
+						preset a restart would stop on, since a preset's own file is
+						not watched.  Requires `midi_map`.
 						""",
 						default=False,
 					),
@@ -600,7 +616,8 @@ def json_schema () -> dict[str, typing.Any]:
 						and trigger more often on noise.  The background itself wanders
 						by several dB from moment to moment, most of all in a quiet
 						room, so a value inside that wander starts recordings that hold
-						nothing.  Raise it in a noisy room.
+						nothing.  Raise it in a noisy room.  The default, 12, is a good
+						start; around 9 already sits inside a quiet room's wander.
 						""",
 						default=12.0,
 					),
@@ -631,7 +648,10 @@ def json_schema () -> dict[str, typing.Any]:
 						"""
 						Time, in seconds, that Subsample listens to the room before
 						detection starts, to measure its background level.  Raise it in
-						a room whose level varies.
+						a room whose level varies.  However low it is set, the first
+						block of audio always goes to it, and a hit inside that block
+						is taken for the room, so give a file that starts on a hit a
+						moment of silence in front.
 						""",
 						default=1.0,
 					),
@@ -679,7 +699,8 @@ def json_schema () -> dict[str, typing.Any]:
 						`hold_seconds` to cover the attack.  Keep it above the
 						background's own wander: a small rise can be met by the noise a
 						tail decays into, which saves a sample of nothing, or a real hit
-						with silence in front of it.  `null` turns re-triggering off.
+						with silence in front of it.  Around 15 is a good start.  `null`
+						turns re-triggering off.
 						""",
 						default=None,
 						nullable=True,
@@ -702,7 +723,8 @@ def json_schema () -> dict[str, typing.Any]:
 						Subsample to keep it.  A recording peaking below it is
 						discarded, which stops a quiet room's own noise being saved as
 						a sample.  Set it below the peak of the quietest sound you want
-						to keep, and lower it first if real sounds go missing.  `null`
+						to keep, and lower it first if real sounds go missing.  For
+						close-miked percussion, -50 to -40 dBFS is typical.  `null`
 						keeps every recording.
 						""",
 						default=None,
@@ -808,8 +830,9 @@ def json_schema () -> dict[str, typing.Any]:
 						"""
 						Memory, in MB, for the samples held in the library.  When a new
 						sample would go over it, Subsample drops the oldest samples from
-						memory; files on disk are never deleted.  When absent, it is a
-						share of `max_memory_mb`.
+						memory, and a note that played one plays its next-best match
+						instead; files on disk are never deleted.  When absent, it is
+						60% of `max_memory_mb`.
 						""",
 						exclusiveMinimum=0,
 					),
@@ -818,11 +841,13 @@ def json_schema () -> dict[str, typing.Any]:
 						"""
 						Directory of samples to load at start-up, including its
 						subdirectories.  Subsample recreates missing `.analysis.json`
-						and `.preview.png` sidecars, and deletes sidecars whose audio
-						has gone.  `null` loads nothing in bulk, so every sample comes
-						from the MIDI map's `directory:` and `path:` rules, and `watch`
-						has nothing to watch.  A `programs:` block in the MIDI map
-						overrides it.
+						and `.preview.png` sidecars, analyses a sample again when its
+						sidecar comes from an earlier release or its audio has changed,
+						and deletes sidecars whose audio has gone.  It loads WAV, FLAC,
+						AIFF, OGG and MP3 files.  `null` loads nothing in bulk, so every
+						sample comes from the MIDI map's `directory:` and `path:` rules,
+						and `watch` has nothing to watch.  A `programs:` block in the
+						MIDI map overrides it.
 						""",
 						default="samples/captures",
 						nullable=True,
@@ -851,7 +876,9 @@ def json_schema () -> dict[str, typing.Any]:
 						Subsample, a DAW or a script.  Subsample waits until a file
 						stops growing, analyses it when it has no sidecar, and adds it
 						to the library; a file that arrives with its sidecar, as
-						another Subsample's captures do, is not analysed again.  A file
+						another Subsample's captures do, is not analysed again, and
+						plays within a second or two; one without a sidecar plays
+						within about ten seconds.  A file
 						deleted or renamed away leaves the library too.  Only the top
 						level of the directory is watched, and the files read are WAV,
 						FLAC, AIFF, OGG and MP3.  Watching relies on the file system's

@@ -204,8 +204,9 @@ _OUTPUT: typing.Final[str] = """\
 output:
   rhythm     the tempo in BPM, and the beats, pulses and onsets found
   attacks    each hit's start in seconds, and its level in dB against the
-             loudest hit, which reads 0.0dB; a hit far below the rest is a
-             ghost note
+             loudest hit, which reads 0.0dB, measured from its attack to the
+             next hit; hits evenly spaced and within a few dB of one another
+             quantise well, and one 20 dB below the rest is a ghost note
   spectral   the length in seconds, then measures from 0 to 1:
                flatness    0 tonal, 1 noisy
                attack      0 instant, 1 a gradual build
