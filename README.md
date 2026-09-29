@@ -1248,10 +1248,15 @@ by libsndfile).
 ### Multi-machine setup (remote recorder + player)
 
 Subsample can be split across two machines: one captures and analyses audio, the
-other plays it back via MIDI. The two machines share a directory (network drive,
-Dropbox, or any folder sync tool). The recorder writes samples there; the player
-watches the same directory and loads new samples as they arrive - no restart
-required.
+other plays it back via MIDI. A folder sync tool such as Syncthing or Dropbox
+keeps a copy of the samples folder on each machine. The recorder writes samples
+to its copy; the player watches its own and loads new samples as they arrive -
+no restart required.
+
+> **A sync tool, not a network drive:** the player's machine is not told of a
+> file another machine writes to a network drive, so the player would load the
+> recorder's samples only when it next starts. A sync tool writes each file on
+> the player's own machine, where the watcher sees it arrive.
 
 This separation is useful when the recording and playback environments are
 different: a field recorder capturing environmental sound in one location, a
@@ -1263,7 +1268,7 @@ dedicated host.
 ```yaml config
 recorder:
   enabled: true
-  directory: "/mnt/shared/samples"
+  directory: "~/Sync/samples"
 
 player:
   enabled: false
@@ -1278,7 +1283,7 @@ player:
   enabled: true
 
 library:
-  directory: "/mnt/shared/samples"
+  directory: "~/Sync/samples"
   watch: true
 ```
 

@@ -854,8 +854,12 @@ def json_schema () -> dict[str, typing.Any]:
 						another Subsample's captures do, is not analysed again.  A file
 						deleted or renamed away leaves the library too.  Only the top
 						level of the directory is watched, and the files read are WAV,
-						FLAC, AIFF, OGG and MP3.  Requires `library.directory` and
-						`player.enabled`.
+						FLAC, AIFF, OGG and MP3.  Watching relies on the file system's
+						notice of a change, which does not cross machines, so a file
+						another machine writes to a network drive loads only at the
+						next start.  A folder sync tool writes each file on this
+						machine, so what it brings loads as it arrives.  Requires
+						`library.directory` and `player.enabled`.
 						""",
 						default=False,
 					),
