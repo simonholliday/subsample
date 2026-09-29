@@ -57,7 +57,7 @@ parameters themselves are declared by the scorer, in subsample.query."""
 _MODES: typing.Final[dict[str, tuple[str, str]]] = {
 	"one_shot": ("One shot", "Plays to the end of the sound and ignores note-off."),
 	"gated":    ("Gated", "Plays while the key is held, and releases at note-off."),
-	"loop":     ("Loop", "Loops while the key is held, and releases past the loop at note-off."),
+	"loop":     ("Loop", "Loops while the key is held, and releases past the loop at note-off. A sound its `process` repitches, quantises or reverses plays gated instead."),
 }
 
 _MEASUREMENTS: typing.Final[dict[str, str]] = {
@@ -1083,7 +1083,7 @@ def _loop () -> dict[str, typing.Any]:
 	}
 
 	return {
-		"description": "Where the sound loops while the key is held. A point left out is found automatically, and writing `loop:` at all sets the mode to `loop`. A sample with no clean loop plays gated instead, with a note in the log.",
+		"description": "Where the sound loops while the key is held. A point left out is found automatically, and writing `loop:` at all sets the mode to `loop`. A sample with no clean loop plays gated instead, with a note in the log. So does a sound whose `process` holds `repitch`, `stretch_quantize`, `pad_quantize` or `reverse`, with a warning when the map loads: its loop points would not survive the change.",
 		"type": "object",
 		"properties": in_order(subsample.player.LOOP_INNER_KEYS, terms, "loop key"),
 		"additionalProperties": False,
