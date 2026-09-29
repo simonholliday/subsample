@@ -1372,9 +1372,10 @@ while Subsample is running. Overrides `player.midi_device`.
 > **Performance note:** running a MIDI sequencer and Subsample simultaneously on
 > the same machine means two real-time workloads compete for CPU and I/O. This
 > works well on a modern multi-core machine but may cause xruns or timing drift
-> on lower-powered hardware. If you experience dropouts, reduce
-> `recorder.audio.buffer_frames`, lower the sequencer's buffer size, or disable the
-> recorder (`recorder.enabled: false`) to run Subsample in playback-only mode.
+> on lower-powered hardware. If you hear dropouts, give each more room: raise
+> `player.audio.buffer_frames` in Subsample and the buffer size in the
+> sequencer, at the cost of a little latency, or turn the recorder off
+> (`recorder.enabled: false`) to run Subsample in playback-only mode.
 
 ## OSC integration
 
