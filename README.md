@@ -658,6 +658,11 @@ default_program: 0
   as a drop-in unit.
 - A Program Change swaps **both** the rules and the pool atomically. A broken
   preset is rolled back and logged rather than stopping playback.
+- A switch changes the kit for **every** MIDI channel, not only
+  `program_channel`'s: a `map:` preset's assignments replace all of the map's,
+  so a MIDI channel the preset does not play is silent until the next switch.
+  One part switching while the others play on, as on a General MIDI device, is
+  not supported.
 - Presets are **flat**: a preset may not declare its own `programs:` or `maps:` block.
 - The top-level `assignments:` block is **optional** when every program is a
   `map:` preset, but **required** if any program uses the `directory:` form (those

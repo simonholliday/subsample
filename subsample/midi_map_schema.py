@@ -208,7 +208,7 @@ def _map_terms () -> dict[str, typing.Any]:
 			"examples": [10],
 		},
 		"programs": {
-			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names. Each program is selected by its Program Change number alone, so a map holds up to 128, and Bank Select messages are not read. Each keeps its own samples in memory, and one too large for `library.max_memory_mb` is reported at startup, since switching to it then reloads samples from disk. A change to this block, to `program_channel` or `default_program`, or to a preset's own file takes a restart.",
+			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names. Each program is selected by its Program Change number alone, so a map holds up to 128, and Bank Select messages are not read. A switch changes the kit on every MIDI channel at once: a `directory:` program's samples serve all of this map's assignments, and a `map:` preset's assignments replace all of them, so a MIDI channel the preset does not play falls silent until the next switch. Each keeps its own samples in memory, and one too large for `library.max_memory_mb` is reported at startup, since switching to it then reloads samples from disk. A change to this block, to `program_channel` or `default_program`, or to a preset's own file takes a restart.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/program"},
 			"examples": [[
@@ -218,7 +218,7 @@ def _map_terms () -> dict[str, typing.Any]:
 		},
 		"program_channel": _number_or_name(
 			0, 16,
-			"The MIDI channel that Program Change messages are read on, where 0 reads every MIDI channel.",
+			"The MIDI channel that Program Change messages are read on, where 0 reads every MIDI channel. A switch still changes the kit on every MIDI channel, not only this one.",
 			default=subsample.bank.DEFAULT_BANK_CHANNEL,
 			examples=[0],
 		),
