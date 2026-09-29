@@ -1050,7 +1050,11 @@ _VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
 #    survives, and its target moves back by the same margin (M8, f683d82).
 #    That shipped in v0.5.0 without this bump, so a disk cache written under
 #    v0.4.1 went on serving the old renders (#3255).
-TRANSFORM_VERSION: str = "4"
+# 5: every time map gains a key frame one sample in, since Rubber Band's finer
+#    engine ignores the one at the start: stretch_quantize, and a beat count's
+#    fit, put each hit after the first out by the first segment's error
+#    (#3881).
+TRANSFORM_VERSION: str = "5"
 
 
 def variant_cache_key (
@@ -2203,7 +2207,9 @@ def _build_time_map (
 
 	Each entry is (source_sample, target_sample).  The first entry anchors
 	the start and the last entry anchors the end — required by the API.
-	All entries are monotonically increasing and non-negative.
+	A second entry, one sample in, carries the first segment's ratio, which
+	Rubber Band's finer engine otherwise ignores.  All entries are
+	monotonically increasing and non-negative.
 
 	Args:
 		onset_source_samples: Source sample positions for each onset.
@@ -2236,6 +2242,18 @@ def _build_time_map (
 		time_map[-1] = (source_length, target_length)
 	else:
 		time_map.append((source_length, target_length))
+
+	# Rubber Band's finer engine (--fine) ignores a key frame at the very start,
+	# so it played up to the first hit unstretched and every later hit was out
+	# by that segment's error: 0.107 s late on a loop of taps quantised from 100
+	# to 120 BPM (#3881).  A key frame one sample in, at the first segment's own
+	# ratio, is one it honours.  Compressed, each hit then lands within a few
+	# milliseconds; stretched, the engine's own early bias remains, some 15 ms
+	# at twice the length.
+	first_src, first_tgt = time_map[1]
+
+	if first_src > 1 and first_tgt > 1:
+		time_map.insert(1, (1, min(first_tgt - 1, max(1, round(first_tgt / first_src)))))
 
 	return time_map
 

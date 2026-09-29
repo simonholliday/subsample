@@ -64,6 +64,30 @@ def _make_pcm_audio (
 	return numpy.zeros((n_frames, channels), dtype=numpy.int16)
 
 
+def _hit_starts (rendered: numpy.ndarray, sample_rate: int) -> list[float]:
+
+	"""Where each hit starts in rendered audio, in seconds.
+
+	A hit starts where the level first reaches 0.05 after at least 100 ms
+	below it, which is where the ear hears it for the taps and clicks these
+	tests render.
+	"""
+
+	level  = numpy.abs(rendered[:, 0])
+	quiet  = int(0.1 * sample_rate)
+	starts: list[float] = []
+	last   = -quiet
+
+	for index in numpy.flatnonzero(level >= 0.05):
+
+		if index - last >= quiet:
+			starts.append(index / sample_rate)
+
+		last = int(index)
+
+	return starts
+
+
 def _make_record (
 	sample_id: int = 1,
 	audio: typing.Optional[numpy.ndarray] = None,
@@ -1352,8 +1376,23 @@ class TestBuildTimeMap:
 			[0, 500], [0, 600], 4410, 5000,
 		)
 
-		# (0, 0) start anchor + (500, 600) + (4410, 5000) end anchor.
-		assert len(time_map) == 3
+		# (0, 0) start anchor, the key frame one sample in, (500, 600), and the
+		# (4410, 5000) end anchor.
+		assert time_map == [(0, 0), (1, 1), (500, 600), (4410, 5000)]
+
+	def test_a_key_frame_one_sample_in_carries_the_first_ratio (self) -> None:
+
+		"""Rubber Band's finer engine ignores the key frame at the start (#3881).
+
+		Without a second one, the stretch up to the first hit went unapplied
+		and every later hit landed late by that segment's error.
+		"""
+
+		squeezed  = subsample.transform._build_time_map([29142], [24000], 48000, 40000)
+		stretched = subsample.transform._build_time_map([1000], [3000], 4000, 12000)
+
+		assert squeezed[:2]  == [(0, 0), (1, 1)]
+		assert stretched[:2] == [(0, 0), (1, 3)]
 
 
 # ---------------------------------------------------------------------------
@@ -1479,6 +1518,30 @@ class TestTimeStretchHandler:
 		step = subsample.transform.TimeStretch(target_bpm=160.0, resolution=8)
 		result = subsample.transform._apply_time_stretch(audio, sr, record, step)
 		assert result.shape[0] < n_frames
+
+	def test_every_hit_lands_where_the_map_puts_it (self) -> None:
+
+		"""The map was right, but Rubber Band's finer engine ignored its key frame
+		at the start, so every hit after the first landed late by the first gap's
+		error: 0.107 s for this loop of taps quantised from 100 to 120 BPM (#3881)."""
+
+		sr    = 44100
+		taps  = (0.0, 0.605, 1.197, 1.803, 2.399, 3.004, 3.604, 4.209)
+		t     = numpy.arange(int(0.5 * sr)) / sr
+		tap   = (0.6 * numpy.sin(2 * numpy.pi * 180.0 * t) * numpy.exp(-t / 0.050)).astype(numpy.float32)
+		audio = numpy.zeros((int(4.8 * sr), 1), dtype=numpy.float32)
+
+		for start in taps:
+			index = int(start * sr)
+			audio[index:index + tap.size, 0] += tap
+
+		record   = _make_record(audio=numpy.zeros(audio.shape, dtype=numpy.int16), tempo_bpm=100.0, onset_times=taps)
+		step     = subsample.transform.TimeStretch(target_bpm=120.0, resolution=16)
+		rendered = subsample.transform._apply_time_stretch(audio, sr, record, step)
+		wanted   = [start / sr for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+		assert wanted == pytest.approx([0.5 * index for index in range(len(taps))], abs=0.001)
+		assert _hit_starts(rendered, sr) == pytest.approx(wanted, abs=0.005)
 
 	def test_crop_fade_in_applied (self) -> None:
 
@@ -4707,6 +4770,21 @@ class TestStretchQuantizeToABeatCount:
 			remainder = (start / self.SR) % interval
 
 			assert min(remainder, interval - remainder) == pytest.approx(0.0, abs=0.002)
+
+	def test_each_hit_lands_where_its_segment_starts (self) -> None:
+
+		"""The test above reads the map, which was right; the render was not.
+		Rubber Band's finer engine ignored the key frame at the start, so with
+		the first hit a way in, every hit was out by the error of the stretch in
+		front of it: 40 ms here (#3881).  A span shorter than the take keeps the
+		engine's own bias under heavy stretching, a few milliseconds early per
+		doubling, out of the measurement."""
+
+		audio, record = self._rotation(4.4, 109.0, fractions=(0.1, 0.35, 0.6, 0.85))
+		rendered = self._rendered(audio, record)
+		wanted   = [start / self.SR for start, _end in subsample.transform._segment_bounds_local.bounds]
+
+		assert _hit_starts(rendered, self.SR) == pytest.approx(wanted, abs=0.005)
 
 	def test_a_hit_moves_by_no_more_than_half_a_grid_interval (self) -> None:
 
