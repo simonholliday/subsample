@@ -2429,3 +2429,58 @@ class TestNumbaRecompileWarning:
 
 	def test_importing_analysis_silences_it (self) -> None:
 		assert self._WARNING not in self._stderr("import subsample.analysis")
+
+
+class TestAnAttackAtTheStart:
+
+	"""A hit in a file's first moments is found where it is (#3880).
+
+	With no quiet before it for the onset envelope to rise out of, it went
+	undetected, or was placed on its decay.
+	"""
+
+	SR = 44100
+
+	def _tap (self) -> numpy.ndarray:
+
+		"""A tap as the guide's loop has them: a 180 Hz tone dying away over half a second."""
+
+		t = numpy.arange(int(0.5 * self.SR)) / self.SR
+
+		return (0.6 * numpy.sin(2 * numpy.pi * 180.0 * t) * numpy.exp(-t / 0.050)).astype(numpy.float32)
+
+	def _attacks (self, mono: numpy.ndarray) -> tuple[float, ...]:
+
+		"""The attack times found by the analysis a capture or an import runs."""
+
+		params = subsample.analysis.compute_params(self.SR)
+
+		return subsample.analysis.analyze_all(mono, params, subsample.config.AnalysisConfig())[1].attack_times
+
+	def test_a_single_hit_on_the_first_sample (self) -> None:
+
+		"""Was one attack at 0.092 s, on the tap's decay."""
+
+		attacks = self._attacks(self._tap())
+
+		assert len(attacks) == 1
+		assert attacks[0] == pytest.approx(0.0, abs=0.002)
+
+	def test_a_loop_trimmed_to_its_first_tap (self) -> None:
+
+		"""Was seven attacks for eight taps, as import trims a loop up to its first."""
+
+		starts = (0.0, 0.605, 1.197, 1.803, 2.399, 3.004, 3.604, 4.209)
+		take   = numpy.zeros(int(4.8 * self.SR), dtype=numpy.float32)
+		tap    = self._tap()
+
+		for start in starts:
+			index = int(start * self.SR)
+			take[index:index + tap.size] += tap
+
+		assert self._attacks(take) == pytest.approx(starts, abs=0.003)
+
+	def test_a_hit_after_quiet_is_where_it_was (self) -> None:
+		take = numpy.concatenate([numpy.zeros(int(0.3 * self.SR), dtype=numpy.float32), self._tap()])
+
+		assert self._attacks(take) == pytest.approx((0.3,), abs=0.002)

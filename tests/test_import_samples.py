@@ -1,6 +1,7 @@
 """Tests for subsample.tools.import_samples (`subsample import`) — the bulk
 sample-import tool."""
 
+import json
 import pathlib
 
 import numpy
@@ -64,6 +65,40 @@ class TestHotFloatImport:
 		data, _ = soundfile.read(str(out / "hot.wav"), always_2d=True)
 		# Without a ceiling the over-unity peaks clip to the rail.
 		assert int(numpy.sum(numpy.abs(data) >= 0.9995)) > 0
+
+
+class TestALoopKeepsItsFirstTap:
+
+	"""Import trims a loop up to its first tap, and the analysis then missed that
+	tap's attack, so stretch_quantize, which crops to the first attack, cut the
+	tap away (#3880).  The loop subsystem.co's guide checked it with."""
+
+	def test_every_tap_is_found (self, tmp_path: pathlib.Path) -> None:
+		rate  = 48000
+		lead  = 1.5
+		rng   = numpy.random.default_rng(3880)
+		take  = (rng.standard_normal(int((lead + 5.4) * rate)) * 10 ** (-66 / 20)).astype(numpy.float32)
+		t     = numpy.arange(int(0.5 * rate)) / rate
+		tap   = (0.6 * numpy.sin(2 * numpy.pi * 180.0 * t) * numpy.exp(-t / 0.050)).astype(numpy.float32)
+
+		for index in range(8):
+			start = int((lead + 0.6 * index) * rate)
+			take[start:start + tap.size] += tap
+
+		src = tmp_path / "loop.wav"
+		soundfile.write(str(src), take, rate, subtype="PCM_24")
+		out = tmp_path / "out"
+		out.mkdir()
+
+		assert import_samples._import_file(
+			src, out, force=True, float_ceiling_dbfs=-1.0,
+			rhythm_cfg=subsample.config.AnalysisConfig(),
+		)
+
+		attacks = json.loads((out / "loop.wav.analysis.json").read_text(encoding="utf-8"))["rhythm"]["attack_times"]
+
+		assert len(attacks) == 8
+		assert attacks[0] == pytest.approx(0.0, abs=0.002)
 
 
 class TestMainStemCollisions:

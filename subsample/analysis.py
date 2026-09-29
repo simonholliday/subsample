@@ -139,7 +139,14 @@ warnings.filterwarnings(
 #     loudest event actually begins, for sounds whose musical hit is not at the
 #     start (a hi-hat pedal close, a shaker's pre-pull).  Purely additive: no
 #     existing value changes, but sidecars need rewriting to carry the new keys.
-ANALYSIS_VERSION: str = "17"
+#
+# 18: onsets and attacks are detected with a window of silence in front, so an
+#     attack in a file's first moments is found (#3880).  Without it the first
+#     hit went unseen, the onset envelope was scaled against the sound's own
+#     decay, and the decay's wiggles passed as hits: the GM references read 2 to
+#     32 onsets each and now 1 to 3, and on 60 real captures most counts fell
+#     while 16 whose first attack had read as past 50 ms now start at 0.
+ANALYSIS_VERSION: str = "18"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -1283,21 +1290,37 @@ def analyze_rhythm (
 	# signal so the amplitude-envelope threshold reflects the actual hit.
 	onset_source = _percussive if _percussive is not None else mono
 
+	# An attack in a file's first moments has no quiet before it for the onset
+	# envelope to rise out of, so it went undetected: a tapped loop that import
+	# had trimmed to its first tap lost that tap, and stretch_quantize, which
+	# crops to the first attack, cut it away; a single hit on the file's first
+	# sample was placed on its decay (#3880).  With the first hit unseen, the
+	# envelope was also scaled against the sound's own decay, so the decay's
+	# wiggles passed as further hits.  Both stages run with one window of
+	# digital silence in front, and every time is shifted back by it.
+	lead_in      = params.n_fft
+	lead_seconds = lead_in / params.sample_rate
+
 	onset_times_raw: numpy.ndarray = librosa.onset.onset_detect(
-		y=onset_source,
+		y=numpy.concatenate([numpy.zeros(lead_in, dtype=onset_source.dtype), onset_source]),
 		sr=params.sample_rate,
 		hop_length=params.hop_length,
 		units='time',
 	)
 
-	onset_times: tuple[float, ...] = tuple(float(t) for t in onset_times_raw)
-
 	# Refine each librosa onset to the sample-accurate attack start — the
 	# moment the transient becomes audible.  Used by the time-stretch handler
-	# for beat-grid alignment.
-	attack_times = _refine_onsets_to_attacks(
-		mono, onset_times, params.sample_rate, params.hop_length,
+	# for beat-grid alignment.  The refinement looks back for the quiet before
+	# each hit, which for the first hit is the silence in front.
+	attack_times_led = _refine_onsets_to_attacks(
+		numpy.concatenate([numpy.zeros(lead_in, dtype=mono.dtype), mono]),
+		tuple(float(t) for t in onset_times_raw),
+		params.sample_rate,
+		params.hop_length,
 	)
+
+	onset_times: tuple[float, ...] = tuple(max(0.0, float(t) - lead_seconds) for t in onset_times_raw)
+	attack_times = tuple(max(0.0, t - lead_seconds) for t in attack_times_led)
 
 	# Independent of the onsets above by design — see _compute_impact.
 	impact_time, impact_pre_level_db = _compute_impact(mono, params.sample_rate)
