@@ -112,41 +112,46 @@ All four are the same workflow.
 
 The guide builds one project, from a first recording to playing live. The
 references are generated from the code that reads these files and runs these
-commands, so they describe the release you have rather than a copy kept by
-hand.
+commands, so they describe the release the guide installs rather than a copy
+kept by hand.
 
 For changing Subsample's code, see [docs/architecture.md](docs/architecture.md)
 and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Installing
 
-Two of Subsample's libraries compile as they install, and it calls on
-PortAudio for sound and on a time-stretching tool, so install those first:
+Subsample is fetched from GitHub with Git, and some of its libraries compile
+as they install, which needs a compiler, Python's own headers and a few
+development packages. It also calls on PortAudio for sound and on a
+time-stretching tool. Install them all first:
 
 ```bash
 # Debian and Ubuntu
-sudo apt install build-essential pkg-config portaudio19-dev libasound2-dev libjack-jackd2-dev rubberband-cli
+sudo apt install git build-essential python3-dev pkg-config portaudio19-dev libasound2-dev libjack-jackd2-dev rubberband-cli
 # Fedora
-sudo dnf install gcc-c++ make pkgconf-pkg-config portaudio-devel alsa-lib-devel jack-audio-connection-kit-devel rubberband
+sudo dnf install git gcc-c++ make python3-devel pkgconf-pkg-config portaudio-devel alsa-lib-devel jack-audio-connection-kit-devel rubberband
 # macOS, with Homebrew
 brew install portaudio rubberband
 ```
 
-On Linux, a sound server must be running: a desktop runs one already, and the
+On macOS, the compiler and Git come with Xcode's command-line tools. On
+Linux, a sound server must be running: a desktop runs one already, and the
 guide's [install chapter](https://subsystem.co/subsample/guide/installing-subsample)
-shows how to add one to a machine without a desktop. Then install Subsample
-with [uv](https://docs.astral.sh/uv/), and make a project in a new folder:
+shows how to add one to a machine without a desktop.
+
+Then install Subsample with [uv](https://docs.astral.sh/uv/), using the line in
+the guide's [install chapter](https://subsystem.co/subsample/guide/installing-subsample),
+which names the release the guide documents. The name `subsample` on the
+Python Package Index belongs to another project, so install from that line
+rather than by name. Then make a project in a new folder:
 
 ```bash
-uv tool install "subsample @ git+https://github.com/simonholliday/subsample@v0.6.3"
 mkdir my-project && cd my-project
 subsample --init
 ```
 
-The name `subsample` on the Python Package Index belongs to another project,
-so install from the line above rather than by name. From here, the
-[guide](https://subsystem.co/subsample/guide) makes a first kit from a
-recording.
+From here, the [guide](https://subsystem.co/subsample/guide) makes a first kit
+from a recording.
 
 ## Dependencies and credits
 
@@ -166,6 +171,7 @@ Subsample uses these libraries:
 | [pyrubberband ↗](https://github.com/bmcfee/pyrubberband) | Pitch shifting and time-stretching (Rubber Band wrapper) | ISC |
 | [watchdog ↗](https://github.com/gorakhargosh/watchdog) | Filesystem monitoring for multi-machine sample hot-loading | Apache-2.0 |
 | [PyMidiDefs ↗](https://github.com/simonholliday/PyMidiDefs) | MIDI constant definitions (notes, CC, drums, GM) | MIT |
+| [threadpoolctl ↗](https://github.com/joblib/threadpoolctl) | Thread limits for numerical work, so analysis does not disturb the audio | BSD-3-Clause |
 
 The 47 General MIDI reference fingerprints are derived from the FluidR3_GM
 SoundFont (MIT licence), and no audio from it is included;
