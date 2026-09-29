@@ -917,6 +917,7 @@ def _run_recorder (
 
 def _load_bank (
 	defn: subsample.bank.BankDefinition,
+	preset: typing.Optional[subsample.player.MidiMapResult],
 	reference_library: subsample.library.ReferenceLibrary,
 	cfg: subsample.config.Config,
 	output_sample_rate: int,
@@ -930,50 +931,40 @@ def _load_bank (
 	  - ``directory:`` shorthand — load the directory as the sample pool;
 	    the program reuses the player's top-level assignments.  The returned
 	    Bank carries ``note_map=None`` (use the global rules).
-	  - ``map:`` preset — load a whole mapper file (its own assignments +
-	    samples).  The library is populated from the preset's own path /
-	    ``directory:`` predicates (resolved relative to the preset folder),
-	    and the returned Bank carries the preset's note_map / zone_templates /
-	    mapped_ccs so a Program Change swaps the rules too.
+	  - ``map:`` preset — a whole mapper file (its own assignments +
+	    samples), whose rules were loaded with the map.  The library is
+	    populated from the preset's own path / ``directory:`` predicates
+	    (resolved relative to the preset folder), and the returned Bank
+	    carries the preset's note_map / zone_templates / mapped_ccs so a
+	    Program Change swaps the rules too.
 
 	Args:
 		defn:               Parsed program definition from the MIDI map.
+		preset:             The rules a ``map:`` program brings, as
+		                    player.load_configured_map loaded them; None for
+		                    the ``directory:`` form.
 		reference_library:  Shared reference library for similarity scoring.
 		cfg:                Full application config (memory limits, transform settings).
 		output_sample_rate: Effective player output sample rate for variant resampling.
-		parent_map_dir:     Directory of the top-level MIDI map, used to
-		                    resolve a relative ``map:`` preset path.
+		parent_map_dir:     Directory of the top-level MIDI map, which a
+		                    relative ``map:`` preset path is resolved from.
 
 	Returns:
 		Fully loaded Bank ready for playback.
 
 	Raises:
-		ValueError: If a ``map:`` preset path is missing or itself declares
-		a nested ``programs:`` block.
+		ValueError: If an assignment's ``extract:`` does not suit the samples
+		            a preset loads.
 	"""
 
 	max_instrument_bytes = int(cfg.library.max_memory_mb * 1024 * 1024)
 
-	preset_result: typing.Optional[subsample.player.MidiMapResult] = None
-
 	if defn.map_path is not None:
-		# `map:` preset — load the mapper file; the library starts empty and
-		# is filled by the preset's own path / directory references below.
-		preset_path = parent_map_dir / defn.map_path
-		if not preset_path.exists():
-			raise ValueError(
-				f"Program {defn.name!r}: preset map {defn.map_path!r} not found "
-				f"(resolved to {preset_path})"
-			)
-		preset_result = subsample.player.load_midi_map(
-			preset_path, reference_library.names(), strict=cfg.player.strict_midi_map,
-		)
-		if preset_result.bank_definitions:
-			raise ValueError(
-				f"Program {defn.name!r}: preset {defn.map_path!r} declares its own "
-				f"'programs:' - nested presets are not allowed"
-			)
-		directory = preset_path.parent
+		# `map:` preset — load_configured_map loaded its rules and refused a
+		# broken one; the library starts empty and is filled by the preset's
+		# own path / directory references below.
+		assert preset is not None
+		directory = (parent_map_dir / defn.map_path).parent
 		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
 	else:
 		# `directory:` shorthand — the directory IS the pool.
@@ -1048,17 +1039,17 @@ def _load_bank (
 	# relative to the preset folder (load_midi_map stamped the preset's
 	# midi_map_dir into each directory predicate), so a self-contained kit
 	# folder loads with no extra coupling.  Then validate its extracts.
-	if preset_result is not None:
+	if preset is not None:
 		subsample.player._resolve_path_references(
-			preset_result.note_map, [similarity_matrix], instrument_library,
+			preset.note_map, [similarity_matrix], instrument_library,
 			target_sample_rate=output_sample_rate,
 			with_preview=cfg.recorder.previews,
 			reference_library=reference_library,
 		)
-		subsample.player._validate_assignment_extracts(preset_result.note_map, instrument_library)
-		if len(preset_result.note_map) == 0:
-			_log.warning("Program %r preset %s has no assignments", defn.name, defn.map_path)
-		elif len(instrument_library) == 0:
+		subsample.player._validate_assignment_extracts(preset.note_map, instrument_library)
+
+		# A preset with no assignments was reported when its rules loaded.
+		if (preset.note_map or preset.zone_templates) and len(instrument_library) == 0:
 			_log.warning(
 				"Program %r preset %s loaded no samples - check its 'directory:' predicates",
 				defn.name, defn.map_path,
@@ -1077,10 +1068,10 @@ def _load_bank (
 
 	preset_zone_templates: typing.Optional[tuple[typing.Any, ...]] = None
 	preset_mapped_ccs:     typing.Optional[set[int]]               = None
-	if preset_result is not None:
-		preset_zone_templates = preset_result.zone_templates
+	if preset is not None:
+		preset_zone_templates = preset.zone_templates
 		preset_mapped_ccs     = subsample.player._collect_mapped_ccs(
-			preset_result.note_map, preset_result.zone_templates,
+			preset.note_map, preset.zone_templates,
 		)
 
 	return subsample.bank.Bank(
@@ -1090,7 +1081,7 @@ def _load_bank (
 		instrument_library=instrument_library,
 		similarity_matrix=similarity_matrix,
 		transform_manager=transform_manager,
-		note_map=preset_result.note_map if preset_result is not None else None,
+		note_map=preset.note_map if preset is not None else None,
 		zone_templates=preset_zone_templates,
 		mapped_ccs=preset_mapped_ccs,
 	)
@@ -1118,6 +1109,34 @@ def _apply_active_preset_rules (
 		return
 
 	player._apply_rule_set(active.note_map, active.zone_templates or (), active.mapped_ccs or set())
+
+
+def _warn_of_broken_presets (
+	result:          subsample.player.MidiMapResult,
+	map_dir:         pathlib.Path,
+	reference_names: list[str],
+	strict:          bool,
+) -> None:
+
+	"""Warn of each ``map:`` preset a restart would stop on, as the map reloads.
+
+	A run keeps the presets it started with, and a preset's own file is not
+	watched, so a broken one must not hold up an edit to the top-level map:
+	the reload goes ahead, and the preset is named now rather than at the next
+	start (#3886).
+	"""
+
+	for defn in result.bank_definitions:
+		if defn.map_path is None:
+			continue
+
+		try:
+			subsample.player.load_preset_map(defn, map_dir, reference_names, strict)
+		except (OSError, ValueError, yaml.YAMLError) as exc:
+			_log.warning(
+				"MIDI map reload: a restart would stop on this preset, so fix "
+				"it first: %s", exc,
+			)
 
 
 def _start_player (
@@ -1595,10 +1614,19 @@ def _main_impl () -> None:
 
 		parent_map_dir = pathlib.Path(typing.cast(str, cfg.player.midi_map)).parent
 
+		# The programs came from the pre-loaded map, which loaded every `map:`
+		# program's rules with it, so a broken preset has already stopped the
+		# run, before any library was loaded.
+		assert preloaded_midi_map_result is not None
+		presets = preloaded_midi_map_result.presets
+
 		banks: list[subsample.bank.Bank] = []
 		try:
 			for defn in bank_definitions:
-				bank = _load_bank(defn, reference_library, cfg, output_sample_rate, parent_map_dir)
+				bank = _load_bank(
+					defn, presets.get(defn.program), reference_library, cfg,
+					output_sample_rate, parent_map_dir,
+				)
 				banks.append(bank)
 				source = defn.map_path if defn.map_path is not None else defn.directory
 				print(
@@ -1606,8 +1634,9 @@ def _main_impl () -> None:
 					f"{len(bank.instrument_library)} sample(s) from {source}"
 				)
 		except (OSError, ValueError, yaml.YAMLError) as exc:
-			# A bad `map:` preset path or malformed preset file must read as one
-			# clean line, not a raw traceback out of the main thread.
+			# A program whose samples cannot be read, or do not suit its
+			# assignments' extracts, must read as one clean line, not a raw
+			# traceback out of the main thread.
 			_log.error("Could not load program bank: %s", exc)
 			raise SystemExit(1)
 
@@ -1960,8 +1989,9 @@ def _main_impl () -> None:
 			`default_program:`) are not hot-reloadable in this version — the
 			callback warns and keeps the current program state.  Editing a
 			`map:` preset's OWN file is also not watched (only the top-level
-			map is) and needs a restart.  Top-level assignment edits reload
-			as normal.
+			map is) and needs a restart, so a broken preset is only warned of
+			here: it does not hold up an edit to the top-level map.  Top-level
+			assignment edits reload as normal.
 			"""
 
 			player = _player_cell[0]
@@ -1975,13 +2005,20 @@ def _main_impl () -> None:
 				# Reload through the same resolver startup used, so editing a
 				# ensemble re-merges every set it includes rather than
 				# reloading the ensemble file's own assignments alone.
-				result = subsample.player.load_configured_map(cfg, reference_library.names())
+				result = subsample.player.load_configured_map(
+					cfg, reference_library.names(), presets=False,
+				)
 			except (OSError, ValueError, yaml.YAMLError) as exc:
 				_log.warning(
 					"MIDI map reload failed at parse time - keeping current "
 					"map: %s", exc,
 				)
 				return
+
+			_warn_of_broken_presets(
+				result, _midi_map_watch_path.parent, reference_library.names(),
+				cfg.player.strict_midi_map,
+			)
 
 			# Detect program-set changes the live reload can't apply, so the
 			# user isn't left wondering why an edit to programs:/program_channel:/

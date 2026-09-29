@@ -1226,7 +1226,7 @@ def _program () -> dict[str, typing.Any]:
 			"examples": ["kits/acoustic"],
 		},
 		"map": {
-			"description": "A whole map, with its own assignments and samples, relative to this map. Its own paths resolve from its own folder, so a kit's folder works as one unit, and a switch to the program changes the assignments and the samples together. It may not declare programs of its own.",
+			"description": "A whole map, with its own assignments and samples, relative to this map. Its own paths resolve from its own folder, so a kit's folder works as one unit, and a switch to the program changes the assignments and the samples together. It may not declare `programs` or `maps` of its own.",
 			"type": "string",
 			"minLength": 1,
 			"examples": ["kits/808-kit.yaml"],

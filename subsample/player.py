@@ -215,6 +215,10 @@ class MidiMapResult:
 		                  None means use the first bank in the list.
 		zone_templates:   Declared zone-tuned assignments.  Empty tuple when no
 		                  ``notes: zone-tuned`` entries are present.
+		presets:          The rules each ``map:`` program brings, by program
+		                  number, loaded without its samples.  Only
+		                  load_configured_map fills it; load_midi_map reads one
+		                  file and leaves it empty.
 	"""
 
 	note_map:         NoteMap
@@ -222,6 +226,7 @@ class MidiMapResult:
 	bank_channel:     int
 	default_bank:     typing.Optional[int]    = None
 	zone_templates:   tuple[ZoneTemplate, ...] = ()
+	presets:          dict[int, "MidiMapResult"] = dataclasses.field(default_factory=dict)
 
 
 def _loudness_positions (
@@ -3586,9 +3591,81 @@ def _merge_into (
 	zone_templates.extend(result.zone_templates)
 
 
+def load_preset_map (
+	defn:            subsample.bank.BankDefinition,
+	map_dir:         pathlib.Path,
+	reference_names: list[str],
+	strict:          bool = True,
+) -> MidiMapResult:
+
+	"""Load the rules a ``map:`` program brings, without its samples.
+
+	A preset is an ordinary map in a file of its own, named relative to the map
+	that declares it, and its own ``directory:`` and path predicates resolve
+	from its own folder, so a kit's folder works as one unit.  Loading it with
+	the map that declares it refuses a broken preset wherever that map is
+	loaded, not first when a run builds the program (#3886).
+
+	Args:
+		defn:            A program that names a ``map:``.
+		map_dir:         The folder of the map that declares the program.
+		reference_names: The reference fingerprints the preset may name.
+		strict:          As load_midi_map's.
+
+	Returns:
+		The preset's rules.  A run loads its samples when it builds the program
+		(cli._load_bank).
+
+	Raises:
+		ValueError:     If the preset is missing, declares programs or maps of
+		                its own, or load_midi_map refuses it.
+		OSError:        If the preset, or a definitions file it mounts, cannot be
+		                read.
+		yaml.YAMLError: If one of those files is not valid YAML.
+	"""
+
+	# Only a `map:` program has a preset; a `directory:` one reuses the rules
+	# of the map that declares it.
+	assert defn.map_path is not None
+	path = map_dir / defn.map_path
+
+	if not path.exists():
+		raise ValueError(
+			f"Program {defn.name!r}: preset map {defn.map_path!r} not found "
+			f"(resolved to {path})"
+		)
+
+	# load_midi_map reads a file's own assignments and leaves its `maps:` to
+	# load_ensemble, so an ensemble loaded as a preset would lose every set it
+	# includes, and its program would play nothing.
+	if is_ensemble(path):
+		raise ValueError(
+			f"Program {defn.name!r}: preset {defn.map_path!r} declares its own "
+			f"'maps:' - presets are flat, so the sets it includes would never "
+			f"play.  Put their assignments in the preset itself, or name the "
+			f"ensemble in player.midi_map."
+		)
+
+	result = load_midi_map(path, reference_names, strict=strict)
+
+	if result.bank_definitions:
+		raise ValueError(
+			f"Program {defn.name!r}: preset {defn.map_path!r} declares its own "
+			f"'programs:' - nested presets are not allowed"
+		)
+
+	# Zone-tuned assignments are held apart from the note map, so a preset made
+	# of them alone has assignments too.
+	if not result.note_map and not result.zone_templates:
+		_log.warning("Program %r preset %s has no assignments", defn.name, defn.map_path)
+
+	return result
+
+
 def load_configured_map (
 	cfg:             subsample.config.Config,
 	reference_names: typing.Optional[list[str]] = None,
+	presets:         bool = True,
 ) -> MidiMapResult:
 
 	"""Load the MIDI map a configuration names, the way a run loads it.
@@ -3608,9 +3685,9 @@ def load_configured_map (
 	not consulted: a map means the same whether or not the player is on.
 	Relative paths resolve from the current directory, as a run's do.  No
 	audio and no sample library is read, so the result says what each
-	assignment selects, not which samples it would pick.  A ``programs:`` entry
-	naming a preset map is only declared here (``bank_definitions``): a run
-	loads that map when it builds the program, with the program's samples.
+	assignment selects, not which samples it would pick.  Each ``map:``
+	program's preset is loaded too, into ``presets``, and refused as a run
+	refuses it; a run loads its samples when it builds the program.
 
 	Whatever a run only warns about is logged through the same loggers a run
 	uses, and not raised.
@@ -3620,6 +3697,10 @@ def load_configured_map (
 		reference_names: The reference fingerprints a map may name.  None loads
 		                 them as a run does, from config.reference_directory(cfg);
 		                 a run passes the names it has already loaded.
+		presets:         False leaves the presets unread and ``presets`` empty,
+		                 for a run's reload: a preset's own file takes a
+		                 restart, so the reload checks the presets apart and
+		                 only warns of a broken one.
 
 	Returns:
 		The rules the player is given.
@@ -3627,9 +3708,11 @@ def load_configured_map (
 	Raises:
 		ValueError:     If the configuration names no map, or a map is refused:
 		                a schema error, an unknown key while
-		                player.strict_midi_map is on, a note claimed twice.
-		OSError:        If a map, an included map or a definitions file cannot
-		                be read.
+		                player.strict_midi_map is on, a note claimed twice, a
+		                preset that is missing or declares programs or maps of
+		                its own.
+		OSError:        If a map, an included map, a preset or a definitions
+		                file cannot be read.
 		yaml.YAMLError: If one of those files is not valid YAML.
 	"""
 
@@ -3663,9 +3746,18 @@ def load_configured_map (
 	path = pathlib.Path(cfg.player.midi_map)
 
 	if is_ensemble(path):
-		return load_ensemble(path, reference_names, strict=strict)
+		result = load_ensemble(path, reference_names, strict=strict)
+	else:
+		result = load_midi_map(path, reference_names, strict=strict)
 
-	return load_midi_map(path, reference_names, strict=strict)
+	if not presets:
+		return result
+
+	return dataclasses.replace(result, presets={
+		defn.program: load_preset_map(defn, path.parent, reference_names, strict)
+		for defn in result.bank_definitions
+		if defn.map_path is not None
+	})
 
 
 @dataclasses.dataclass

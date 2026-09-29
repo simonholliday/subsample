@@ -33,9 +33,13 @@ Usage flow
    (Internally these are still modelled as "banks" — a switchable sample
    library — but the YAML surface uses the MIDI-correct "program" vocabulary
    since each is selected by a Program Change, not by MIDI Bank Select.)
+   ``load_configured_map()`` also loads each ``map:`` program's preset,
+   without its samples, into ``MidiMapResult.presets``, so a broken preset
+   is refused wherever the map is loaded.
 
-2. ``cli.py`` calls ``_load_bank()`` for each ``BankDefinition``, then
-   constructs a ``BankManager`` and passes it to ``MidiPlayer``.
+2. ``cli.py`` calls ``_load_bank()`` for each ``BankDefinition``, which
+   loads its samples (a ``map:`` program's from the rules loaded in step 1),
+   then constructs a ``BankManager`` and passes it to ``MidiPlayer``.
 
 3. On receiving a MIDI Program Change, the player calls
    ``bank_manager.switch_to(program)`` and subsequent note triggers query

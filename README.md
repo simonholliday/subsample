@@ -658,7 +658,7 @@ default_program: 0
   as a drop-in unit.
 - A Program Change swaps **both** the rules and the pool atomically. A broken
   preset is rolled back and logged rather than stopping playback.
-- Presets are **flat**: a preset may not declare its own `programs:` block.
+- Presets are **flat**: a preset may not declare its own `programs:` or `maps:` block.
 - The top-level `assignments:` block is **optional** when every program is a
   `map:` preset, but **required** if any program uses the `directory:` form (those
   reuse the top-level assignments).
@@ -670,7 +670,8 @@ startup warning notes that switching to it may lag (samples reload from disk).
 
 > **Editing a preset:** the file watcher follows only the top-level map. Editing a
 > `map:` preset's own file - or changing the `programs:` / `program_channel:` /
-> `default_program:` settings - requires a **restart** to take effect.
+> `default_program:` settings - requires a **restart** to take effect. When the
+> top-level map reloads, it warns of any preset a restart would stop on.
 
 #### Programs vs directory predicate
 

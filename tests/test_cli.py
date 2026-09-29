@@ -1773,6 +1773,185 @@ assignments:
 		assert calls == [["BD0025"]]
 
 
+class TestPresetsLoadWithTheirMap:
+
+	"""A `map:` program's preset is loaded, without its samples, with the map.
+
+	load_configured_map only declared a preset, so a checker loading a map
+	with it never saw a broken one; a run stopped on it only once it built
+	its programs (#3886).
+	"""
+
+	_PROGRAMS = "programs:\n  - {{ name: Brushes, program: 3, map: {preset} }}\n"
+
+	@classmethod
+	def _write_programs (cls, path: pathlib.Path, preset: str) -> pathlib.Path:
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_text(cls._PROGRAMS.format(preset=preset), encoding="utf-8")
+		return path
+
+	@staticmethod
+	def _write (path: pathlib.Path, text: str) -> pathlib.Path:
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_text(text, encoding="utf-8")
+		return path
+
+	def _load (self, path: pathlib.Path, presets: bool = True) -> subsample.player.MidiMapResult:
+		return subsample.player.load_configured_map(
+			TestLoadConfiguredMap._cfg(midi_map=str(path)), ["BD0025"], presets=presets,
+		)
+
+	def test_a_preset_is_loaded_from_its_own_folder (self, tmp_path: pathlib.Path) -> None:
+		TestLoadConfiguredMap._write_set(tmp_path / "kits" / "brushes.yaml", channel=10, note=38)
+		path = self._write_programs(tmp_path / "map.yaml", "kits/brushes.yaml")
+
+		result = self._load(path)
+
+		assert (9, 38) in result.presets[3].note_map
+
+	def test_an_ensemble_file_loads_its_presets_too (self, tmp_path: pathlib.Path) -> None:
+		TestLoadConfiguredMap._write_set(tmp_path / "setA" / "midi-map.yaml", channel=10, note=42)
+		TestLoadConfiguredMap._write_set(tmp_path / "kits" / "brushes.yaml", channel=10, note=38)
+		path = self._write(tmp_path / "ensemble.yaml", (
+			"maps:\n  - setA/midi-map.yaml\n"
+			"programs:\n  - { name: Brushes, program: 3, map: kits/brushes.yaml }\n"
+		))
+
+		result = self._load(path)
+
+		assert (9, 42) in result.note_map
+		assert (9, 38) in result.presets[3].note_map
+
+	def test_a_missing_preset_is_refused (self, tmp_path: pathlib.Path) -> None:
+		path = self._write_programs(tmp_path / "map.yaml", "kits/nowhere.yaml")
+
+		with pytest.raises(ValueError, match="not found"):
+			self._load(path)
+
+	def test_a_preset_with_programs_of_its_own_is_refused (self, tmp_path: pathlib.Path) -> None:
+		self._write_programs(tmp_path / "kits" / "brushes.yaml", "inner.yaml")
+		path = self._write_programs(tmp_path / "map.yaml", "kits/brushes.yaml")
+
+		with pytest.raises(ValueError, match="nested presets"):
+			self._load(path)
+
+	def test_a_preset_that_is_an_ensemble_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""A run read only its own assignments, so the sets it included never played."""
+
+		TestLoadConfiguredMap._write_set(tmp_path / "kits" / "set" / "kit.yaml", channel=10, note=38)
+		self._write(tmp_path / "kits" / "brushes.yaml", "maps:\n  - set/kit.yaml\n")
+		path = self._write_programs(tmp_path / "map.yaml", "kits/brushes.yaml")
+
+		with pytest.raises(ValueError, match="presets are flat"):
+			self._load(path)
+
+	def test_a_preset_the_run_refuses_raises (self, tmp_path: pathlib.Path) -> None:
+		self._write(tmp_path / "kits" / "brushes.yaml", (
+			"channel: 10\nassignments:\n  - name: Hat\n    notes: 42\n"
+			"    select:\n      pick: velocity\n"
+		))
+		path = self._write_programs(tmp_path / "map.yaml", "kits/brushes.yaml")
+
+		with pytest.raises(ValueError, match="order"):
+			self._load(path)
+
+	def test_a_preset_with_no_assignments_is_logged (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		self._write(tmp_path / "kits" / "brushes.yaml", "channel: 10\n")
+		path = self._write_programs(tmp_path / "map.yaml", "kits/brushes.yaml")
+		caplog.set_level(logging.WARNING, logger="subsample")
+
+		self._load(path)
+
+		assert any("'Brushes' preset" in record.getMessage() for record in caplog.records)
+
+	def test_a_zone_tuned_preset_has_assignments (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""Zone-tuned assignments are held apart from the note map, and count."""
+
+		self._write(tmp_path / "kits" / "keys.yaml", (
+			"channel: 1\nassignments:\n  - name: Keys\n    notes: zone-tuned\n"
+			"    select:\n      where: { pitched: true }\n"
+			"    process:\n      - repitch: true\n"
+		))
+		path = self._write_programs(tmp_path / "map.yaml", "kits/keys.yaml")
+		caplog.set_level(logging.WARNING, logger="subsample")
+
+		result = self._load(path)
+
+		assert len(result.presets[3].zone_templates) == 1
+		assert not any("no assignments" in record.getMessage() for record in caplog.records)
+
+	def test_presets_may_be_left_unread (self, tmp_path: pathlib.Path) -> None:
+
+		"""The run's reload keeps its presets until a restart, and checks them apart."""
+
+		path = self._write_programs(tmp_path / "map.yaml", "kits/nowhere.yaml")
+
+		result = self._load(path, presets=False)
+
+		assert result.presets == {}
+		assert result.bank_definitions[0].map_path == "kits/nowhere.yaml"
+
+	def test_a_reload_warns_of_a_broken_preset (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A preset's own file takes a restart, so the reload goes ahead and says so."""
+
+		path = self._write_programs(tmp_path / "map.yaml", "kits/nowhere.yaml")
+		result = self._load(path, presets=False)
+		caplog.set_level(logging.WARNING, logger="subsample")
+
+		subsample.cli._warn_of_broken_presets(result, tmp_path, ["BD0025"], strict=True)
+
+		assert any(
+			"a restart would stop on this preset" in record.getMessage()
+			and "kits/nowhere.yaml" in record.getMessage()
+			for record in caplog.records
+		)
+
+	def test_a_run_builds_the_program_from_the_rules_the_map_loaded (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""The preset is parsed once, and its samples load from its own folder."""
+
+		monkeypatch.setattr(subsample.cli, "_STARTED", [])
+
+		kit = tmp_path / "kits" / "brushes"
+		(kit / "Snare").mkdir(parents=True)
+		tests.helpers._write_wav_and_sidecar(kit / "Snare", "s")
+		self._write(kit / "midi-map.yaml", (
+			"channel: 10\nassignments:\n  - name: Snare\n    notes: 38\n"
+			"    select:\n      where: { directory: Snare }\n"
+		))
+		path = self._write_programs(tmp_path / "map.yaml", "kits/brushes/midi-map.yaml")
+
+		cfg = TestLoadConfiguredMap._cfg(midi_map=str(path))
+		# The variant cache would otherwise be made in the working directory.
+		cfg = dataclasses.replace(cfg, transform=dataclasses.replace(cfg.transform, max_disk_mb=0.0))
+		result = subsample.player.load_configured_map(cfg, [])
+
+		bank = subsample.cli._load_bank(
+			result.bank_definitions[0], result.presets[3],
+			subsample.library.ReferenceLibrary([]), cfg,
+			cfg.recorder.audio.sample_rate, tmp_path,
+		)
+
+		try:
+			assert bank.note_map is result.presets[3].note_map
+			assert bank.directory == kit
+			assert len(bank.instrument_library) == 1
+
+		finally:
+			bank.transform_manager.shutdown()
+
+
 class TestDrainingCapturesOnTheWayOut:
 
 	"""Ctrl+C used to throw away captures that were still being analysed.
