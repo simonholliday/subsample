@@ -5,11 +5,11 @@ import hashlib
 import math
 import os
 import pathlib
-import unittest.mock
 import tempfile
 import threading
 import time
 import typing
+import unittest.mock
 
 import numpy
 import pytest
@@ -461,7 +461,7 @@ class TestSourceSampleRate:
 		)
 		processor._on_complete = lambda r: captured.append(r)
 		processor._disk_cache = None
-		processor._execute(record, spec, key="k")
+		processor._execute(record, spec, key=subsample.transform.TransformKey(record.sample_id, spec))
 
 		return captured[0].audio.shape[0] if captured else None
 
@@ -562,7 +562,7 @@ class TestTransformProcessor:
 		try:
 			subsample.transform.TransformProcessor._HANDLERS[
 				subsample.transform.PitchShift
-			] = _dummy_handler  # type: ignore[assignment]
+			] = _dummy_handler
 
 			processor = subsample.transform.TransformProcessor(
 				sample_rate=44100,
@@ -920,7 +920,7 @@ class TestTransformManagerGetVariant:
 		# A distinctive constant no Reverse of the record could produce.
 		marker = numpy.full((100, 1), 0.123, dtype=numpy.float32)
 		disk.put(
-			hashlib.md5(record.audio.tobytes()).hexdigest(), spec,
+			hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest(), spec,
 			subsample.transform.TransformResult(
 				key=key, audio=marker, duration=0.1,
 				level=subsample.analysis.LevelResult(peak=0.123, rms=0.1),
@@ -957,11 +957,11 @@ class TestTransformManagerGetVariant:
 
 			source_hashes = [
 				call for call in spy.call_args_list
-				if call.args and call.args[0] == record.audio.tobytes()
+				if call.args and call.args[0] == tests.helpers._audio(record).tobytes()
 			]
 
 		assert len(source_hashes) == 1
-		assert processor.audio_md5(record) == hashlib.md5(record.audio.tobytes()).hexdigest()
+		assert processor.audio_md5(record) == hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest()
 
 	def test_a_source_md5_follows_the_buffer_not_the_id (self, tmp_path: pathlib.Path) -> None:
 
@@ -973,10 +973,12 @@ class TestTransformManagerGetVariant:
 		lib.add(record)
 
 		first = processor.audio_md5(record)
-		louder = dataclasses.replace(record, audio=(record.audio + 100).astype(record.audio.dtype))
+		audio = tests.helpers._audio(record)
+		louder_audio = (audio + 100).astype(audio.dtype)
+		louder = dataclasses.replace(record, audio=louder_audio)
 
 		assert processor.audio_md5(louder) != first
-		assert processor.audio_md5(louder) == hashlib.md5(louder.audio.tobytes()).hexdigest()
+		assert processor.audio_md5(louder) == hashlib.md5(louder_audio.tobytes()).hexdigest()
 
 		manager.on_parent_evicted([1])
 		assert 1 not in processor._audio_md5s
@@ -995,7 +997,7 @@ class TestTransformManagerGetVariant:
 
 		marker = numpy.full((100, 1), 0.321, dtype=numpy.float32)
 		disk.put(
-			hashlib.md5(record.audio.tobytes()).hexdigest(), spec,
+			hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest(), spec,
 			subsample.transform.TransformResult(
 				key=key, audio=marker, duration=0.1,
 				level=subsample.analysis.LevelResult(peak=0.321, rms=0.1),
@@ -1019,7 +1021,7 @@ class TestTransformManagerGetVariant:
 		processor.enqueue(record, spec)
 		manager.shutdown()
 
-		md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+		md5 = hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest()
 		assert disk.get(md5, spec, key) is not None
 
 	def test_base_variant_never_touches_disk (self, tmp_path: pathlib.Path) -> None:
@@ -1062,7 +1064,7 @@ class TestSampleRateConversion:
 
 		# n_frames / output_rate should match n_frames / input_rate
 		# (i.e. duration is preserved, frame count scales with rate).
-		original_frames = record.audio.shape[0]   # type: ignore[union-attr]
+		original_frames = tests.helpers._audio(record).shape[0]
 		expected_frames = int(round(original_frames * 48000 / 44100))
 		assert abs(result.audio.shape[0] - expected_frames) <= 2  # allow 1–2 rounding frames
 
@@ -1081,7 +1083,7 @@ class TestSampleRateConversion:
 		processor.shutdown()
 
 		assert len(completed) == 1
-		original_frames = record.audio.shape[0]   # type: ignore[union-attr]
+		original_frames = tests.helpers._audio(record).shape[0]
 		assert completed[0].audio.shape[0] == original_frames
 
 	def test_duration_uses_output_rate (self) -> None:
@@ -2321,7 +2323,7 @@ class TestSpecFromProcess:
 		))
 		spec = subsample.transform.spec_from_process(process)
 		assert len(spec.steps) == 1
-		assert spec.steps[0].target_midi_note == 72
+		assert tests.helpers._first_step(spec, subsample.transform.PitchShift).target_midi_note == 72
 
 	def test_beat_quantize_with_params (self) -> None:
 		process = subsample.query.ProcessSpec(steps=(
@@ -2581,12 +2583,12 @@ class TestCcResolution:
 		# CC on channel 10 (mido 9): should resolve.
 		cc_state_match = {(9, 1): 64}
 		spec = subsample.transform.spec_from_process(process, cc_state=cc_state_match)
-		assert abs(spec.steps[0].amount - 64.0 / 127.0) < 1e-6
+		assert abs(tests.helpers._first_step(spec, subsample.transform.PadQuantize).amount - 64.0 / 127.0) < 1e-6
 
 		# CC on channel 1 (mido 0): should NOT match, fall back to default.
 		cc_state_wrong = {(0, 1): 127}
 		spec2 = subsample.transform.spec_from_process(process, cc_state=cc_state_wrong)
-		assert spec2.steps[0].amount == 0.5  # default = midpoint
+		assert tests.helpers._first_step(spec2, subsample.transform.PadQuantize).amount == 0.5  # default = midpoint
 
 	def test_a_channel_binding_with_no_channel_state_rests (self) -> None:
 
@@ -2603,7 +2605,7 @@ class TestCcResolution:
 
 		spec = subsample.transform.spec_from_process(process, cc_state=None, cc_omni={1: 127})
 
-		assert spec.steps[0].amount == 0.5  # resting at the midpoint, not 1.0
+		assert tests.helpers._first_step(spec, subsample.transform.PadQuantize).amount == 0.5  # resting at the midpoint, not 1.0
 
 	def test_cc_binding_omni (self) -> None:
 		"""Omni CcBinding (channel=None) uses cc_omni (last-write-wins)."""
@@ -2616,7 +2618,7 @@ class TestCcResolution:
 		))
 		cc_omni = {1: 0}  # CC#1 = 0 (last-write-wins)
 		spec = subsample.transform.spec_from_process(process, cc_omni=cc_omni)
-		assert spec.steps[0].amount == 0.0  # CC 0 → min
+		assert tests.helpers._first_step(spec, subsample.transform.PadQuantize).amount == 0.0  # CC 0 → min
 
 
 # ---------------------------------------------------------------------------
@@ -2850,7 +2852,7 @@ class TestVariantDiskCache:
 			scans += 1
 			return real_scandir(path)
 
-		monkeypatch.setattr(subsample.transform.os, "scandir", counting_scandir)
+		monkeypatch.setattr(os, "scandir", counting_scandir)
 
 		for note in (60, 62, 64):
 			result = self._make_result(midi_note=note)
@@ -3339,7 +3341,7 @@ class TestBitDepth:
 	def test_spec_from_process_dither_forms (self) -> None:
 		"""dither: true → triangular; absent → none; named types pass
 		through case-normalised."""
-		def built_dither (params: tuple) -> str:
+		def built_dither (params: tuple[tuple[str, typing.Any], ...]) -> str:
 			process = subsample.query.ProcessSpec(steps=(
 				subsample.query.ProcessorStep(name="bit_depth", params=params),
 			))
@@ -3872,7 +3874,7 @@ class TestPadQuantize:
 			),
 		))
 		spec = subsample.transform.spec_from_process(process_over)
-		assert spec.steps[0].amount == 1.0
+		assert tests.helpers._first_step(spec, subsample.transform.PadQuantize).amount == 1.0
 
 		process_under = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(
@@ -3881,7 +3883,7 @@ class TestPadQuantize:
 			),
 		))
 		spec = subsample.transform.spec_from_process(process_under)
-		assert spec.steps[0].amount == 0.0
+		assert tests.helpers._first_step(spec, subsample.transform.PadQuantize).amount == 0.0
 
 
 # ---------------------------------------------------------------------------

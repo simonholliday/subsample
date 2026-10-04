@@ -14,6 +14,7 @@ device or full player construction is needed.
 import logging
 import pathlib
 import threading
+import typing
 import unittest.mock
 
 import mido
@@ -28,6 +29,7 @@ import subsample.similarity
 
 
 _FADE_FRAMES = 441   # 10 ms at 44100 Hz
+_PICK        = subsample.query.PickSpec(1, 1)   # the choke map never reads which sample plays
 
 
 def _voice (
@@ -36,7 +38,7 @@ def _voice (
 	one_shot:        bool = False,
 	releasing:       bool = False,
 	release_to_end:  bool = False,
-	release_frames:  "int | None" = None,
+	release_frames:  typing.Optional[int] = None,
 	release_curve:   int = 0,
 	looping:         bool = False,
 	fade_pos:        int = 0,
@@ -52,7 +54,10 @@ def _voice (
 	)
 
 
-def _player (voices, choke_map) -> unittest.mock.MagicMock:
+def _player (
+	voices:    typing.Iterable[subsample.player._Voice],
+	choke_map: dict[tuple[int, int], frozenset[tuple[int, int]]],
+) -> unittest.mock.MagicMock:
 	"""A MagicMock player wired with just what the choke path reads."""
 	player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 	player._voices              = list(voices)
@@ -62,7 +67,7 @@ def _player (voices, choke_map) -> unittest.mock.MagicMock:
 	return player
 
 
-def _choke (player, channel, note) -> None:
+def _choke (player: unittest.mock.MagicMock, channel: int, note: int) -> None:
 	subsample.player.MidiPlayer._choke_voices(player, channel, note)
 
 
@@ -73,7 +78,9 @@ def _choke (player, channel, note) -> None:
 class TestParseSilencedBy:
 
 	def test_absent_forms_are_none (self) -> None:
-		for raw in (None, False, []):
+		absent: tuple[typing.Any, ...] = (None, False, [])
+
+		for raw in absent:
 			assert subsample.player._parse_silenced_by(raw, "t") is None
 
 	def test_self_scalar (self) -> None:
@@ -137,14 +144,18 @@ class TestParseSilencedBy:
 class TestBuildChokeMap:
 
 	@staticmethod
-	def _assign (name, silenced_by):
+	def _assign (
+		name: str, silenced_by: typing.Optional[subsample.query.ChokeSpec],
+	) -> subsample.query.Assignment:
 		return subsample.query.Assignment(name=name, select=(), silenced_by=silenced_by)
 
-	def _note_map (self, entries):
+	def _note_map (
+		self, entries: dict[tuple[int, int], typing.Optional[subsample.query.ChokeSpec]],
+	) -> subsample.player.NoteMap:
 		# entries: {(ch, note): silenced_by-spec-or-None}
-		nm: dict = {}
+		nm: subsample.player.NoteMap = {}
 		for (ch, note), spec in entries.items():
-			nm[(ch, note)] = [(self._assign(f"{note}", spec), None)]
+			nm[(ch, note)] = [(self._assign(f"{note}", spec), _PICK)]
 		return nm
 
 	def test_three_way_hat_is_mutual (self) -> None:
@@ -182,7 +193,7 @@ class TestBuildChokeMap:
 		# damps both (one physical instrument across two notes).
 		S = subsample.query.ChokeSpec
 		asgn = self._assign("wide", S(is_self=True, notes=frozenset()))
-		nm = {(9, 60): [(asgn, None)], (9, 62): [(asgn, None)]}
+		nm = {(9, 60): [(asgn, _PICK)], (9, 62): [(asgn, _PICK)]}
 		cm = subsample.player._build_choke_map(nm)
 		both = frozenset({(9, 60), (9, 62)})
 		assert cm[(9, 60)] == both
@@ -195,8 +206,8 @@ class TestBuildChokeMap:
 		victim = self._assign("victim", S(is_self=False, notes=frozenset({42})))  # ch 9
 		other  = self._assign("other", None)                                      # ch 0, note 46
 		nm = {
-			(9, 46): [(victim, None)],
-			(0, 46): [(other, None)],
+			(9, 46): [(victim, _PICK)],
+			(0, 46): [(other, _PICK)],
 		}
 		cm = subsample.player._build_choke_map(nm)
 		assert cm == {(9, 42): frozenset({(9, 46)})}   # killer keyed to ch 9 only
@@ -479,7 +490,7 @@ assignments:
 
 class TestChokeReload:
 
-	def _make_player (self, midi_map: dict) -> subsample.player.MidiPlayer:
+	def _make_player (self, midi_map: subsample.player.NoteMap) -> subsample.player.MidiPlayer:
 		lib = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		lib.samples.return_value = []          # keep the candidate-cache rebuild cheap
 		sim = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
@@ -490,7 +501,7 @@ class TestChokeReload:
 		)
 
 	@staticmethod
-	def _asgn (silenced_by):
+	def _asgn (silenced_by: typing.Optional[subsample.query.ChokeSpec]) -> subsample.query.Assignment:
 		return subsample.query.Assignment(
 			name="x", select=(subsample.query.SelectSpec(),), silenced_by=silenced_by,
 		)

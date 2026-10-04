@@ -2,6 +2,7 @@
 
 import dataclasses
 import threading
+import typing
 
 import numpy
 import pytest
@@ -77,7 +78,7 @@ def _make_timbre (
 def _make_record (
 	name:     str,
 	spectral: subsample.analysis.AnalysisResult,
-	timbre:   subsample.analysis.TimbreResult | None = None,
+	timbre:   typing.Optional[subsample.analysis.TimbreResult] = None,
 ) -> subsample.library.SampleRecord:
 
 	"""Return a minimal SampleRecord wrapping the given spectral (and optional timbre) result."""

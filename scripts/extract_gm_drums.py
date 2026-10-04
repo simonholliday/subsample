@@ -193,7 +193,8 @@ def _analyze_and_save (wav_path: pathlib.Path) -> bool:
 	# Write trimmed audio back so the sidecar MD5 matches.
 	soundfile.write(str(wav_path), data, samplerate, subtype="PCM_16")
 
-	mono = numpy.mean(data, axis=1, dtype=numpy.float32)  # type: ignore[call-overload]
+	# numpy's stubs type a mean over one axis as possibly a scalar; over axis 1 of 2-D audio it is an array.
+	mono: numpy.ndarray = numpy.mean(data, axis=1, dtype=numpy.float32)  # type: ignore[assignment]
 	params = subsample.analysis.compute_params(samplerate)
 	rhythm_cfg = subsample.config.AnalysisConfig()
 

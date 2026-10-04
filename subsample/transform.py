@@ -1423,8 +1423,9 @@ _ApplyFn = typing.Callable[
 	numpy.ndarray,
 ]
 
-# Callback invoked on the worker thread when a transform completes.
-_OnTransformComplete = typing.Callable[["TransformResult"], None]
+# Callback invoked on the worker thread when a transform completes.  What it
+# returns is ignored, so a cache's put, which reports what it evicted, will do.
+_OnTransformComplete = typing.Callable[["TransformResult"], object]
 
 # Cap on the remembered failures (see TransformProcessor._failures).  Well
 # above any realistic count of distinct failing specs in a session; on overflow

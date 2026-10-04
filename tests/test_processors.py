@@ -24,9 +24,12 @@ import typing
 import numpy
 import pytest
 
+import subsample.library
 import subsample.processors
 import subsample.query
 import subsample.transform
+
+import tests.helpers
 
 
 _PROCESSORS = subsample.processors.PROCESSORS
@@ -706,7 +709,9 @@ class TestParserEnforcesTheDeclaration:
 
 		"""A vocoder with no carrier used to load and be dropped at render; now the map says so at load."""
 
-		for entry in (processor.name, {processor.name: {}}, {processor.name: True}):
+		entries: tuple[typing.Any, ...] = (processor.name, {processor.name: {}}, {processor.name: True})
+
+		for entry in entries:
 			with pytest.raises(ValueError, match=f"{processor.name} needs {parameter.name}"):
 				subsample.query.parse_process([entry], "test")
 
@@ -835,9 +840,15 @@ class TestCcBindings:
 
 		spec = _load("filter_low", {"freq": {"cc": 74}})
 
-		assert subsample.transform.spec_from_process(spec).steps[0].freq == 16000.0
-		assert subsample.transform.spec_from_process(spec, cc_omni={74: 0}).steps[0].freq == 20.0
-		assert subsample.transform.spec_from_process(spec, cc_omni={74: 127}).steps[0].freq == 20000.0
+		assert tests.helpers._first_step(
+			subsample.transform.spec_from_process(spec), subsample.transform.LowPassFilter,
+		).freq == 16000.0
+		assert tests.helpers._first_step(
+			subsample.transform.spec_from_process(spec, cc_omni={74: 0}), subsample.transform.LowPassFilter,
+		).freq == 20.0
+		assert tests.helpers._first_step(
+			subsample.transform.spec_from_process(spec, cc_omni={74: 127}), subsample.transform.LowPassFilter,
+		).freq == 20000.0
 
 	def test_an_automatic_parameter_rests_at_its_automatic_value (self) -> None:
 
@@ -845,8 +856,12 @@ class TestCcBindings:
 
 		spec = _load("compress", {"threshold": {"cc": 20}})
 
-		assert subsample.transform.spec_from_process(spec).steps[0].threshold_db is None
-		assert subsample.transform.spec_from_process(spec, cc_omni={20: 0}).steps[0].threshold_db == -60.0
+		assert tests.helpers._first_step(
+			subsample.transform.spec_from_process(spec), subsample.transform.Compress,
+		).threshold_db is None
+		assert tests.helpers._first_step(
+			subsample.transform.spec_from_process(spec, cc_omni={20: 0}), subsample.transform.Compress,
+		).threshold_db == -60.0
 
 	def test_a_tempo_knob_rests_at_the_session_tempo (self) -> None:
 
@@ -854,7 +869,9 @@ class TestCcBindings:
 
 		spec = _load("stretch_quantize", {"tempo": {"cc": 2}})
 
-		assert subsample.transform.spec_from_process(spec, target_bpm=97.0).steps[0].target_bpm == 97.0
+		assert tests.helpers._first_step(
+			subsample.transform.spec_from_process(spec, target_bpm=97.0), subsample.transform.TimeStretch,
+		).target_bpm == 97.0
 
 
 class TestNoEffectWarning:
@@ -933,7 +950,7 @@ class TestCompilerReadsTheDeclaration:
 		with caplog.at_level(logging.WARNING, logger="subsample.transform"):
 			spec = subsample.transform.spec_from_process(subsample.query.ProcessSpec(steps=(step,)), target_bpm=120.0)
 
-		assert spec.steps[0].amount == 1.0
+		assert tests.helpers._first_step(spec, subsample.transform.PadQuantize).amount == 1.0
 		assert "pad_quantize strength of 7.0 is outside what it allows, so it is held at 1" in caplog.text
 
 
@@ -953,7 +970,9 @@ def _render (processor: str, params: typing.Mapping[str, typing.Any]) -> numpy.n
 	step = _compile(processor, params).steps[0]
 	handler = subsample.transform.TransformProcessor._HANDLERS[type(step)]
 
-	return typing.cast(numpy.ndarray, handler(_SIGNAL.copy(), _RATE, None, step))
+	record = typing.cast(subsample.library.SampleRecord, None)   # no effect rendered here reads it
+
+	return handler(_SIGNAL.copy(), _RATE, record, step)
 
 
 def _all_distinct (renders: dict[str, numpy.ndarray]) -> list[tuple[str, str]]:

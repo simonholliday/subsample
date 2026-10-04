@@ -2,11 +2,11 @@
 
 import dataclasses
 import pathlib
+import random
 import typing
-
-import numpy
 import unittest.mock
 
+import numpy
 import pytest
 
 import subsample.analysis
@@ -762,8 +762,10 @@ class TestParseSelect:
 			specs = subsample.query.parse_select(raw, "test", midi_map_dir)
 
 			# Should be resolved to an absolute path
-			assert specs[0].where.reference.startswith("/")
-			assert "relative/path/to/ref" in specs[0].where.reference
+			reference = specs[0].where.reference
+			assert reference is not None
+			assert reference.startswith("/")
+			assert "relative/path/to/ref" in reference
 
 	def test_bare_name_reference_preserved (self) -> None:
 
@@ -1693,7 +1695,7 @@ class TestPickSpecResolve:
 			calls.append((lo, hi))
 			return lo
 
-		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+		monkeypatch.setattr(random, "randint", fake_randint)
 
 		subsample.query.PickSpec(1, 3).resolve_index(10)
 		assert calls == [(1, 3)]
@@ -1710,7 +1712,7 @@ class TestPickSpecResolve:
 			calls.append((lo, hi))
 			return lo
 
-		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+		monkeypatch.setattr(random, "randint", fake_randint)
 
 		subsample.query.PickSpec(2, None).resolve_index(5)
 		assert calls == [(2, 5)]
@@ -1723,7 +1725,7 @@ class TestPickSpecResolve:
 			calls.append((lo, hi))
 			return lo
 
-		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+		monkeypatch.setattr(random, "randint", fake_randint)
 
 		subsample.query.PickSpec(None, 3).resolve_index(10)
 		assert calls == [(1, 3)]
@@ -1736,7 +1738,7 @@ class TestPickSpecResolve:
 			calls.append((lo, hi))
 			return lo
 
-		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+		monkeypatch.setattr(random, "randint", fake_randint)
 
 		subsample.query.PickSpec(None, None).resolve_index(7)
 		assert calls == [(1, 7)]
@@ -1841,14 +1843,14 @@ class TestPanSpecResolve:
 			calls.append((lo, hi))
 			return lo
 
-		monkeypatch.setattr(subsample.query.random, "uniform", fake_uniform)
+		monkeypatch.setattr(random, "uniform", fake_uniform)
 
 		subsample.query.PanSpec(-30.0, 30.0).resolve()
 		assert calls == [(-30.0, 30.0)]
 
 	def test_fresh_draw_each_call (self, monkeypatch: pytest.MonkeyPatch) -> None:
 		values = iter([10.0, -40.0])
-		monkeypatch.setattr(subsample.query.random, "uniform", lambda lo, hi: next(values))
+		monkeypatch.setattr(random, "uniform", lambda lo, hi: next(values))
 
 		spec = subsample.query.PanSpec(-100.0, 100.0)
 		assert spec.resolve() == 10.0
@@ -1969,7 +1971,7 @@ class TestVelocityPick:
 			draws.append((lo, hi))
 			return hi                        # always the +max offset
 
-		monkeypatch.setattr(subsample.query.random, "randint", fake_randint)
+		monkeypatch.setattr(random, "randint", fake_randint)
 
 		spec = self._vel(variation=10)       # ±5
 		idx = spec.resolve_index(128, 60, 0, 127)   # velocity 60 + 5 → 65 → index 65
@@ -1981,13 +1983,13 @@ class TestVelocityPick:
 		def boom (lo: int, hi: int) -> int:
 			raise AssertionError("randint called for variation=0")
 
-		monkeypatch.setattr(subsample.query.random, "randint", boom)
+		monkeypatch.setattr(random, "randint", boom)
 		spec = self._vel(variation=0)
 		assert spec.resolve_index(10, 64, 0, 127) == spec.resolve_index(10, 64, 0, 127)
 
 	def test_variation_clamped_at_window_ceiling (self, monkeypatch: pytest.MonkeyPatch) -> None:
 		"""Jitter overshooting the window top clamps to the loudest sample."""
-		monkeypatch.setattr(subsample.query.random, "randint", lambda lo, hi: hi)
+		monkeypatch.setattr(random, "randint", lambda lo, hi: hi)
 		spec = self._vel(variation=20)       # +10 → 127 + 10, clamped to 127
 		assert spec.resolve_index(10, 127, 0, 127) == 9
 

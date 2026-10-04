@@ -70,6 +70,18 @@ def _loud_chunk (n: int = 100, amplitude: int = 10000) -> numpy.ndarray:
 	return numpy.full(n, amplitude, dtype=numpy.int16)
 
 
+def _state (detector: subsample.detector.LevelDetector) -> subsample.detector.DetectorState:
+
+	"""The detector's state, read afresh.
+
+	After `assert detector.state == X`, mypy takes detector.state to be X for
+	the rest of the test, since it cannot see process_chunk change it, and
+	reports a later assert on it as a comparison that can never be true.
+	"""
+
+	return detector.state
+
+
 class TestWarmup:
 
 	def test_no_trigger_during_warmup (self) -> None:
@@ -107,7 +119,7 @@ class TestIdleToRecording:
 		result = detector.process_chunk(_loud_chunk(), current_frame=200)
 
 		assert result is None  # Recording started but not yet ended
-		assert detector.state == subsample.detector.DetectorState.RECORDING
+		assert _state(detector) == subsample.detector.DetectorState.RECORDING
 
 	def test_trigger_chunk_does_not_pollute_ambient (self) -> None:
 		"""Code-review regression: the triggering chunk must NOT be folded into
@@ -156,7 +168,7 @@ class TestHoldTime:
 			result = detector.process_chunk(_silent_chunk(), current_frame=300 + i * 100)
 
 		assert result is not None
-		assert detector.state == subsample.detector.DetectorState.IDLE
+		assert _state(detector) == subsample.detector.DetectorState.IDLE
 
 	def test_ambient_not_updated_during_recording (self) -> None:
 		"""Ambient EMA must not track the signal while recording is active.
@@ -292,7 +304,7 @@ class TestBufferOverflow:
 
 		# Force-end should have fired before the loop exhausted
 		assert result is not None
-		assert detector.state == subsample.detector.DetectorState.IDLE
+		assert _state(detector) == subsample.detector.DetectorState.IDLE
 
 	def test_no_force_end_when_limit_is_zero (self) -> None:
 		# max_recording_frames=0 disables the overflow check
@@ -712,7 +724,7 @@ class TestFinalize:
 		start, end = bounds
 		assert end == 1234
 		assert start < end
-		assert detector.state == subsample.detector.DetectorState.IDLE
+		assert _state(detector) == subsample.detector.DetectorState.IDLE
 
 	def test_finalize_returns_none_when_not_recording (self) -> None:
 

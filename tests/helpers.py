@@ -13,6 +13,8 @@ import numpy
 
 import subsample.analysis
 import subsample.cache
+import subsample.library
+import subsample.transform
 
 
 def _make_wav (
@@ -266,3 +268,31 @@ def _hit_starts (rendered: numpy.ndarray, sample_rate: int) -> list[float]:
 		last = int(index)
 
 	return starts
+
+
+def _audio (record: subsample.library.SampleRecord) -> numpy.ndarray:
+
+	"""A record's audio, which every record a test builds with audio has."""
+
+	assert record.audio is not None
+
+	return record.audio
+
+
+_Step = typing.TypeVar("_Step")
+
+
+def _first_step (spec: subsample.transform.TransformSpec, kind: type[_Step]) -> _Step:
+
+	"""A compiled spec's first step, checked to be the kind the test expects.
+
+	A spec's steps are typed as a union of every step class, so a field of one
+	can be read only once the step is narrowed; the check also fails plainly
+	if the parser compiled some other step.
+	"""
+
+	step = spec.steps[0]
+
+	assert isinstance(step, kind)
+
+	return step

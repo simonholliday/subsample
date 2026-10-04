@@ -203,7 +203,7 @@ class TestBankManager:
 
 	def test_preset_bank_carries_rules_through_switch (self) -> None:
 		"""A `map:` preset's note_map survives switch_to / active_bank."""
-		rules = {(9, 36): []}
+		rules: subsample.player.NoteMap = {(9, 36): []}
 		a = _make_bank(name="Directory", program=0)               # note_map None
 		b = _make_bank(name="Preset", program=1, note_map=rules)  # carries rules
 		bm = subsample.bank.BankManager([a, b])

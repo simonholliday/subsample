@@ -155,6 +155,7 @@ class TestAudioReader:
 
 		reader.stop()
 
+		assert chunk is not None
 		assert chunk.shape == (buffer_frames, 1)
 		assert chunk.dtype == numpy.int16
 
@@ -620,7 +621,6 @@ class TestFlacReadPrecision:
 		"""Writing 24-bit-worth of int32 samples to FLAC and reading back
 		recovers the same values in the upper 24 bits.
 		"""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		# Three hand-picked 24-bit values covering full positive, full
 		# negative, and an off-centre value with non-zero low bits in the
@@ -644,7 +644,6 @@ class TestFlacReadPrecision:
 
 	def test_16bit_flac_returns_int16 (self, tmp_path: pathlib.Path) -> None:
 		"""A 16-bit FLAC reads back as int16 with bit_depth 16."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		samples = numpy.array([[1000], [-1000], [32767], [-32768]], dtype=numpy.int16)
 		flac_path = tmp_path / "sixteen.flac"
@@ -674,7 +673,6 @@ class TestNonPcmRead:
 	def test_float_wav_scales_to_full_int32_range (self, tmp_path: pathlib.Path) -> None:
 		"""A 0.6-amplitude sine in a FLOAT WAV reads back with int32
 		magnitudes near 0.6 × 2**31, not as ±1 noise."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		sr = 44100
 		t  = numpy.linspace(0, 0.1, int(sr * 0.1), dtype=numpy.float32)
@@ -700,7 +698,6 @@ class TestNonPcmRead:
 
 	def test_float_wav_silence_is_zero (self, tmp_path: pathlib.Path) -> None:
 		"""A silent FLOAT WAV reads back as all zeros (not ±1 noise)."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		silence = numpy.zeros((1024, 2), dtype=numpy.float32)
 		path = tmp_path / "silence.wav"
@@ -713,7 +710,6 @@ class TestNonPcmRead:
 
 	def test_float_wav_clipping_safe (self, tmp_path: pathlib.Path) -> None:
 		"""A FLOAT WAV with > 1.0 sample doesn't wrap on int32 cast — it clamps."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		# Slightly over-scale audio (headroom-mixed files occasionally do this).
 		hot = numpy.array([[1.2, -1.2], [0.5, -0.5]], dtype=numpy.float32)
@@ -737,7 +733,6 @@ class TestNonPcmRead:
 		int32 magnitudes near 0.6 × 2**31.  Same failure mode as FLOAT but
 		via a different code path (would otherwise fall to the int16
 		else-branch and collapse to peaks of ±1)."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		sr = 44100
 		t  = numpy.linspace(0, 0.1, int(sr * 0.1), dtype=numpy.float64)
@@ -761,7 +756,6 @@ class TestNonPcmRead:
 	def test_double_aiff_scales_to_full_int32_range (self, tmp_path: pathlib.Path) -> None:
 		"""DOUBLE inside an AIFF container — soundfile normalises the subtype
 		string regardless of container, so the same code path serves both."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		sr = 44100
 		t  = numpy.linspace(0, 0.05, int(sr * 0.05), dtype=numpy.float64)
@@ -784,7 +778,6 @@ class TestNonPcmRead:
 		int32 with the value in the upper 24 bits, matching how PCM_24 FLAC
 		is handled.  Before the fix, ALAC_24 fell to the int16 else-branch
 		and silently lost its lower 8 bits."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		# Same hand-picked values as the PCM_24 FLAC test, so the same
 		# recovery convention applies.
@@ -808,7 +801,6 @@ class TestNonPcmRead:
 		Write via float32 input — libsndfile's ALAC_32 encoder corrupts
 		direct int32 input, but the real-world Apple Music / Logic encode
 		path (DAW float → ALAC_32) round-trips correctly."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		sr = 44100
 		t  = numpy.linspace(0, 0.05, int(sr * 0.05), dtype=numpy.float32)
@@ -837,8 +829,6 @@ class TestFloatImportCeiling:
 	Integer-PCM sources are never touched."""
 
 	def test_hot_float_scaled_down_not_clipped (self, tmp_path: pathlib.Path) -> None:
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
-
 		# A source peaking at +6 dBFS (linear 2.0) — float has the headroom.
 		hot = numpy.array([[2.0, -2.0], [0.5, -0.5]], dtype=numpy.float32)
 		path = tmp_path / "hot.wav"
@@ -855,8 +845,6 @@ class TestFloatImportCeiling:
 		assert abs(ratio - 4.0) < 0.05  # 2.0/0.5 preserved
 
 	def test_float_below_ceiling_untouched (self, tmp_path: pathlib.Path) -> None:
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
-
 		# Peak 0.5 is already below the -1 dBFS ceiling — no scaling applied.
 		quiet = numpy.array([[0.5, -0.5], [0.25, -0.25]], dtype=numpy.float32)
 		path = tmp_path / "quiet.wav"
@@ -869,8 +857,6 @@ class TestFloatImportCeiling:
 		assert abs(scaled.audio.max() - 0.5 * (2 ** 31)) < 0.5 * (2 ** 31) * 0.01
 
 	def test_ceiling_none_still_clips (self, tmp_path: pathlib.Path) -> None:
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
-
 		hot = numpy.array([[2.0, -2.0]], dtype=numpy.float32)
 		path = tmp_path / "hot.wav"
 		soundfile.write(str(path), hot, 44100, subtype="FLOAT")
@@ -882,8 +868,6 @@ class TestFloatImportCeiling:
 		assert info.audio[0, 1] == numpy.iinfo(numpy.int32).min
 
 	def test_integer_pcm_never_scaled (self, tmp_path: pathlib.Path) -> None:
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
-
 		# A 16-bit PCM source at a high level must be returned verbatim — the
 		# ceiling only guards the float/double conversion, never integer sources.
 		pcm = numpy.array([[30000, -30000], [1000, -1000]], dtype=numpy.int16)
@@ -896,8 +880,6 @@ class TestFloatImportCeiling:
 		numpy.testing.assert_array_equal(info.audio, pcm)
 
 	def test_hot_double_scaled_down_not_clipped (self, tmp_path: pathlib.Path) -> None:
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
-
 		# The 64-bit DOUBLE path (float64) shares the scaling logic but a distinct
 		# read branch — exercise it with a hot source too.
 		hot = numpy.array([[2.0, -2.0], [0.5, -0.5]], dtype=numpy.float64)
@@ -931,7 +913,6 @@ def _write_hot_float (path: pathlib.Path) -> pathlib.Path:
 	"""Write a 32-bit float source peaking at +6 dBFS (linear 2.0) — legal for
 	float, above what the integer pipeline can hold."""
 
-	import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 	hot = numpy.array([[2.0, -2.0], [0.5, -0.5]], dtype=numpy.float32)
 	soundfile.write(str(path), hot, 44100, subtype="FLOAT")

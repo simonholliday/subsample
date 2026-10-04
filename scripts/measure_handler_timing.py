@@ -188,6 +188,10 @@ def main () -> int:
 		print("config.player.midi_map is not set", file=sys.stderr)
 		return 1
 
+	if cfg.library.directory is None:
+		print("config.library.directory is not set", file=sys.stderr)
+		return 1
+
 	output_sr = (
 		cfg.player.audio.sample_rate
 		if cfg.player.audio.sample_rate is not None

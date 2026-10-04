@@ -67,6 +67,7 @@ subsample = "subsample.cli:main"
 
 [tool.mypy]
 strict = true
+files = ["subsample", "scripts", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["mido", "mido.*"]

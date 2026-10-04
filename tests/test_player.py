@@ -24,8 +24,8 @@ import yaml
 import subsample.analysis
 import subsample.audio
 import subsample.bank
-import subsample.ensemble
 import subsample.config
+import subsample.ensemble
 import subsample.library
 import subsample.loopfind
 import subsample.player
@@ -178,6 +178,19 @@ def _make_note_map (
 		note_map[(channel, note)] = [(assignment, subsample.query.PickSpec(rank, rank))]
 
 	return note_map
+
+
+def _mock (attribute: object) -> unittest.mock.MagicMock:
+
+	"""A mocked attribute as the MagicMock it is, so a test can set what it returns.
+
+	mypy knows a mocked library's methods by their real types, which have no
+	return_value.
+	"""
+
+	assert isinstance(attribute, unittest.mock.MagicMock)
+
+	return attribute
 
 
 # ---------------------------------------------------------------------------
@@ -1069,7 +1082,7 @@ class TestCcPanic:
 		v.release_to_end = release_to_end
 		return v
 
-	def _drive (self, control: int, voices: list) -> None:
+	def _drive (self, control: int, voices: list[subsample.player._Voice]) -> None:
 		import unittest.mock
 		import mido
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
@@ -1276,7 +1289,8 @@ class TestParseRelease:
 
 	def test_bool_not_treated_as_number (self) -> None:
 		# True/False must hit the adaptive/None branches, never the ms-scalar path.
-		assert subsample.player._parse_release(True, "a").time is None
+		spec = subsample.player._parse_release(True, "a")
+		assert spec is not None and spec.time is None
 
 	def test_shorthand_keeps_sibling_curve (self) -> None:
 		# Regression: {cc: ...} shorthand must not drop a sibling curve: key.
@@ -1404,7 +1418,7 @@ class TestResolveRelease:
 
 	"""MidiPlayer._resolve_release — spec → (frames, curve_code, to_end) at note-on."""
 
-	def _player (self, sample_rate: int = 44100, cc_state: typing.Optional[dict] = None) -> unittest.mock.MagicMock:
+	def _player (self, sample_rate: int = 44100, cc_state: typing.Optional[dict[tuple[int, int], int]] = None) -> unittest.mock.MagicMock:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._output_sample_rate = sample_rate
 		player._release_fade_frames = round(subsample.player._RELEASE_FADE_SECONDS * sample_rate)
@@ -1783,7 +1797,7 @@ class TestSameNoteSteal:
 		fields.update(kw)
 		return subsample.player._Voice(**fields)
 
-	def _mock_player (self, voices: list) -> typing.Any:
+	def _mock_player (self, voices: list[subsample.player._Voice]) -> typing.Any:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices      = voices
 		player._voices_lock = threading.Lock()
@@ -1902,7 +1916,7 @@ class TestSameNoteSteal:
 		player._voices.append(old)
 
 		# Mapping exists, but selection returns nothing (e.g. a velocity gap).
-		player._note_map = {(9, 36): [("entry",)]}
+		player._note_map = {(9, 36): [(subsample.query.Assignment(name="Kick", select=()), subsample.query.PickSpec(1, 1))]}
 		player._select_velocity_layers = unittest.mock.MagicMock(return_value=[])  # type: ignore[method-assign]
 
 		player._handle_message(mido.Message("note_on", channel=9, note=36, velocity=64))
@@ -1917,7 +1931,7 @@ class TestReleaseThreadingThroughTrigger:
 	The base-variant path (no process pipeline — the common case) once silently
 	dropped it; this guards each path."""
 
-	def _run_trigger (self, process_steps: tuple, which: str) -> subsample.player._Voice:
+	def _run_trigger (self, process_steps: tuple[subsample.query.ProcessorStep, ...], which: str) -> subsample.player._Voice:
 		"""Drive _trigger_one so a voice is served from the named path; return it.
 
 		which: "base" (empty process → get_base) or "int_pcm" (transform manager
@@ -1962,7 +1976,9 @@ class TestReleaseThreadingThroughTrigger:
 		subsample.player.MidiPlayer._trigger_one(player, msg, assignment, pick, 100)
 
 		assert len(player._voices) == 1
-		return player._voices[0]
+		voice: subsample.player._Voice = player._voices[0]
+
+		return voice
 
 	def test_base_variant_path_carries_release (self) -> None:
 		voice = self._run_trigger(process_steps=(), which="base")
@@ -2613,7 +2629,9 @@ class TestResolveAssignmentInheritance:
 		"loud":       {"gain": 3, "process": [{"saturate": {"drive": 6}}]},
 	}
 
-	def _resolve (self, assignments: list, templates: typing.Any = "_default") -> list:
+	def _resolve (
+		self, assignments: list[dict[str, typing.Any]], templates: typing.Any = "_default",
+	) -> list[dict[str, typing.Any]]:
 		return subsample.player._resolve_assignment_inheritance(
 			assignments, self._TEMPLATES if templates == "_default" else templates,
 		)
@@ -4072,7 +4090,7 @@ class TestRuntimeSafetyGuards:
 		)
 
 		applied: list[subsample.player.NoteMap] = []
-		player._apply_rule_set_locked = lambda nm, zt, ccs: applied.append(nm)  # type: ignore[method-assign]
+		player._apply_rule_set_locked = lambda base_note_map, zone_templates, mapped_ccs: applied.append(base_note_map)  # type: ignore[method-assign]
 
 		player.reload_midi_map(result)
 
@@ -5056,7 +5074,7 @@ class TestParseNoteSpecNamespaces:
 	"""The namespaces param — a per-map view merging mounted definitions over
 	the built-in drum table.  None keeps the module-global behaviour."""
 
-	_SPACES: dict[str, dict[str, int]] = {
+	_SPACES: dict[str, typing.Mapping[str, int]] = {
 		**subsample.player.SYMBOL_NAMESPACES,
 		"my": {"dawn_chorus_pheasant": 60},
 	}
@@ -5417,9 +5435,9 @@ class TestUpdatePitchedAssignments:
 
 		# The query engine calls instrument_library.samples() to get the
 		# candidate list, and similarity_matrix.get_matches() for ranked results.
-		player._instrument_library.samples.return_value = [mock_record]
-		player._instrument_library.get.return_value = mock_record
-		player._similarity_matrix.get_matches.return_value = [
+		_mock(player._instrument_library.samples).return_value = [mock_record]
+		_mock(player._instrument_library.get).return_value = mock_record
+		_mock(player._similarity_matrix.get_matches).return_value = [
 			unittest.mock.MagicMock(sample_id=42),
 		]
 
@@ -5444,7 +5462,7 @@ class TestUpdatePitchedAssignments:
 		"""No enqueue when similarity matrix returns None (no match yet)."""
 		player = self._make_player_with_pitch_map()
 
-		player._similarity_matrix.get_match.return_value = None
+		_mock(player._similarity_matrix.get_match).return_value = None
 		transform_manager = unittest.mock.MagicMock()
 		player._transform_manager = transform_manager
 
@@ -5464,9 +5482,9 @@ class TestUpdatePitchedAssignments:
 
 		# The query engine needs samples() to return the record, and
 		# get_matches() to provide ranked results for the reference.
-		player._instrument_library.samples.return_value = [mock_record]
-		player._instrument_library.get.return_value = mock_record
-		player._similarity_matrix.get_matches.return_value = [
+		_mock(player._instrument_library.samples).return_value = [mock_record]
+		_mock(player._instrument_library.get).return_value = mock_record
+		_mock(player._similarity_matrix.get_matches).return_value = [
 			unittest.mock.MagicMock(sample_id=42),
 		]
 
@@ -5507,8 +5525,8 @@ class TestUpdatePitchedAssignments:
 		# The query engine calls has_stable_pitch internally via the
 		# WherePredicate.matches() method when pitched=True.  We mock it
 		# to return True so the record passes the filter.
-		player._instrument_library.samples.return_value = [mock_record]
-		player._instrument_library.get.return_value = mock_record
+		_mock(player._instrument_library.samples).return_value = [mock_record]
+		_mock(player._instrument_library.get).return_value = mock_record
 
 		transform_manager = unittest.mock.MagicMock()
 		player._transform_manager = transform_manager
@@ -5550,7 +5568,7 @@ class TestUpdatePitchedAssignments:
 		player._transform_manager = transform_manager
 
 		# Mock the instrument library to return no samples (empty query result).
-		player._instrument_library.samples.return_value = []
+		_mock(player._instrument_library.samples).return_value = []
 
 		player.update_pitched_assignments()
 
@@ -5584,8 +5602,8 @@ class TestUpdatePitchedAssignments:
 		mock_record.name = "loop-sample"
 		mock_record.rhythm.tempo_bpm = 120.0
 
-		player._instrument_library.samples.return_value = [mock_record]
-		player._instrument_library.get.return_value = mock_record
+		_mock(player._instrument_library.samples).return_value = [mock_record]
+		_mock(player._instrument_library.get).return_value = mock_record
 
 		transform_manager = unittest.mock.MagicMock()
 		player._transform_manager = transform_manager
@@ -5647,8 +5665,8 @@ class TestUpdatePitchedAssignments:
 			r.rhythm.tempo_bpm = 120.0
 			records.append(r)
 
-		player._instrument_library.samples.return_value = records
-		player._instrument_library.get.side_effect = lambda sid: next(
+		_mock(player._instrument_library.samples).return_value = records
+		_mock(player._instrument_library.get).side_effect = lambda sid: next(
 			(r for r in records if r.sample_id == sid), None,
 		)
 
@@ -5693,8 +5711,8 @@ class TestUpdatePitchedAssignments:
 		mock_record.sample_id = 7
 		mock_record.rhythm.tempo_bpm = 100.0
 
-		player._instrument_library.samples.return_value = [mock_record]
-		player._instrument_library.get.return_value = mock_record
+		_mock(player._instrument_library.samples).return_value = [mock_record]
+		_mock(player._instrument_library.get).return_value = mock_record
 
 		transform_manager = unittest.mock.MagicMock()
 		player._transform_manager = transform_manager
@@ -6156,7 +6174,7 @@ class TestFallbackResolution:
 		))
 
 		# Empty library → no matches.
-		player._instrument_library.samples.return_value = []
+		_mock(player._instrument_library.samples).return_value = []
 
 		player._handle_message(self._note_on())
 
@@ -6908,7 +6926,7 @@ class TestRenderFloatGainDb:
 
 		return numpy.full((n_frames, 1), value, dtype=numpy.float32)
 
-	def _make_level (self, peak: float = 0.5, rms: float = 0.3) -> subsample.library.SampleRecord:
+	def _make_level (self, peak: float = 0.5, rms: float = 0.3) -> subsample.analysis.LevelResult:
 
 		"""Return a LevelResult with given peak and rms."""
 
@@ -7575,7 +7593,7 @@ class TestBuildEnergyProfileResolver:
 			process, transform_manager=transform_manager, session_bpm=100.0,
 		)
 		assert resolver is not None
-		resolver(sample_id=42)
+		resolver(42)
 
 		# Verify the spec passed to get_variant.
 		transform_manager.get_variant.assert_called_once()
@@ -7620,7 +7638,7 @@ class TestBuildEnergyProfileResolver:
 			process, transform_manager=transform_manager, session_bpm=0.0,
 		)
 		assert resolver is not None
-		resolver(sample_id=1)
+		resolver(1)
 
 		sample_id, spec = transform_manager.get_variant.call_args[0]
 		assert isinstance(spec.steps[0], subsample.transform.PadQuantize)
@@ -7642,7 +7660,7 @@ class TestBuildEnergyProfileResolver:
 			process, transform_manager=transform_manager, session_bpm=140.0,
 		)
 		assert resolver is not None
-		resolver(sample_id=1)
+		resolver(1)
 
 		_, spec = transform_manager.get_variant.call_args[0]
 		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
@@ -7663,7 +7681,7 @@ class TestBuildEnergyProfileResolver:
 			process, transform_manager=transform_manager, session_bpm=120.0,
 		)
 		assert resolver is not None
-		assert resolver(sample_id=1) is profile
+		assert resolver(1) is profile
 
 	def test_resolver_returns_none_when_variant_missing (self) -> None:
 		"""When get_variant returns None (cache miss), resolver returns None."""
@@ -7678,7 +7696,7 @@ class TestBuildEnergyProfileResolver:
 			process, transform_manager=transform_manager, session_bpm=120.0,
 		)
 		assert resolver is not None
-		assert resolver(sample_id=99) is None
+		assert resolver(99) is None
 
 	def test_resolver_returns_none_when_variant_has_no_profile (self) -> None:
 		"""When get_variant returns a result but energy_profile is None,
@@ -7696,7 +7714,7 @@ class TestBuildEnergyProfileResolver:
 			process, transform_manager=transform_manager, session_bpm=120.0,
 		)
 		assert resolver is not None
-		assert resolver(sample_id=1) is None
+		assert resolver(1) is None
 
 
 # ---------------------------------------------------------------------------
@@ -7728,7 +7746,7 @@ class TestBeatMatchEndToEnd:
 			),
 		}
 
-		mock_records = []
+		mock_records: list[subsample.library.SampleRecord] = []
 		for sid in (1, 2, 3):
 			r = unittest.mock.MagicMock()
 			r.sample_id = sid
@@ -7795,7 +7813,7 @@ class TestBeatMatchEndToEnd:
 			# Sample 2 has no profile → resolver returns None → excluded.
 		}
 
-		mock_records = []
+		mock_records: list[subsample.library.SampleRecord] = []
 		for sid in (1, 2):
 			r = unittest.mock.MagicMock()
 			r.sample_id = sid
@@ -7847,13 +7865,14 @@ class TestBeatMatchEndToEnd:
 		_build_energy_profile_resolver returns None → no resolver is passed
 		→ all samples score None → all excluded → empty result."""
 
-		mock_records = [unittest.mock.MagicMock()]
-		mock_records[0].sample_id = 1
-		mock_records[0].duration = 1.0
-		mock_records[0].rhythm.tempo_bpm = 120.0
-		mock_records[0].rhythm.onset_count = 4
-		mock_records[0].pitch.dominant_pitch_hz = 0.0
-		mock_records[0].level.rms = 0.1
+		record = unittest.mock.MagicMock()
+		record.sample_id = 1
+		record.duration = 1.0
+		record.rhythm.tempo_bpm = 120.0
+		record.rhythm.onset_count = 4
+		record.pitch.dominant_pitch_hz = 0.0
+		record.level.rms = 0.1
+		mock_records: list[subsample.library.SampleRecord] = [record]
 
 		# Process has only a repitch step — no quantize.
 		process = subsample.query.ProcessSpec(steps=(
@@ -7926,8 +7945,8 @@ class TestBeatMatchEndToEnd:
 		mock_record.pitch.dominant_pitch_hz = 0.0
 		mock_record.level.rms = 0.1
 
-		player._instrument_library.samples.return_value = [mock_record]
-		player._instrument_library.get.return_value = mock_record
+		_mock(player._instrument_library.samples).return_value = [mock_record]
+		_mock(player._instrument_library.get).return_value = mock_record
 
 		profile = subsample.transform.GridEnergyProfile(
 			bpm=120.0, resolution=4, energy=(1.0, 0.0, 1.0, 0.0),
@@ -8192,7 +8211,8 @@ class TestCandidateCache:
 
 		# A firm hit lands on the loud sample (id 10) — rank spacing would not.
 		assert player._resolve_sample_id(asgn, pick, lib, velocity=110) == 10
-		assert player._resolve_sample_id(asgn, pick, lib, velocity=1)   <= 9   # soft → a ghost, not the hit
+		soft = player._resolve_sample_id(asgn, pick, lib, velocity=1)
+		assert soft is not None and soft <= 9   # soft → a ghost, not the hit
 
 	def test_rank_spacing_spreads_lone_hit_thin_e2e (self) -> None:
 		"""Contrast: default rank spacing gives the lone hit only the very top of the range."""
@@ -8622,7 +8642,7 @@ class TestParsePanWeights:
 	"""
 
 	def _ratios (self, weights: numpy.ndarray) -> numpy.ndarray:
-		return weights / numpy.sum(weights)
+		return weights / float(numpy.sum(weights))
 
 	def test_scalar_centre_equals_equal_weights (self) -> None:
 		scalar = subsample.player._parse_pan_weights(0, "t")
@@ -8751,6 +8771,7 @@ class TestPanPositionPair:
 	def test_matches_scalar_pan_weights (self) -> None:
 		"""The fixed-pan parser derives the same pair (guards the refactor)."""
 		weights = subsample.player._parse_pan_weights(30, "t")
+		assert weights is not None
 		numpy.testing.assert_allclose(weights, subsample.player._pan_position_pair(30.0))
 
 
@@ -8807,10 +8828,12 @@ class TestRandomPanThroughTrigger:
 		subsample.player.MidiPlayer._trigger_one(player, msg, assignment, pick, 100)
 
 		# _get_mix_matrix(in_channels, pan_weights, output_routing, format, extract)
-		return player._get_mix_matrix.call_args[0][1]
+		pan_weights: numpy.ndarray = player._get_mix_matrix.call_args[0][1]
+
+		return pan_weights
 
 	def test_draws_and_builds_quantized_pair (self, monkeypatch: pytest.MonkeyPatch) -> None:
-		monkeypatch.setattr(subsample.query.random, "uniform", lambda lo, hi: 33.4)
+		monkeypatch.setattr(random, "uniform", lambda lo, hi: 33.4)
 
 		asgn = subsample.query.Assignment(
 			name="P", select=(), mode="gated",
@@ -8823,7 +8846,7 @@ class TestRandomPanThroughTrigger:
 
 	def test_fresh_draw_per_note_on (self, monkeypatch: pytest.MonkeyPatch) -> None:
 		values = iter([80.0, -80.0])
-		monkeypatch.setattr(subsample.query.random, "uniform", lambda lo, hi: next(values))
+		monkeypatch.setattr(random, "uniform", lambda lo, hi: next(values))
 
 		asgn = subsample.query.Assignment(
 			name="P", select=(), mode="gated",
@@ -8836,9 +8859,10 @@ class TestRandomPanThroughTrigger:
 		def boom (lo: float, hi: float) -> float:
 			raise AssertionError("RNG consulted for a fixed pan")
 
-		monkeypatch.setattr(subsample.query.random, "uniform", boom)
+		monkeypatch.setattr(random, "uniform", boom)
 
 		weights = subsample.player._parse_pan_weights(-50, "t")
+		assert weights is not None
 		asgn = subsample.query.Assignment(name="P", select=(), mode="gated", pan_weights=weights)
 
 		numpy.testing.assert_allclose(self._pan_arg(asgn), weights)   # must not raise

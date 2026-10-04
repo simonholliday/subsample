@@ -59,7 +59,9 @@ def _synth_sine (sample_rate: int = 44100, freq_hz: float = 440.0, duration_s: f
 	"""Return a mono float32 sine wave at amplitude 0.5."""
 
 	t = numpy.linspace(0.0, duration_s, int(sample_rate * duration_s), endpoint=False).astype(numpy.float32)
-	return (0.5 * numpy.sin(2.0 * numpy.pi * freq_hz * t)).astype(numpy.float32)
+	wave: numpy.ndarray = numpy.sin(2.0 * numpy.pi * freq_hz * t)
+
+	return (0.5 * wave).astype(numpy.float32)
 
 
 # ---------------------------------------------------------------------------

@@ -54,7 +54,7 @@ _TIMEOUT: float = 5.0
 _AUDIO_PATH_TIMEOUT: float = 15.0
 
 
-def _fast_audio_timings () -> dict[str, float | int]:
+def _fast_audio_timings () -> dict[str, float]:
 	"""Speed up audio-path timing constants for tests. Returns originals.
 
 	Callers set the constants before watcher.start() and restore in finally.
@@ -78,13 +78,13 @@ def _fast_audio_timings () -> dict[str, float | int]:
 	return originals
 
 
-def _restore_audio_timings (originals: dict[str, float | int]) -> None:
+def _restore_audio_timings (originals: dict[str, float]) -> None:
 	"""Restore audio-path timing constants after a test."""
 
-	subsample.watcher._AUDIO_DEBOUNCE_SECONDS = originals["audio_debounce"]  # type: ignore[assignment]
-	subsample.watcher._SIDECAR_GRACE_SECONDS = originals["sidecar_grace"]    # type: ignore[assignment]
-	subsample.watcher._STABILITY_CHECK_SECONDS = originals["stability"]      # type: ignore[assignment]
-	subsample.watcher._STABILITY_MAX_CHECKS = originals["stability_max"]     # type: ignore[assignment]
+	subsample.watcher._AUDIO_DEBOUNCE_SECONDS = originals["audio_debounce"]
+	subsample.watcher._SIDECAR_GRACE_SECONDS = originals["sidecar_grace"]
+	subsample.watcher._STABILITY_CHECK_SECONDS = originals["stability"]
+	subsample.watcher._STABILITY_MAX_CHECKS = int(originals["stability_max"])
 
 
 # ---------------------------------------------------------------------------
@@ -1011,7 +1011,7 @@ class TestACaptureIsIntegratedOnce:
 	"""
 
 	def test_a_registered_sidecar_is_ignored_once (self, tmp_path: pathlib.Path) -> None:
-		loaded: list[pathlib.Path] = []
+		loaded: list[subsample.library.SampleRecord] = []
 
 		watcher = subsample.watcher.InstrumentWatcher(
 			directory=tmp_path,

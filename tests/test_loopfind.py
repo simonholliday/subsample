@@ -20,7 +20,7 @@ def _steady_tone (seconds: float = 2.0, f0: float = 220.0) -> numpy.ndarray:
 	# 10 ms attack, otherwise flat (steady sustain, no decay).
 	attack = numpy.minimum(t / 0.010, 1.0)
 	x = x * attack
-	return (0.5 * x / numpy.max(numpy.abs(x))).astype(numpy.float32)
+	return (0.5 * x / float(numpy.max(numpy.abs(x)))).astype(numpy.float32)
 
 
 def _click () -> numpy.ndarray:
@@ -29,7 +29,7 @@ def _click () -> numpy.ndarray:
 
 	t = numpy.arange(int(_SR * 0.04)) / _SR
 	x = numpy.random.RandomState(0).randn(t.size) * numpy.exp(-t / 0.005)
-	return (0.5 * x / numpy.max(numpy.abs(x))).astype(numpy.float32)
+	return (0.5 * x / float(numpy.max(numpy.abs(x)))).astype(numpy.float32)
 
 
 def _pitch_glide (seconds: float = 2.0) -> numpy.ndarray:
@@ -49,7 +49,7 @@ def _pitch_glide (seconds: float = 2.0) -> numpy.ndarray:
 	for h in range(1, 6):
 		x += numpy.sin(h * phase) / h
 	x = x * numpy.minimum(t / 0.010, 1.0)            # 10 ms attack, otherwise flat
-	return (0.5 * x / numpy.max(numpy.abs(x))).astype(numpy.float32)
+	return (0.5 * x / float(numpy.max(numpy.abs(x)))).astype(numpy.float32)
 
 
 def _stereo (mono: numpy.ndarray) -> numpy.ndarray:

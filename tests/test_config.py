@@ -19,13 +19,13 @@ _DEFAULT_CONFIG_PATH = subsample.config._locate_default_config()
 
 def _load_with (
 	tmp_path: pathlib.Path,
-	detection: typing.Optional[dict] = None,
-	audio: typing.Optional[dict] = None,
+	detection: typing.Optional[dict[str, typing.Any]] = None,
+	audio: typing.Optional[dict[str, typing.Any]] = None,
 ) -> subsample.config.Config:
 
 	"""Write a complete config with optional detection/audio overrides and load it."""
 
-	cfg: dict = {
+	cfg: dict[str, typing.Any] = {
 		"recorder": {
 			"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1, "buffer_frames": 512},
 			"buffer": {"max_seconds": 60},
@@ -1687,7 +1687,7 @@ class TestMidiMaps:
 	"""
 
 	@staticmethod
-	def _load (tmp_path: pathlib.Path, player: dict) -> subsample.config.Config:
+	def _load (tmp_path: pathlib.Path, player: dict[str, typing.Any]) -> subsample.config.Config:
 		config_file = tmp_path / "config.yaml"
 		config_file.write_text(yaml.safe_dump({
 			"recorder": {
@@ -1769,8 +1769,8 @@ class TestValuesTheAppCannotActOn:
 	it never applies to anything.
 	"""
 
-	def _config (self, tmp_path: pathlib.Path, extra: dict) -> pathlib.Path:
-		cfg: dict = {
+	def _config (self, tmp_path: pathlib.Path, extra: dict[str, typing.Any]) -> pathlib.Path:
+		cfg: dict[str, typing.Any] = {
 			"recorder": {"audio": {"sample_rate": 48000, "bit_depth": 16, "channels": 1}},
 			"detection": {
 				"threshold_db": 12.0, "hold_seconds": 0.5,
@@ -1798,7 +1798,7 @@ class TestValuesTheAppCannotActOn:
 		("osc",       {"send_port": 99999},         "osc.send_port"),
 	])
 	def test_it_is_refused_by_name (
-		self, tmp_path: pathlib.Path, section: str, values: dict, named: str,
+		self, tmp_path: pathlib.Path, section: str, values: dict[str, typing.Any], named: str,
 	) -> None:
 		path = self._config(tmp_path, {section: values})
 
@@ -1810,7 +1810,7 @@ class TestValuesTheAppCannotActOn:
 		("transform", {"max_memory_mb": 350.0, "max_disk_mb": 3000.0}),
 	])
 	def test_the_template_lines_load_when_uncommented (
-		self, tmp_path: pathlib.Path, section: str, values: dict,
+		self, tmp_path: pathlib.Path, section: str, values: dict[str, typing.Any],
 	) -> None:
 
 		"""config.yaml.default showed `max_memory_mb: auto`, which fails with

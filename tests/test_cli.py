@@ -25,6 +25,7 @@ import subsample.detector
 import subsample.events
 import subsample.library
 import subsample.player
+import subsample.recorder
 import subsample.similarity
 import subsample.transform
 import subsample.watcher
@@ -406,9 +407,7 @@ class TestToolDispatch:
 
 		mock_module = unittest.mock.Mock()
 		mock_module.main.return_value = 7
-		monkeypatch.setattr(
-			subsample.cli.importlib, "import_module", lambda name: mock_module,
-		)
+		monkeypatch.setattr(importlib, "import_module", lambda name: mock_module)
 		monkeypatch.setattr(sys, "argv", ["subsample", "catalog", "whatever"])
 
 		with pytest.raises(SystemExit) as excinfo:
@@ -1167,7 +1166,7 @@ class TestPrintBanner:
 		player = dataclasses.replace(cfg.player, enabled=False)
 		return dataclasses.replace(cfg, recorder=recorder, player=player)
 
-	def test_player_only_shows_player_output (self, capsys: pytest.CaptureFixture) -> None:
+	def test_player_only_shows_player_output (self, capsys: pytest.CaptureFixture[str]) -> None:
 		subsample.cli._print_banner(self._player_only())
 		line = capsys.readouterr().out
 
@@ -1176,7 +1175,7 @@ class TestPrintBanner:
 		assert "8ch" in line               # player output channels, not recorder 2
 		assert "midi-map-gm-drums.yaml" in line
 
-	def test_player_only_hides_recorder_fields (self, capsys: pytest.CaptureFixture) -> None:
+	def test_player_only_hides_recorder_fields (self, capsys: pytest.CaptureFixture[str]) -> None:
 		subsample.cli._print_banner(self._player_only())
 		line = capsys.readouterr().out
 
@@ -1185,13 +1184,13 @@ class TestPrintBanner:
 		assert "trigger ≥" not in line
 		assert "buffer" not in line
 
-	def test_player_output_bit_depth_falls_back_to_recorder (self, capsys: pytest.CaptureFixture) -> None:
+	def test_player_output_bit_depth_falls_back_to_recorder (self, capsys: pytest.CaptureFixture[str]) -> None:
 		# player.audio.bit_depth is None → resolves to the recorder's 24, matching
 		# MidiPlayer's own output_bit_depth fallback.
 		subsample.cli._print_banner(self._player_only())
 		assert "24-bit" in capsys.readouterr().out
 
-	def test_recorder_only_shows_capture_format (self, capsys: pytest.CaptureFixture) -> None:
+	def test_recorder_only_shows_capture_format (self, capsys: pytest.CaptureFixture[str]) -> None:
 		subsample.cli._print_banner(self._recorder_only())
 		line = capsys.readouterr().out
 
@@ -1202,7 +1201,7 @@ class TestPrintBanner:
 		# No player output segment.
 		assert "map " not in line
 
-	def test_both_modes_show_both_segments (self, capsys: pytest.CaptureFixture) -> None:
+	def test_both_modes_show_both_segments (self, capsys: pytest.CaptureFixture[str]) -> None:
 		import dataclasses
 		cfg = self._player_only()
 		cfg = dataclasses.replace(cfg, recorder=dataclasses.replace(cfg.recorder, enabled=True))
@@ -1533,10 +1532,10 @@ class TestLibraryWatchWithPrograms:
 
 	class _Watcher:
 
-		"""Stand-in for InstrumentWatcher that records the directory it was given."""
+		"""Stand-in for InstrumentWatcher that keeps its directory where the real one does."""
 
 		def __init__ (self, directory: pathlib.Path, **_kwargs: typing.Any) -> None:
-			self.directory = directory
+			self._directory = directory
 
 		def start (self) -> None:
 			pass
@@ -1555,7 +1554,8 @@ class TestLibraryWatchWithPrograms:
 			subsample.bank.Bank(
 				name=name, directory=tmp_path / name, program=program,
 				instrument_library=subsample.library.InstrumentLibrary(1024 * 1024),
-				similarity_matrix=None, transform_manager=None,
+				similarity_matrix=typing.cast(subsample.similarity.SimilarityMatrix, None),
+				transform_manager=None,
 			)
 			for program, name in enumerate(("kit", "pads"))
 		]
@@ -1575,7 +1575,7 @@ class TestLibraryWatchWithPrograms:
 			[None], subsample.events.EventEmitter(), 44100,
 		)
 
-		assert [watcher.directory for watcher in watchers] == [tmp_path / "kit", tmp_path / "pads"]
+		assert [watcher._directory for watcher in watchers] == [tmp_path / "kit", tmp_path / "pads"]
 
 	def test_without_programs_a_null_directory_has_nothing_to_watch (
 		self, monkeypatch: pytest.MonkeyPatch,
@@ -2157,7 +2157,7 @@ class TestDrainingCapturesOnTheWayOut:
 	def test_it_waits_for_every_capture (self, capsys: pytest.CaptureFixture[str]) -> None:
 		processor = self._Processor(depth=3)
 
-		subsample.cli._drain_captures(processor, poll=0.0)
+		subsample.cli._drain_captures(typing.cast(subsample.recorder.SampleProcessor, processor), poll=0.0)
 
 		assert processor.depth == 0
 		assert processor.flushes == 3
@@ -2166,14 +2166,14 @@ class TestDrainingCapturesOnTheWayOut:
 
 		"""An unexplained wait reads as a hang, which is what makes people kill it."""
 
-		subsample.cli._drain_captures(self._Processor(depth=2), poll=0.0)
+		subsample.cli._drain_captures(typing.cast(subsample.recorder.SampleProcessor, self._Processor(depth=2)), poll=0.0)
 
 		out = capsys.readouterr().out
 		assert "2 capture(s)" in out
 		assert "to go" in out
 
 	def test_an_empty_queue_says_nothing (self, capsys: pytest.CaptureFixture[str]) -> None:
-		subsample.cli._drain_captures(self._Processor(depth=0), poll=0.0)
+		subsample.cli._drain_captures(typing.cast(subsample.recorder.SampleProcessor, self._Processor(depth=0)), poll=0.0)
 
 		assert capsys.readouterr().out == ""
 

@@ -20,8 +20,11 @@ pytest
 Same setup as [Tests](#tests):
 
 ```bash
-mypy subsample
+mypy
 ```
+
+That checks the package, the tests and the maintainer scripts: the folders
+listed under `[tool.mypy]` in `pyproject.toml`.
 
 ## Maintainer scripts
 

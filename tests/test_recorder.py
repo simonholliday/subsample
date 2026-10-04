@@ -4,12 +4,13 @@ import datetime
 import logging
 import pathlib
 import tempfile
+import typing
+import unittest.mock
 import wave
 
 import numpy
-import unittest.mock
-
 import pytest
+import soundfile
 
 import subsample.analysis
 import subsample.audio
@@ -223,7 +224,18 @@ class TestSampleProcessorQueueDepth:
 		# an 8-arg stub raised TypeError on every call, swallowed by the
 		# recorder's broad except, so this test never actually exercised the
 		# handoff and `received` stayed empty.
-		def on_complete (path, spectral, rhythm, pitch, timbre, level, band_energy, duration, raw_audio, **captured):
+		def on_complete (
+			filepath: pathlib.Path,
+			spectral: subsample.analysis.AnalysisResult,
+			rhythm: subsample.analysis.RhythmResult,
+			pitch: subsample.analysis.PitchResult,
+			timbre: subsample.analysis.TimbreResult,
+			level: subsample.analysis.LevelResult,
+			band_energy: subsample.analysis.BandEnergyResult,
+			duration: float,
+			audio: numpy.ndarray,
+			**captured: typing.Any,
+		) -> None:
 			received.append(spectral)
 
 		with tempfile.TemporaryDirectory() as tmp:
@@ -233,7 +245,7 @@ class TestSampleProcessorQueueDepth:
 			original_analyze = subsample.analysis.analyze_all
 			call_count = 0
 
-			def gated_analyze (*args, **kwargs):
+			def gated_analyze (*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
 				nonlocal call_count
 				call_count += 1
 				if call_count == 1:
@@ -279,7 +291,7 @@ class TestSampleProcessorQueueDepth:
 			original_analyze = subsample.analysis.analyze_all
 			call_count = 0
 
-			def gated_analyze (*args, **kwargs):
+			def gated_analyze (*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
 				nonlocal call_count
 				call_count += 1
 				if call_count == 1:
@@ -421,7 +433,6 @@ class TestFlacCapture:
 		"""audio_format='flac' at 16-bit writes a .flac file whose audio
 		decodes back to the original samples bit-identically.
 		"""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		rng = numpy.random.RandomState(0)
 		audio = (rng.randn(4410, 1) * 5000.0).astype(numpy.int16)
@@ -448,7 +459,6 @@ class TestFlacCapture:
 		"""24-bit 4-channel FLAC round-trip preserves the upper 24 bits of
 		every channel.  Covers the ambisonic-shape (4-channel) path.
 		"""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		rng = numpy.random.RandomState(1)
 		# 24-bit values stored as int32 left-shifted by 8.  Keep amplitudes
@@ -688,9 +698,17 @@ class TestWhatTheCaptureHandsOn:
 		handed: list[dict[str, typing.Any]] = []
 
 		def on_complete (
-			path, spectral, rhythm, pitch, timbre, level, band_energy, duration, raw_audio,
-			**captured,
-		):
+			filepath: pathlib.Path,
+			spectral: subsample.analysis.AnalysisResult,
+			rhythm: subsample.analysis.RhythmResult,
+			pitch: subsample.analysis.PitchResult,
+			timbre: subsample.analysis.TimbreResult,
+			level: subsample.analysis.LevelResult,
+			band_energy: subsample.analysis.BandEnergyResult,
+			duration: float,
+			audio: numpy.ndarray,
+			**captured: typing.Any,
+		) -> None:
 			handed.append(captured)
 
 		with tempfile.TemporaryDirectory() as tmp:

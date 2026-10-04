@@ -6,6 +6,7 @@ import typing
 
 import numpy
 import pytest
+import soundfile
 
 import subsample.analysis
 import subsample.audio
@@ -30,6 +31,15 @@ def _write_wav_and_sidecar (
 	n_frames: int = 2048,
 ) -> tuple[pathlib.Path, pathlib.Path]:
 	return tests.helpers._write_wav_and_sidecar(directory, audio_stem, n_frames)
+
+
+def _filepath (record: subsample.library.SampleRecord) -> pathlib.Path:
+
+	"""The record's file, which every record loaded from disk has."""
+
+	assert record.filepath is not None
+
+	return record.filepath
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +522,7 @@ class TestInstrumentLibrary:
 		r = _make_instrument_record("01", n_frames=1000, filepath=pathlib.Path("/kit/01.wav"))
 		before = lib.memory_used
 		lib.add(r)
-		assert lib.memory_used == before + r.audio.nbytes
+		assert lib.memory_used == before + tests.helpers._audio(r).nbytes
 
 		lib.remove_by_path(pathlib.Path("/kit/01.wav"))
 		assert lib.memory_used == before
@@ -633,7 +643,7 @@ class TestInstrumentLibrary:
 		"""find_by_name returns None after a sample has been evicted."""
 		r1 = _make_instrument_record("old-kick", n_frames=500)
 		r2 = _make_instrument_record("new-kick", n_frames=500)
-		lib = subsample.library.InstrumentLibrary(max_memory_bytes=r1.audio.nbytes + 10)
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=tests.helpers._audio(r1).nbytes + 10)
 		lib.add(r1)
 		lib.add(r2)   # evicts r1
 
@@ -743,10 +753,10 @@ class TestLoadInstrumentLibrary:
 		assert len(samples) == 2
 		assert {s.name for s in samples} == {"01"}                    # same label
 		assert len({s.sample_id for s in samples}) == 2               # distinct identity
-		assert {s.filepath.parent.name for s in samples} == {"a_kicks", "z_snares"}
+		assert {_filepath(s).parent.name for s in samples} == {"a_kicks", "z_snares"}
 		# Each is addressable by its true key — path — and the two disambiguate.
 		for s in samples:
-			assert lib.find_by_path(s.filepath) == s.sample_id
+			assert lib.find_by_path(_filepath(s)) == s.sample_id
 
 	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
 		_write_wav_and_sidecar(tmp_path, "KICK")
@@ -1011,7 +1021,7 @@ class TestLoadInstrumentLibraryRecursive:
 		)
 
 		assert len(lib) == 2
-		by_folder = {s.filepath.parent.name: s.sample_id for s in lib.samples()}
+		by_folder = {_filepath(s).parent.name: s.sample_id for s in lib.samples()}
 		assert set(by_folder) == {"kicks", "snares"}
 		assert lib.find_by_path(tmp_path / "kicks" / "01.wav") == by_folder["kicks"]
 		assert lib.find_by_path(tmp_path / "snares" / "01.wav") == by_folder["snares"]
@@ -1036,7 +1046,7 @@ class TestLoadInstrumentLibraryRecursive:
 			subsample.query.SelectSpec(where=where), lib.samples(), None,
 		)
 
-		assert [s.filepath.parent.name for s in ranked] == ["outer"]
+		assert [_filepath(s).parent.name for s in ranked] == ["outer"]
 
 	def test_over_budget_multi_take_warns (
 		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
@@ -1138,7 +1148,6 @@ class TestLoadWavAudio:
 	def test_honours_configured_float_ceiling (self, tmp_path: pathlib.Path) -> None:
 		"""A hot 32-bit float sample loaded straight into the library scales to fit
 		instead of hard-clipping — the ceiling is not CLI-import-only."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		path = tmp_path / "hot.wav"
 		soundfile.write(

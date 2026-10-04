@@ -163,16 +163,38 @@ def _first (result: subsample.player.MidiMapResult) -> subsample.query.Assignmen
 
 	"""The assignment the probe map declares."""
 
-	return typing.cast(subsample.query.Assignment, result.note_map[(0, 60)][0][0])
+	return result.note_map[(0, 60)][0][0]
+
+
+def _release (result: subsample.player.MidiMapResult) -> subsample.query.ReleaseSpec:
+
+	"""The probe assignment's release, which a probe that reads it declares."""
+
+	release = _first(result).release
+
+	assert release is not None
+
+	return release
+
+
+def _pan (result: subsample.player.MidiMapResult) -> subsample.query.PanSpec:
+
+	"""The probe assignment's random pan, which a probe that reads it declares."""
+
+	pan = _first(result).pan_spec
+
+	assert pan is not None
+
+	return pan
 
 
 # ---------------------------------------------------------------------------
 # Where each published limit and default is written in a real map
 # ---------------------------------------------------------------------------
 
-_Probe = typing.Callable[[typing.Any], dict[str, typing.Any]]
+_LimitProbe = typing.Callable[[typing.Any], dict[str, typing.Any]]
 
-_LIMIT_PROBES: dict[str, _Probe] = {
+_LIMIT_PROBES: dict[str, _LimitProbe] = {
 	"properties/program_channel/anyOf/0":
 		lambda value: _map(program_channel=value),
 	"$defs/order_clause/anyOf/1/properties/pattern/items":
@@ -290,15 +312,15 @@ _DEFAULT_PROBES: dict[str, tuple[dict[str, typing.Any], _Reading]] = {
 	),
 	"$defs/release/anyOf/3/properties/curve": (
 		_map(assignments=[_assignment(mode="gated", release={"time": 100})]),
-		lambda result: _first(result).release.curve,
+		lambda result: _release(result).curve,
 	),
 	"$defs/release/anyOf/4/properties/curve": (
 		_map(assignments=[_assignment(mode="gated", release={"cc": 74})]),
-		lambda result: _first(result).release.curve,
+		lambda result: _release(result).curve,
 	),
 	"$defs/pan/anyOf/3/properties/variation": (
 		_map(assignments=[_assignment(pan={"position": 0})]),
-		lambda result: _first(result).pan_spec.hi - _first(result).pan_spec.lo,
+		lambda result: _pan(result).hi - _pan(result).lo,
 	),
 }
 """A map that leaves one term out, and what the loaded map then holds, by the
@@ -592,6 +614,22 @@ term that publishes it.  The processors are generated below, because every one
 of them is written into a `process:` list the same way."""
 
 
+def _processor_probe (name: str) -> _Probe:
+
+	"""A probe that writes a processor's own example as its whole entry."""
+
+	return lambda value: _stepped({name: value})
+
+
+def _parameter_probe (
+	processor: subsample.processors.Processor, parameter: subsample.processors.Parameter,
+) -> _Probe:
+
+	"""A probe that writes a parameter's example, with what the parameter needs beside it."""
+
+	return lambda value: _stepped({processor.name: {parameter.name: value, **_beside(processor, parameter)}})
+
+
 def _processor_probes () -> dict[str, _Probe]:
 
 	"""Where each processor's own example, and each parameter's, is written."""
@@ -602,9 +640,7 @@ def _processor_probes () -> dict[str, _Probe]:
 	for processor in subsample.processors.PROCESSORS.values():
 
 		if processor.examples:
-			probes[f"{entries}/{processor.name}"] = (
-				lambda value, name=processor.name: _stepped({name: value})
-			)
+			probes[f"{entries}/{processor.name}"] = _processor_probe(processor.name)
 
 		for index, form in enumerate(_processor_entry(processor.name)["anyOf"]):
 			if form.get("type") != "object":
@@ -616,10 +652,7 @@ def _processor_probes () -> dict[str, _Probe]:
 					continue
 
 				probes[f"{entries}/{processor.name}/anyOf/{index}/properties/{parameter.name}"] = (
-					lambda value, processor=processor, parameter=parameter:
-						_stepped({processor.name: {
-							parameter.name: value, **_beside(processor, parameter),
-						}})
+					_parameter_probe(processor, parameter)
 				)
 
 	return probes
@@ -761,8 +794,7 @@ class TestWordsComeFromTheParser:
 			_assignment(mode="gated", release={"time": 100, "curve": curve}),
 		]))
 
-		assert _first(result).release is not None
-		assert _first(result).release.curve == curve
+		assert _release(result).curve == curve
 
 	@pytest.mark.parametrize("curve", subsample.query.VALID_PICK_CURVES)
 	def test_every_pick_curve_loads (self, tmp_path: pathlib.Path, curve: str) -> None:
@@ -797,8 +829,10 @@ class TestWordsComeFromTheParser:
 
 		result = _load(tmp_path, _map(assignments=[_assignment(extract=kind)]))
 
-		assert _first(result).extract is not None
-		assert _first(result).extract.kind == kind
+		extract = _first(result).extract
+
+		assert extract is not None
+		assert extract.kind == kind
 
 	@pytest.mark.parametrize("name", subsample.query.valid_order_names())
 	def test_every_order_name_loads (self, tmp_path: pathlib.Path, name: str) -> None:
@@ -810,7 +844,7 @@ class TestWordsComeFromTheParser:
 		if name == "beat_match":
 			clause["pattern"] = [1, 0]
 
-		where = {"reference": "BD0025"} if name == "similarity" else {"pitched": True}
+		where: dict[str, typing.Any] = {"reference": "BD0025"} if name == "similarity" else {"pitched": True}
 
 		result = _load(
 			tmp_path,
@@ -825,7 +859,7 @@ class TestWordsComeFromTheParser:
 
 		"""Every older ranking word the schema still publishes is one a map may write."""
 
-		where = {"reference": "BD0025"} if token == "similarity" else {"pitched": True}
+		where: dict[str, typing.Any] = {"reference": "BD0025"} if token == "similarity" else {"pitched": True}
 
 		result = _load(
 			tmp_path,

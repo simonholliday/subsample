@@ -6,6 +6,7 @@ import typing
 
 import numpy
 import pytest
+import soundfile
 
 import subsample.analysis
 import subsample.audio
@@ -612,7 +613,6 @@ class TestEnsureSampleAssets:
 		read.  These are two separate reads of the same file, and the sidecar's
 		stored level has to describe the audio that actually plays — loudness
 		normalisation divides by it."""
-		import soundfile  # type: ignore[import-untyped]  # soundfile ships no stubs
 
 		wav_path = tmp_path / "hot.wav"
 		t = numpy.linspace(0, 0.25, 11025, endpoint=False)
@@ -967,7 +967,7 @@ class TestLoopPersistence:
 		t = numpy.arange(int(sr * seconds)) / sr
 		x = sum(numpy.sin(2 * numpy.pi * 220.0 * h * t) / h for h in range(1, 6))
 		x = x * numpy.minimum(t / 0.01, 1.0)
-		return (0.5 * x / numpy.max(numpy.abs(x))).astype(numpy.float32)
+		return (0.5 * x / float(numpy.max(numpy.abs(x)))).astype(numpy.float32)
 
 	def _save (self, wav: pathlib.Path, loop: typing.Optional[subsample.loopfind.LoopPoints]) -> None:
 		tests.helpers._make_wav(wav)

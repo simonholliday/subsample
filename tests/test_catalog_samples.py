@@ -65,7 +65,7 @@ def _fix_sidecar_md5 (wav_path: pathlib.Path, sidecar_path: pathlib.Path) -> Non
 	sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _edit_sidecar (sidecar_path: pathlib.Path, **section_updates: dict) -> None:
+def _edit_sidecar (sidecar_path: pathlib.Path, **section_updates: dict[str, typing.Any]) -> None:
 
 	"""Apply per-section key updates to a sidecar JSON payload."""
 
@@ -126,7 +126,7 @@ def _make_non_loopable_sample (directory: pathlib.Path, stem: str) -> pathlib.Pa
 
 
 def _run_csv (
-	capsys: pytest.CaptureFixture,
+	capsys: pytest.CaptureFixture[str],
 	argv: list[str],
 ) -> tuple[list[str], list[dict[str, str]]]:
 
@@ -252,14 +252,14 @@ class TestCsvOutput:
 
 	"""End-to-end CSV tests over a real (sidecar-backed) directory."""
 
-	def test_header_matches_base_columns (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_header_matches_base_columns (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "tone")
 
 		header, _rows = _run_csv(capsys, [str(tmp_path)])
 
 		assert tuple(header) == catalog_samples._columns(full=False)
 
-	def test_pitched_quantizable_sample (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_pitched_quantizable_sample (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		"""Values come from the sidecar (cache-first), not a re-analysis."""
 		_make_pitched_sample(tmp_path, "tone")
 
@@ -278,7 +278,7 @@ class TestCsvOutput:
 		assert row["attack_count"] == "2"
 		assert row["duration_s"] == "1"
 
-	def test_unpitched_sample (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_unpitched_sample (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_unpitched_sample(tmp_path, "hit")
 
 		_header, rows = _run_csv(capsys, [str(tmp_path)])
@@ -291,7 +291,7 @@ class TestCsvOutput:
 		assert row["pitch_hz"] == ""
 		assert row["attack_count"] == "1"
 
-	def test_subdirectory_paths_are_relative (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_subdirectory_paths_are_relative (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		sub = tmp_path / "kicks"
 		sub.mkdir()
 		_make_pitched_sample(sub, "deep")
@@ -300,7 +300,7 @@ class TestCsvOutput:
 
 		assert rows[0]["path"] == str(pathlib.Path("kicks") / "deep.wav")
 
-	def test_full_columns (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_full_columns (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		"""--full adds the timbre vectors with the sidecar's values."""
 		_make_pitched_sample(tmp_path, "tone")
 
@@ -312,7 +312,7 @@ class TestCsvOutput:
 		assert rows[0]["mfcc_12"] == "12"
 		assert rows[0]["sample_rate"] == "44100"
 
-	def test_output_file (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_output_file (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		"""-o writes the same CSV to a file instead of stdout."""
 		_make_pitched_sample(tmp_path, "tone")
 		out_path = tmp_path / "catalog.csv"
@@ -328,13 +328,13 @@ class TestCsvOutput:
 	def test_missing_directory_exits (self, tmp_path: pathlib.Path) -> None:
 		assert catalog_samples.main([str(tmp_path / "nope")]) == 1
 
-	def test_empty_directory_emits_header_only (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_empty_directory_emits_header_only (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		header, rows = _run_csv(capsys, [str(tmp_path)])
 
 		assert tuple(header) == catalog_samples._columns(full=False)
 		assert rows == []
 
-	def test_unreadable_audio_is_skipped (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_unreadable_audio_is_skipped (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		"""A corrupt file is reported to stderr and omitted from the CSV."""
 		_make_pitched_sample(tmp_path, "tone")
 		(tmp_path / "broken.wav").write_bytes(b"RIFFnot really a wav")
@@ -345,7 +345,7 @@ class TestCsvOutput:
 		assert rows[0]["name"] == "tone.wav"
 
 	def test_default_directory_from_config (
-		self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture,
+		self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str],
 		monkeypatch: pytest.MonkeyPatch,
 	) -> None:
 		"""With no directory argument, instrument.directory from config is used."""
@@ -378,7 +378,7 @@ class TestPathsMode:
 
 	"""--pitched / --quantizable / --loopable replace the CSV with matching paths."""
 
-	def test_pitched_filter (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_pitched_filter (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "tone")
 		_make_unpitched_sample(tmp_path, "hit")
 
@@ -387,7 +387,7 @@ class TestPathsMode:
 		out_lines = capsys.readouterr().out.splitlines()
 		assert out_lines == [str(tmp_path / "tone.wav")]
 
-	def test_loopable_filter (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_loopable_filter (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		# Tonal helper sidecar → loop candidate; the unpitched, non-stationary
 		# sample fails both branches.
 		_make_pitched_sample(tmp_path, "tone")
@@ -398,7 +398,7 @@ class TestPathsMode:
 		out_lines = capsys.readouterr().out.splitlines()
 		assert out_lines == [str(tmp_path / "tone.wav")]
 
-	def test_quantizable_filter (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_quantizable_filter (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "tone")
 		_make_unpitched_sample(tmp_path, "hit")
 
@@ -407,7 +407,7 @@ class TestPathsMode:
 		out_lines = capsys.readouterr().out.splitlines()
 		assert out_lines == [str(tmp_path / "tone.wav")]
 
-	def test_both_filters_require_both (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_both_filters_require_both (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		"""--pitched --quantizable is an AND: quantizable-only samples drop out."""
 		_make_pitched_sample(tmp_path, "tone")
 
@@ -421,7 +421,7 @@ class TestPathsMode:
 		out_lines = capsys.readouterr().out.splitlines()
 		assert out_lines == [str(tmp_path / "tone.wav")]
 
-	def test_no_header_in_paths_mode (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_no_header_in_paths_mode (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		"""Paths mode output is pipeable — no CSV header line."""
 		_make_unpitched_sample(tmp_path, "hit")
 
@@ -429,7 +429,7 @@ class TestPathsMode:
 
 		assert capsys.readouterr().out == ""
 
-	def test_paths_mode_to_file (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_paths_mode_to_file (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "tone")
 		out_path = tmp_path / "pitched.txt"
 
@@ -491,7 +491,7 @@ class TestTriageColumns:
 		assert "clipping_risk" in columns
 		assert "noisiness" in columns
 
-	def test_noisiness_high_for_stationary_unpitched (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_noisiness_high_for_stationary_unpitched (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		# Static-like: noise_floor near rms (never quiet) and no detected pitch.
 		wav_path, sidecar_path = tests.helpers._write_wav_and_sidecar(tmp_path, "static")
 		_edit_sidecar(
@@ -505,7 +505,7 @@ class TestTriageColumns:
 
 		assert float(rows[0]["noisiness"]) > 0.8
 
-	def test_noisiness_low_for_pitched (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_noisiness_low_for_pitched (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		# The default helper sidecar is voiced_fraction 0.9 → pitched → low noisiness.
 		_make_pitched_sample(tmp_path, "tone")
 
@@ -513,7 +513,7 @@ class TestTriageColumns:
 
 		assert float(rows[0]["noisiness"]) < 0.2
 
-	def test_normal_sample_flags_no (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_normal_sample_flags_no (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		# Helper level: peak 0.85, rms 0.25, noise_floor 0.01 — a healthy event.
 		_make_pitched_sample(tmp_path, "tone")
 
@@ -523,7 +523,7 @@ class TestTriageColumns:
 		assert rows[0]["clipping_risk"] == "no"
 		assert rows[0]["snr_db"] != ""
 
-	def test_near_silent_flagged (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_near_silent_flagged (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		wav_path, sidecar_path = tests.helpers._write_wav_and_sidecar(tmp_path, "quiet")
 		_edit_sidecar(sidecar_path, level={"peak": 0.001})
 		_fix_sidecar_md5(wav_path, sidecar_path)
@@ -532,7 +532,7 @@ class TestTriageColumns:
 
 		assert rows[0]["near_silent"] == "yes"
 
-	def test_clipping_risk_flagged (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_clipping_risk_flagged (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		wav_path, sidecar_path = tests.helpers._write_wav_and_sidecar(tmp_path, "hot")
 		_edit_sidecar(sidecar_path, level={"peak": 0.999})
 		_fix_sidecar_md5(wav_path, sidecar_path)
@@ -597,14 +597,14 @@ class TestGroupMode:
 
 	"""#1 --group near-duplicate clustering."""
 
-	def test_group_columns_prepended (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_group_columns_prepended (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "tone")
 
 		header, _rows = _run_csv(capsys, [str(tmp_path), "--group"])
 
 		assert header[:3] == ["group", "group_size", "group_keeper"]
 
-	def test_identical_samples_grouped_with_one_keeper (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_identical_samples_grouped_with_one_keeper (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		# Three byte-identical copies → identical sidecars → one group of three.
 		for stem in ("a", "b", "c"):
 			_make_pitched_sample(tmp_path, stem)
@@ -616,7 +616,7 @@ class TestGroupMode:
 		assert all(r["group_size"] == "3" for r in rows)
 		assert sum(1 for r in rows if r["group_keeper"] == "yes") == 1
 
-	def test_distinct_sample_separate_group (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_distinct_sample_separate_group (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "twin_a")
 		_make_pitched_sample(tmp_path, "twin_b")
 		_make_distinct_sample(tmp_path, "loner")
@@ -629,7 +629,7 @@ class TestGroupMode:
 		assert by_name["loner.wav"]["group"] != by_name["twin_a.wav"]["group"]
 		assert by_name["loner.wav"]["group_size"] == "1"
 
-	def test_keeper_first_within_group (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_keeper_first_within_group (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		# Two identical-vector copies but different levels: the louder is keeper
 		# and must be emitted first in its group block.
 		for stem, peak in (("soft", 0.3), ("loud", 0.9)):
@@ -643,7 +643,7 @@ class TestGroupMode:
 		assert rows[0]["group_keeper"] == "yes"
 		assert rows[1]["group_keeper"] == "no"
 
-	def test_largest_group_first (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_largest_group_first (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		# A pile of 3 identical + a single distinct → group 1 is the big pile.
 		for stem in ("t1", "t2", "t3"):
 			_make_pitched_sample(tmp_path, stem)
@@ -654,7 +654,7 @@ class TestGroupMode:
 		assert rows[0]["group"] == "1"
 		assert rows[0]["group_size"] == "3"
 
-	def test_paths_mode_emits_keepers_only (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_paths_mode_emits_keepers_only (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		for stem in ("a", "b", "c"):
 			_make_pitched_sample(tmp_path, stem)
 
@@ -669,7 +669,7 @@ class TestOrderSimilarity:
 
 	"""#2 --order similarity nearest-neighbour chain."""
 
-	def test_all_rows_present (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_all_rows_present (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "a")
 		_make_distinct_sample(tmp_path, "b")
 		_make_pitched_sample(tmp_path, "c")
@@ -678,14 +678,14 @@ class TestOrderSimilarity:
 
 		assert {r["name"] for r in rows} == {"a.wav", "b.wav", "c.wav"}
 
-	def test_no_group_columns (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_no_group_columns (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "a")
 
 		header, _rows = _run_csv(capsys, [str(tmp_path), "--order", "similarity"])
 
 		assert "group" not in header
 
-	def test_paths_mode_ordered (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture) -> None:
+	def test_paths_mode_ordered (self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
 		_make_pitched_sample(tmp_path, "a")
 		_make_pitched_sample(tmp_path, "b")
 
