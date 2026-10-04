@@ -676,6 +676,9 @@ def _build_variant_lookup (
 		return None
 
 	def _lookup (sample_id: int) -> typing.Optional[subsample.transform.TransformResult]:
+
+		"""The sample's variant for this spec if it has baked, else None (and it is queued)."""
+
 		return transform_manager.get_variant(sample_id, spec)
 
 	return _lookup
@@ -713,11 +716,17 @@ def _build_beats_resolver (
 		# available once the variant has baked, so the filter would drop samples
 		# whose length is already known.
 		def _declared (sample_id: int) -> typing.Optional[float]:
+
+			"""The beat count the step declares, the same for every sample."""
+
 			return declared
 
 		return _declared
 
 	def _resolver (sample_id: int) -> typing.Optional[float]:
+
+		"""The quantised variant's length in beats, from its grid, or None until it bakes."""
+
 		result = lookup(sample_id)
 		if result is None or result.energy_profile is None:
 			return None
@@ -750,6 +759,9 @@ def _build_energy_profile_resolver (
 		return None
 
 	def _resolver (sample_id: int) -> typing.Optional[subsample.transform.GridEnergyProfile]:
+
+		"""The quantised variant's grid energy profile, or None until it bakes."""
+
 		result = lookup(sample_id)
 		if result is None:
 			return None
@@ -3187,17 +3199,17 @@ def load_midi_map (
 				f"(got {name!r}).  Quote it if the name is a number."
 			)
 
-		if isinstance(assignment_raw, dict):
-			# `one_shot` is a removed alias with its own migration error in
-			# _parse_mode — exclude it here so that clearer message fires instead
-			# of the generic unknown-key one.
-			unknown_keys = set(assignment_raw).difference(VALID_ASSIGNMENT_KEYS) - {"one_shot"}
-			if unknown_keys:
-				raise ValueError(
-					f"MIDI map assignment {name!r}: unknown key(s) "
-					f"{sorted(unknown_keys)}.  Valid keys: "
-					f"{sorted(VALID_ASSIGNMENT_KEYS)}."
-				)
+		# Every assignment is a mapping by now: _resolve_assignment_inheritance
+		# refused anything else.  `one_shot` is a removed alias with its own
+		# migration error in _parse_mode — exclude it here so that clearer
+		# message fires instead of the generic unknown-key one.
+		unknown_keys = set(assignment_raw).difference(VALID_ASSIGNMENT_KEYS) - {"one_shot"}
+		if unknown_keys:
+			raise ValueError(
+				f"MIDI map assignment {name!r}: unknown key(s) "
+				f"{sorted(unknown_keys)}.  Valid keys: "
+				f"{sorted(VALID_ASSIGNMENT_KEYS)}."
+			)
 
 		# Channel: user-facing 1-16 → mido 0-indexed.  An explicit value here is a
 		# deliberate statement that this entry sits apart from the rest of the
@@ -4227,6 +4239,9 @@ def _collect_mapped_ccs (
 	ccs: set[int] = set()
 
 	def _scan_process (process: subsample.query.ProcessSpec) -> None:
+
+		"""Add the CC number of every knob a process chain binds."""
+
 		for step in process.steps:
 			for _, value in step.params:
 				if isinstance(value, subsample.query.CcBinding):
@@ -4266,6 +4281,9 @@ def _uses_quantize (
 	"""
 
 	def _quantizes (process: subsample.query.ProcessSpec) -> bool:
+
+		"""Whether a process chain quantises to the session tempo."""
+
 		return process.has_stretch_quantize() or process.has_pad_quantize()
 
 	for entries in note_map.values():
@@ -4295,6 +4313,9 @@ def _uses_beat_filter (
 	"""
 
 	def _filters_by_beats (select: tuple["subsample.query.SelectSpec", ...]) -> bool:
+
+		"""Whether any select in the chain filters on duration_beats."""
+
 		return any(not spec.where.duration_beats.is_empty() for spec in select)
 
 	for entries in note_map.values():
@@ -4389,6 +4410,12 @@ class MidiPlayer:
 		zone_templates: tuple[ZoneTemplate, ...] = (),
 	) -> None:
 
+		"""Hold the player's libraries, rules and output settings; nothing opens until run().
+
+		sample_rate and bit_depth are the capture format, which the output
+		follows wherever output_sample_rate or output_bit_depth is unset.
+		"""
+
 		self._device_name        = device_name
 		self._shutdown_event     = shutdown_event
 		self._instrument_library = instrument_library
@@ -4401,7 +4428,6 @@ class MidiPlayer:
 		# the directly-passed instances (single-directory backward compat).
 		self._bank_manager       = bank_manager
 		self._sample_rate        = sample_rate
-		self._bit_depth          = bit_depth
 		self._output_device_name = output_device_name
 
 		# Output format for the playback stream.  Both default to the capture
@@ -4791,18 +4817,27 @@ class MidiPlayer:
 
 	@property
 	def _effective_instrument_library (self) -> subsample.library.InstrumentLibrary:
+
+		"""The active program's library, or the one library without programs."""
+
 		if self._bank_manager is not None:
 			return self._bank_manager.active_bank.instrument_library
 		return self._instrument_library
 
 	@property
 	def _effective_similarity_matrix (self) -> subsample.similarity.SimilarityMatrix:
+
+		"""The active program's similarity matrix, or the one matrix without programs."""
+
 		if self._bank_manager is not None:
 			return self._bank_manager.active_bank.similarity_matrix
 		return self._similarity_matrix
 
 	@property
 	def _effective_transform_manager (self) -> typing.Optional[subsample.transform.TransformManager]:
+
+		"""The active program's transform pipeline, or the one pipeline without programs."""
+
 		if self._bank_manager is not None:
 			tm: typing.Any = self._bank_manager.active_bank.transform_manager
 			return typing.cast(typing.Optional[subsample.transform.TransformManager], tm)
@@ -5852,6 +5887,9 @@ class MidiPlayer:
 		override = assignment.loop     # query.LoopSpec in seconds/ms, or None
 
 		def resolve_frames (ov_seconds: typing.Optional[float], auto_frames: typing.Optional[int]) -> typing.Optional[int]:
+
+			"""A loop point in output frames: the map's override if it has one, else the found loop's, rescaled."""
+
 			if ov_seconds is not None:
 				return round(ov_seconds * sr_out)
 			if auto_frames is not None:
@@ -6987,6 +7025,8 @@ class MidiPlayer:
 			routing: typing.Optional[tuple[int, ...]],
 			label:   str,
 		) -> typing.Optional[tuple[int, ...]]:
+
+			"""The routing, or None (default routing) with a warning if it names a channel the device lacks."""
 
 			if routing is None:
 				return None

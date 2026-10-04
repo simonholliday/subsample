@@ -57,10 +57,16 @@ _CRACKLE_TAU: typing.Final[float] = 0.9e-3    # sferic IF-ring decay
 # ---------------------------------------------------------------------------
 
 def _t (n: int, sr: float) -> numpy.ndarray:
+
+	"""The time of each of n samples at sr, in seconds, from 0."""
+
 	return numpy.arange(n, dtype=numpy.float64) / sr
 
 
 def _analytic (x: numpy.ndarray) -> numpy.ndarray:
+
+	"""The analytic signal of x (its Hilbert transform as the imaginary part), in float64."""
+
 	# ⓒ Buffers shorter than ~10 frames make the zero-phase filters below
 	# raise (sosfiltfilt padlen).  That is out of contract by design: no
 	# capture or pipeline path produces sub-10-frame audio, and guarding
@@ -69,7 +75,9 @@ def _analytic (x: numpy.ndarray) -> numpy.ndarray:
 
 
 def _resample (x: numpy.ndarray, orig_sr: float, target_sr: float) -> numpy.ndarray:
+
 	"""1-D resample via the same high-quality SoX path the pipeline uses."""
+
 	if int(orig_sr) == int(target_sr):
 		return numpy.asarray(x, dtype=numpy.float64)
 	return numpy.asarray(
@@ -84,7 +92,9 @@ def _resample (x: numpy.ndarray, orig_sr: float, target_sr: float) -> numpy.ndar
 
 
 def _fit_length (x: numpy.ndarray, n: int) -> numpy.ndarray:
+
 	"""Pad/trim to exactly n samples (resampling and diff() drift by ±1)."""
+
 	if len(x) == n:
 		return x
 	if len(x) > n:
@@ -97,30 +107,38 @@ def _fit_length (x: numpy.ndarray, n: int) -> numpy.ndarray:
 # ---------------------------------------------------------------------------
 
 def am_mod (msg: numpy.ndarray, fc: float, sr: float, index: float = _AM_INDEX) -> numpy.ndarray:
+
 	"""Double-sideband full-carrier AM: (1 + m*x)*cos(2*pi*fc*t).  msg already
 	normalised to [-1, 1] by the caller (shared norm preserves L/R balance)."""
+
 	return (1.0 + index * msg) * numpy.cos(2.0 * numpy.pi * fc * _t(len(msg), sr))
 
 
 def am_diode_demod (s: numpy.ndarray, sr: float, fcut: float = 5000.0) -> numpy.ndarray:
+
 	"""Diode envelope detector: rectify, then low-pass (1/fc << 1/fcut << 1/fm).
 	The authentic cheap-AM detector — rectification + carrier ripple + fade
 	distortion — NOT the idealised abs(hilbert) magnitude."""
+
 	sos = scipy.signal.butter(4, fcut, btype="low", fs=sr, output="sos")
 	env = scipy.signal.sosfiltfilt(sos, numpy.abs(numpy.asarray(s, dtype=numpy.float64)))
 	return env - numpy.mean(env)
 
 
 def fm_mod (msg: numpy.ndarray, fc: float, sr: float, dev: float = _FM_DEV_HZ) -> numpy.ndarray:
+
 	"""Narrowband FM: cos(2*pi*fc*t + 2*pi*dev*integral(msg))."""
+
 	phase = 2.0 * numpy.pi * fc * _t(len(msg), sr) + 2.0 * numpy.pi * dev * numpy.cumsum(msg) / sr
 	return numpy.cos(phase)
 
 
 def fm_discriminator (s: numpy.ndarray) -> numpy.ndarray:
+
 	"""Ideal polar FM discriminator: instantaneous frequency from the analytic
 	signal's phase derivative.  Channel noise through this produces the genuine
 	+6 dB/oct triangular spectrum and the threshold clicks."""
+
 	ph = numpy.unwrap(numpy.angle(_analytic(s)))
 	f = numpy.diff(ph)
 	f = numpy.concatenate([f[:1], f])      # pad first sample to preserve length
@@ -128,19 +146,23 @@ def fm_discriminator (s: numpy.ndarray) -> numpy.ndarray:
 
 
 def deemphasis (x: numpy.ndarray, sr: float, tau: float = _DEEMPH_TAU) -> numpy.ndarray:
+
 	"""Standard one-pole FM de-emphasis (pole at exp(-1/(tau*sr)), unity DC
 	gain).  750 us is the land-mobile NFM constant; applied without TX
 	pre-emphasis it is an authentic "lo-fi tilt" that rolls off the
 	discriminator's rising hiss and gives the dull two-way-radio timbre.
 	(A full pre/de-emphasis pair — flat signal, shaped noise — is a deferred
 	refinement; the un-fakeable FM character is the discriminator noise itself.)"""
+
 	x = numpy.asarray(x, dtype=numpy.float64)
 	p = float(numpy.exp(-1.0 / (tau * sr)))
 	return scipy.signal.lfilter([1.0 - p], [1.0, -p], x)
 
 
 def ssb_mod (msg: numpy.ndarray, fc: float, sr: float, sideband: str = "usb") -> numpy.ndarray:
+
 	"""Phasing-method SSB, suppressed carrier (USB by default)."""
+
 	z = _analytic(msg)
 	t = _t(len(msg), sr)
 	if sideband == "lsb":
@@ -149,8 +171,10 @@ def ssb_mod (msg: numpy.ndarray, fc: float, sr: float, sideband: str = "usb") ->
 
 
 def ssb_demod (s: numpy.ndarray, fc: float, sr: float, lp: float = 4000.0) -> numpy.ndarray:
+
 	"""Coherent product detector with a free-running BFO at fc.  A non-zero
 	offset in fc is a constant-Hz frequency shift (the mistuned 'Donald Duck')."""
+
 	t = _t(len(s), sr)
 	base = numpy.real(_analytic(s) * numpy.exp(-1j * 2.0 * numpy.pi * fc * t))
 	sos = scipy.signal.butter(8, lp, btype="low", fs=sr, output="sos")
@@ -158,9 +182,11 @@ def ssb_demod (s: numpy.ndarray, fc: float, sr: float, lp: float = 4000.0) -> nu
 
 
 def freq_shift (x: numpy.ndarray, shift_hz: float, sr: float) -> numpy.ndarray:
+
 	"""Bode / single-sideband frequency shift: adds a constant Hz to every
 	component (harmonic ratios break — NOT a pitch shift).  Same physics as a
 	mistuned SSB receiver and the Moog/Bode studio shifter."""
+
 	z = _analytic(x)
 	return numpy.real(z * numpy.exp(1j * 2.0 * numpy.pi * shift_hz * _t(len(x), sr)))
 
@@ -172,9 +198,11 @@ def freq_shift_lfo (
 	rate:  float,
 	depth: float,
 ) -> numpy.ndarray:
+
 	"""Frequency shift whose amount drifts: shift(t) = base + depth*sin(2*pi*rate*t).
 	Phase is the INTEGRAL of the instantaneous shift, i.e. a true continuous
 	oscillator drift (microphonic / BFO warble), not chopped re-shifting."""
+
 	t = _t(len(x), sr)
 	shift_inst = base + depth * numpy.sin(2.0 * numpy.pi * rate * t)
 	phase = 2.0 * numpy.pi * numpy.cumsum(shift_inst) / sr
@@ -191,8 +219,10 @@ def channel_filter (
 	bandwidth: typing.Optional[float],
 	sr:        float,
 ) -> numpy.ndarray:
+
 	"""Per-mode transmit/IF band-limit.  am/lw keep the lows (steep low-pass);
 	fm/ssb are the band-passed 'comms' band.  `bandwidth` overrides the top."""
+
 	msg = numpy.asarray(msg, dtype=numpy.float64)
 
 	# Bandwidth is validated at MIDI-map parse time and clamped for CC
@@ -221,8 +251,10 @@ def gaussian_hiss (
 	carrier_ref: float,
 	rng:         numpy.random.Generator,
 ) -> numpy.ndarray:
+
 	"""White thermal hiss scaled by a carrier-to-noise ratio derived from the
 	`signal` (weak-signal) amount.  signal 0 -> clean, 1 -> buried."""
+
 	cnr_db = 40.0 - 38.0 * float(numpy.clip(signal, 0.0, 1.0))
 	noise_std = carrier_ref * (10.0 ** (-cnr_db / 20.0))
 	return numpy.asarray(noise_std * rng.standard_normal(n), dtype=numpy.float64)
@@ -236,9 +268,11 @@ def crackle (
 	carrier_hz:  float,
 	rng:         numpy.random.Generator,
 ) -> numpy.ndarray:
+
 	"""Atmospheric static (QRN): Poisson arrivals x heavy-tailed (log-normal)
 	amplitude x damped-sinusoid IF ring, with a soft tanh front-end cap so the
 	intensity knob stays monotone.  Density-led: rate spans 3..1200 events/s."""
+
 	intensity = float(numpy.clip(intensity, 0.0, 1.0))
 	rate = 3.0 * (1200.0 / 3.0) ** intensity
 	amp_scale = 1.0 + 2.0 * max(0.0, intensity - 0.7)
@@ -262,7 +296,9 @@ def crackle (
 
 
 def _slow_lfo (n: int, sr: float, rate_hz: float, rng: numpy.random.Generator) -> numpy.ndarray:
+
 	"""A unit-scaled, band-limited slow random signal (~rate_hz) for fading."""
+
 	white = rng.standard_normal(n)
 	sos = scipy.signal.butter(2, rate_hz, btype="low", fs=sr, output="sos")
 	slow = scipy.signal.sosfiltfilt(sos, white)
@@ -275,10 +311,12 @@ def selective_fade (
 	amount: float,
 	rng:    numpy.random.Generator,
 ) -> numpy.ndarray:
+
 	"""Shortwave selective fading: a moving frequency-selective comb (delayed
 	copies with slow random phase walks) plus a slow amplitude fade.  Applied
 	to the on-air signal pre-demod, so the demodulator misbehaves authentically
 	when the carrier notches deeper than the sidebands."""
+
 	amount = float(numpy.clip(amount, 0.0, 1.0))
 	z = _analytic(s)
 	n = len(s)
@@ -293,9 +331,11 @@ def selective_fade (
 
 
 def agc (x: numpy.ndarray, sr: float, target: float = 0.3, win_s: float = 0.12) -> numpy.ndarray:
+
 	"""Automatic gain control: hold the recovered level roughly constant so the
 	noise floor SWELLS as the carrier fades (a fading station swims in rising
 	hiss).  Peak-following with a smoothing window (cf. real receiver AGC)."""
+
 	x = numpy.asarray(x, dtype=numpy.float64)
 	w = max(1, int(win_s * sr))
 	env = numpy.abs(x)
@@ -311,12 +351,17 @@ def agc (x: numpy.ndarray, sr: float, target: float = 0.3, win_s: float = 0.12) 
 # ---------------------------------------------------------------------------
 
 def _dc_block (x: numpy.ndarray, sr: float) -> numpy.ndarray:
+
+	"""Remove DC and sub-audio drift with a zero-phase 10 Hz high-pass."""
+
 	sos = scipy.signal.butter(2, 10.0, btype="high", fs=sr, output="sos")
 	return scipy.signal.sosfiltfilt(sos, numpy.asarray(x, dtype=numpy.float64))
 
 
 def _soft_ceiling (x: numpy.ndarray, ceil: float = 0.99) -> numpy.ndarray:
+
 	"""Tanh soft ceiling so no combination emits a full-scale scream."""
+
 	peak = float(numpy.max(numpy.abs(x)))
 	if peak <= ceil:
 		return x
@@ -324,10 +369,12 @@ def _soft_ceiling (x: numpy.ndarray, ceil: float = 0.99) -> numpy.ndarray:
 
 
 def _max_windowed_rms (energy: numpy.ndarray, sr: float, win_s: float = 0.05) -> float:
+
 	"""RMS of the loudest `win_s` window, from per-sample energy (x^2).
 
 	O(n) via a cumulative sum; buffers shorter than one window fall back to
 	the whole-buffer RMS."""
+
 	w = max(1, int(win_s * sr))
 
 	if len(energy) <= w:
@@ -342,6 +389,9 @@ def _max_windowed_rms (energy: numpy.ndarray, sr: float, win_s: float = 0.05) ->
 # ---------------------------------------------------------------------------
 
 def _modulate (msg: numpy.ndarray, mode: str, sr: float) -> numpy.ndarray:
+
+	"""Put msg on the carrier the mode transmits with: FM, SSB, or AM for am and lw."""
+
 	if mode == "fm":
 		return fm_mod(msg, _CARRIER_HZ, sr)
 	if mode == "ssb":
@@ -350,8 +400,10 @@ def _modulate (msg: numpy.ndarray, mode: str, sr: float) -> numpy.ndarray:
 
 
 def _demodulate (s: numpy.ndarray, mode: str, demod: str, tune: float, sr: float) -> numpy.ndarray:
+
 	"""Resolve the receive demodulator.  `matched` uses the mode's natural
 	detector; an explicit demod ≠ mode is the deliberate 'wrong demodulator'."""
+
 	use = demod
 	if use == "matched":
 		use = "fm" if mode == "fm" else ("ssb" if mode == "ssb" else "am")
@@ -381,9 +433,11 @@ def _receive_one (
 	hiss_seed:  int,
 	shared_seed: int,
 ) -> numpy.ndarray:
+
 	"""Full single-channel receiver: oversample -> band-limit -> modulate ->
 	(pre-demod impairments) -> demodulate -> AGC -> decimate.  Returns audio at
 	`sr`, length == len(msg)."""
+
 	n = len(msg)
 	os_sr = sr * _OVERSAMPLE
 	msg_os = _resample(msg, sr, os_sr)
@@ -428,10 +482,12 @@ def render_radio (
 	stereo:    str,
 	mix:       float,
 ) -> numpy.ndarray:
+
 	"""Composite radio effect on (n_frames, channels) float32.  Returns the same
 	shape.  Default `stereo='mono'` collapses to a single authentic receiver and
 	copies it to every channel; `stereo='stereo'` runs each channel as its own
 	receiver sharing one sky (independent hiss, shared crackle/fade)."""
+
 	audio = numpy.asarray(audio, dtype=numpy.float64)
 	n_frames, channels = audio.shape
 
@@ -487,7 +543,9 @@ def render_radio (
 def render_freqshift (
 	audio: numpy.ndarray, sample_rate: int, *, shift_hz: float, mix: float,
 ) -> numpy.ndarray:
+
 	"""Standalone Bode/SSB frequency shifter (per channel, shared phase)."""
+
 	audio = numpy.asarray(audio, dtype=numpy.float64)
 	if mix <= 0.0 or shift_hz == 0.0:
 		return audio.astype(numpy.float32)
@@ -501,7 +559,9 @@ def render_freqshift (
 def render_wobble (
 	audio: numpy.ndarray, sample_rate: int, *, depth: float, rate: float, base: float, mix: float,
 ) -> numpy.ndarray:
+
 	"""Standalone oscillator-warble (LFO frequency drift), per channel."""
+
 	audio = numpy.asarray(audio, dtype=numpy.float64)
 	if mix <= 0.0 or (depth == 0.0 and base == 0.0):
 		return audio.astype(numpy.float32)
@@ -515,8 +575,10 @@ def render_wobble (
 def _finish (
 	wet: numpy.ndarray, dry: numpy.ndarray, sr: float, mix: float,
 ) -> numpy.ndarray:
+
 	"""Shared tail: NaN-scrub -> per-channel DC-block -> level-match to dry ->
 	wet/dry blend -> soft ceiling.  Returns float32 (n_frames, channels)."""
+
 	wet = numpy.nan_to_num(numpy.asarray(wet, dtype=numpy.float64), nan=0.0, posinf=0.0, neginf=0.0)
 	for c in range(wet.shape[1]):
 		wet[:, c] = _dc_block(wet[:, c], sr)

@@ -404,7 +404,8 @@ class BankManager:
 
 			if old_program in new_map:
 				self._active = new_map[old_program]
-			elif new_map:
+			else:
+				# new_map is never empty: an empty list was refused above.
 				first = new_map[min(new_map)]
 				self._active = first
 				_log.info(

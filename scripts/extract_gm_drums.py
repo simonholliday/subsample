@@ -228,6 +228,8 @@ def _analyze_and_save (wav_path: pathlib.Path) -> bool:
 
 def main () -> None:
 
+	"""Render each General MIDI drum note from a SoundFont, analyse it, and copy its sidecar into the package data."""
+
 	if shutil.which("fluidsynth") is None:
 		sys.exit("fluidsynth not found.  Install it:  apt install fluidsynth")
 

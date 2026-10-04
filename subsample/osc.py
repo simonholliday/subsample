@@ -56,6 +56,8 @@ class OscEventSender:
 
 	def __init__ (self, host: str = "127.0.0.1", port: int = 9000) -> None:
 
+		"""Send to host:port over UDP; python-osc is needed from here."""
+
 		import pythonosc.udp_client
 
 		self._client = pythonosc.udp_client.SimpleUDPClient(host, port)

@@ -1749,6 +1749,9 @@ def format_level_result (result: LevelResult) -> str:
 	"""
 
 	def _dbfs (v: float) -> str:
+
+		"""A linear level as dBFS text, -inf for silence."""
+
 		if v <= 0.0:
 			return "-infdBFS"
 		return f"{20.0 * math.log10(v):.1f}dBFS"

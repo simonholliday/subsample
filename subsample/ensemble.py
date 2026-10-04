@@ -67,9 +67,9 @@ class MapInclude:
 
 
 def parse_map_includes (
-	raw:              typing.Any,
-	ensemble_dir:  pathlib.Path,
-	definitions:      typing.Optional[subsample.definitions.Definitions] = None,
+	raw:          typing.Any,
+	ensemble_dir: pathlib.Path,
+	definitions:  typing.Optional[subsample.definitions.Definitions] = None,
 ) -> list[MapInclude]:
 
 	"""Parse the ``maps:`` key of a MIDI map into MapInclude objects.
@@ -78,12 +78,12 @@ def parse_map_includes (
 	mapping with ``map`` and an optional ``channel``.
 
 	Args:
-		raw:             Value of the ``maps:`` key from the parsed YAML.
+		raw:          Value of the ``maps:`` key from the parsed YAML.
 		ensemble_dir: Directory of the ensemble file; include paths resolve
-		                 against it.
-		definitions:     The ensemble's mounted definitions, so ``channel:``
-		                 may be a name from the file's ``channels:`` section
-		                 (``channel: my.kit``).
+		              against it.
+		definitions:  The ensemble's mounted definitions, so ``channel:``
+		              may be a name from the file's ``channels:`` section
+		              (``channel: my.kit``).
 
 	Returns:
 		Ordered list of MapInclude.  Empty when raw is None or an empty list.

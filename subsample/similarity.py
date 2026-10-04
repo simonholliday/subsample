@@ -92,50 +92,15 @@ class SimilarityScore:
 	score: float
 
 
-def score_against_library (
-	record:  subsample.library.SampleRecord,
-	library: subsample.library.ReferenceLibrary,
-	cfg:     subsample.config.SimilarityConfig,
-) -> list[SimilarityScore]:
-
-	"""Compare a sample record against every reference sample.
-
-	Computes cosine similarity between the given record's composite feature
-	vector and each reference sample's feature vector. Returns scores sorted
-	by similarity descending so the best match appears first.
-
-	Args:
-		record:  The newly recorded sample (spectral + timbre data used).
-		library: Reference library loaded at startup.
-		cfg:     Similarity weights controlling each feature group's influence.
-
-	Returns:
-		List of SimilarityScore, sorted descending by score.
-		Empty if the library is empty.
-	"""
-
-	query = _build_feature_vector(record, cfg)
-
-	scores = [
-		SimilarityScore(
-			name  = ref.name,
-			score = _cosine_similarity(query, _build_feature_vector(ref, cfg)),
-		)
-		for ref in library.samples()
-	]
-
-	# Sort best match first so the first element is always the closest reference
-	return sorted(scores, key=lambda s: s.score, reverse=True)
-
-
 def format_similarity_scores (scores: list[SimilarityScore]) -> str:
 
 	"""Format similarity scores as a single compact log string.
 
 	Example output: "KICK 0.94  SNARE 0.61  HAT 0.22"
 
-	Scores are expected to already be sorted (best match first) by
-	score_against_library(). Returns an empty string if scores is empty.
+	Scores are expected to already be sorted (best match first), as
+	SimilarityMatrix.get_scores() returns them. Returns an empty string if
+	scores is empty.
 	"""
 
 	if not scores:
@@ -178,6 +143,8 @@ class SimilarityMatrix:
 		reference_library: subsample.library.ReferenceLibrary,
 		similarity_cfg:    subsample.config.SimilarityConfig,
 	) -> None:
+
+		"""An empty matrix ranked against these references, with no samples scored yet."""
 
 		self._lock = threading.Lock()
 		self._similarity_cfg = similarity_cfg
@@ -442,8 +409,7 @@ class SimilarityMatrix:
 
 		"""Return similarity scores of one instrument against all references.
 
-		Uses cached scores — no recomputation. Equivalent to
-		score_against_library() but reads from the matrix.
+		Uses cached scores — no recomputation.
 
 		Args:
 			sample_id: Instrument sample ID (must have been added via add() or
@@ -471,6 +437,8 @@ class SimilarityMatrix:
 			return len(self._scores)
 
 	def __repr__ (self) -> str:
+
+		"""How many references and samples the matrix holds, for a log line."""
 
 		with self._lock:
 			n_refs = len(self._rankings)
@@ -717,6 +685,9 @@ def _connected_components (n: int, edges: list[tuple[int, int]]) -> list[list[in
 	parent = list(range(n))
 
 	def find (x: int) -> int:
+
+		"""The root of x's group, compressing the path to it on the way."""
+
 		# Iterative find with path compression (recursion would risk a deep
 		# stack on a long single-linkage chain).
 		root = x

@@ -184,9 +184,13 @@ class ReferenceLibrary:
 
 	def __len__ (self) -> int:
 
+		"""How many references the library holds."""
+
 		return len(self._index)
 
 	def __repr__ (self) -> str:
+
+		"""The references' names, for a log line."""
 
 		names = ", ".join(self.names())
 		return f"ReferenceLibrary({len(self)} sample(s): {names})"
@@ -465,9 +469,13 @@ class InstrumentLibrary:
 
 	def __len__ (self) -> int:
 
+		"""How many samples are resident."""
+
 		return len(self._index)
 
 	def __repr__ (self) -> str:
+
+		"""How many samples are resident and the memory they take, for a log line."""
 
 		used_mb = self._total_bytes / (1024 * 1024)
 		limit_mb = self._max_bytes / (1024 * 1024)

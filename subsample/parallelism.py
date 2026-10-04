@@ -20,6 +20,7 @@ pools share, so they behave consistently:
     slower, not faster, and needlessly jittery next to a live audio thread.
     Each worker is pinned to a single BLAS thread.
 """
+
 import concurrent.futures
 import contextlib
 import logging

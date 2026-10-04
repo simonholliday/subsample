@@ -122,11 +122,15 @@ class AudioConfig:
 @dataclasses.dataclass(frozen=True)
 class BufferConfig:
 
+	"""The `recorder.buffer` section: how much recent audio the capture ring buffer holds."""
+
 	max_seconds: int
 
 
 @dataclasses.dataclass(frozen=True)
 class RecorderConfig:
+
+	"""The `recorder` section: live capture, its input format, buffer and where recordings go."""
 
 	audio: AudioConfig
 	buffer: BufferConfig
@@ -152,6 +156,8 @@ class RecorderConfig:
 
 @dataclasses.dataclass(frozen=True)
 class PlayerAudioConfig:
+
+	"""The `player.audio` section: the output device and its format.  Unset values follow the recorder's."""
 
 	device: typing.Optional[str] = None
 	bit_depth: typing.Optional[int] = None
@@ -183,6 +189,8 @@ class PlayerAudioConfig:
 
 @dataclasses.dataclass(frozen=True)
 class PlayerConfig:
+
+	"""The `player` section: MIDI input, the map or maps it plays, and its output."""
 
 	audio: PlayerAudioConfig = dataclasses.field(default_factory=PlayerAudioConfig)
 	enabled: bool = False
@@ -276,6 +284,8 @@ class PlayerConfig:
 @dataclasses.dataclass(frozen=True)
 class DetectionConfig:
 
+	"""The `detection` section: when the level detector opens and closes a recording, and how it is trimmed."""
+
 	threshold_db: float
 	hold_seconds: float
 	warmup_seconds: float
@@ -334,6 +344,8 @@ class DetectionConfig:
 @dataclasses.dataclass(frozen=True)
 class AnalysisConfig:
 
+	"""The `analysis` section: the tempo priors every analysis of a sample uses."""
+
 	start_bpm: float = 120.0
 	"""Tempo prior for beat_track — the algorithm's initial BPM estimate.
 	Does not constrain the result; just biases the search."""
@@ -347,6 +359,8 @@ class AnalysisConfig:
 
 @dataclasses.dataclass(frozen=True)
 class SimilarityConfig:
+
+	"""The `similarity` section: how much each feature group weighs when sounds are compared."""
 
 	weight_spectral: float = 1.0
 	"""Weight applied to the spectral feature group (14 normalised [0, 1] values:
@@ -383,6 +397,8 @@ class SimilarityConfig:
 
 @dataclasses.dataclass(frozen=True)
 class LibraryConfig:
+
+	"""The `library` section: the samples loaded at start, their memory budget, and the watcher."""
 
 	max_memory_mb: float = 100.0
 	"""Maximum audio memory (MB) for in-memory instrument samples.
@@ -482,6 +498,8 @@ class TempoConfig:
 
 @dataclasses.dataclass(frozen=True)
 class TransformConfig:
+
+	"""The `transform` section: derived variants, their memory and disk budgets, and pitch fan-out."""
 
 	max_memory_mb: float = 50.0
 	"""Maximum memory (MB) for in-memory derivative audio (transform variants).
@@ -601,6 +619,8 @@ class AmbisonicConfig:
 
 @dataclasses.dataclass(frozen=True)
 class Config:
+
+	"""The whole of config.yaml, merged over config.yaml.default and validated, one dataclass per section."""
 
 	recorder: RecorderConfig
 	detection: DetectionConfig
@@ -946,23 +966,37 @@ class _KeyTracker (dict[str, typing.Any]):
 
 	def __init__ (self, raw: dict[str, typing.Any], label: str) -> None:
 
+		"""Wrap one section's raw mapping; `label` names it in the warning."""
+
 		super().__init__(raw)
 		self.label = label
 		self.accessed: set[str] = set()
 
 	def get (self, key: typing.Any, default: typing.Any = None) -> typing.Any:
+
+		"""dict.get, recording that the key was read."""
+
 		self.accessed.add(key)
 		return super().get(key, default)
 
 	def __getitem__ (self, key: typing.Any) -> typing.Any:
+
+		"""dict lookup, recording that the key was read."""
+
 		self.accessed.add(key)
 		return super().__getitem__(key)
 
 	def __contains__ (self, key: typing.Any) -> bool:
+
+		"""Membership, which also counts as reading the key: a check for it is a use."""
+
 		self.accessed.add(key)
 		return super().__contains__(key)
 
 	def unknown_keys (self) -> list[str]:
+
+		"""The keys the YAML held that nothing read, in order, for the warning."""
+
 		return sorted(set(self.keys()) - self.accessed)
 
 

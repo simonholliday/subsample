@@ -29,6 +29,8 @@ class EventEmitter:
 
 	def __init__ (self) -> None:
 
+		"""An emitter with no subscribers."""
+
 		self._handlers: dict[str, list[typing.Callable[..., None]]] = {}
 		self._lock:     threading.Lock = threading.Lock()
 

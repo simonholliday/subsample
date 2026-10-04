@@ -3,6 +3,7 @@
 import dataclasses
 import hashlib
 import math
+import os
 import pathlib
 import unittest.mock
 import tempfile
@@ -933,44 +934,52 @@ class TestTransformManagerGetVariant:
 		assert cache.get(key) is not None             # promoted into memory
 		manager.shutdown()
 
-	def test_source_md5_memoised_across_lookups (self, tmp_path: pathlib.Path) -> None:
-		"""get_variant runs on the rtmidi thread — the full-buffer hash must
-		be computed once per sample, not once per miss."""
+	def test_source_md5_is_hashed_once_for_every_lookup_and_job (self, tmp_path: pathlib.Path) -> None:
 
-		manager, _cache, lib, _disk, _processor = self._make_stack(tmp_path)
+		"""get_variant runs on the rtmidi thread, and each worker job needs the
+		hash too: the manager memoised it, but every job hashed the whole
+		buffer again, 88 times for an 88-note repitch fan-out (L-26).  One
+		buffer is now hashed once, however many look-ups and jobs ask."""
+
+		manager, _cache, lib, _disk, processor = self._make_stack(tmp_path)
 		record = _make_record(sample_id=1)
 		lib.add(record)
 
 		with unittest.mock.patch(
 			"subsample.transform.hashlib.md5", wraps=hashlib.md5,
 		) as spy:
-			manager.get_variant(1, self._spec())
-			first = spy.call_count
-			manager.get_variant(1, subsample.transform.TransformSpec(
-				steps=(subsample.transform.Saturate(amount_db=3.0),),
-			))
+			for amount_db in (1.0, 2.0, 3.0, 4.0):
+				manager.get_variant(1, subsample.transform.TransformSpec(
+					steps=(subsample.transform.Saturate(amount_db=amount_db),),
+				))
 
-			# The manager itself must not have hashed again (worker threads
-			# may hash for the disk WRITE, so compare manager-side counts).
-			assert manager._md5_cache.get(1) is not None
-			assert first >= 1
+			manager.shutdown()
 
-		manager.shutdown()
+			source_hashes = [
+				call for call in spy.call_args_list
+				if call.args and call.args[0] == record.audio.tobytes()
+			]
 
-	def test_md5_cache_invalidated_on_evict_and_readd (self, tmp_path: pathlib.Path) -> None:
-		manager, _cache, lib, _disk, _processor = self._make_stack(tmp_path)
+		assert len(source_hashes) == 1
+		assert processor.audio_md5(record) == hashlib.md5(record.audio.tobytes()).hexdigest()
+
+	def test_a_source_md5_follows_the_buffer_not_the_id (self, tmp_path: pathlib.Path) -> None:
+
+		"""A sample re-added under its own id with new audio must be hashed
+		afresh, and its entry goes when it leaves the library."""
+
+		manager, _cache, lib, _disk, processor = self._make_stack(tmp_path)
 		record = _make_record(sample_id=1)
 		lib.add(record)
 
-		manager.get_variant(1, self._spec())
-		assert 1 in manager._md5_cache
+		first = processor.audio_md5(record)
+		louder = dataclasses.replace(record, audio=(record.audio + 100).astype(record.audio.dtype))
+
+		assert processor.audio_md5(louder) != first
+		assert processor.audio_md5(louder) == hashlib.md5(louder.audio.tobytes()).hexdigest()
 
 		manager.on_parent_evicted([1])
-		assert 1 not in manager._md5_cache
-
-		manager.get_variant(1, self._spec())
-		manager.on_sample_added(record)
-		assert 1 not in manager._md5_cache
+		assert 1 not in processor._audio_md5s
 
 		manager.shutdown()
 
@@ -1762,6 +1771,9 @@ class TestOnSampleAddedNoAutoStretch:
 			def enqueue (self, record: typing.Any, spec: subsample.transform.TransformSpec) -> None:
 				enqueued_specs.append(spec)
 
+			def forget_audio_md5 (self, sample_id: int) -> None:
+				pass
+
 		class _FakeCache:
 			def put (self, result: typing.Any) -> None:
 				pass
@@ -2240,7 +2252,7 @@ class TestLimit:
 		# Use enough frames to exceed the default 5 ms look-ahead (221 samples at 44.1 kHz).
 		audio = numpy.full((2000, 1), 0.01, dtype=numpy.float32)  # ~ -40 dBFS
 		record = _make_record(sample_id=1)
-		step = subsample.transform.Limit(threshold_db=-1.0)
+		step = subsample.transform.Limiter(threshold_db=-1.0)
 		result = subsample.transform._apply_limit(audio, 44100, record, step)
 		# Check the tail (past the look-ahead delay region).
 		numpy.testing.assert_allclose(result[300:], audio[300:], atol=1e-4)
@@ -2249,7 +2261,7 @@ class TestLimit:
 		"""Signal above threshold is brought down near the ceiling."""
 		audio = numpy.full((2000, 1), 0.9, dtype=numpy.float32)  # ~ -0.9 dBFS
 		record = _make_record(sample_id=1)
-		step = subsample.transform.Limit(threshold_db=-6.0, lookahead_ms=0.0)
+		step = subsample.transform.Limiter(threshold_db=-6.0, lookahead_ms=0.0)
 		result = subsample.transform._apply_limit(audio, 44100, record, step)
 		# After settling, the output should be substantially reduced.
 		output_peak = float(numpy.max(numpy.abs(result[-100:])))
@@ -2258,7 +2270,7 @@ class TestLimit:
 	def test_output_is_float32 (self) -> None:
 		audio = numpy.array([[0.5], [0.3]], dtype=numpy.float32)
 		record = _make_record(sample_id=1)
-		step = subsample.transform.Limit()
+		step = subsample.transform.Limiter()
 		result = subsample.transform._apply_limit(audio, 44100, record, step)
 		assert result.dtype == numpy.float32
 
@@ -2462,7 +2474,7 @@ class TestSpecFromProcess:
 			),
 		))
 		spec = subsample.transform.spec_from_process(process)
-		assert isinstance(spec.steps[0], subsample.transform.Limit)
+		assert isinstance(spec.steps[0], subsample.transform.Limiter)
 		assert spec.steps[0].threshold_db == -3.0
 		assert spec.steps[0].release_ms == 30.0
 		assert spec.steps[0].lookahead_ms == 10.0
@@ -2472,7 +2484,7 @@ class TestSpecFromProcess:
 			subsample.query.ProcessorStep(name="limit"),
 		))
 		spec = subsample.transform.spec_from_process(process)
-		assert isinstance(spec.steps[0], subsample.transform.Limit)
+		assert isinstance(spec.steps[0], subsample.transform.Limiter)
 		assert spec.steps[0].threshold_db == -1.0
 		assert spec.steps[0].lookahead_ms == 5.0
 
@@ -2815,6 +2827,46 @@ class TestVariantDiskCache:
 
 		files_after = list(tmp_path.glob("*.variant"))
 		assert len(files_after) <= 2
+
+	def test_a_write_under_budget_does_not_list_the_directory (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""Every write listed and statted the whole cache directory to learn
+		whether it was over budget, thousands of files once per render (L-26).
+		The first write measures it; later ones add their own size, and the
+		directory is listed again only when that reaches the budget.  Files
+		another Subsample wrote meanwhile are counted then."""
+
+		variant_bytes = 4410 * 2 * 4 + 32
+		cache = subsample.transform.VariantDiskCache(
+			directory=tmp_path, max_bytes=variant_bytes * 3 + 100, sample_rate=44100,
+		)
+		scans = 0
+		real_scandir = os.scandir
+
+		def counting_scandir (path: typing.Any) -> typing.Any:
+			nonlocal scans
+			scans += 1
+			return real_scandir(path)
+
+		monkeypatch.setattr(subsample.transform.os, "scandir", counting_scandir)
+
+		for note in (60, 62, 64):
+			result = self._make_result(midi_note=note)
+			cache.put("md5", result.key.spec, result)
+
+		assert scans == 1
+		assert len([name for name in os.listdir(tmp_path) if name.endswith(".variant")]) == 3   # listdir: glob would scan
+
+		# Another Subsample's file, unseen until the budget is reached.
+		(tmp_path / "other.variant").write_bytes(b"\x00" * variant_bytes)
+
+		result = self._make_result(midi_note=66)
+		cache.put("md5", result.key.spec, result)
+
+		assert scans == 2
+		assert sum(os.path.getsize(tmp_path / name) for name in os.listdir(tmp_path) if name.endswith(".variant")) <= variant_bytes * 3 + 100
 
 	def test_corrupt_file_deleted (self, tmp_path: pathlib.Path) -> None:
 		"""A file with bad magic bytes is deleted on read."""
@@ -4642,7 +4694,7 @@ class TestReviewRegressions:
 		# 200 frames < 220-sample (5 ms @ 44.1 kHz) default look-ahead window.
 		audio = numpy.full((200, 1), 0.9, dtype=numpy.float32)
 
-		step = subsample.transform.Limit(threshold_db=-6.0)   # default lookahead_ms=5.0
+		step = subsample.transform.Limiter(threshold_db=-6.0)   # default lookahead_ms=5.0
 		result = subsample.transform._apply_limit(audio, 44100, record, step)
 
 		assert result.shape == audio.shape
@@ -4729,7 +4781,7 @@ class TestLookAheadKeepsTiming:
 	SR = 44100
 
 	_STEPS = [
-		pytest.param(subsample.transform._apply_limit, subsample.transform.Limit(threshold_db=-6.0, lookahead_ms=5.0), id="limit"),
+		pytest.param(subsample.transform._apply_limit, subsample.transform.Limiter(threshold_db=-6.0, lookahead_ms=5.0), id="limit"),
 		pytest.param(subsample.transform._apply_compress, subsample.transform.Compress(threshold_db=-20.0, ratio=4.0, lookahead_ms=5.0), id="compress"),
 		pytest.param(subsample.transform._apply_gate, subsample.transform.Gate(threshold_db=-40.0, lookahead_ms=5.0), id="gate"),
 	]

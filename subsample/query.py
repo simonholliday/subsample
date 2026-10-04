@@ -171,6 +171,9 @@ class Range:
 	eq:  typing.Optional[float] = None
 
 	def contains (self, x: float) -> bool:
+
+		"""Whether x satisfies every bound set on this range."""
+
 		if self.eq  is not None and x != self.eq:  return False
 		if self.gte is not None and x <  self.gte: return False
 		if self.lte is not None and x >  self.lte: return False
@@ -1440,6 +1443,9 @@ def _break_ties (
 	"""
 
 	def key (entry: tuple[float, "subsample.library.SampleRecord"]) -> tuple[tuple[int, float], ...]:
+
+		"""The tie-break clauses' sort key for one (similarity, record) entry."""
+
 		_score, record = entry
 		parts: list[tuple[int, float]] = []
 
@@ -1612,6 +1618,9 @@ def query (
 	def _compose_key (
 		record: "subsample.library.SampleRecord",
 	) -> tuple[tuple[int, float], ...]:
+
+		"""One record's sort key across every order clause."""
+
 		parts: list[tuple[int, float]] = []
 		for ci, clause in enumerate(clauses):
 			score = scores[(ci, record.sample_id)]
@@ -2026,6 +2035,9 @@ def _parse_where (
 	# Range correspondence.  Empty Ranges (no operator set) default via
 	# default_factory on the dataclass.
 	def _range_for (field: str) -> Range:
+
+		"""The Range the map's operators build for one field, or an empty one."""
+
 		ops = range_kwargs[field]
 		return Range(**ops) if ops else Range()
 
@@ -2440,6 +2452,9 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 		# subclass of int, so reject it explicitly the same way the scalar
 		# form does.
 		def _is_bound (x: typing.Any) -> bool:
+
+			"""Whether x can end a pick range: a whole number, or null for open."""
+
 			return x is None or (isinstance(x, int) and not isinstance(x, bool))
 
 		if len(raw) != 2 or not all(_is_bound(x) for x in raw):
@@ -3197,6 +3212,9 @@ def parse_process (
 	steps: list[ProcessorStep] = []
 
 	def _check_processor_name (name: str) -> None:
+
+		"""Refuse a processor name nobody declared, in strict mode."""
+
 		if _STRICT_MODE and name not in _VALID_PROCESSOR_NAMES:
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: unknown processor "

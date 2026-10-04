@@ -916,6 +916,92 @@ def _run_recorder (
 		writer.shutdown()
 
 
+def _output_sample_rate (cfg: subsample.config.Config) -> int:
+
+	"""The rate the player's stream runs at: player.audio.sample_rate, or the recorder's when unset.
+
+	Samples are resampled to it as they load, variants are rendered at it, and
+	the banner reports it, so each reads it from here rather than working it out
+	again (L-24 of the 2026-09-21 review found four copies).
+	"""
+
+	if cfg.player.audio.sample_rate is not None:
+		return cfg.player.audio.sample_rate
+
+	return cfg.recorder.audio.sample_rate
+
+
+def _build_transform_manager (
+	cfg:                subsample.config.Config,
+	instrument_library: subsample.library.InstrumentLibrary,
+	output_sample_rate: int,
+	program:            typing.Optional[str] = None,
+) -> subsample.transform.TransformManager:
+
+	"""Build the transform pipeline for one library: its caches, its worker pool and its manager.
+
+	The workers are running once this returns, so the manager's shutdown is
+	registered as a teardown, for a Ctrl+C during the rest of startup.  A
+	program's name, when given, labels its idle log line; the disk cache is
+	announced only for the single library, since every program shares it.
+	"""
+
+	transform_cache = subsample.transform.TransformCache(
+		max_memory_bytes=int(cfg.transform.max_memory_mb * 1024 * 1024),
+	)
+	label = f" [{program}]" if program is not None else ""
+
+	def _on_transform_complete (result: subsample.transform.TransformResult) -> None:
+
+		"""Keep a finished render in the memory cache."""
+
+		transform_cache.put(result)
+
+	def _on_transform_idle (completed: int) -> None:
+
+		"""Log the cache's size each time the render queue empties."""
+
+		_log.info(
+			"Transform queue idle%s - %d variant(s) processed  [cache: %s]",
+			label, completed, transform_cache.format_memory(),
+		)
+
+	variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None
+
+	if cfg.transform.variant_cache_dir and cfg.transform.max_disk_mb > 0:
+		variant_disk_cache = subsample.transform.VariantDiskCache(
+			directory=pathlib.Path(cfg.transform.variant_cache_dir),
+			max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
+			sample_rate=output_sample_rate,
+		)
+
+		if program is None:
+			_log.info(
+				"Variant disk cache: %s (max %.0f MB)",
+				cfg.transform.variant_cache_dir, cfg.transform.max_disk_mb,
+			)
+
+	transform_processor = subsample.transform.TransformProcessor(
+		sample_rate=cfg.recorder.audio.sample_rate,
+		output_sample_rate=output_sample_rate,
+		on_complete=_on_transform_complete,
+		on_idle=_on_transform_idle,
+		disk_cache=variant_disk_cache,
+	)
+
+	transform_manager = subsample.transform.TransformManager(
+		cache=transform_cache,
+		processor=transform_processor,
+		instrument_library=instrument_library,
+		cfg=cfg.transform,
+		disk_cache=variant_disk_cache,
+	)
+
+	_register_teardown(transform_manager.shutdown)
+
+	return transform_manager
+
+
 def _load_bank (
 	defn: subsample.bank.BankDefinition,
 	preset: typing.Optional[subsample.player.MidiMapResult],
@@ -990,49 +1076,9 @@ def _load_bank (
 	if len(instrument_library) > 0:
 		similarity_matrix.bulk_add(instrument_library.samples())
 
-	# Transform pipeline (per-bank).
-	max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
-
-	transform_cache = subsample.transform.TransformCache(
-		max_memory_bytes=max_transform_bytes,
-	)
-
-	def _on_transform_complete (result: subsample.transform.TransformResult) -> None:
-		transform_cache.put(result)
-
-	def _on_transform_idle (completed: int) -> None:
-		_log.info(
-			"Transform queue idle [%s] - %d variant(s) processed  [cache: %s]",
-			defn.name, completed, transform_cache.format_memory(),
-		)
-
-	variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None
-	if cfg.transform.variant_cache_dir and cfg.transform.max_disk_mb > 0:
-		variant_disk_cache = subsample.transform.VariantDiskCache(
-			directory=pathlib.Path(cfg.transform.variant_cache_dir),
-			max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
-			sample_rate=output_sample_rate,
-		)
-
-	transform_processor = subsample.transform.TransformProcessor(
-		sample_rate=cfg.recorder.audio.sample_rate,
-		output_sample_rate=output_sample_rate,
-		on_complete=_on_transform_complete,
-		on_idle=_on_transform_idle,
-		disk_cache=variant_disk_cache,
-	)
-
-	transform_manager = subsample.transform.TransformManager(
-		cache=transform_cache,
-		processor=transform_processor,
-		instrument_library=instrument_library,
-		cfg=cfg.transform,
-		disk_cache=variant_disk_cache,
-	)
-
-	# One pool per bank, each running from here, so each gets its own teardown
-	# for a Ctrl+C during the rest of startup.
-	_register_teardown(transform_manager.shutdown)
+	# Transform pipeline (per-bank).  One pool per bank, each running from
+	# here, so each gets its own teardown for a Ctrl+C during startup.
+	transform_manager = _build_transform_manager(cfg, instrument_library, output_sample_rate, defn.name)
 
 	# For a `map:` preset, populate the (empty) library + similarity matrix
 	# from the preset's own path / directory references — these resolve
@@ -1216,12 +1262,7 @@ def _start_player (
 		# Single-bank mode: use the global similarity matrix
 		matrices.append(similarity_matrix)
 
-	# Resolve the effective output sample rate for resampling loaded samples.
-	effective_output_sr = (
-		cfg.player.audio.sample_rate
-		if cfg.player.audio.sample_rate is not None
-		else cfg.recorder.audio.sample_rate
-	)
+	effective_output_sr = _output_sample_rate(cfg)
 
 	# Resolve path references and run the post-parse validators inside one
 	# guard: each can raise a ValueError (or a file OSError) that would
@@ -1255,76 +1296,33 @@ def _start_player (
 	# MidiPlayer.run() will open the named virtual port with virtual=True.
 	if cfg.player.virtual_midi_port is not None:
 		print(f"  MIDI input   : virtual port \"{cfg.player.virtual_midi_port}\"")
-		player = subsample.player.MidiPlayer(
-			"",
-			shutdown_event,
-			instrument_library=instrument_library,
-			similarity_matrix=similarity_matrix,
-			midi_map=midi_map,
-			sample_rate=cfg.recorder.audio.sample_rate,
-			bit_depth=cfg.recorder.audio.bit_depth,
-			output_device_name=cfg.player.audio.device,
-			output_bit_depth=cfg.player.audio.bit_depth,
-			output_sample_rate=cfg.player.audio.sample_rate,
-			transform_manager=transform_manager,
-			virtual_midi_port=cfg.player.virtual_midi_port,
-			max_polyphony=cfg.player.max_polyphony,
-			limiter_threshold_db=cfg.player.limiter_threshold_db,
-			limiter_ceiling_db=cfg.player.limiter_ceiling_db,
-			bank_manager=bank_manager,
-			target_bpm=cfg.tempo.bpm,
-			tempo_source=cfg.tempo.source,
-			output_channels=cfg.player.audio.channels,
-			ambisonic_config=cfg.ambisonic,
-			buffer_frames=cfg.player.audio.buffer_frames,
-			zone_templates=midi_map_result.zone_templates,
-		)
-		player_cell[0] = player
-
-		try:
-			# update_pitched_assignments materialises zones and rebuilds the
-			# candidate cache; a map error deferred past parse (e.g. `order:
-			# similarity` with no reference) surfaces here, so it must sit
-			# inside the guard alongside run().
-			_apply_active_preset_rules(player, bank_manager)
-			player.update_pitched_assignments()
-			player.run()
-		except (ValueError, OSError) as exc:
-			# OSError covers PortAudio rejecting the device/format and mido
-			# failing to bind the port — catch it so a device-open failure prints
-			# a clean message instead of escaping this thread target as a raw
-			# traceback.  Returning ends the thread; the main loop notices all
-			# subsystem threads have stopped and exits (see the wait loop) rather
-			# than parking on shutdown_event forever.
-			print(f"\nError starting player: {exc}", file=sys.stderr)
-
-		return
+		device_name = ""
 
 	# Hardware port mode: resolve device name from config or interactive menu.
-	try:
-		devices = subsample.player.list_midi_input_devices()
+	else:
+		try:
+			devices = subsample.player.list_midi_input_devices()
 
-		if cfg.player.midi_device is not None:
-			try:
-				device_name = subsample.player.find_midi_device_by_name(cfg.player.midi_device)
-			except ValueError:
-				_log.warning(
-					"Configured MIDI device %r not found - prompting for selection",
-					cfg.player.midi_device,
-				)
+			if cfg.player.midi_device is not None:
+				try:
+					device_name = subsample.player.find_midi_device_by_name(cfg.player.midi_device)
+				except ValueError:
+					_log.warning(
+						"Configured MIDI device %r not found - prompting for selection",
+						cfg.player.midi_device,
+					)
+					device_name = subsample.player.select_midi_device(devices)
+			else:
 				device_name = subsample.player.select_midi_device(devices)
-		else:
-			device_name = subsample.player.select_midi_device(devices)
 
-	except subsample.player.MidiUnavailableError as exc:
-		# Worded as the virtual-port path words it, which meets the same
-		# failure when it opens its port.
-		print(f"\nError starting player: {exc}", file=sys.stderr)
-		return
+		except subsample.player.MidiUnavailableError as exc:
+			# Worded as a virtual port's failure to open is worded below.
+			print(f"\nError starting player: {exc}", file=sys.stderr)
+			return
 
-	except ValueError as exc:
-		print(f"Error opening MIDI device: {exc}", file=sys.stderr)
-		return
+		except ValueError as exc:
+			print(f"Error opening MIDI device: {exc}", file=sys.stderr)
+			return
 
 	player = subsample.player.MidiPlayer(
 		device_name,
@@ -1338,6 +1336,7 @@ def _start_player (
 		output_bit_depth=cfg.player.audio.bit_depth,
 		output_sample_rate=cfg.player.audio.sample_rate,
 		transform_manager=transform_manager,
+		virtual_midi_port=cfg.player.virtual_midi_port,
 		max_polyphony=cfg.player.max_polyphony,
 		limiter_threshold_db=cfg.player.limiter_threshold_db,
 		limiter_ceiling_db=cfg.player.limiter_ceiling_db,
@@ -1352,15 +1351,20 @@ def _start_player (
 	player_cell[0] = player
 
 	try:
-		# See the virtual-port branch: update_pitched_assignments can surface a
-		# deferred map error (e.g. `order: similarity` with no reference), so it
-		# runs inside the guard with run().
+		# update_pitched_assignments materialises zones and rebuilds the
+		# candidate cache; a map error deferred past parse (e.g. `order:
+		# similarity` with no reference) surfaces here, so it must sit
+		# inside the guard alongside run().
 		_apply_active_preset_rules(player, bank_manager)
 		player.update_pitched_assignments()
 		player.run()
 	except (ValueError, OSError) as exc:
-		# OSError: PortAudio/mido device-open failure — see the virtual-port
-		# branch above for why this thread target must not let it escape.
+		# OSError covers PortAudio rejecting the device/format and mido
+		# failing to bind the port — catch it so a device-open failure prints
+		# a clean message instead of escaping this thread target as a raw
+		# traceback.  Returning ends the thread; the main loop notices all
+		# subsystem threads have stopped and exits (see the wait loop) rather
+		# than parking on shutdown_event forever.
 		print(f"\nError starting player: {exc}", file=sys.stderr)
 
 
@@ -1592,12 +1596,7 @@ def _main_impl () -> None:
 	# reports per-program pools rather than the ignored library.directory).
 	_print_banner(cfg, multi_bank=bool(bank_definitions))
 
-	# Resolve the effective output sample rate for the player.
-	output_sample_rate = (
-		cfg.player.audio.sample_rate
-		if cfg.player.audio.sample_rate is not None
-		else cfg.recorder.audio.sample_rate
-	)
+	output_sample_rate = _output_sample_rate(cfg)
 
 	# Declare shared variables before the bank/single-directory branch.
 	max_instrument_bytes = int(cfg.library.max_memory_mb * 1024 * 1024)
@@ -1735,53 +1734,7 @@ def _main_impl () -> None:
 
 		# --- Transform pipeline ---
 		if cfg.player.enabled:
-			max_transform_bytes = int(cfg.transform.max_memory_mb * 1024 * 1024)
-
-			_transform_cache = subsample.transform.TransformCache(
-				max_memory_bytes=max_transform_bytes,
-			)
-			def _on_transform_complete (
-				result: subsample.transform.TransformResult,
-			) -> None:
-				_transform_cache.put(result)
-
-			def _on_transform_idle (completed: int) -> None:
-				_log.info(
-					"Transform queue idle - %d variant(s) processed  [cache: %s]",
-					completed, _transform_cache.format_memory(),
-				)
-
-			_variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None
-
-			if cfg.transform.variant_cache_dir and cfg.transform.max_disk_mb > 0:
-				_variant_disk_cache = subsample.transform.VariantDiskCache(
-					directory=pathlib.Path(cfg.transform.variant_cache_dir),
-					max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
-					sample_rate=output_sample_rate,
-				)
-				_log.info(
-					"Variant disk cache: %s (max %.0f MB)",
-					cfg.transform.variant_cache_dir, cfg.transform.max_disk_mb,
-				)
-
-			_transform_processor = subsample.transform.TransformProcessor(
-				sample_rate=cfg.recorder.audio.sample_rate,
-				output_sample_rate=output_sample_rate,
-				on_complete=_on_transform_complete,
-				on_idle=_on_transform_idle,
-				disk_cache=_variant_disk_cache,
-			)
-			transform_manager = subsample.transform.TransformManager(
-				cache=_transform_cache,
-				processor=_transform_processor,
-				instrument_library=instrument_library,
-				cfg=cfg.transform,
-				disk_cache=_variant_disk_cache,
-			)
-
-			# Its workers are running from here on, so a Ctrl+C during the rest
-			# of startup has something to stop.
-			_register_teardown(transform_manager.shutdown)
+			transform_manager = _build_transform_manager(cfg, instrument_library, output_sample_rate)
 
 			if len(instrument_library) > 0:
 				for _record in instrument_library.samples():
@@ -1876,258 +1829,29 @@ def _main_impl () -> None:
 	))
 
 	# --- MIDI map file watcher ---
-	# Monitors the MIDI map YAML file for changes so assignments can be
+	# Monitors the files the MIDI map is read from, so assignments can be
 	# reloaded without restarting — enables live-coding of sample routing.
 	midi_map_watcher: typing.Optional[subsample.watcher.MidiMapWatcher] = None
 
-	# Every file the map is read from is watched: the map, each set an ensemble
-	# includes or player.midi_maps names, and every definitions file they mount
-	# (MidiMapResult.source_files, #389).  config.yaml itself is not, so a set
-	# added to or removed from player.midi_maps still takes a restart.  On a
-	# shared drive a write made by another machine is never seen at all
-	# (inotify only sees writes made through the local mount by this machine).
 	if (
 		cfg.player.watch_midi_map
 		and cfg.player.enabled
 		and preloaded_midi_map_result is not None
 	):
-		if cfg.player.midi_maps is not None:
-			_log.info(
-				"Watching the sets player.midi_maps names; config.yaml is not "
-				"watched, so adding or removing a set needs a restart",
-			)
-
-		# A map: preset's folder is the top-level map's; the config form has no
-		# map file and no programs, so its presets are none.
-		_midi_map_dir = (
-			pathlib.Path(cfg.player.midi_map).parent
-			if cfg.player.midi_map is not None else pathlib.Path.cwd()
+		midi_map_watcher = _start_midi_map_watcher(
+			cfg, preloaded_midi_map_result, reference_library, instrument_library,
+			similarity_matrix, transform_manager, _player_cell,
 		)
-
-		# Snapshot the bank state at startup so the live-reload callback can
-		# detect bank-related edits that hot-reload doesn't cover yet.
-		_startup_bank_definitions = list(bank_definitions)
-		_startup_bank_channel     = bank_channel
-		_startup_default_bank     = default_bank
-
-		def _on_midi_map_changed (path: pathlib.Path) -> None:
-
-			"""Reload the MIDI map and deliver it to the active player.
-
-			Program-set edits (the `programs:` block, `program_channel:`, and
-			`default_program:`) are not hot-reloadable in this version — the
-			callback warns and keeps the current program state.  Editing a
-			`map:` preset's OWN file is also not watched (it is not among the
-			map's source files) and needs a restart, so a broken preset is only
-			warned of here: it does not hold up an edit to the map.  Edits to
-			the map, a set it includes or a definitions file reload as normal,
-			and once the map parses, the watcher follows the files it was
-			read from this time (#389).
-			"""
-
-			player = _player_cell[0]
-
-			if player is None:
-				return
-
-			assert reference_library is not None
-
-			try:
-				# Reload through the same resolver startup used, so editing a
-				# ensemble re-merges every set it includes rather than
-				# reloading the ensemble file's own assignments alone.
-				result = subsample.player.load_configured_map(
-					cfg, reference_library.names(), presets=False,
-				)
-			except (OSError, ValueError, yaml.YAMLError) as exc:
-				_log.warning(
-					"MIDI map reload failed at parse time - keeping current "
-					"map: %s", exc,
-				)
-				return
-
-			# Follow the files this edit is read from, even if a later check
-			# keeps the old map: a set the edit names is the one being worked on.
-			if midi_map_watcher is not None:
-				midi_map_watcher.watch(result.source_files)
-
-			_warn_of_broken_presets(
-				result, _midi_map_dir, reference_library.names(),
-				cfg.player.strict_midi_map,
-			)
-
-			# Detect program-set changes the live reload can't apply, so the
-			# user isn't left wondering why an edit to programs:/program_channel:/
-			# default_program: has no audible effect.  The BankDefinition diff
-			# also catches a changed map: path or a program retyped between
-			# map: and directory: (map_path is part of the frozen equality).
-			if (
-				result.bank_definitions != _startup_bank_definitions
-				or result.bank_channel != _startup_bank_channel
-				or result.default_bank != _startup_default_bank
-			):
-				_log.warning(
-					"MIDI map reload: programs, program_channel, or "
-					"default_program changed - these only take effect on restart. "
-					"Editing a map: preset's own file also needs a restart. "
-					"Top-level assignment changes will still apply.",
-				)
-
-			# Load any NEW path/directory/reference predicates the edit
-			# introduced — startup does this via _resolve_path_references, and
-			# without it here a live-coded `path:`/`directory:` select would
-			# reload "successfully" but silently match nothing until restart.
-			# Targets the primary library/matrix (same as the OSC import
-			# path); per-bank matrices in multi-bank mode still resolve at
-			# startup/program load.  Already-loaded paths are deduped inside.
-			try:
-				reload_sr = (
-					cfg.player.audio.sample_rate
-					if cfg.player.audio.sample_rate is not None
-					else cfg.recorder.audio.sample_rate
-				)
-				reload_matrices = [similarity_matrix] if similarity_matrix is not None else []
-				subsample.player._resolve_path_references(
-					result.note_map, reload_matrices, instrument_library,
-					target_sample_rate=reload_sr,
-					with_preview=cfg.recorder.previews,
-					reference_library=reference_library,
-					transform_manager=transform_manager,
-					zone_templates=result.zone_templates,
-				)
-			except Exception as exc:
-				_log.warning(
-					"MIDI map reload: could not load new path references - "
-					"affected selects may match nothing: %s", exc,
-				)
-
-			# Re-run the extract compatibility check that startup does.  Without
-			# it, a live edit introducing `extract: depth` on a stereo pool (or
-			# `extract: channel.9` on a 2-channel sample) reloads "successfully"
-			# and then raises inside build_extract_matrix on EVERY note-on, where
-			# _safe_handle_message swallows it into a log line — the assignment
-			# just goes silent.  Rejecting the reload keeps the working map live,
-			# which is the same trade the parse-time failure above makes.
-			try:
-				subsample.player._validate_assignment_extracts(
-					result.note_map, instrument_library,
-				)
-			except ValueError as exc:
-				_log.error(
-					"MIDI map reload failed extract validation - keeping current "
-					"map: %s", exc,
-				)
-				return
-
-			# reload_midi_map runs update_assignments() against the new map
-			# and rolls back to the previous map + zone templates on any
-			# exception — broad catch here so a runtime-validated YAML
-			# error (e.g. similarity ordering without where.reference set,
-			# only detectable when the query actually runs) never stops
-			# live playback.
-			try:
-				player.reload_midi_map(result)
-			except Exception as exc:
-				_log.error(
-					"MIDI map reload failed validation - keeping current map: %s",
-					exc,
-				)
-
-		watched = preloaded_midi_map_result.source_files
-
-		midi_map_watcher = subsample.watcher.MidiMapWatcher(
-			paths=watched,
-			on_changed=_on_midi_map_changed,
-		)
-
-		# The map is the first of its source files; the rest are what it reads.
-		if cfg.player.midi_map is not None:
-			watching = cfg.player.midi_map + (
-				f" and the {len(watched) - 1} file(s) it reads" if len(watched) > 1 else ""
-			)
-		else:
-			watching = f"the {len(watched)} file(s) player.midi_maps reads"
-
-		if _start_watcher(midi_map_watcher, "MIDI map"):
-			print(f"  MIDI map     : watching {watching} for changes")
-		else:
-			midi_map_watcher = None
 
 	# --- OSC receiver ---
 	# Listens for /sample/import messages and triggers file import.
 	osc_receiver: typing.Any = None
 
 	if cfg.osc.enabled and cfg.osc.receive_enabled:
-		try:
-			def _on_osc_import (file_path_str: str) -> None:
-				"""Handle a /sample/import OSC message.
-
-				Reads and analyses the file in place (does not copy), then
-				loads it into the in-memory instrument library for immediate
-				playback.  The sample is available until the next restart.
-				"""
-
-				file_path = pathlib.Path(file_path_str)
-
-				if not file_path.is_file():
-					_log.warning("OSC /sample/import: file not found: %s", file_path)
-					return
-
-				result = subsample.cache.ensure_sample_assets(file_path, with_preview=cfg.recorder.previews)
-
-				if result is None:
-					_log.warning("OSC /sample/import: analysis failed: %s", file_path)
-					return
-
-				audio = subsample.library.load_wav_audio(file_path, output_sample_rate)
-
-				if audio is None:
-					_log.warning("OSC /sample/import: could not read audio: %s", file_path)
-					return
-
-				record = subsample.library.SampleRecord(
-					sample_id      = subsample.library.allocate_id(),
-					name           = file_path.stem,
-					spectral       = result.spectral,
-					rhythm         = result.rhythm,
-					pitch          = result.pitch,
-					timbre         = result.timbre,
-					level          = result.level,
-					band_energy    = result.band_energy,
-					params         = result.params,
-					duration       = result.duration,
-					audio          = audio,
-					filepath       = file_path,
-					channel_format = result.channel_format,
-					loop           = result.loop,
-					audio_sample_rate = output_sample_rate or result.params.sample_rate,
-				)
-
-				# An analysis that outlasts the receiver's wait at stop ends here
-				# after the transform workers it would hand variants to are gone.
-				# The sample would last only until the restart anyway.
-				if shutdown_event.is_set():
-					_log.info("OSC /sample/import: shutting down - not adding %s", file_path)
-					return
-
-				_integrate_sample(record, instrument_library, similarity_matrix,
-				                  transform_manager, _player_cell, app_events)
-
-			osc_receiver = subsample.osc.OscReceiver(
-				port=cfg.osc.receive_port,
-				on_import=_on_osc_import,
-				host=cfg.osc.receive_host,
-			)
-			osc_receiver.start()
-			print(f"  OSC receiver : listening on port {cfg.osc.receive_port}")
-
-		except ImportError:
-			_log.warning("OSC receive enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
-		except OSError as exc:
-			# OscReceiver binds the UDP socket in its constructor, so a busy port
-			# raises OSError here (not ImportError).  Log and continue rather
-			# than letting it escape and skip the rest of startup.
-			_log.warning("OSC receiver could not bind port %d: %s - OSC receive disabled", cfg.osc.receive_port, exc)
+		osc_receiver = _start_osc_receiver(
+			cfg, instrument_library, similarity_matrix, transform_manager,
+			_player_cell, app_events, output_sample_rate, shutdown_event,
+		)
 
 	for t in threads:
 		t.start()
@@ -2247,7 +1971,13 @@ def _start_library_watchers (
 				}
 
 				def _make_bank_callback (b: subsample.bank.Bank) -> typing.Callable[[subsample.library.SampleRecord], None]:
+
+					"""The watcher's new-sample callback for one program, bound to it here rather than by the loop."""
+
 					def cb (record: subsample.library.SampleRecord) -> None:
+
+						"""Add an arriving sample to this program's library and subsystems."""
+
 						_log.info("Watcher [%s]: new sample - %s (%.2fs)", b.name, record.name, record.duration)
 						_integrate_sample(record, b.instrument_library, b.similarity_matrix,
 						                  b.transform_manager, player_cell, app_events)
@@ -2255,7 +1985,13 @@ def _start_library_watchers (
 					return cb
 
 				def _make_bank_removal_callback (b: subsample.bank.Bank) -> typing.Callable[[pathlib.Path], None]:
+
+					"""The watcher's removal callback for one program, bound to it here rather than by the loop."""
+
 					def rm (path: pathlib.Path) -> None:
+
+						"""Take a deleted sample out of this program's library and subsystems."""
+
 						_log.info("Watcher [%s]: sample removed - %s", b.name, path.name)
 						_remove_sample(path, b.instrument_library, b.similarity_matrix,
 						               b.transform_manager, player_cell)
@@ -2283,11 +2019,17 @@ def _start_library_watchers (
 			}
 
 			def _on_watched_sample (record: subsample.library.SampleRecord) -> None:
+
+				"""Add an arriving sample to the library and its subsystems."""
+
 				_log.info("Watcher: new sample arrived - %s (%.2fs)", record.name, record.duration)
 				_integrate_sample(record, instrument_library, similarity_matrix,
 				                  transform_manager, player_cell, app_events)
 
 			def _on_watched_sample_removed (path: pathlib.Path) -> None:
+
+				"""Take a deleted sample out of the library and its subsystems."""
+
 				_log.info("Watcher: sample removed - %s", path.name)
 				_remove_sample(path, instrument_library, similarity_matrix,
 				               transform_manager, player_cell)
@@ -2305,6 +2047,282 @@ def _start_library_watchers (
 				print(f"  Watcher      : monitoring {cfg.library.directory} for new samples")
 
 	return watchers
+
+
+def _start_midi_map_watcher (
+	cfg:                subsample.config.Config,
+	preloaded:          subsample.player.MidiMapResult,
+	reference_library:  subsample.library.ReferenceLibrary,
+	instrument_library: subsample.library.InstrumentLibrary,
+	similarity_matrix:  typing.Optional[subsample.similarity.SimilarityMatrix],
+	transform_manager:  typing.Optional[subsample.transform.TransformManager],
+	player_cell:        list[typing.Optional[subsample.player.MidiPlayer]],
+) -> typing.Optional[subsample.watcher.MidiMapWatcher]:
+
+	"""Start player.watch_midi_map's watcher, and return it, or None if it could not start.
+
+	Every file the map is read from is watched: the map, each set an ensemble
+	includes or player.midi_maps names, and every definitions file they mount
+	(MidiMapResult.source_files, #389).  config.yaml itself is not, so a set
+	added to or removed from player.midi_maps still takes a restart.  On a
+	shared drive a write made by another machine is never seen at all
+	(inotify only sees writes made through the local mount by this machine).
+	"""
+
+	if cfg.player.midi_maps is not None:
+		_log.info(
+			"Watching the sets player.midi_maps names; config.yaml is not "
+			"watched, so adding or removing a set needs a restart",
+		)
+
+	# A map: preset's folder is the top-level map's; the config form has no
+	# map file and no programs, so its presets are none.
+	_midi_map_dir = (
+		pathlib.Path(cfg.player.midi_map).parent
+		if cfg.player.midi_map is not None else pathlib.Path.cwd()
+	)
+
+	# Snapshot the bank state at startup so the live-reload callback can
+	# detect bank-related edits that hot-reload doesn't cover yet.
+	_startup_bank_definitions = list(preloaded.bank_definitions)
+	_startup_bank_channel     = preloaded.bank_channel
+	_startup_default_bank     = preloaded.default_bank
+
+	midi_map_watcher: typing.Optional[subsample.watcher.MidiMapWatcher] = None
+
+	def _on_midi_map_changed (path: pathlib.Path) -> None:
+
+		"""Reload the MIDI map and deliver it to the active player.
+
+		Program-set edits (the `programs:` block, `program_channel:`, and
+		`default_program:`) are not hot-reloadable in this version — the
+		callback warns and keeps the current program state.  Editing a
+		`map:` preset's OWN file is also not watched (it is not among the
+		map's source files) and needs a restart, so a broken preset is only
+		warned of here: it does not hold up an edit to the map.  Edits to
+		the map, a set it includes or a definitions file reload as normal,
+		and once the map parses, the watcher follows the files it was
+		read from this time (#389).
+		"""
+
+		player = player_cell[0]
+
+		if player is None:
+			return
+
+		try:
+			# Reload through the same resolver startup used, so editing a
+			# ensemble re-merges every set it includes rather than
+			# reloading the ensemble file's own assignments alone.
+			result = subsample.player.load_configured_map(
+				cfg, reference_library.names(), presets=False,
+			)
+		except (OSError, ValueError, yaml.YAMLError) as exc:
+			_log.warning(
+				"MIDI map reload failed at parse time - keeping current "
+				"map: %s", exc,
+			)
+			return
+
+		# Follow the files this edit is read from, even if a later check
+		# keeps the old map: a set the edit names is the one being worked on.
+		if midi_map_watcher is not None:
+			midi_map_watcher.watch(result.source_files)
+
+		_warn_of_broken_presets(
+			result, _midi_map_dir, reference_library.names(),
+			cfg.player.strict_midi_map,
+		)
+
+		# Detect program-set changes the live reload can't apply, so the
+		# user isn't left wondering why an edit to programs:/program_channel:/
+		# default_program: has no audible effect.  The BankDefinition diff
+		# also catches a changed map: path or a program retyped between
+		# map: and directory: (map_path is part of the frozen equality).
+		if (
+			result.bank_definitions != _startup_bank_definitions
+			or result.bank_channel != _startup_bank_channel
+			or result.default_bank != _startup_default_bank
+		):
+			_log.warning(
+				"MIDI map reload: programs, program_channel, or "
+				"default_program changed - these only take effect on restart. "
+				"Editing a map: preset's own file also needs a restart. "
+				"Top-level assignment changes will still apply.",
+			)
+
+		# Load any NEW path/directory/reference predicates the edit
+		# introduced — startup does this via _resolve_path_references, and
+		# without it here a live-coded `path:`/`directory:` select would
+		# reload "successfully" but silently match nothing until restart.
+		# Targets the primary library/matrix (same as the OSC import
+		# path); per-bank matrices in multi-bank mode still resolve at
+		# startup/program load.  Already-loaded paths are deduped inside.
+		try:
+			reload_sr = _output_sample_rate(cfg)
+			reload_matrices = [similarity_matrix] if similarity_matrix is not None else []
+			subsample.player._resolve_path_references(
+				result.note_map, reload_matrices, instrument_library,
+				target_sample_rate=reload_sr,
+				with_preview=cfg.recorder.previews,
+				reference_library=reference_library,
+				transform_manager=transform_manager,
+				zone_templates=result.zone_templates,
+			)
+		except Exception as exc:
+			_log.warning(
+				"MIDI map reload: could not load new path references - "
+				"affected selects may match nothing: %s", exc,
+			)
+
+		# Re-run the extract compatibility check that startup does.  Without
+		# it, a live edit introducing `extract: depth` on a stereo pool (or
+		# `extract: channel.9` on a 2-channel sample) reloads "successfully"
+		# and then raises inside build_extract_matrix on EVERY note-on, where
+		# _safe_handle_message swallows it into a log line — the assignment
+		# just goes silent.  Rejecting the reload keeps the working map live,
+		# which is the same trade the parse-time failure above makes.
+		try:
+			subsample.player._validate_assignment_extracts(
+				result.note_map, instrument_library,
+			)
+		except ValueError as exc:
+			_log.error(
+				"MIDI map reload failed extract validation - keeping current "
+				"map: %s", exc,
+			)
+			return
+
+		# reload_midi_map runs update_assignments() against the new map
+		# and rolls back to the previous map + zone templates on any
+		# exception — broad catch here so a runtime-validated YAML
+		# error (e.g. similarity ordering without where.reference set,
+		# only detectable when the query actually runs) never stops
+		# live playback.
+		try:
+			player.reload_midi_map(result)
+		except Exception as exc:
+			_log.error(
+				"MIDI map reload failed validation - keeping current map: %s",
+				exc,
+			)
+
+	watched = preloaded.source_files
+
+	midi_map_watcher = subsample.watcher.MidiMapWatcher(
+		paths=watched,
+		on_changed=_on_midi_map_changed,
+	)
+
+	# The map is the first of its source files; the rest are what it reads.
+	if cfg.player.midi_map is not None:
+		watching = cfg.player.midi_map + (
+			f" and the {len(watched) - 1} file(s) it reads" if len(watched) > 1 else ""
+		)
+	else:
+		watching = f"the {len(watched)} file(s) player.midi_maps reads"
+
+	if not _start_watcher(midi_map_watcher, "MIDI map"):
+		return None
+
+	print(f"  MIDI map     : watching {watching} for changes")
+
+	return midi_map_watcher
+
+
+def _start_osc_receiver (
+	cfg:                subsample.config.Config,
+	instrument_library: subsample.library.InstrumentLibrary,
+	similarity_matrix:  typing.Optional[subsample.similarity.SimilarityMatrix],
+	transform_manager:  typing.Optional[subsample.transform.TransformManager],
+	player_cell:        list[typing.Optional[subsample.player.MidiPlayer]],
+	app_events:         subsample.events.EventEmitter,
+	output_sample_rate: int,
+	shutdown_event:     threading.Event,
+) -> typing.Any:
+
+	"""Start the OSC receiver that imports each file a /sample/import message names.
+
+	Returns the started subsample.osc.OscReceiver, or None when python-osc is
+	missing or the port is taken; either is logged and the rest of startup
+	goes on.  Typed Any because subsample.osc needs python-osc only once a
+	receiver is built.
+	"""
+
+	try:
+		def _on_osc_import (file_path_str: str) -> None:
+			"""Handle a /sample/import OSC message.
+
+			Reads and analyses the file in place (does not copy), then
+			loads it into the in-memory instrument library for immediate
+			playback.  The sample is available until the next restart.
+			"""
+
+			file_path = pathlib.Path(file_path_str)
+
+			if not file_path.is_file():
+				_log.warning("OSC /sample/import: file not found: %s", file_path)
+				return
+
+			result = subsample.cache.ensure_sample_assets(file_path, with_preview=cfg.recorder.previews)
+
+			if result is None:
+				_log.warning("OSC /sample/import: analysis failed: %s", file_path)
+				return
+
+			audio = subsample.library.load_wav_audio(file_path, output_sample_rate)
+
+			if audio is None:
+				_log.warning("OSC /sample/import: could not read audio: %s", file_path)
+				return
+
+			record = subsample.library.SampleRecord(
+				sample_id      = subsample.library.allocate_id(),
+				name           = file_path.stem,
+				spectral       = result.spectral,
+				rhythm         = result.rhythm,
+				pitch          = result.pitch,
+				timbre         = result.timbre,
+				level          = result.level,
+				band_energy    = result.band_energy,
+				params         = result.params,
+				duration       = result.duration,
+				audio          = audio,
+				filepath       = file_path,
+				channel_format = result.channel_format,
+				loop           = result.loop,
+				audio_sample_rate = output_sample_rate,
+			)
+
+			# An analysis that outlasts the receiver's wait at stop ends here
+			# after the transform workers it would hand variants to are gone.
+			# The sample would last only until the restart anyway.
+			if shutdown_event.is_set():
+				_log.info("OSC /sample/import: shutting down - not adding %s", file_path)
+				return
+
+			_integrate_sample(record, instrument_library, similarity_matrix,
+			                  transform_manager, player_cell, app_events)
+
+		osc_receiver = subsample.osc.OscReceiver(
+			port=cfg.osc.receive_port,
+			on_import=_on_osc_import,
+			host=cfg.osc.receive_host,
+		)
+		osc_receiver.start()
+		print(f"  OSC receiver : listening on port {cfg.osc.receive_port}")
+
+		return osc_receiver
+
+	except ImportError:
+		_log.warning("OSC receive enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
+	except OSError as exc:
+		# OscReceiver binds the UDP socket in its constructor, so a busy port
+		# raises OSError here (not ImportError).  Log and continue rather
+		# than letting it escape and skip the rest of startup.
+		_log.warning("OSC receiver could not bind port %d: %s - OSC receive disabled", cfg.osc.receive_port, exc)
+
+	return None
 
 
 def _drain_captures (
@@ -2391,13 +2409,9 @@ def _print_banner (cfg: subsample.config.Config, multi_bank: bool = False) -> No
 	if cfg.player.enabled:
 		# Mirror the engine's own output resolution so the banner matches the
 		# stream that actually opens: rate falls back to the recorder's when
-		# player.audio.sample_rate is unset (cli output_sample_rate); bit depth
+		# player.audio.sample_rate is unset (_output_sample_rate); bit depth
 		# likewise (MidiPlayer output_bit_depth); channels default to stereo.
-		out_rate = (
-			cfg.player.audio.sample_rate
-			if cfg.player.audio.sample_rate is not None
-			else cfg.recorder.audio.sample_rate
-		)
+		out_rate = _output_sample_rate(cfg)
 		out_bits = (
 			cfg.player.audio.bit_depth
 			if cfg.player.audio.bit_depth is not None
@@ -2585,6 +2599,8 @@ def _make_on_complete (
 		channel_format: str = "pcm",
 		loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
 	) -> None:
+
+		"""Announce a finished recording and add it to the live library and its subsystems."""
 
 		_log.info(
 			"Recorded %s: duration %.2fs, %s",

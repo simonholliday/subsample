@@ -116,8 +116,8 @@ import collections
 import concurrent.futures
 import dataclasses
 import hashlib
-import math
 import logging
+import math
 import os
 import pathlib
 import struct
@@ -125,6 +125,7 @@ import tempfile
 import threading
 import time
 import typing
+import weakref
 
 import librosa
 import numpy
@@ -316,9 +317,13 @@ class Compress:
 
 
 @dataclasses.dataclass(frozen=True)
-class Limit:
+class Limiter:
 
 	"""Brickwall limiter — shortcut to the compressor with limiter presets.
+
+	The `limit` processor's step.  Named Limiter, not Limit, because
+	subsample.processors.Limit is a parameter's bounds and _declared_limit
+	uses both side by side (L-27 of the 2026-09-21 review).
 
 	Internally uses the same feed-forward compressor with hard knee,
 	ratio 100:1, near-instant attack, and look-ahead to catch transients
@@ -660,7 +665,7 @@ TransformStep = typing.Union[
 	BandPassFilter,
 	Saturate,
 	Compress,
-	Limit,
+	Limiter,
 	HpssHarmonic,
 	HpssPercussive,
 	TimeStretch,
@@ -814,6 +819,8 @@ class TransformCache:
 
 	def __init__ (self, max_memory_bytes: int) -> None:
 
+		"""An empty cache that holds at most max_memory_bytes of variant audio."""
+
 		self._index:        dict[TransformKey, TransformResult] = {}
 
 		# sample_id → set of TransformKeys for that parent
@@ -943,13 +950,17 @@ class TransformCache:
 
 	@property
 	def memory_used (self) -> int:
+
 		"""Current total memory used by cached derivatives, in bytes."""
+
 		with self._lock:
 			return self._total_bytes
 
 	@property
 	def memory_limit (self) -> int:
+
 		"""Maximum memory allowed for cached derivatives, in bytes."""
+
 		return self._max_bytes
 
 	def format_memory (self) -> str:
@@ -986,28 +997,6 @@ class TransformCache:
 			pass
 
 		return evicted
-
-	def _evict_key_locked (self, key: TransformKey) -> None:
-
-		"""Remove one key, updating memory and parent index.  Caller must hold _lock."""
-
-		result = self._index.pop(key, None)
-
-		if result is None:
-			return
-
-		self._total_bytes -= result.audio.nbytes
-
-		parent_keys = self._parent_index.get(key.sample_id)
-		if parent_keys is not None:
-			parent_keys.discard(key)
-
-			if not parent_keys:
-				del self._parent_index[key.sample_id]
-				try:
-					self._parent_order.remove(key.sample_id)
-				except ValueError:
-					pass
 
 # ---------------------------------------------------------------------------
 # VariantDiskCache
@@ -1122,6 +1111,8 @@ class VariantDiskCache:
 		sample_rate:    int,
 	) -> None:
 
+		"""A cache in directory, created if needed, for variants at sample_rate; max_bytes 0 disables it."""
+
 		self._directory   = directory
 		self._max_bytes   = max_bytes
 		self._sample_rate = sample_rate
@@ -1132,11 +1123,22 @@ class VariantDiskCache:
 		# total, over-evicting warm variants.
 		self._lock:       threading.Lock = threading.Lock()
 
+		# The directory's size as of the last scan, plus every file written
+		# since: None until the first write measures it.  A write used to scan
+		# the whole directory to learn whether it was over budget, so a cache
+		# of thousands of variants was listed and statted once per render.
+		# Files another Subsample writes are not counted until the estimate
+		# says the budget is reached, and the scan that follows counts them.
+		self._bytes_estimate: typing.Optional[int] = None
+
 		if max_bytes > 0:
 			self._directory.mkdir(parents=True, exist_ok=True)
 
 	@property
 	def enabled (self) -> bool:
+
+		"""Whether the cache reads and writes at all: a budget of 0 turns it off."""
+
 		return self._max_bytes > 0
 
 	def get (
@@ -1339,17 +1341,30 @@ class VariantDiskCache:
 			_log.warning("Variant cache: write error for %s: %s", path.name, exc)
 			return
 
-		self._evict_if_needed()
+		try:
+			written = path.stat().st_size
+		except OSError:
+			written = 0
 
-	def _evict_if_needed (self) -> None:
+		self._evict_if_needed(written)
+
+	def _evict_if_needed (self, written: int) -> None:
 
 		"""Delete oldest variant files until total size is within budget.
 
-		Held under ``self._lock`` so concurrent worker-thread evictions don't
-		each scan and unlink the same files (which over-evicts — see __init__).
+		Scans the directory only when the running estimate says the budget is
+		reached, or on the first write, which measures it.  Held under
+		``self._lock`` so concurrent worker-thread evictions don't each scan and
+		unlink the same files (which over-evicts — see __init__).
 		"""
 
 		with self._lock:
+			if self._bytes_estimate is not None:
+				self._bytes_estimate += written
+
+				if self._bytes_estimate <= self._max_bytes:
+					return
+
 			try:
 				entries = []
 
@@ -1359,6 +1374,7 @@ class VariantDiskCache:
 						entries.append((stat.st_mtime, stat.st_size, entry.path))
 
 				total = sum(size for _, size, _ in entries)
+				self._bytes_estimate = total
 
 				if total <= self._max_bytes:
 					return
@@ -1378,6 +1394,8 @@ class VariantDiskCache:
 						evicted += 1
 					except OSError:
 						pass
+
+				self._bytes_estimate = total
 
 				if evicted > 0:
 					_log.info(
@@ -1463,6 +1481,8 @@ class TransformProcessor:
 		disk_cache:         typing.Optional[VariantDiskCache] = None,
 	) -> None:
 
+		"""Start the render worker pool; finished renders go to on_complete."""
+
 		self._sample_rate        = sample_rate
 		# Output sample rate for the playback device.  If different from the
 		# capture rate, _execute() resamples AFTER all DSP steps so the
@@ -1473,6 +1493,11 @@ class TransformProcessor:
 		# TransformManager to log cache memory status at queue-idle boundaries.
 		self._on_idle            = on_idle
 		self._disk_cache         = disk_cache
+
+		# Each sample's source-PCM MD5, by sample_id, with a weak reference to
+		# the buffer it was taken from (see audio_md5).  Plain dict: single-key
+		# get/set/pop are GIL-atomic, and the worst race is one hash done twice.
+		self._audio_md5s: dict[int, tuple[weakref.ref[numpy.ndarray], str]] = {}
 
 		n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
 		_log.debug("rendering: %d background worker(s)", n_workers)
@@ -1550,6 +1575,38 @@ class TransformProcessor:
 
 		self._executor.submit(self._execute, record, spec, key)
 
+	def audio_md5 (self, record: "subsample.library.SampleRecord") -> str:
+
+		"""The MD5 of a record's source PCM, hashed once per buffer.
+
+		Keys the disk cache, and every worker job and every trigger's disk
+		look-up needs it, so it was hashed again each time: an 88-note repitch
+		fan-out hashed one buffer 88 times.  An entry is used only while it
+		still describes this record's buffer, by identity through a weak
+		reference, so a sample re-added under its own id with new audio is
+		hashed afresh, and a job still holding the old record cannot be given
+		the new hash for the old audio.
+		"""
+
+		if record.audio is None:
+			raise ValueError(f"sample {record.sample_id} has no audio to hash")
+
+		entry = self._audio_md5s.get(record.sample_id)
+
+		if entry is not None and entry[0]() is record.audio:
+			return entry[1]
+
+		digest = hashlib.md5(record.audio.tobytes()).hexdigest()
+		self._audio_md5s[record.sample_id] = (weakref.ref(record.audio), digest)
+
+		return digest
+
+	def forget_audio_md5 (self, sample_id: int) -> None:
+
+		"""Drop a sample's remembered hash, once the sample has left the library."""
+
+		self._audio_md5s.pop(sample_id, None)
+
 	def shutdown (self) -> None:
 
 		"""Wait for all in-flight transforms and stop the worker pool."""
@@ -1620,7 +1677,7 @@ class TransformProcessor:
 			audio_md5: typing.Optional[str] = None
 
 			if self._disk_cache is not None and spec.steps:
-				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
+				audio_md5 = self.audio_md5(record)
 
 			# Check disk cache before doing expensive DSP.  This covers the
 			# startup pre-computation path (update_assignments → get_variant)
@@ -1836,7 +1893,7 @@ class TransformManager:
 	on_sample_added(record)
 	    Called from the on_complete callback after a new SampleRecord is added
 	    to InstrumentLibrary.  Enqueues the base variant only; pitch/quantize
-    variants are driven by the player's update_assignments().
+	    variants are driven by the player's update_assignments().
 
 	on_parent_evicted(sample_ids)
 	    Called when InstrumentLibrary.add() returns evicted IDs.  Cascade-evicts
@@ -1861,19 +1918,13 @@ class TransformManager:
 		disk_cache:         typing.Optional[VariantDiskCache] = None,
 	) -> None:
 
+		"""Tie a library to the cache, render pool and disk cache that make its variants."""
+
 		self._cache              = cache
 		self._processor          = processor
 		self._instrument_library = instrument_library
 		self._cfg                = cfg
 		self._disk_cache         = disk_cache
-
-		# Source-PCM MD5 per sample_id, memoised because get_variant runs on
-		# the rtmidi dispatch thread (once per trigger, and once PER CANDIDATE
-		# for variant-state selects) — a full-buffer hash + tobytes() copy
-		# there is a latency hazard.  Invalidated on re-add and eviction.
-		# Plain dict: single-key get/set/pop are GIL-atomic, and the worst
-		# race outcome is one redundant recompute of the same digest.
-		self._md5_cache: dict[int, str] = {}
 
 	def get_variant (
 		self,
@@ -1902,13 +1953,12 @@ class TransformManager:
 		record = self._instrument_library.get(sample_id)
 
 		# Check disk cache before enqueuing a (possibly expensive) recompute.
+		# The source hash is the processor's memo, shared with its workers:
+		# get_variant runs on the rtmidi dispatch thread (once per trigger, and
+		# once PER CANDIDATE for variant-state selects), where a full-buffer
+		# hash and tobytes() copy is a latency hazard.
 		if self._disk_cache is not None and record is not None and record.audio is not None:
-			audio_md5 = self._md5_cache.get(sample_id)
-
-			if audio_md5 is None:
-				audio_md5 = hashlib.md5(record.audio.tobytes()).hexdigest()
-				self._md5_cache[sample_id] = audio_md5
-
+			audio_md5 = self._processor.audio_md5(record)
 			disk_hit = self._disk_cache.get(audio_md5, spec, key)
 
 			if disk_hit is not None:
@@ -1975,9 +2025,9 @@ class TransformManager:
 		precise set.
 		"""
 
-		# A re-added sample (same id, new capture) has new PCM — the memoised
-		# source hash must not survive it.
-		self._md5_cache.pop(record.sample_id, None)
+		# A re-added sample (same id, new capture) has new PCM.  audio_md5
+		# would notice the new buffer anyway; this frees the old entry now.
+		self._processor.forget_audio_md5(record.sample_id)
 
 		# Base variant: always enqueue regardless of pitch content.
 		self._processor.enqueue(record, _BASE_VARIANT_SPEC)
@@ -1991,7 +2041,7 @@ class TransformManager:
 		"""
 
 		for sid in sample_ids:
-			self._md5_cache.pop(sid, None)
+			self._processor.forget_audio_md5(sid)
 			evicted = self._cache.remove_parent(sid)
 
 			if evicted:
@@ -2854,7 +2904,7 @@ def _apply_saturate (
 
 
 # ---------------------------------------------------------------------------
-# Compress / Limit handlers
+# Compress / Limiter handlers
 # ---------------------------------------------------------------------------
 
 # Tiny constant to avoid log10(0).
@@ -3087,7 +3137,7 @@ def _apply_limit (
 	audio:       numpy.ndarray,
 	sample_rate: int,
 	record:      "subsample.library.SampleRecord",
-	step:        Limit,
+	step:        Limiter,
 ) -> numpy.ndarray:
 
 	"""Brickwall limiter — compressor with limiter presets."""
@@ -3864,11 +3914,6 @@ def _apply_pad_quantize (
 		seg_starts[0]    = 0
 		target_starts[0] = max(0, target_starts[0] - margin)
 
-	# Compute output length: the last segment placed at its target position.
-	last_seg_idx    = len(seg_starts) - 1
-	last_seg_len    = seg_ends[last_seg_idx] - seg_starts[last_seg_idx]
-	output_length   = target_starts[last_seg_idx] + last_seg_len
-
 	# Handle overlap: push segments forward if they collide with the
 	# previous segment's audio.  Walk forward, adjusting target positions.
 	grid_interval = 60.0 / step.target_bpm / (step.resolution / 4.0)
@@ -3891,7 +3936,8 @@ def _apply_pad_quantize (
 
 			adjusted_targets[i] = grid_point
 
-	# Recompute output length after adjustments.
+	# Output length: the last segment placed at its adjusted target.
+	last_seg_idx  = len(seg_starts) - 1
 	last_seg_len  = seg_ends[last_seg_idx] - seg_starts[last_seg_idx]
 	output_length = adjusted_targets[last_seg_idx] + last_seg_len
 
@@ -4248,7 +4294,7 @@ TransformProcessor._HANDLERS[HighPassFilter]   = _apply_high_pass
 TransformProcessor._HANDLERS[BandPassFilter]  = _apply_band_pass
 TransformProcessor._HANDLERS[Saturate]        = _apply_saturate
 TransformProcessor._HANDLERS[Compress]        = _apply_compress
-TransformProcessor._HANDLERS[Limit]           = _apply_limit
+TransformProcessor._HANDLERS[Limiter]         = _apply_limit
 TransformProcessor._HANDLERS[HpssHarmonic]    = _apply_hpss_harmonic
 TransformProcessor._HANDLERS[HpssPercussive]  = _apply_hpss_percussive
 TransformProcessor._HANDLERS[Gate]            = _apply_gate
@@ -4494,7 +4540,7 @@ def spec_from_process (
 			))
 
 		elif proc.name == "limit":
-			steps.append(Limit(
+			steps.append(Limiter(
 				threshold_db=float(_resolved(proc, "threshold", cc_state, cc_omni)),
 				release_ms=float(_resolved(proc, "release", cc_state, cc_omni)),
 				lookahead_ms=float(_resolved(proc, "lookahead", cc_state, cc_omni)),

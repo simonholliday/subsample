@@ -49,6 +49,8 @@ def _percentile (values: list[float], pct: float) -> float:
 
 def main () -> int:
 
+	"""Send timed notes through a virtual MIDI port and report how long each took to arrive."""
+
 	parser = argparse.ArgumentParser(
 		description="Measure MIDI-to-dispatch latency for the subsample player.",
 	)
@@ -92,6 +94,9 @@ def main () -> int:
 		timings_lock = threading.Lock()
 
 		def _callback (msg: mido.Message) -> None:
+
+			"""Record how long a note took from send to this callback."""
+
 			now_ns = time.perf_counter_ns()
 			with sent_lock:
 				if not sent_times_ns:

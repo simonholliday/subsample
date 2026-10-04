@@ -256,11 +256,29 @@ class TestL2Normalize:
 # TestScoreAgainstLibrary
 # ---------------------------------------------------------------------------
 
+def _scores (
+	query:   subsample.library.SampleRecord,
+	library: subsample.library.ReferenceLibrary,
+	cfg:     subsample.config.SimilarityConfig,
+) -> list[subsample.similarity.SimilarityScore]:
+
+	"""Score one record against a reference library the way the app does, through the matrix."""
+
+	matrix = subsample.similarity.SimilarityMatrix(library, cfg)
+	matrix.add(query)
+
+	return matrix.get_scores(query.sample_id)
+
+
 class TestScoreAgainstLibrary:
+
+	"""How one sample scores against each reference.  These went through
+	score_against_library, which only the tests called (L-25 of the
+	2026-09-21 review); they now go through SimilarityMatrix, as the app does."""
 
 	def test_empty_library_returns_empty (self) -> None:
 		lib = _library_with()
-		scores = subsample.similarity.score_against_library(
+		scores = _scores(
 			_make_record("Q", _make_spectral()), lib, _DEFAULT_CFG,
 		)
 		assert scores == []
@@ -270,7 +288,7 @@ class TestScoreAgainstLibrary:
 		timbre   = _make_timbre()
 		record   = _make_record("KICK", spectral, timbre)
 		lib      = _library_with(record)
-		scores   = subsample.similarity.score_against_library(record, lib, _DEFAULT_CFG)
+		scores   = _scores(record, lib, _DEFAULT_CFG)
 		assert len(scores) == 1
 		assert scores[0].score == pytest.approx(1.0)
 
@@ -278,7 +296,7 @@ class TestScoreAgainstLibrary:
 		query = _make_record("Q", _make_spectral(spectral_flatness=0.8, attack=0.2))
 		ref   = _make_record("R", _make_spectral(spectral_flatness=0.6, attack=0.4))
 		lib   = _library_with(ref)
-		scores = subsample.similarity.score_against_library(query, lib, _DEFAULT_CFG)
+		scores = _scores(query, lib, _DEFAULT_CFG)
 		assert 0.0 < scores[0].score < 1.0
 
 	def test_returns_sorted_descending (self) -> None:
@@ -286,13 +304,13 @@ class TestScoreAgainstLibrary:
 		kick  = _make_record("KICK",  _make_spectral(spectral_flatness=0.9))
 		snare = _make_record("SNARE", _make_spectral(spectral_flatness=0.1))
 		lib   = _library_with(snare, kick)
-		scores = subsample.similarity.score_against_library(query, lib, _DEFAULT_CFG)
+		scores = _scores(query, lib, _DEFAULT_CFG)
 		assert scores[0].name == "KICK"
 		assert scores[0].score >= scores[1].score
 
 	def test_name_preserved_in_result (self) -> None:
 		lib = _library_with(_make_record("BD0025", _make_spectral()))
-		scores = subsample.similarity.score_against_library(
+		scores = _scores(
 			_make_record("Q", _make_spectral()), lib, _DEFAULT_CFG,
 		)
 		assert scores[0].name == "BD0025"
@@ -313,8 +331,8 @@ class TestScoreAgainstLibrary:
 		rec_b = _make_record("B", spectral, timbre=timbre_b)
 		lib   = _library_with(rec_a)
 
-		score_full     = subsample.similarity.score_against_library(rec_b, lib, _DEFAULT_CFG)[0].score
-		score_spectral = subsample.similarity.score_against_library(rec_b, lib, _SPECTRAL_ONLY_CFG)[0].score
+		score_full     = _scores(rec_b, lib, _DEFAULT_CFG)[0].score
+		score_spectral = _scores(rec_b, lib, _SPECTRAL_ONLY_CFG)[0].score
 
 		# Spectral-only: identical fingerprints → 1.0
 		assert score_spectral == pytest.approx(1.0)
@@ -758,8 +776,8 @@ class TestLevelIndependence:
 		lib = _library_with(ref)
 		cfg = _DEFAULT_CFG
 
-		scores_quiet = subsample.similarity.score_against_library(record_quiet, lib, cfg)
-		scores_loud  = subsample.similarity.score_against_library(record_loud,  lib, cfg)
+		scores_quiet = _scores(record_quiet, lib, cfg)
+		scores_loud  = _scores(record_loud,  lib, cfg)
 
 		assert len(scores_quiet) == 1
 		assert len(scores_loud)  == 1
@@ -820,7 +838,7 @@ class TestBandEnergyGroup:
 
 		lib = _library_with(kick_ref, hihat_ref)
 		cfg = self._cfg_band_only()
-		scores = subsample.similarity.score_against_library(query, lib, cfg)
+		scores = _scores(query, lib, cfg)
 
 		assert len(scores) == 2
 		kick_score  = next(s for s in scores if s.name == "BD")

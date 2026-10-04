@@ -90,6 +90,8 @@ _ONSET_BACKOFF_SECONDS: float = 0.0003
 
 class DetectorState (enum.Enum):
 
+	"""Where the level detector is: learning the ambient floor, waiting for a sound, or recording one."""
+
 	WARMUP = "warmup"
 	IDLE = "idle"
 	RECORDING = "recording"

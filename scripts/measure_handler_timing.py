@@ -63,10 +63,16 @@ class _PathCapture (logging.Handler):
 	"""
 
 	def __init__ (self) -> None:
+
+		"""A handler that has seen nothing yet."""
+
 		super().__init__()
 		self.last_msg: str = ""
 
 	def emit (self, record: logging.LogRecord) -> None:
+
+		"""Keep the format string of the latest record, unformatted."""
+
 		self.last_msg = str(record.msg)
 
 
@@ -160,6 +166,8 @@ def _fire (
 
 def main () -> int:
 
+	"""Load the configured map and library, fire one assignment repeatedly, and report the timings."""
+
 	parser = argparse.ArgumentParser(description=__doc__)
 	parser.add_argument("--assignment", default="Kicks", help="Assignment name to fire (default: Kicks, as in the shipped map template).")
 	parser.add_argument("--hits", type=int, default=500, help="Warm-phase hit count (default: 500).")
@@ -220,6 +228,9 @@ def main () -> int:
 	)
 
 	def _on_complete (result: subsample.transform.TransformResult) -> None:
+
+		"""Keep a finished render in the memory cache."""
+
 		transform_cache.put(result)
 
 	variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None

@@ -85,6 +85,8 @@ class InstrumentWatcher:
 		on_sample_removed: typing.Optional[typing.Callable[[pathlib.Path], None]] = None,
 	) -> None:
 
+		"""Set up a watcher on directory's top level; nothing is watched until start()."""
+
 		self._directory = directory
 		# Audio + sidecar paths already loaded, so a spurious create/modify event
 		# for one is ignored.  MUTABLE (guarded by _lock): a deletion discards the
@@ -684,6 +686,8 @@ class _InstrumentFileHandler (watchdog.events.FileSystemEventHandler):
 		deleted_callback: typing.Callable[[pathlib.Path], None],
 	) -> None:
 
+		"""Route sidecar, audio and deletion events to their own callbacks."""
+
 		super().__init__()
 		self._sidecar_callback = sidecar_callback
 		self._audio_callback = audio_callback
@@ -808,6 +812,8 @@ class MidiMapWatcher:
 		paths: typing.Iterable[pathlib.Path],
 		on_changed: typing.Callable[[pathlib.Path], None],
 	) -> None:
+
+		"""Watch these files, calling on_changed with the last to change once saves settle."""
 
 		self._on_changed = on_changed
 
@@ -982,6 +988,8 @@ class _MidiMapFileHandler (watchdog.events.FileSystemEventHandler):
 		is_watched: typing.Callable[[pathlib.Path], bool],
 		callback: typing.Callable[[pathlib.Path], None],
 	) -> None:
+
+		"""Forward events for the paths is_watched accepts to callback."""
 
 		super().__init__()
 		self._is_watched = is_watched
