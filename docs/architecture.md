@@ -294,7 +294,9 @@ time.
 ## Watchers
 
 **The library watcher** (`watcher.InstrumentWatcher`) runs two paths over the
-top level of `library.directory`. A new `.analysis.json` loads its sample after
+top level of `library.directory`, or of each program's directory when the map
+declares `programs:`, whatever `library.directory` says
+(`cli._start_library_watchers`). A new `.analysis.json` loads its sample after
 a 1 s debounce, since the recorder writes the audio first and the sidecar's
 arrival means both are complete. A new audio file waits a 2 s debounce, then a
 5 s grace for a sidecar from another Subsample, then a 2 s check that its size

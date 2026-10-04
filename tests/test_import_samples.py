@@ -67,6 +67,48 @@ class TestHotFloatImport:
 		assert int(numpy.sum(numpy.abs(data) >= 0.9995)) > 0
 
 
+class TestForceAcrossFormats:
+
+	"""--force after audio_format changed wrote kick.flac beside the kick.wav
+	imported before, with its sidecar, so the library loaded the sound twice."""
+
+	def test_a_forced_reimport_in_the_other_format_replaces_the_first (
+		self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str],
+	) -> None:
+
+		source = tmp_path / "kick.wav"
+		t = numpy.arange(22050) / 44100.0
+		audio = (0.8 * numpy.exp(-t * 20.0) * numpy.sin(2 * numpy.pi * 60.0 * t)).astype(numpy.float32)
+		soundfile.write(str(source), audio, 44100, subtype="PCM_16")
+
+		out = tmp_path / "out"
+		out.mkdir()
+		cfg = subsample.config.AnalysisConfig()
+
+		assert import_samples._import_file(source, out, force=False, float_ceiling_dbfs=-1.0, rhythm_cfg=cfg, audio_format="wav")
+		(out / "kick.wav.preview.png").write_bytes(b"png")
+
+		assert import_samples._import_file(source, out, force=True, float_ceiling_dbfs=-1.0, rhythm_cfg=cfg, audio_format="flac")
+
+		assert sorted(path.name for path in out.iterdir()) == ["kick.flac", "kick.flac.analysis.json"]
+		assert "(replaces kick.wav)" in capsys.readouterr().out
+
+	def test_a_forced_reimport_in_the_same_format_removes_nothing_else (self, tmp_path: pathlib.Path) -> None:
+
+		source = tmp_path / "snare.wav"
+		audio = (0.5 * numpy.random.default_rng(1).standard_normal(22050)).astype(numpy.float32)
+		soundfile.write(str(source), audio, 44100, subtype="PCM_16")
+
+		out = tmp_path / "out"
+		out.mkdir()
+		cfg = subsample.config.AnalysisConfig()
+
+		for _ in range(2):
+			assert import_samples._import_file(source, out, force=True, float_ceiling_dbfs=-1.0, rhythm_cfg=cfg, audio_format="wav")
+
+		assert sorted(path.name for path in out.iterdir()) == ["snare.wav", "snare.wav.analysis.json"]
+
+
 class TestALoopKeepsItsFirstTap:
 
 	"""Import trims a loop up to its first tap, and the analysis then missed that

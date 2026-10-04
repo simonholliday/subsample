@@ -34,6 +34,7 @@ import numpy
 import subsample.analysis
 import subsample.audio
 import subsample.config
+import subsample.file_mode
 import subsample.loopfind
 import subsample.preview
 
@@ -47,13 +48,6 @@ _log = logging.getLogger(__name__)
 # one canonical place (rather than redeclaring the same strings).
 SIDECAR_SUFFIX:     typing.Final[str] = ".analysis.json"
 PREVIEW_PNG_SUFFIX: typing.Final[str] = ".preview.png"
-
-# The process umask, captured once at import (reading it requires a set+restore,
-# which is not thread-safe — safe here because import runs before any threads).
-# Sidecars written via mkstemp would otherwise be 0600 (owner-only); apply the
-# umask so they get the ordinary data-file mode instead, like every other file.
-_UMASK: typing.Final[int] = os.umask(0)
-os.umask(_UMASK)
 
 # Audio file extensions that subsample considers part of an instrument
 # library.  Used by the recursive library load to discover audio files,
@@ -328,10 +322,8 @@ def save_cache (
 	)
 
 	try:
-		# mkstemp creates the temp file 0600 (owner-only); the sidecar it becomes
-		# is ordinary analysis data, so apply the umask for the normal data-file
-		# mode (0644 under the usual 022) instead of leaving it owner-private.
-		os.fchmod(fd, 0o666 & ~_UMASK)
+		# mkstemp creates the temp file owner-only; a sidecar is ordinary data.
+		os.fchmod(fd, subsample.file_mode.DATA_FILE_MODE)
 
 		with os.fdopen(fd, "w", encoding="utf-8") as f:
 			f.write(json_str)

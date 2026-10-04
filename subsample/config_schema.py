@@ -874,7 +874,8 @@ def json_schema () -> dict[str, typing.Any]:
 					"watch": _setting(
 						"boolean",
 						"""
-						Loads audio files that appear in `library.directory` while
+						Loads audio files that appear in `library.directory`, or in each
+						program's directory when the MIDI map declares `programs:`, while
 						Subsample runs, without a restart, whatever wrote them: another
 						Subsample, a DAW or a script.  Subsample waits until a file
 						stops growing, analyses it when it has no sidecar, and adds it
@@ -889,7 +890,8 @@ def json_schema () -> dict[str, typing.Any]:
 						another machine writes to a network drive loads only at the
 						next start.  A folder sync tool writes each file on this
 						machine, so what it brings loads as it arrives.  Requires
-						`library.directory` and `player.enabled`.
+						`player.enabled`, and `library.directory` unless the map
+						declares `programs:`.
 						""",
 						default=False,
 					),

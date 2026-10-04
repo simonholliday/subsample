@@ -45,11 +45,10 @@ import typing
 
 import mido
 
-import subsample.audio
-import subsample.config
 import subsample.library
 import subsample.player
 import subsample.similarity
+import subsample.tools._shared
 import subsample.transform
 
 
@@ -171,12 +170,11 @@ def main () -> int:
 
 	logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
-	cfg = subsample.config.load_config()
-
-	# Loading the library heals sidecars via ensure_sample_assets (read through
-	# read_audio_file) — wire the float ceiling so hot floats are read as the
-	# player reads them.
-	subsample.audio.set_float_import_ceiling(cfg.recorder.audio.float_import_ceiling_dbfs)
+	# Loading the library heals stale sidecars via ensure_sample_assets, which
+	# writes what it computes.  Wire the float ceiling and the analysis tempo
+	# priors as the app does, or a heal here rewrites a sidecar with default
+	# priors that the player then trusts.
+	cfg = subsample.tools._shared.load_config_and_wire()
 
 	if cfg.player.midi_map is None:
 		print("config.player.midi_map is not set", file=sys.stderr)

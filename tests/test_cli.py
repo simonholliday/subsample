@@ -27,6 +27,7 @@ import subsample.library
 import subsample.player
 import subsample.similarity
 import subsample.transform
+import subsample.watcher
 
 import tests.helpers
 
@@ -1522,6 +1523,73 @@ class TestStartWatcher:
 
 		with pytest.raises(TypeError):
 			subsample.cli._start_watcher(watcher, "sample directory")
+
+
+class TestLibraryWatchWithPrograms:
+
+	"""With `programs:` the map's programs replace library.directory, so null is
+	a natural setting there.  library.watch then watched nothing, without a
+	word: the watchers were started only when library.directory was set."""
+
+	class _Watcher:
+
+		"""Stand-in for InstrumentWatcher that records the directory it was given."""
+
+		def __init__ (self, directory: pathlib.Path, **_kwargs: typing.Any) -> None:
+			self.directory = directory
+
+		def start (self) -> None:
+			pass
+
+	def _cfg (self, directory: typing.Optional[str]) -> subsample.config.Config:
+		cfg = subsample.config.load_config(subsample.config._locate_default_config())
+
+		return dataclasses.replace(
+			cfg,
+			library=dataclasses.replace(cfg.library, watch=True, directory=directory),
+			player=dataclasses.replace(cfg.player, enabled=True),
+		)
+
+	def _banks (self, tmp_path: pathlib.Path) -> subsample.bank.BankManager:
+		banks = [
+			subsample.bank.Bank(
+				name=name, directory=tmp_path / name, program=program,
+				instrument_library=subsample.library.InstrumentLibrary(1024 * 1024),
+				similarity_matrix=None, transform_manager=None,
+			)
+			for program, name in enumerate(("kit", "pads"))
+		]
+
+		return subsample.bank.BankManager(banks, bank_channel=10, default_program=0)
+
+	@pytest.mark.parametrize("directory", [None, "samples/captures"])
+	def test_each_program_directory_is_watched_whatever_library_directory_says (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, directory: typing.Optional[str],
+	) -> None:
+
+		monkeypatch.setattr(subsample.watcher, "InstrumentWatcher", self._Watcher)
+
+		watchers = subsample.cli._start_library_watchers(
+			self._cfg(directory), self._banks(tmp_path),
+			subsample.library.InstrumentLibrary(1024 * 1024), None, None,
+			[None], subsample.events.EventEmitter(), 44100,
+		)
+
+		assert [watcher.directory for watcher in watchers] == [tmp_path / "kit", tmp_path / "pads"]
+
+	def test_without_programs_a_null_directory_has_nothing_to_watch (
+		self, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		monkeypatch.setattr(subsample.watcher, "InstrumentWatcher", self._Watcher)
+
+		watchers = subsample.cli._start_library_watchers(
+			self._cfg(None), None,
+			subsample.library.InstrumentLibrary(1024 * 1024), None, None,
+			[None], subsample.events.EventEmitter(), 44100,
+		)
+
+		assert watchers == []
 
 
 class TestReferenceDirectoryResolution:

@@ -151,9 +151,8 @@ def _write_atomically (filepath: pathlib.Path, payload: bytes) -> None:
 	handle, temporary = tempfile.mkstemp(dir=filepath.parent, prefix=filepath.name + ".tmp")
 
 	try:
-		# mkstemp creates 0600; a recording is ordinary data, so apply the umask
-		# rather than leaving it readable only by its owner.
-		os.fchmod(handle, 0o666 & ~subsample.cache._UMASK)
+		# mkstemp creates the file owner-only; a recording is ordinary data.
+		os.fchmod(handle, subsample.file_mode.DATA_FILE_MODE)
 
 		with os.fdopen(handle, "wb") as opened:
 			opened.write(payload)

@@ -803,9 +803,24 @@ def load_instrument_library (
 	# no collision to reject (rglob yields each path exactly once).
 	loaded = 0
 
+	# A symlink to a file already loaded resolves to the same key, and add()
+	# replaces the first record with it.  That is one sound, not one evicted
+	# for want of memory, so the warning below leaves such duplicates out.
+	seen_paths: set[pathlib.Path] = set()
+	duplicates = 0
+	resident_bytes = 0
+
 	for loaded_sample in raw_results:
 		if loaded_sample is None:
 			continue
+
+		key_path = _resolve_path(loaded_sample.audio_path)
+
+		if key_path in seen_paths:
+			duplicates += 1
+		else:
+			seen_paths.add(key_path)
+			resident_bytes += loaded_sample.audio.nbytes if loaded_sample.audio is not None else 0
 
 		record = SampleRecord(
 			sample_id      = allocate_id(),
@@ -833,20 +848,20 @@ def load_instrument_library (
 	# A colliding take-folder tree can hold many same-stem files; their combined
 	# audio may exceed the memory limit, and FIFO eviction then silently drops
 	# earliest-loaded samples during the walk.  Warn only when eviction ACTUALLY
-	# dropped a loaded sample (fewer resident than loaded) — a single sample that
-	# alone exceeds the budget is kept resident (add()'s "added anyway" path) and
-	# must not trigger this.  The per-sample over-budget notice in add() is separate.
-	if lib._max_bytes > 0 and len(lib) < loaded:
-		total_audio_bytes = sum(
-			s.audio.nbytes for s in raw_results
-			if s is not None and s.audio is not None
-		)
+	# dropped a distinct sample (fewer resident than distinct files loaded) — a
+	# single sample that alone exceeds the budget is kept resident (add()'s
+	# "added anyway" path) and must not trigger this.  The per-sample over-budget
+	# notice in add() is separate.
+	distinct = loaded - duplicates
+	evicted  = distinct - len(lib)
+
+	if lib.memory_limit > 0 and evicted > 0:
 		_log.warning(
 			"Instrument library: %d sample(s) totalling %.1f MB exceed the memory "
 			"limit of %.1f MB - %d were evicted (FIFO), so some are unavailable at "
 			"note-on.  Raise library.max_memory_mb to keep them all resident.",
-			loaded, total_audio_bytes / (1024 * 1024), lib._max_bytes / (1024 * 1024),
-			loaded - len(lib),
+			distinct, resident_bytes / (1024 * 1024), lib.memory_limit / (1024 * 1024),
+			evicted,
 		)
 
 	_log.info("Loaded %d instrument sample(s) from %s", loaded, directory)

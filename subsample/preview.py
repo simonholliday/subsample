@@ -33,6 +33,7 @@ import PIL.ImageDraw
 import PIL.ImageFont
 
 import subsample.analysis
+import subsample.file_mode
 
 
 PREVIEW_VERSION: int = 3
@@ -513,6 +514,10 @@ def render_png (data: PreviewData, path: pathlib.Path) -> None:
 	)
 
 	try:
+		# mkstemp creates the file owner-only, but a preview exists to be
+		# browsed, in a file manager or over a share, like its sidecar.
+		os.fchmod(fd, subsample.file_mode.DATA_FILE_MODE)
+
 		with os.fdopen(fd, "wb") as f:
 			img.save(f, format="PNG", optimize=True)
 

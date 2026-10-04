@@ -3,12 +3,14 @@
 import json
 import math
 import pathlib
+import stat
 
 import numpy
 import pytest
 
 import PIL.Image
 
+import subsample.file_mode
 import subsample.preview
 
 import tests.helpers
@@ -263,6 +265,19 @@ class TestRenderPng:
 		new_size = out.stat().st_size
 
 		assert new_size != first_size or new_size > len(b"stale content")
+
+	def test_a_preview_is_readable_as_its_sidecar_is (self, tmp_path: pathlib.Path) -> None:
+
+		"""The image was written through mkstemp, which creates a file only its
+		owner can read, and the rename kept that.  A preview exists to be
+		browsed, in a file manager or over a share, so it gets the mode the
+		sidecar beside it already gets: 0666 less the umask."""
+
+		out = tmp_path / "sample.preview.png"
+		subsample.preview.render_png(_make_preview_data(), out)
+
+		assert stat.S_IMODE(out.stat().st_mode) == subsample.file_mode.DATA_FILE_MODE
+		assert subsample.file_mode.DATA_FILE_MODE & 0o044   # group and others can read, under any usual umask
 
 	def test_real_audio_renders (self, tmp_path: pathlib.Path) -> None:
 

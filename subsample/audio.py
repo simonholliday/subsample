@@ -22,6 +22,7 @@ import wave
 
 import numpy
 import pyaudio
+import soundfile
 
 import subsample.config
 import subsample.devices
@@ -260,8 +261,6 @@ def read_audio_file (
 	# WAV would do the same, and a 24-bit ALAC file would lose its upper
 	# 8 bits of precision.
 	try:
-		import soundfile
-
 		sf_info = soundfile.info(str(path))
 		subtype = (sf_info.subtype or "").upper()
 
@@ -503,11 +502,13 @@ class AudioReader:
 
 		# channels must be resolved to a concrete int before AudioReader is
 		# constructed.  Callers are responsible for auto-detecting via
-		# get_device_channels() when AudioConfig.channels is None.
-		assert audio_cfg.channels is not None, (
-			"AudioConfig.channels must be resolved before opening an AudioReader. "
-			"Call get_device_channels() to auto-detect from the selected device."
-		)
+		# get_device_channels() when AudioConfig.channels is None.  A raise,
+		# not an assert, which python -O strips.
+		if audio_cfg.channels is None:
+			raise ValueError(
+				"AudioConfig.channels must be resolved before opening an AudioReader. "
+				"Call get_device_channels() to auto-detect from the selected device."
+			)
 
 		self._bit_depth = audio_cfg.bit_depth
 		self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self._QUEUE_MAX)

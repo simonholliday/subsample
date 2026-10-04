@@ -1065,6 +1065,24 @@ class TestLoadInstrumentLibraryRecursive:
 
 		assert not any("exceed the memory limit" in r.message for r in caplog.records)
 
+	def test_a_symlink_to_a_loaded_file_is_not_reported_as_evicted (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""Two paths to one file load as one sample.  The warning took the one
+		fewer resident sample for an eviction, and told the musician to raise
+		a memory limit the library was nowhere near."""
+
+		import logging
+		_write_wav_and_sidecar(tmp_path, "a", n_frames=1000)
+		(tmp_path / "b.wav").symlink_to(tmp_path / "a.wav")
+
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			lib = subsample.library.load_instrument_library(tmp_path, 10 * 1024 * 1024, with_preview=False)
+
+		assert len(lib) == 1
+		assert not any("exceed the memory limit" in r.message for r in caplog.records)
+
 	def test_single_over_budget_sample_does_not_aggregate_warn (
 		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
 	) -> None:

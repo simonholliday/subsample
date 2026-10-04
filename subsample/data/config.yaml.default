@@ -589,8 +589,8 @@ analysis:
 #   # project assembled from shared sample sets wants: each set declares the
 #   # samples it needs, so there is no reason to walk a capture tree of
 #   # thousands of unrelated ones (and the sets may live outside the project
-#   # entirely, on a shared drive).  Also disables `watch` below, which then
-#   # has nothing to watch.
+#   # entirely, on a shared drive).  Also leaves `watch` below nothing to
+#   # watch, unless the MIDI map declares programs:.
 #
 #   reference_directory: null
 #   # Directory of reference fingerprints that a MIDI map can NAME in a
@@ -603,7 +603,8 @@ analysis:
 #   # replace the built-in ones.  Path-based references in a map are unaffected.
 #
 #   watch: false
-#   # When true, monitor library.directory at runtime for new audio files
+#   # When true, monitor library.directory (or each program's directory, when
+#   # the MIDI map declares programs:) at runtime for new audio files
 #   # and hot-load them without restarting. Detects audio files from any
 #   # source - another subsample instance (via sidecar), a DAW, or any
 #   # application that writes WAV/FLAC/AIFF/OGG/MP3 files. Files without
@@ -611,7 +612,8 @@ analysis:
 #   # stability check (to handle files still being written).
 #   # A network drive gives no notice of files another machine writes; share
 #   # the folder with a sync tool such as Syncthing instead.
-#   # Requires library.directory and player.enabled.
+#   # Requires player.enabled, and library.directory unless the map declares
+#   # programs:.
 
 # ---------------------------------------------------------------------------
 # transform - in-memory derivative audio (pitch variants, time-stretch, etc.)

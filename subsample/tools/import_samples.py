@@ -298,14 +298,50 @@ def _import_file (
 	except OSError as exc:
 		_log.warning("Could not save analysis cache for %s: %s", target_path.name, exc)
 
+	# A forced re-import after audio_format changed writes the other container,
+	# and the earlier copy stayed beside it, so the library loaded both.
+	replaced = _remove_other_container(target_dir, filepath.stem, keep=target_path)
+
 	# Report
 
 	peak = float(numpy.max(numpy.abs(faded)))
 	rms = float(numpy.sqrt(numpy.mean(faded ** 2)))
+	replaces = f"  (replaces {replaced.name})" if replaced is not None else ""
 
-	print(f"  {filepath.name}  {duration:.1f}s  peak {_dbfs(peak)}  rms {_dbfs(rms)}")
+	print(f"  {filepath.name}  {duration:.1f}s  peak {_dbfs(peak)}  rms {_dbfs(rms)}{replaces}")
 
 	return True
+
+
+def _remove_other_container (
+	target_dir: pathlib.Path,
+	stem: str,
+	keep: pathlib.Path,
+) -> typing.Optional[pathlib.Path]:
+
+	"""Remove an earlier import of this stem in the other container, with its sidecar and preview.
+
+	It is the same sound under the same name, which --force asked to replace.
+	Returns the audio file removed, or None when there was none.
+	"""
+
+	for extension in (".wav", ".flac"):
+		earlier = target_dir / (stem + extension)
+
+		if earlier == keep or not earlier.exists():
+			continue
+
+		preview = earlier.with_name(earlier.name + subsample.cache.PREVIEW_PNG_SUFFIX)
+
+		for path in (earlier, subsample.cache.cache_path(earlier), preview):
+			try:
+				path.unlink(missing_ok=True)
+			except OSError as exc:
+				_log.warning("Could not remove %s, imported before as %s: %s", path.name, earlier.name, exc)
+
+		return earlier
+
+	return None
 
 
 # What the output means, printed at the end of --help and published with it on

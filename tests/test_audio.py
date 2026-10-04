@@ -129,6 +129,19 @@ class TestAudioReader:
 
 		return reader, mock_stream
 
+	def test_an_unresolved_channel_count_is_refused (self) -> None:
+
+		"""The check was an assert, which python -O removes, so the reader
+		went on to open a stream with no channel count."""
+
+		cfg = subsample.config.AudioConfig(sample_rate=44100, bit_depth=16, channels=None, buffer_frames=16)
+		mock_pa = unittest.mock.MagicMock()
+
+		with pytest.raises(ValueError, match="channels must be resolved"):
+			subsample.audio.AudioReader(mock_pa, device_index=0, audio_cfg=cfg)
+
+		mock_pa.open.assert_not_called()
+
 	def test_read_returns_correct_shape (self) -> None:
 		"""read() should unpack raw bytes and return shape (buffer_frames, channels)."""
 		buffer_frames = 16

@@ -6,10 +6,12 @@ an adjacent `.analysis.json` sidecar, rebuilds the PreviewData from the
 audio + existing analysis, and writes a fresh `<audio>.preview.png`
 sidecar.
 
-Reads each sidecar through `subsample.cache.load_cache`, which re-analyses and
-rewrites a `.analysis.json` that is version- or MD5-stale (so a stale sidecar IS
-refreshed as a side effect); an up-to-date sidecar is left untouched.  The PNG
-itself is pure raster output and is always rewritten.
+Reads each sidecar through `subsample.cache.ensure_sample_assets`, as a library
+load does, so a `.analysis.json` that is version- or MD5-stale is re-analysed and
+rewritten with its embedded preview block, under the analysis settings in
+config.yaml; an up-to-date sidecar is left untouched.  The PNG itself is pure
+raster output and is always rewritten.  A file that fails is reported and
+skipped, and the run goes on.
 
 This script will be superseded by a proper `python -m subsample
 regen-previews` CLI later, which will also refresh the embedded preview
@@ -30,6 +32,7 @@ import subsample.analysis
 import subsample.audio
 import subsample.cache
 import subsample.preview
+import subsample.tools._shared
 
 
 logging.basicConfig(
@@ -43,9 +46,14 @@ _log = logging.getLogger(__name__)
 
 def _regen_one (audio_path: pathlib.Path) -> bool:
 
-	"""Regenerate the preview PNG for a single sample.  Returns True on success."""
+	"""Regenerate the preview PNG for a single sample.  Returns True on success.
 
-	cached = subsample.cache.load_cache(audio_path)
+	A stale sidecar is healed through ensure_sample_assets, which keeps its
+	preview block.  load_cache, used before, rewrote it without one, so the
+	next library load analysed the sample again and overwrote this PNG.
+	"""
+
+	cached = subsample.cache.ensure_sample_assets(audio_path, with_preview=True)
 	if cached is None:
 		_log.warning("skip %s — no valid analysis sidecar", audio_path.name)
 		return False
@@ -97,6 +105,8 @@ def _iter_audio_files (root: pathlib.Path) -> list[pathlib.Path]:
 
 def main () -> None:
 
+	"""Regenerate the preview PNG of every analysed sample under a directory."""
+
 	parser = argparse.ArgumentParser(
 		description="Regenerate .preview.png sidecars for an existing library.",
 	)
@@ -120,10 +130,20 @@ def main () -> None:
 		      file=sys.stderr)
 		sys.exit(1)
 
+	# The sidecars a heal writes must describe the audio as the app would.
+	subsample.tools._shared.load_config_and_wire()
+
 	print(f"Regenerating {len(audio_files)} preview PNG(s) under {root} ...")
 	ok = 0
 	for path in audio_files:
-		if _regen_one(path):
+		# One unreadable or corrupt file used to end the whole run.
+		try:
+			regenerated = _regen_one(path)
+		except Exception as exc:
+			_log.warning("skip %s — %s", path.name, exc)
+			continue
+
+		if regenerated:
 			ok += 1
 
 	print(f"Done.  {ok}/{len(audio_files)} samples regenerated.")

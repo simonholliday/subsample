@@ -1869,80 +1869,10 @@ def _main_impl () -> None:
 	# Only active when player is enabled — the watcher's purpose is to feed
 	# new samples into the playback pipeline.
 
-	# A null library.directory has nothing to watch — the samples come from the
-	# MIDI map's own predicates, and those directories are not watched (a set on
-	# a shared drive would not deliver events anyway; inotify only sees writes
-	# made through the local mount by this machine).
-	if cfg.library.watch and cfg.player.enabled and cfg.library.directory is not None:
-
-		# Multi-bank mode: one watcher per bank directory.
-		if bank_manager is not None:
-			for bank in bank_manager.all_banks():
-				_bank = bank  # capture for closure
-
-				known_sc = {
-					(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
-					for r in _bank.instrument_library.samples()
-					if (fp := r.filepath) is not None
-				}
-
-				def _make_bank_callback (b: subsample.bank.Bank) -> typing.Callable[[subsample.library.SampleRecord], None]:
-					def cb (record: subsample.library.SampleRecord) -> None:
-						_log.info("Watcher [%s]: new sample - %s (%.2fs)", b.name, record.name, record.duration)
-						_integrate_sample(record, b.instrument_library, b.similarity_matrix,
-						                  b.transform_manager, _player_cell, app_events)
-
-					return cb
-
-				def _make_bank_removal_callback (b: subsample.bank.Bank) -> typing.Callable[[pathlib.Path], None]:
-					def rm (path: pathlib.Path) -> None:
-						_log.info("Watcher [%s]: sample removed - %s", b.name, path.name)
-						_remove_sample(path, b.instrument_library, b.similarity_matrix,
-						               b.transform_manager, _player_cell)
-
-					return rm
-
-				watcher = subsample.watcher.InstrumentWatcher(
-					directory=_bank.directory,
-					known_sidecars=known_sc,
-					on_sample_loaded=_make_bank_callback(_bank),
-					target_sample_rate=output_sample_rate,
-					with_preview=cfg.recorder.previews,
-					on_sample_removed=_make_bank_removal_callback(_bank),
-				)
-				if _start_watcher(watcher, f"sample directory {_bank.name!r}"):
-					instrument_watchers.append(watcher)
-					print(f"  Watcher      : monitoring {_bank.directory} ({_bank.name!r})")
-
-		# Single-directory mode.
-		else:
-			known_sidecars: set[pathlib.Path] = {
-				(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
-				for r in instrument_library.samples()
-				if (fp := r.filepath) is not None
-			}
-
-			def _on_watched_sample (record: subsample.library.SampleRecord) -> None:
-				_log.info("Watcher: new sample arrived - %s (%.2fs)", record.name, record.duration)
-				_integrate_sample(record, instrument_library, similarity_matrix,
-				                  transform_manager, _player_cell, app_events)
-
-			def _on_watched_sample_removed (path: pathlib.Path) -> None:
-				_log.info("Watcher: sample removed - %s", path.name)
-				_remove_sample(path, instrument_library, similarity_matrix,
-				               transform_manager, _player_cell)
-
-			watcher = subsample.watcher.InstrumentWatcher(
-				directory=pathlib.Path(cfg.library.directory),
-				known_sidecars=known_sidecars,
-				on_sample_loaded=_on_watched_sample,
-				target_sample_rate=output_sample_rate,
-				with_preview=cfg.recorder.previews,
-				on_sample_removed=_on_watched_sample_removed,
-			)
-			if _start_watcher(watcher, "sample directory"):
-				instrument_watchers.append(watcher)
-				print(f"  Watcher      : monitoring {cfg.library.directory} for new samples")
+	instrument_watchers.extend(_start_library_watchers(
+		cfg, bank_manager, instrument_library, similarity_matrix,
+		transform_manager, _player_cell, app_events, output_sample_rate,
+	))
 
 	# --- MIDI map file watcher ---
 	# Monitors the MIDI map YAML file for changes so assignments can be
@@ -2274,6 +2204,106 @@ def _main_impl () -> None:
 	# co-occurs with the stuck-daemon path above).
 	if startup_failed:
 		raise SystemExit(1)
+
+
+def _start_library_watchers (
+	cfg:                subsample.config.Config,
+	bank_manager:       typing.Optional[subsample.bank.BankManager],
+	instrument_library: subsample.library.InstrumentLibrary,
+	similarity_matrix:  typing.Optional[subsample.similarity.SimilarityMatrix],
+	transform_manager:  typing.Optional[subsample.transform.TransformManager],
+	player_cell:        list[typing.Optional[subsample.player.MidiPlayer]],
+	app_events:         subsample.events.EventEmitter,
+	output_sample_rate: int,
+) -> list[subsample.watcher.InstrumentWatcher]:
+
+	"""Start the library.watch watchers, and return those that started.
+
+	One per program directory when the map declares programs, else one on
+	library.directory.  Each loads a sample that arrives into its library and
+	takes out one that goes.
+	"""
+
+	watchers: list[subsample.watcher.InstrumentWatcher] = []
+
+	# Without programs, a null library.directory has nothing to watch — the
+	# samples come from the MIDI map's own predicates, and those directories are
+	# not watched (a set on a shared drive would not deliver events anyway;
+	# inotify only sees writes made through the local mount by this machine).
+	# With programs, library.directory is ignored, so null is a reasonable
+	# setting there and each program's directory is watched whatever it says.
+	if cfg.library.watch and cfg.player.enabled:
+
+		# Multi-bank mode: one watcher per bank directory.
+		if bank_manager is not None:
+			for bank in bank_manager.all_banks():
+				_bank = bank  # capture for closure
+
+				known_sc = {
+					(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
+					for r in _bank.instrument_library.samples()
+					if (fp := r.filepath) is not None
+				}
+
+				def _make_bank_callback (b: subsample.bank.Bank) -> typing.Callable[[subsample.library.SampleRecord], None]:
+					def cb (record: subsample.library.SampleRecord) -> None:
+						_log.info("Watcher [%s]: new sample - %s (%.2fs)", b.name, record.name, record.duration)
+						_integrate_sample(record, b.instrument_library, b.similarity_matrix,
+						                  b.transform_manager, player_cell, app_events)
+
+					return cb
+
+				def _make_bank_removal_callback (b: subsample.bank.Bank) -> typing.Callable[[pathlib.Path], None]:
+					def rm (path: pathlib.Path) -> None:
+						_log.info("Watcher [%s]: sample removed - %s", b.name, path.name)
+						_remove_sample(path, b.instrument_library, b.similarity_matrix,
+						               b.transform_manager, player_cell)
+
+					return rm
+
+				watcher = subsample.watcher.InstrumentWatcher(
+					directory=_bank.directory,
+					known_sidecars=known_sc,
+					on_sample_loaded=_make_bank_callback(_bank),
+					target_sample_rate=output_sample_rate,
+					with_preview=cfg.recorder.previews,
+					on_sample_removed=_make_bank_removal_callback(_bank),
+				)
+				if _start_watcher(watcher, f"sample directory {_bank.name!r}"):
+					watchers.append(watcher)
+					print(f"  Watcher      : monitoring {_bank.directory} ({_bank.name!r})")
+
+		# Single-directory mode.
+		elif cfg.library.directory is not None:
+			known_sidecars: set[pathlib.Path] = {
+				(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
+				for r in instrument_library.samples()
+				if (fp := r.filepath) is not None
+			}
+
+			def _on_watched_sample (record: subsample.library.SampleRecord) -> None:
+				_log.info("Watcher: new sample arrived - %s (%.2fs)", record.name, record.duration)
+				_integrate_sample(record, instrument_library, similarity_matrix,
+				                  transform_manager, player_cell, app_events)
+
+			def _on_watched_sample_removed (path: pathlib.Path) -> None:
+				_log.info("Watcher: sample removed - %s", path.name)
+				_remove_sample(path, instrument_library, similarity_matrix,
+				               transform_manager, player_cell)
+
+			watcher = subsample.watcher.InstrumentWatcher(
+				directory=pathlib.Path(cfg.library.directory),
+				known_sidecars=known_sidecars,
+				on_sample_loaded=_on_watched_sample,
+				target_sample_rate=output_sample_rate,
+				with_preview=cfg.recorder.previews,
+				on_sample_removed=_on_watched_sample_removed,
+			)
+			if _start_watcher(watcher, "sample directory"):
+				watchers.append(watcher)
+				print(f"  Watcher      : monitoring {cfg.library.directory} for new samples")
+
+	return watchers
 
 
 def _drain_captures (
