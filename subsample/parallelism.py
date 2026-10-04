@@ -32,8 +32,20 @@ import warnings
 
 import threadpoolctl
 
+import subsample.audio
+import subsample.cache
+import subsample.config
+
 
 _log = logging.getLogger(__name__)
+
+# How the analysis pool starts its worker processes.  `fork` starts a worker
+# with everything already imported, which is quick.  Nothing a worker needs
+# depends on it: init_analysis_worker hands each worker the settings the parent
+# configured process-wide, so `forkserver` or `spawn` analyse the same way
+# (#390), and a Python that drops `fork` needs only this line changed, and
+# can_fork_safely's gate and the fork-warning filter in map_analysis revisited.
+_START_METHOD: str = "fork"
 
 
 # While the player is live, background analysis is limited to roughly this
@@ -166,15 +178,25 @@ def cap_blas_threads () -> None:
 	_blas_limiter = threadpoolctl.threadpool_limits(limits=1)
 
 
-def init_analysis_worker () -> None:
+def init_analysis_worker (
+	analysis_config:    subsample.config.AnalysisConfig,
+	float_ceiling_dbfs: typing.Optional[float],
+) -> None:
 
 	"""Set up one freshly-started analysis worker process.
 
-	Runs once per worker as the process pool's initializer, pinning it to a
-	single BLAS thread.
+	Runs once per worker as the process pool's initializer.  It pins the worker
+	to a single BLAS thread and gives it the two settings the parent set
+	process-wide, which the library scan reads from module state rather than
+	being passed them: the analysis config and the float import ceiling.  A
+	forked worker inherits both, but one started fresh would run on the
+	defaults and say nothing, analysing every sample differently (#390).
 	"""
 
 	cap_blas_threads()
+
+	subsample.cache.set_analysis_config(analysis_config)
+	subsample.audio.set_float_import_ceiling(float_ceiling_dbfs)
 
 
 def map_analysis (
@@ -220,8 +242,12 @@ def map_analysis (
 	if use_processes:
 		executor = concurrent.futures.ProcessPoolExecutor(
 			max_workers=n_workers,
-			mp_context=multiprocessing.get_context("fork"),
+			mp_context=multiprocessing.get_context(_START_METHOD),
 			initializer=init_analysis_worker,
+			initargs=(
+				subsample.cache.analysis_config(),
+				subsample.audio.float_import_ceiling(),
+			),
 		)
 	else:
 		executor = concurrent.futures.ThreadPoolExecutor(

@@ -96,6 +96,16 @@ def set_float_import_ceiling (dbfs: typing.Optional[float]) -> None:
 	_FLOAT_IMPORT_CEILING_DBFS = dbfs
 
 
+def float_import_ceiling () -> typing.Optional[float]:
+
+	"""The process-wide float/double import ceiling, as set_float_import_ceiling() last set it.
+
+	Read by the analysis worker pool, which hands it to each worker it starts
+	(subsample.parallelism.init_analysis_worker)."""
+
+	return _FLOAT_IMPORT_CEILING_DBFS
+
+
 def scale_float_to_ceiling (
 	data: numpy.ndarray,
 	ceiling_dbfs: typing.Optional[float],

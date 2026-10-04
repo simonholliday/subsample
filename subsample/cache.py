@@ -87,6 +87,16 @@ def set_analysis_config (cfg: subsample.config.AnalysisConfig) -> None:
 	global _ANALYSIS_CONFIG
 	_ANALYSIS_CONFIG = cfg
 
+
+def analysis_config () -> subsample.config.AnalysisConfig:
+
+	"""The process-wide AnalysisConfig, as set_analysis_config() last set it.
+
+	Read by the analysis worker pool, which hands it to each worker it starts
+	(subsample.parallelism.init_analysis_worker)."""
+
+	return _ANALYSIS_CONFIG
+
 # Return type shared by load_cache(), load_sidecar(), and ensure_sample_assets().
 @dataclasses.dataclass(frozen=True)
 class SampleAssets:

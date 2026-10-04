@@ -3,10 +3,14 @@
 import logging
 import os
 import threading
+import typing
 
 import pytest
 import threadpoolctl
 
+import subsample.audio
+import subsample.cache
+import subsample.config
 import subsample.parallelism
 
 
@@ -105,11 +109,77 @@ def test_cap_blas_threads_pins_to_one () -> None:
 	assert all(pool["num_threads"] == 1 for pool in info)
 
 
-def test_init_analysis_worker_runs () -> None:
+_SETTINGS_UNDER_TEST = (
+	subsample.config.AnalysisConfig(tempo_min=72.0, tempo_max=144.0),
+	-1.5,
+)
+"""Non-default analysis settings, to tell a worker that was handed them from one on the defaults."""
 
-	"""The process-pool initializer runs without error."""
 
-	subsample.parallelism.init_analysis_worker()
+@pytest.fixture
+def _parent_settings () -> typing.Iterator[None]:
+
+	"""Set the parent's process-wide analysis settings to _SETTINGS_UNDER_TEST, then restore them."""
+
+	previous = (subsample.cache.analysis_config(), subsample.audio.float_import_ceiling())
+
+	subsample.cache.set_analysis_config(_SETTINGS_UNDER_TEST[0])
+	subsample.audio.set_float_import_ceiling(_SETTINGS_UNDER_TEST[1])
+
+	yield
+
+	subsample.cache.set_analysis_config(previous[0])
+	subsample.audio.set_float_import_ceiling(previous[1])
+
+
+def test_init_analysis_worker_sets_what_the_parent_set () -> None:
+
+	"""The process-pool initializer installs the settings it is handed."""
+
+	previous = (subsample.cache.analysis_config(), subsample.audio.float_import_ceiling())
+
+	try:
+		subsample.parallelism.init_analysis_worker(*_SETTINGS_UNDER_TEST)
+
+		assert subsample.cache.analysis_config() == _SETTINGS_UNDER_TEST[0]
+		assert subsample.audio.float_import_ceiling() == _SETTINGS_UNDER_TEST[1]
+
+	finally:
+		subsample.cache.set_analysis_config(previous[0])
+		subsample.audio.set_float_import_ceiling(previous[1])
+
+
+def _settings_of (value: int) -> tuple[subsample.config.AnalysisConfig, typing.Optional[float], int]:
+
+	"""Module-level (picklable) worker reporting the settings it analyses with, and its PID."""
+
+	return subsample.cache.analysis_config(), subsample.audio.float_import_ceiling(), os.getpid()
+
+
+@pytest.mark.usefixtures("_parent_settings")
+@pytest.mark.parametrize("start_method", ["spawn", "forkserver"])
+def test_a_worker_started_fresh_analyses_with_the_parents_settings (
+	monkeypatch: pytest.MonkeyPatch, start_method: str,
+) -> None:
+
+	"""#390: a worker that does not inherit the parent's memory is handed its settings.
+
+	The library scan reads the analysis config and the float import ceiling
+	from module state.  A forked worker inherits them; one started fresh used
+	to run on the defaults, analysing every sample differently and saying
+	nothing, so a Python without `fork` would have broken the scan silently.
+	"""
+
+	monkeypatch.setattr(subsample.parallelism, "_START_METHOD", start_method)
+	monkeypatch.setattr(subsample.parallelism, "can_fork_safely", lambda: True)
+	_pin_cpus(monkeypatch, 4)
+
+	results = subsample.parallelism.map_analysis(_settings_of, [1, 2], player_active=False)
+
+	for analysis_config, float_ceiling, pid in results:
+		assert pid != os.getpid()
+		assert analysis_config == _SETTINGS_UNDER_TEST[0]
+		assert float_ceiling == _SETTINGS_UNDER_TEST[1]
 
 
 def _double (value: int) -> int:
