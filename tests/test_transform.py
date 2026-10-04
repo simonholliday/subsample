@@ -491,13 +491,15 @@ class TestTransformProcessor:
 
 	def test_enqueue_skips_record_with_no_audio (self) -> None:
 		processor = subsample.transform.TransformProcessor(sample_rate=44100)
-		record    = _make_record(audio=None)
+		record    = dataclasses.replace(_make_record(), audio=None)   # _make_record fills in audio for None
 		spec      = subsample.transform.TransformSpec(
 			steps=(subsample.transform.PitchShift(target_midi_note=60),)
 		)
 
-		# Should not raise; just a silent no-op
 		processor.enqueue(record, spec)
+
+		assert processor._in_flight == set()
+
 		processor.shutdown()
 
 	def test_enqueue_skips_when_handler_not_registered (self) -> None:

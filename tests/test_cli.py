@@ -2177,11 +2177,13 @@ class TestDrainingCapturesOnTheWayOut:
 
 		assert capsys.readouterr().out == ""
 
-	def test_no_recorder_is_not_an_error (self) -> None:
+	def test_no_recorder_is_not_an_error (self, capsys: pytest.CaptureFixture[str]) -> None:
 
 		"""Player-only and watcher-only runs have no capture queue at all."""
 
 		subsample.cli._drain_captures(None, poll=0.0)
+
+		assert capsys.readouterr().out == ""
 
 
 class TestAnUnreadableMapPathIsReported:

@@ -24,6 +24,7 @@ import yaml
 import subsample.analysis
 import subsample.audio
 import subsample.bank
+import subsample.channel
 import subsample.config
 import subsample.ensemble
 import subsample.library
@@ -571,7 +572,11 @@ class TestMidiPlayer:
 
 		# Reaching here means run() returned without hanging.  (The
 		# threaded variant, test_run_on_thread_exits_cleanly, adds a join
-		# timeout for the genuinely-asynchronous case.)
+		# timeout for the genuinely-asynchronous case.)  On the way out it
+		# closed everything it opened.
+		port.close.assert_called_once()
+		mock_pa.open.return_value.close.assert_called_once()
+		mock_pa.terminate.assert_called_once()
 
 	def test_logs_port_open (self, caplog: pytest.LogCaptureFixture) -> None:
 		import logging
@@ -5392,8 +5397,11 @@ class TestUpdatePitchedAssignments:
 	def test_no_transform_manager_noop (self) -> None:
 		"""update_pitched_assignments() is a no-op when transform_manager is None."""
 		player = self._make_player_with_pitch_map()
-		# Should not raise even with no transform manager.
+		before = dict(player._note_map)
+
 		player.update_pitched_assignments()
+
+		assert player._note_map == before
 
 	def test_no_pitched_assignments_no_enqueue (self) -> None:
 		"""No enqueue calls when no pitched assignments exist."""
@@ -7296,17 +7304,25 @@ class TestValidateAssignmentExtracts:
 			lib.add(r)
 		return lib
 
-	def test_no_extract_skips_validation (self) -> None:
+	def _spy_on_matrices (self, monkeypatch: pytest.MonkeyPatch) -> unittest.mock.MagicMock:
+		"""Record each extract matrix validation builds, without changing what it builds."""
+		spy = unittest.mock.MagicMock(wraps=subsample.channel.build_extract_matrix)
+		monkeypatch.setattr(subsample.channel, "build_extract_matrix", spy)
+		return spy
+
+	def test_no_extract_skips_validation (self, monkeypatch: pytest.MonkeyPatch) -> None:
 		"""Assignments without an extract are skipped silently."""
 		record = self._make_record("a", 2)
 		lib    = self._populated_library([record])
 		assignment = subsample.query.Assignment(name="a", select=(subsample.query.SelectSpec(),))
 		note_map = {(0, 60): [(assignment, subsample.query.PickSpec(1, 1))]}
+		spy = self._spy_on_matrices(monkeypatch)
 
-		# Should not raise.
 		subsample.player._validate_assignment_extracts(note_map, lib)
 
-	def test_compatible_extract_passes (self) -> None:
+		spy.assert_not_called()
+
+	def test_compatible_extract_passes (self, monkeypatch: pytest.MonkeyPatch) -> None:
 		"""omni on a stereo library is compatible — validation passes."""
 		records = [self._make_record(f"sample_{i}", 2) for i in range(3)]
 		lib     = self._populated_library(records)
@@ -7317,9 +7333,12 @@ class TestValidateAssignmentExtracts:
 			extract=subsample.query.ExtractSpec(kind="omni"),
 		)
 		note_map = {(0, 36): [(assignment, subsample.query.PickSpec(1, 1))]}
+		spy = self._spy_on_matrices(monkeypatch)
 
-		# Should not raise.
 		subsample.player._validate_assignment_extracts(note_map, lib)
+
+		# The three stereo samples are one format, checked once.
+		spy.assert_called_once_with(assignment.extract, 2, "pcm")
 
 	def test_incompatible_extract_rejected (self) -> None:
 		"""depth on stereo samples raises with the assignment name and 'depth'."""
@@ -7336,7 +7355,7 @@ class TestValidateAssignmentExtracts:
 		with pytest.raises(ValueError, match="bass_drum"):
 			subsample.player._validate_assignment_extracts(note_map, lib)
 
-	def test_empty_library_skipped (self) -> None:
+	def test_empty_library_skipped (self, monkeypatch: pytest.MonkeyPatch) -> None:
 		"""No matching samples — validation skips (no failure to report)."""
 		lib = self._populated_library([])
 		assignment = subsample.query.Assignment(
@@ -7345,9 +7364,11 @@ class TestValidateAssignmentExtracts:
 			extract=subsample.query.ExtractSpec(kind="depth"),
 		)
 		note_map = {(0, 36): [(assignment, subsample.query.PickSpec(1, 1))]}
+		spy = self._spy_on_matrices(monkeypatch)
 
-		# Should not raise — depth has no candidates to test.
 		subsample.player._validate_assignment_extracts(note_map, lib)
+
+		spy.assert_not_called()   # depth has no candidates to test
 
 	def test_warns_on_equivalent_to_omni (self, caplog: pytest.LogCaptureFixture) -> None:
 		"""front on stereo (no F/B info) logs a warning but doesn't raise."""
@@ -7370,7 +7391,7 @@ class TestValidateAssignmentExtracts:
 		# But should warn.
 		assert any("equivalent to 'omni'" in r.message for r in caplog.records)
 
-	def test_deduplicates_same_assignment_across_notes (self) -> None:
+	def test_deduplicates_same_assignment_across_notes (self, monkeypatch: pytest.MonkeyPatch) -> None:
 		"""An assignment mapped to multiple notes is validated once."""
 		records = [self._make_record("sample_0", 2)]
 		lib     = self._populated_library(records)
@@ -7387,8 +7408,11 @@ class TestValidateAssignmentExtracts:
 			(0, 38): [(assignment, subsample.query.PickSpec(1, 1))],
 		}
 
-		# Should not raise and should complete without exception.
+		spy = self._spy_on_matrices(monkeypatch)
+
 		subsample.player._validate_assignment_extracts(note_map, lib)
+
+		assert spy.call_count == 1
 
 
 class TestSelectSegment:

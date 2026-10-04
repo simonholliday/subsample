@@ -339,3 +339,31 @@ def test_a_dead_worker_does_not_empty_the_batch (caplog: pytest.LogCaptureFixtur
 	assert results == [0, 10, 20, 30, 40, 50, 60, 70]
 	assert any("pool died" in record.message for record in caplog.records), \
 		"the pool never died, so this proves nothing"
+
+
+def _dies_on_item_two_and_fails_on_item_five (item: int) -> int:
+
+	"""As _dies_on_item_two, plus one item that is unreadable wherever it runs."""
+
+	if item == 5:
+		raise ValueError("unreadable")
+
+	return _dies_on_item_two(item)
+
+
+def test_an_item_that_fails_in_the_retry_is_skipped_not_fatal (caplog: pytest.LogCaptureFixture) -> None:
+
+	"""After a worker dies the batch is redone in-process, and one bad file
+	there is skipped like anywhere else rather than ending the retry."""
+
+	if not (subsample.parallelism.analysis_worker_count(player_active=False) > 1
+	        and subsample.parallelism.can_fork_safely()):
+		pytest.skip("this machine runs the batch in-process, so no worker can die")
+
+	with caplog.at_level(logging.WARNING):
+		results = subsample.parallelism.map_analysis(
+			_dies_on_item_two_and_fails_on_item_five, list(range(8)), player_active=False,
+		)
+
+	assert results == [0, 10, 20, 30, 40, None, 60, 70]
+	assert any("Analysis failed for item 5 - skipping it" in record.message for record in caplog.records)

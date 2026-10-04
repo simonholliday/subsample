@@ -2484,3 +2484,66 @@ class TestAnAttackAtTheStart:
 		take = numpy.concatenate([numpy.zeros(int(0.3 * self.SR), dtype=numpy.float32), self._tap()])
 
 		assert self._attacks(take) == pytest.approx((0.3,), abs=0.002)
+
+
+class TestKnownValues:
+
+	"""Each measurement of a signal whose answer is known, on its documented scale.
+
+	Checking only that a measurement lands in [0, 1] cannot catch a mistake in
+	its scale (the 2026-09-21 review's M25 and L-8): these do.
+	"""
+
+	_RATE = 44100
+
+	def _params (self) -> subsample.analysis.AnalysisParams:
+		return subsample.analysis.compute_params(self._RATE)
+
+	def _sine (self, frequency: float, envelope: typing.Optional[numpy.ndarray] = None) -> numpy.ndarray:
+		"""A sine at half scale, one second long unless an envelope sets its length."""
+		frames = self._RATE if envelope is None else envelope.size
+		wave = 0.5 * numpy.sin(2.0 * numpy.pi * frequency * numpy.arange(frames) / self._RATE)
+		if envelope is not None:
+			wave = wave * envelope
+		return wave.astype(numpy.float32)
+
+	def _on_scale (self, value: float, low: float, high: float) -> float:
+		"""Where a value sits on the log scale from low to high, as the analysis maps it."""
+		return math.log(value / low) / math.log(high / low)
+
+	@pytest.mark.parametrize("frequency", [250.0, 1000.0, 4000.0])
+	def test_a_sine_crosses_zero_twice_a_cycle (self, frequency: float) -> None:
+		"""ZCR maps crossings per sample from [0, 0.5] to [0, 1], so a sine at f scores 4f / rate."""
+		result = subsample.analysis.analyze_mono(self._sine(frequency), self._params())
+		assert result.zcr == pytest.approx(4.0 * frequency / self._RATE, rel=0.03)
+
+	@pytest.mark.parametrize("frequency", [250.0, 1000.0, 4000.0])
+	def test_a_sines_centroid_and_rolloff_are_its_frequency (self, frequency: float) -> None:
+		"""Both sit at the tone itself, on the log scale from 20 Hz to Nyquist."""
+		result = subsample.analysis.analyze_mono(self._sine(frequency), self._params())
+		expected = self._on_scale(frequency, 20.0, self._RATE / 2.0)
+		assert result.spectral_centroid == pytest.approx(expected, abs=0.01)
+		assert result.spectral_rolloff == pytest.approx(expected, abs=0.01)
+
+	def test_two_equal_tones_spread_half_their_distance_either_side (self) -> None:
+		"""Tones at 500 Hz and 4500 Hz centre on 2500 Hz with a spread of 2000 Hz."""
+		audio = (self._sine(500.0) + self._sine(4500.0)).astype(numpy.float32)
+		result = subsample.analysis.analyze_mono(audio, self._params())
+		assert result.spectral_centroid == pytest.approx(self._on_scale(2500.0, 20.0, self._RATE / 2.0), abs=0.01)
+		assert result.spectral_bandwidth == pytest.approx(self._on_scale(2000.0, 20.0, self._RATE / 2.0), abs=0.01)
+
+	def test_a_half_second_swell_has_the_attack_of_its_rise (self) -> None:
+		"""Attack runs from 20 dB below the peak to the peak: 90% of a linear rise, on the log scale from 1 ms to 2 s."""
+		rise = numpy.linspace(0.0, 1.0, self._RATE // 2)
+		fall = numpy.exp(-numpy.arange(self._RATE) / self._RATE / 0.05)
+		result = subsample.analysis.analyze_mono(self._sine(440.0, numpy.concatenate([rise, fall])), self._params())
+		assert result.attack == pytest.approx(self._on_scale(0.45, 0.001, 2.0), abs=0.02)
+
+	@pytest.mark.parametrize("seconds", [0.3, 1.0])
+	def test_a_decay_has_the_release_of_its_fall_to_minus_20_db (self, seconds: float) -> None:
+		"""A struck tone that falls 20 dB in this many seconds has that release, and no attack."""
+		frames = int(self._RATE * (2.0 * seconds + 0.2))
+		decay = numpy.exp(-numpy.arange(frames) / self._RATE / (seconds / math.log(10.0)))
+		result = subsample.analysis.analyze_mono(self._sine(440.0, decay), self._params())
+		assert result.release == pytest.approx(self._on_scale(seconds, 0.001, 2.0), abs=0.02)
+		assert result.attack == 0.0

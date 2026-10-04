@@ -1,6 +1,7 @@
 """Tests for subsample/cache.py — analysis result caching."""
 
 import json
+import logging
 import pathlib
 import typing
 
@@ -13,6 +14,7 @@ import subsample.audio
 import subsample.cache
 import subsample.library
 import subsample.loopfind
+import subsample.preview
 
 import tests.helpers
 
@@ -607,6 +609,96 @@ class TestEnsureSampleAssets:
 		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
 
 		assert result is None
+
+	def _rewrite_sidecar (self, wav_path: pathlib.Path, **changes: typing.Any) -> None:
+		"""Change top-level fields of a sample's sidecar in place; a value of None removes the field."""
+		sidecar = subsample.cache.cache_path(wav_path)
+		payload = json.loads(sidecar.read_text())
+		for key, value in changes.items():
+			if value is None:
+				del payload[key]
+			else:
+				payload[key] = value
+		sidecar.write_text(json.dumps(payload))
+
+	def test_a_sidecar_from_an_older_analysis_is_redone (self, tmp_path: pathlib.Path) -> None:
+		"""A new analysis version re-analyses every sample once, so no stale measurement survives an upgrade."""
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+		self._rewrite_sidecar(wav_path, analysis_version="0")
+
+		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+
+		assert result is not None
+		payload = json.loads(subsample.cache.cache_path(wav_path).read_text())
+		assert payload["analysis_version"] == subsample.analysis.ANALYSIS_VERSION
+
+	def test_audio_that_cannot_be_read_for_its_checksum_is_skipped (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""A fresh sidecar is not trusted for audio that cannot be read: the sample is skipped, and the log says why."""
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+
+		def unreadable (path: pathlib.Path) -> str:
+			raise OSError("device not ready")
+
+		monkeypatch.setattr(subsample.cache, "compute_audio_md5", unreadable)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.cache"):
+			result = subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+
+		assert result is None
+		assert "Could not read kick.wav for MD5 check: device not ready" in caplog.text
+
+	def test_an_unreadable_preview_block_is_healed (self, tmp_path: pathlib.Path) -> None:
+		"""A corrupt preview block is rewritten from the audio, instead of a warning on every start and no picture."""
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+		self._png_path(wav_path).unlink()
+		self._rewrite_sidecar(wav_path, preview="not a preview")
+
+		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		assert result is not None
+		assert subsample.cache.load_preview_data(wav_path) is not None
+		assert self._png_path(wav_path).exists()
+
+	def test_a_picture_that_fails_to_draw_does_not_lose_the_sample (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""The preview picture is a convenience: if drawing it fails, the sample still loads and the log says so."""
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+		self._png_path(wav_path).unlink()
+
+		def broken (data: typing.Any, path: pathlib.Path) -> None:
+			raise RuntimeError("no drawing today")
+
+		monkeypatch.setattr(subsample.preview, "render_png", broken)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.cache"):
+			result = subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+
+		assert result is not None
+		assert "Failed to render preview PNG kick.wav.preview.png: no drawing today" in caplog.text
+
+	def test_a_sidecar_missing_a_section_is_healed (self, tmp_path: pathlib.Path) -> None:
+		"""A sidecar whose version and checksum are current but which lacks a section is rewritten whole."""
+		wav_path = tmp_path / "kick.wav"
+		tests.helpers._make_wav(wav_path)
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+		self._rewrite_sidecar(wav_path, spectral=None)
+
+		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+
+		assert result is not None
+		payload = json.loads(subsample.cache.cache_path(wav_path).read_text())
+		assert "spectral" in payload
 
 	def test_analysis_honours_configured_float_ceiling (self, tmp_path: pathlib.Path) -> None:
 		"""The analysis read scales a hot float source too, not just the playback

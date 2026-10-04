@@ -151,82 +151,27 @@ def _write_sidecar (
 	Does NOT create the audio file — only the sidecar.  Returns the sidecar
 	path.  Used by both library and watcher tests.
 
-	The JSON payload mirrors the format in subsample/cache.py.  If the sidecar
-	schema changes (new fields, renamed keys), update this helper to match.
+	The payload comes from the cache's own serialiser, so it has every field
+	a real sidecar has and follows the schema when it changes.
 	"""
 
 	audio_path   = directory / (audio_stem + audio_ext)
 	sidecar_path = subsample.cache.cache_path(audio_path)
-	spectral     = _make_spectral()
-	rhythm       = _make_rhythm()
-	pitch        = _make_pitch()
-	timbre       = _make_timbre()
-	level        = _make_level()
-	band_energy  = _make_band_energy()
-	params       = _make_params()
 
-	payload: dict[str, typing.Any] = {
-		"analysis_version": subsample.analysis.ANALYSIS_VERSION,
+	payload = subsample.cache._serialize(
 		# A fake digest is fine here: library/watcher loads go through
 		# load_sidecar(), which validates version only — the MD5 is checked
 		# by ensure_sample_assets/load_cache paths that regenerate anyway.
-		"audio_md5":        "deadbeef00000000deadbeef00000000",
-		"sample_rate":      params.sample_rate,
-		"duration":         1.0,
-		"params": {
-			"n_fft":        params.n_fft,
-			"hop_length":   params.hop_length,
-			"sample_rate":  params.sample_rate,
-		},
-		"spectral": {
-			"spectral_flatness":  spectral.spectral_flatness,
-			"attack":             spectral.attack,
-			"release":            spectral.release,
-			"spectral_centroid":  spectral.spectral_centroid,
-			"spectral_bandwidth": spectral.spectral_bandwidth,
-			"zcr":                spectral.zcr,
-			"harmonic_ratio":     spectral.harmonic_ratio,
-			"spectral_contrast":  spectral.spectral_contrast,
-			"voiced_fraction":    spectral.voiced_fraction,
-			"log_attack_time":    spectral.log_attack_time,
-			"spectral_flux":      spectral.spectral_flux,
-			"spectral_rolloff":   spectral.spectral_rolloff,
-			"spectral_slope":     spectral.spectral_slope,
-		},
-		"rhythm": {
-			"tempo_bpm":        rhythm.tempo_bpm,
-			"beat_times":       list(rhythm.beat_times),
-			"pulse_curve":      rhythm.pulse_curve.tolist(),
-			"pulse_peak_times": list(rhythm.pulse_peak_times),
-			"onset_times":      list(rhythm.onset_times),
-			"attack_times":     list(rhythm.attack_times),
-			"onset_count":      rhythm.onset_count,
-		},
-		"pitch": {
-			"dominant_pitch_hz":    pitch.dominant_pitch_hz,
-			"pitch_confidence":     pitch.pitch_confidence,
-			"chroma_profile":       list(pitch.chroma_profile),
-			"dominant_pitch_class": pitch.dominant_pitch_class,
-			"pitch_stability":      pitch.pitch_stability,
-			"voiced_frame_count":   pitch.voiced_frame_count,
-		},
-		"timbre": {
-			"mfcc":       list(timbre.mfcc),
-			"mfcc_delta": list(timbre.mfcc_delta),
-			"mfcc_onset": list(timbre.mfcc_onset),
-		},
-		"level": {
-			"peak":            level.peak,
-			"rms":             level.rms,
-			"crest_factor":    level.crest_factor,
-			"crest_factor_db": level.crest_factor_db,
-			"noise_floor":     level.noise_floor,
-		},
-		"band_energy": {
-			"energy_fractions": list(band_energy.energy_fractions),
-			"decay_rates":      list(band_energy.decay_rates),
-		},
-	}
+		audio_md5   = "deadbeef00000000deadbeef00000000",
+		params      = _make_params(),
+		spectral    = _make_spectral(),
+		rhythm      = _make_rhythm(),
+		pitch       = _make_pitch(),
+		timbre      = _make_timbre(),
+		duration    = 1.0,
+		level       = _make_level(),
+		band_energy = _make_band_energy(),
+	)
 
 	sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
 	return sidecar_path

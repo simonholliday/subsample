@@ -1,5 +1,6 @@
 """Tests for subsample.osc — OSC sender and receiver."""
 
+import logging
 import pathlib
 import threading
 import time
@@ -80,7 +81,7 @@ class TestOscEventSender:
 			["kick_01", 0.5, 80.0, 4],
 		)
 
-	def test_on_complete_logs_warning_on_send_failure (self) -> None:
+	def test_on_complete_logs_warning_on_send_failure (self, caplog: pytest.LogCaptureFixture) -> None:
 		"""A failed send logs a warning but does not raise."""
 
 		sender = subsample.osc.OscEventSender("127.0.0.1", 9000)
@@ -89,21 +90,23 @@ class TestOscEventSender:
 
 		filepath = pathlib.Path("/tmp/test.wav")
 
-		# Should not raise.
-		sender.on_complete(
-			filepath,
-			tests.helpers._make_spectral(),
-			tests.helpers._make_rhythm(),
-			tests.helpers._make_pitch(),
-			tests.helpers._make_timbre(),
-			tests.helpers._make_level(),
-			tests.helpers._make_band_energy(),
-			1.0,
-			numpy.zeros((1024, 1), dtype=numpy.int16),
-		)
+		with caplog.at_level(logging.WARNING, logger="subsample.osc"):
+			sender.on_complete(
+				filepath,
+				tests.helpers._make_spectral(),
+				tests.helpers._make_rhythm(),
+				tests.helpers._make_pitch(),
+				tests.helpers._make_timbre(),
+				tests.helpers._make_level(),
+				tests.helpers._make_band_energy(),
+				1.0,
+				numpy.zeros((1024, 1), dtype=numpy.int16),
+			)
 
-	def test_on_sample_loaded_logs_warning_on_send_failure (self) -> None:
-		"""A failed send on on_sample_loaded does not raise."""
+		assert "OSC send failed for /sample/captured (test.wav)" in caplog.text
+
+	def test_on_sample_loaded_logs_warning_on_send_failure (self, caplog: pytest.LogCaptureFixture) -> None:
+		"""A failed send on on_sample_loaded logs a warning but does not raise."""
 
 		sender = subsample.osc.OscEventSender("127.0.0.1", 9000)
 		sender._client = unittest.mock.MagicMock()
@@ -122,8 +125,10 @@ class TestOscEventSender:
 			duration    = 1.0,
 		)
 
-		# Should not raise.
-		sender.on_sample_loaded(record)
+		with caplog.at_level(logging.WARNING, logger="subsample.osc"):
+			sender.on_sample_loaded(record)
+
+		assert "OSC send failed for /sample/loaded (test)" in caplog.text
 
 	def test_on_complete_unpitched_sends_minus_one (self) -> None:
 		"""Unpitched samples send pitch_class=-1 and pitch_hz=0.0."""

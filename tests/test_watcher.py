@@ -192,7 +192,8 @@ class TestInstrumentWatcher:
 		watcher = self._make_watcher(tmp_path, lambda _r: None)
 		watcher.start()
 		watcher.stop()
-		# Reaching here means the observer thread joined cleanly.
+
+		assert not watcher._observer.is_alive()
 
 	def test_no_timer_scheduled_after_stop (self, tmp_path: pathlib.Path) -> None:
 
@@ -971,6 +972,8 @@ class TestMidiMapWatcher:
 		)
 		watcher.start()
 		watcher.stop()
+
+		assert not watcher._observer.is_alive()
 
 	def test_no_callback_or_timer_after_stop (self, tmp_path: pathlib.Path) -> None:
 

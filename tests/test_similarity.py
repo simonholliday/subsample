@@ -548,7 +548,11 @@ class TestSimilarityMatrix:
 
 	def test_remove_unknown_id_is_noop (self) -> None:
 		matrix = self._matrix("BD")
-		matrix.remove([99999])  # should not raise
+		inst = _make_record("I1", _make_spectral())
+		matrix.add(inst)
+		matrix.remove([99999])
+		assert matrix.get_match("BD", 0) == inst.sample_id
+		assert len(matrix) == 1
 
 	def test_remove_updates_rankings_for_all_references (self) -> None:
 		refs = [_make_record("BD", _make_spectral()), _make_record("SN", _make_spectral())]
