@@ -123,6 +123,7 @@ import pathlib
 import struct
 import tempfile
 import threading
+import time
 import typing
 
 import librosa
@@ -1403,10 +1404,27 @@ _ApplyFn = typing.Callable[
 # Callback invoked on the worker thread when a transform completes.
 _OnTransformComplete = typing.Callable[["TransformResult"], None]
 
-# Cap on the remembered-failure set (see TransformProcessor._failed_keys).  Well
-# above any realistic count of distinct doomed specs in a session; on overflow
-# the set is cleared wholesale (a re-fail then re-adds one entry).
+# Cap on the remembered failures (see TransformProcessor._failures).  Well
+# above any realistic count of distinct failing specs in a session; on overflow
+# they are forgotten wholesale (a re-fail then re-adds one entry).
 _MAX_FAILED_KEYS: int = 4096
+
+# How long a failed render waits before a note may try it again.  A failure can
+# pass (memory, a full /tmp under Rubber Band, a killed subprocess) or recur on
+# every attempt (a processor that cannot handle this sound), and nothing tells
+# the two apart, so each repeat doubles the pause, up to the ceiling.
+_RETRY_PAUSE_SECONDS:     float = 30.0
+_RETRY_PAUSE_MAX_SECONDS: float = 600.0
+
+
+@dataclasses.dataclass(frozen=True)
+class _Failure:
+
+	"""A render that failed, and when a note may try it again."""
+
+	retry_at: float   # on the processor's clock (time.monotonic)
+	pause:    float   # seconds; doubles with each repeat
+	attempts: int
 
 
 class TransformProcessor:
@@ -1466,14 +1484,17 @@ class TransformProcessor:
 		self._in_flight:      set[TransformKey]  = set()
 		self._in_flight_lock: threading.Lock     = threading.Lock()
 
-		# Deterministic worker failures (a spec whose handler always raises for
-		# this sample — e.g. a fixed-note repitch on an unpitched sample) are
-		# remembered so the identical doomed job is not re-enqueued and its
-		# traceback re-logged on every trigger.  Keys embed the sample_id, so a
-		# re-added sample gets a fresh id and retries naturally; the set is
-		# cleared wholesale if it ever overflows _MAX_FAILED_KEYS.  Guarded by
-		# _in_flight_lock.
-		self._failed_keys:    set[TransformKey]  = set()
+		# Failed renders, remembered so the same job is not re-enqueued and its
+		# traceback re-logged on every trigger, but only for a pause: a failure
+		# may pass (L-10), so a note after the pause tries again, and each repeat
+		# doubles the pause up to _RETRY_PAUSE_MAX_SECONDS.  A success forgets
+		# it.  Keys embed the sample_id, so a re-added sample starts afresh; the
+		# whole dict is cleared if it ever overflows _MAX_FAILED_KEYS.  Guarded
+		# by _in_flight_lock.
+		self._failures: dict[TransformKey, _Failure] = {}
+
+		# The clock the pauses are measured on; a test may replace it.
+		self._clock: typing.Callable[[], float] = time.monotonic
 
 		# Counters for idle/active boundary logging.
 		self._batch_enqueued:  int = 0   # jobs submitted since last idle
@@ -1492,6 +1513,7 @@ class TransformProcessor:
 		  - any step in the spec has no registered handler (transform not yet
 		    implemented — see _HANDLERS); submitting would always fail on the worker
 		  - an identical job is already in-flight (deduplication)
+		  - an identical job failed and its pause has not run out (see _failures)
 		"""
 
 		if record.audio is None:
@@ -1506,8 +1528,14 @@ class TransformProcessor:
 		key = TransformKey(sample_id=record.sample_id, spec=spec)
 
 		with self._in_flight_lock:
-			if key in self._in_flight or key in self._failed_keys:
+			if key in self._in_flight:
 				return
+
+			failure = self._failures.get(key)
+
+			if failure is not None and self._clock() < failure.retry_at:
+				return
+
 			was_idle = len(self._in_flight) == 0
 			self._in_flight.add(key)
 			if was_idle:
@@ -1525,6 +1553,31 @@ class TransformProcessor:
 		"""Wait for all in-flight transforms and stop the worker pool."""
 
 		self._executor.shutdown(wait=True)
+
+	def _remember_failure (self, key: TransformKey) -> _Failure:
+
+		"""Record one more failure of this job, and when a note may try it again.
+
+		The first waits _RETRY_PAUSE_SECONDS, and each repeat doubles the pause
+		up to _RETRY_PAUSE_MAX_SECONDS.  The caller holds _in_flight_lock.
+		"""
+
+		previous = self._failures.get(key)
+
+		if previous is None:
+			if len(self._failures) >= _MAX_FAILED_KEYS:
+				self._failures.clear()
+
+			pause    = _RETRY_PAUSE_SECONDS
+			attempts = 1
+		else:
+			pause    = min(previous.pause * 2.0, _RETRY_PAUSE_MAX_SECONDS)
+			attempts = previous.attempts + 1
+
+		failure = _Failure(retry_at=self._clock() + pause, pause=pause, attempts=attempts)
+		self._failures[key] = failure
+
+		return failure
 
 	def _execute (
 		self,
@@ -1606,7 +1659,7 @@ class TransformProcessor:
 			# Guard the reduction on a non-empty buffer: numpy.max raises
 			# "zero-size array to reduction operation" on a zero-frame sample,
 			# which fired BEFORE the empty-buffer skip below could pass it
-			# through, killing the job and blacklisting the key permanently.
+			# through, failing the job so the note played unprocessed.
 			actual_peak = float(numpy.max(numpy.abs(audio))) if audio.shape[0] > 0 else 0.0
 
 			if actual_peak > 0.0:
@@ -1729,18 +1782,28 @@ class TransformProcessor:
 			if self._on_complete is not None and not fell_back:
 				self._on_complete(result)
 
-		except Exception:
-			_log.exception(
-				"Transform failed for sample %d  spec=%s",
-				key.sample_id, key.spec,
-			)
-
-			# Remember this deterministic failure so the identical doomed job is
-			# not re-enqueued and its traceback re-logged on every trigger.
+			# A render that works after failing starts any later failure afresh.
 			with self._in_flight_lock:
-				if len(self._failed_keys) >= _MAX_FAILED_KEYS:
-					self._failed_keys.clear()
-				self._failed_keys.add(key)
+				self._failures.pop(key, None)
+
+		except Exception:
+			with self._in_flight_lock:
+				failure = self._remember_failure(key)
+
+			# The traceback says why once; a repeat is one line, since the same
+			# failure can recur every few minutes for as long as its note plays.
+			if failure.attempts == 1:
+				_log.exception(
+					"Transform failed for sample %d  spec=%s - it plays unprocessed, "
+					"and is tried again in %.0f s",
+					key.sample_id, key.spec, failure.pause,
+				)
+			else:
+				_log.warning(
+					"Transform failed again for sample %d  spec=%s (%d attempts) - "
+					"tried again in %.0f s",
+					key.sample_id, key.spec, failure.attempts, failure.pause,
+				)
 
 		finally:
 			with self._in_flight_lock:

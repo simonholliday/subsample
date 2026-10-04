@@ -585,6 +585,144 @@ class TestTransformProcessor:
 			subsample.transform.TransformProcessor._HANDLERS.update(original_handlers)
 
 
+class TestAFailedRenderIsTriedAgain:
+
+	"""L-10: a failed render waits a pause before a note tries it again, not the whole session.
+
+	A failure can pass (memory, a full /tmp under Rubber Band, a killed
+	subprocess), so remembering every one for the session left a note playing
+	unprocessed until a restart."""
+
+	_SPEC = subsample.transform.TransformSpec(
+		steps=(subsample.transform.PitchShift(target_midi_note=60),)
+	)
+
+	def _setup (
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+		failing:     list[bool],
+	) -> tuple[subsample.transform.TransformProcessor, list[float], list[int], threading.Event]:
+
+		"""A processor whose pitch shift fails while ``failing[0]`` holds, on a clock the test sets."""
+
+		calls: list[int] = []
+
+		def _handler (
+			audio:       numpy.ndarray,
+			sample_rate: int,
+			record:      subsample.library.SampleRecord,
+			step:        subsample.transform.PitchShift,
+		) -> numpy.ndarray:
+			calls.append(1)
+			if failing[0]:
+				raise RuntimeError("a passing failure")
+			return audio
+
+		monkeypatch.setitem(
+			subsample.transform.TransformProcessor._HANDLERS,
+			subsample.transform.PitchShift,
+			_handler,
+		)
+
+		idle = threading.Event()
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100, bit_depth=16, on_idle=lambda _count: idle.set(),
+		)
+
+		now = [0.0]
+		processor._clock = lambda: now[0]
+
+		return processor, now, calls, idle
+
+	def _play (
+		self,
+		processor: subsample.transform.TransformProcessor,
+		idle:      threading.Event,
+	) -> None:
+
+		"""Trigger the render, and wait for it if it was started."""
+
+		idle.clear()
+		processor.enqueue(_make_record(sample_id=1), self._SPEC)
+
+		if processor._in_flight:
+			assert idle.wait(10.0)
+
+	def test_a_note_in_the_pause_does_not_try_again (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		processor, now, calls, idle = self._setup(monkeypatch, [True])
+
+		self._play(processor, idle)
+		now[0] = 29.0
+		self._play(processor, idle)
+		processor.shutdown()
+
+		assert len(calls) == 1
+
+	def test_a_note_after_the_pause_tries_again (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		processor, now, calls, idle = self._setup(monkeypatch, [True])
+
+		self._play(processor, idle)
+		now[0] = 31.0
+		self._play(processor, idle)
+		processor.shutdown()
+
+		assert len(calls) == 2
+
+	def test_each_repeat_doubles_the_pause_up_to_ten_minutes (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		processor, now, calls, idle = self._setup(monkeypatch, [True])
+		key = subsample.transform.TransformKey(sample_id=1, spec=self._SPEC)
+		pauses: list[float] = []
+
+		for _attempt in range(7):
+			self._play(processor, idle)
+			failure = processor._failures[key]
+			pauses.append(failure.pause)
+			now[0] = failure.retry_at + 1.0
+
+		processor.shutdown()
+
+		assert pauses == [30.0, 60.0, 120.0, 240.0, 480.0, 600.0, 600.0]
+
+	def test_a_render_that_works_forgets_the_failure (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		failing = [True]
+		processor, now, calls, idle = self._setup(monkeypatch, failing)
+
+		self._play(processor, idle)
+		failing[0] = False
+		now[0] = 31.0
+		self._play(processor, idle)
+		processor.shutdown()
+
+		assert len(calls) == 2
+		assert not processor._failures
+
+	def test_the_traceback_is_logged_once_and_a_repeat_in_one_line (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		processor, now, calls, idle = self._setup(monkeypatch, [True])
+
+		with caplog.at_level("WARNING", logger="subsample.transform"):
+			self._play(processor, idle)
+			now[0] = 31.0
+			self._play(processor, idle)
+
+		processor.shutdown()
+
+		failures = [record for record in caplog.records if "Transform failed" in record.getMessage()]
+
+		assert len(failures) == 2
+		assert failures[0].exc_info is not None
+		assert "tried again in 30 s" in failures[0].getMessage()
+		assert failures[1].exc_info is None
+		assert "failed again" in failures[1].getMessage()
+		assert "tried again in 60 s" in failures[1].getMessage()
+
+
 # ---------------------------------------------------------------------------
 # TestTransformManager
 # ---------------------------------------------------------------------------

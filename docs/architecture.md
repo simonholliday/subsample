@@ -112,6 +112,13 @@ When a variant set for a parent sample would exceed the memory budget, the entir
 oldest parent's variant family is evicted together, keeping the remaining
 families intact and playable.
 
+A render that fails leaves its note playing a previous or the base variant, and
+is not tried again until a pause has passed: 30 seconds, doubling with each
+repeat up to ten minutes, and forgotten once a render works. A failure can pass
+(memory, a full `/tmp` under Rubber Band, a killed subprocess) or recur on every
+attempt, and nothing tells the two apart, so the pause bounds the cost of
+either. The first failure logs its traceback, and a repeat logs one line.
+
 ## Playback path
 
 ```
