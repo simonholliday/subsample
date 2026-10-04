@@ -48,7 +48,8 @@ class EventEmitter:
 		"""
 
 		# Snapshot under the lock, then call handlers outside it — a handler
-		# must not be able to deadlock by (un)subscribing during dispatch.
+		# that subscribes during dispatch must not deadlock.  (There is no way
+		# to unsubscribe: every subscriber lives as long as the app.)
 		with self._lock:
 			handlers = list(self._handlers.get(event, []))
 

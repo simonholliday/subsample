@@ -4,13 +4,13 @@ Ties together config loading, device selection, the circular buffer,
 the level detector, the WAV writer, and the MIDI player. Supports two
 input modes and two run modes:
 
-  File input   — pass audio file paths as positional arguments; each
-                 file is processed through the detection pipeline and
-                 segments are written to the output directory as new
-                 ``.wav`` files with their analysis sidecars.  The
-                 process then exits — the chopped segments are picked
-                 up at the next subsample startup, when the recursive
-                 library load discovers them.
+  File input   — pass audio file paths as positional arguments, in any
+                 format the library loads; each file is processed through
+                 the detection pipeline and segments are written to
+                 recorder.directory, in recorder.audio.audio_format, with
+                 their analysis sidecars.  The process then exits — the
+                 chopped segments are picked up at the next subsample
+                 startup, when the recursive library load discovers them.
 
   Live capture — stream from an audio input device (recorder.enabled: true).
 
@@ -139,10 +139,11 @@ def parser () -> argparse.ArgumentParser:
 		type=pathlib.Path,
 		metavar="FILE",
 		help=(
-			"Audio files to cut into samples, written to the configured output "
-			"directory and named after the source file (e.g. recording_1.wav, "
-			"recording_2.wav, …). Subsample exits once they are done, without "
-			"starting live capture."
+			"Audio files to cut into samples, written to `recorder.directory` "
+			"and named after the source file (e.g. recording_1.wav, "
+			"recording_2.wav, …, or .flac files when "
+			"`recorder.audio.audio_format` is `flac`). Subsample exits once "
+			"they are done, without starting live capture."
 		),
 	)
 	command.add_argument(

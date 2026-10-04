@@ -9584,6 +9584,32 @@ maps:
 		with pytest.raises(ValueError, match="claimed by both"):
 			subsample.player.load_ensemble(ensemble, ["BD0025"])
 
+	def test_one_set_plays_on_two_channels (self, tmp_path: pathlib.Path) -> None:
+
+		"""As player.midi_maps already allowed: one kit from two controllers."""
+
+		self._write_set(tmp_path / "kit", "midi-map.yaml", channel=10, note=36)
+		ensemble = self._write_ensemble(tmp_path, """
+maps:
+  - { channel: 10, map: kit/midi-map.yaml }
+  - { channel: 11, map: kit/midi-map.yaml }
+""")
+
+		result = subsample.player.load_ensemble(ensemble, ["BD0025"])
+
+		assert (9, 36) in result.note_map
+		assert (10, 36) in result.note_map
+
+	def test_one_set_twice_on_its_own_channel_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""With no channel of its own, a set listed twice claims its notes twice."""
+
+		self._write_set(tmp_path / "kit", "midi-map.yaml", channel=10, note=36)
+		ensemble = self._write_ensemble(tmp_path, "maps:\n  - kit/midi-map.yaml\n  - kit/midi-map.yaml\n")
+
+		with pytest.raises(ValueError, match="claimed by both"):
+			subsample.player.load_ensemble(ensemble, ["BD0025"])
+
 	def test_nested_ensemble_is_rejected (self, tmp_path: pathlib.Path) -> None:
 
 		"""One level only, mirroring the existing rule for `map:` presets.  No

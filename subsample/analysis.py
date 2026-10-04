@@ -469,7 +469,8 @@ class RhythmResult:
 	attack_times: tuple[float, ...]
 	"""Sample-accurate attack start times in seconds, one per onset.
 	Refined from onset_times by searching backward in the amplitude envelope
-	to find where energy first rises above 10% of the local peak.  These
+	for the valley before each hit, then forward for where the envelope first
+	rises 20% of the way from that valley to the local peak.  These
 	align with the perceptual "hit" — the moment a musician would tap — and
 	are used by the time-stretch handler for beat-grid alignment.
 	Same length as onset_times; each value <= the corresponding onset time."""
@@ -954,7 +955,10 @@ def _compute_impact (
 	peak_value   = float(numpy.max(region))
 
 	if peak_value <= valley_value:
-		# Flat region — a constant tone or digital silence has no impact point.
+		# An exactly flat envelope: digital silence or DC.  A steady tone does
+		# not reach this branch, since its envelope ripples with the waveform,
+		# and can report an arbitrary impact (a 440 Hz sine reads 0.19 s).
+		# Nothing in playback reads impact; it is published for a sequencer.
 		return (0.0, None)
 
 	threshold = valley_value + _ENVELOPE_THRESHOLD_RATIO * (peak_value - valley_value)

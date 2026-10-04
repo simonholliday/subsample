@@ -164,14 +164,15 @@ Subsample uses these libraries:
 | [NumPy ↗](https://numpy.org/) | Numerical array operations | BSD-3-Clause |
 | [librosa ↗](https://librosa.org/) | Audio analysis (spectral, rhythm, pitch) | ISC |
 | [SciPy ↗](https://scipy.org/) | Signal processing (onset detection, filtering) | BSD-3-Clause |
-| [SoundFile ↗](https://python-soundfile.readthedocs.io/) | WAV file reading for library pre-load | BSD-3-Clause |
+| [SoundFile ↗](https://python-soundfile.readthedocs.io/) | Audio file reading and writing | BSD-3-Clause |
 | [Pillow ↗](https://python-pillow.org/) | PNG waveform preview rendering | MIT-CMU |
 | [mido ↗](https://github.com/mido/mido) | MIDI message parsing and I/O | MIT |
 | [python-rtmidi ↗](https://github.com/SpotlightKid/python-rtmidi) | MIDI device access (RtMidi bindings) | MIT |
 | [pyrubberband ↗](https://github.com/bmcfee/pyrubberband) | Pitch shifting and time-stretching (Rubber Band wrapper) | ISC |
-| [watchdog ↗](https://github.com/gorakhargosh/watchdog) | Filesystem monitoring for multi-machine sample hot-loading | Apache-2.0 |
+| [watchdog ↗](https://github.com/gorakhargosh/watchdog) | Watching the sample directory and the MIDI map for changes | Apache-2.0 |
 | [PyMidiDefs ↗](https://github.com/simonholliday/PyMidiDefs) | MIDI constant definitions (notes, CC, drums, GM) | MIT |
 | [threadpoolctl ↗](https://github.com/joblib/threadpoolctl) | Thread limits for numerical work, so analysis does not disturb the audio | BSD-3-Clause |
+| [python-osc ↗](https://github.com/attwad/python-osc) | Open Sound Control messages with other software (optional) | Unlicense |
 
 The 47 General MIDI reference fingerprints are derived from the FluidR3_GM
 SoundFont (MIT licence), and no audio from it is included;

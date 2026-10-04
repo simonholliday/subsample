@@ -389,7 +389,9 @@ class LibraryConfig:
 
 	When this limit is exceeded the oldest samples are evicted (FIFO) to make
 	room. Only in-memory audio is removed; WAV files on disk are never deleted.
-	At 44100 Hz 16-bit mono, 100 MB ≈ 19 minutes of audio."""
+	The 100.0 here is only the dataclass's own default: load_config sets it
+	from the global budget (60% of max_memory_mb) unless config.yaml gives
+	one.  At 44100 Hz 16-bit mono, 100 MB ≈ 19 minutes of audio."""
 
 	directory: typing.Optional[str] = "samples/captures"
 	"""Path to the directory of instrument samples to load at startup.
@@ -403,12 +405,15 @@ class LibraryConfig:
 	`directory:`/`path:` predicates instead.  That is what a project assembled
 	from shared sample sets wants — each set declares the samples it needs, so
 	walking a whole capture tree of unrelated material is pure cost.  It also
-	disables the `watch` option below, which has nothing to watch."""
+	leaves the `watch` option below nothing to watch, unless the MIDI map
+	declares programs:, whose directories replace this one."""
 
 	watch: bool = False
 	"""When True, monitor library.directory at runtime for new audio
 	files and hot-load them into the live instrument library without
-	restarting.
+	restarting.  Under programs:, each program's directory is watched
+	instead.  Only the top level of a directory is watched, not its
+	subdirectories, though the load at startup walks them all.
 
 	Two detection paths run in parallel:
 
@@ -425,7 +430,8 @@ class LibraryConfig:
 	another via a shared directory) and with audio files from any external
 	application.
 
-	Requires library.directory to be set and player.enabled to be True."""
+	Requires player.enabled to be True, and library.directory to be set
+	unless the MIDI map declares programs:."""
 
 	reference_directory: typing.Optional[str] = None
 	"""Directory of reference fingerprints that MIDI maps can name in a
@@ -483,8 +489,10 @@ class TransformConfig:
 	Separate from library.max_memory_mb — derivatives are disposable and
 	regenerated on demand, so they have their own independent budget.
 	Eviction strategy: parent-priority FIFO (all variants of the oldest parent
-	are evicted together to keep variant sets intact).
-	At 44100 Hz float32 stereo, 50 MB ≈ 150 seconds of derivative audio."""
+	are evicted together to keep variant sets intact).  The 50.0 here is only
+	the dataclass's own default: load_config sets it from the global budget
+	unless config.yaml gives one.  At 44100 Hz float32 stereo, 50 MB ≈ 150
+	seconds of derivative audio."""
 
 	auto_pitch: bool = True
 	"""When True, pitch-shifted variants are produced for each tonal sample
@@ -506,6 +514,8 @@ class TransformConfig:
 
 	max_disk_mb: float = 500.0
 	"""Maximum disk space (MB) for cached variant files.  0 = disabled.
+	Like the memory shares, 500.0 is only the dataclass default; load_config
+	sizes it from the global budget unless config.yaml gives one.
 	Least-recently-used files are evicted (a cache read touches mtime, so recently played variants survive) when the budget is
 	exceeded.  At 44100 Hz float32 stereo, 500 MB ≈ 1500 seconds."""
 

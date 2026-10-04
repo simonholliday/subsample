@@ -3,5 +3,6 @@
 # reference fingerprints are package data under subsample/data/reference/;
 # anything regenerated in this folder is local-only scratch.  Only the empty
 # directory itself is tracked.
+*
 !.gitignore
 !.gitkeep

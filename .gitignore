@@ -62,8 +62,9 @@ samples/**/*.db
 
 # samples/ — only these four subdirectories belong to the repo.  Each commits
 # an empty directory (via .gitkeep) and ignores its own contents through its
-# own .gitignore; samples/reference/ additionally re-tracks the GM reference
-# *.analysis.json sidecars.  Everything else under samples/ — other capture
+# own .gitignore.  samples/reference/ is extract_gm_drums.py's working area; the
+# GM reference sidecars that ship are package data under
+# subsample/data/reference/.  Everything else under samples/ — other capture
 # folders, personal or scratch working sets — is local-only and never tracked.
 !samples/
 samples/*

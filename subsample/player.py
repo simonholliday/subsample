@@ -63,6 +63,7 @@ import threading
 import time
 import typing
 
+import librosa
 import mido
 import numpy
 import pyaudio
@@ -3928,9 +3929,10 @@ class _Voice:
 
 	"""A single triggered sample being played back by the mix callback.
 
-	audio:     Pre-rendered float32 array, shape (n_frames, output_channels),
-	           in [-1.0, 1.0]. Gain has already been applied. The callback
-	           reads from this array; it is never modified after creation.
+	audio:     Pre-rendered float32 array, shape (n_frames, output_channels).
+	           Gain has already been applied, so a voice can exceed [-1.0, 1.0];
+	           the callback clips only the summed mix.  The callback reads
+	           from this array; it is never modified after creation.
 	note:      MIDI note number that triggered this voice — used to match
 	           note_off events in _handle_message().
 	channel:   MIDI channel (mido 0-indexed) that triggered this voice.
@@ -5505,7 +5507,9 @@ class MidiPlayer:
 		of the port.
 
 		note_off (and note_on with velocity=0) marks matching active voices as
-		releasing so the audio callback fades them out over self._release_fade_frames.
+		releasing so the audio callback fades them out over the assignment's
+		release, or the default declick (self._release_fade_frames) when it
+		has none, or lets them play out under `release: full`.
 		note_on triggers sample selection via the query engine, then looks up
 		the appropriate transform variant based on the assignment's ProcessSpec.
 		Note routing for note_on first picks the velocity layer (the entry in
@@ -6259,7 +6263,6 @@ class MidiPlayer:
 			and src_rate != self._output_sample_rate
 			and float_audio.shape[0] > 0
 		):
-			import librosa
 			float_audio = librosa.resample(
 				float_audio.T,
 				orig_sr=src_rate,
@@ -6370,11 +6373,6 @@ class MidiPlayer:
 
 		eff_library    = self._effective_instrument_library
 		eff_similarity = self._effective_similarity_matrix
-
-		# Lazy import: librosa is already a hard dep but the import is
-		# slow on cold start; defer until first materialise so module
-		# import stays fast.
-		import librosa
 
 		for template in self._zone_templates:
 
@@ -7534,7 +7532,9 @@ class MidiPlayer:
 		Args:
 			audio:      float32, shape (n_frames, in_channels).
 			level:      LevelResult for this audio (peak + rms), used for gain calc.
-			velocity:   MIDI velocity (0-127) from the triggering note_on message.
+			velocity:   The note's velocity (0-127) after the assignment's
+			            `velocity: rescale`, when it has one, so not always the
+			            raw value of the triggering note_on message.
 			mix_matrix: float32 array, shape (output_channels, in_channels).
 			            Built by _get_mix_matrix() from channel.build_mix_matrix().
 			gain_db:    Per-assignment level offset in dB (from Assignment.gain_db).

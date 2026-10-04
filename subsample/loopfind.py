@@ -454,7 +454,7 @@ def bake_loop_body (audio: numpy.ndarray, loop: LoopPoints) -> numpy.ndarray:
 
 	The last ``loop.crossfade`` frames are cross-faded with the audio just before
 	``start``, so wrapping end->start is seamless and a realtime player need only
-	jump its cursor.  Shape follows ``audio``; the returned array is always float32 (mono or multi-channel).
+	jump its cursor.  Shape and dtype follow ``audio`` (mono or multi-channel).
 	"""
 
 	start, end, xf = loop.start, loop.end, loop.crossfade
@@ -486,8 +486,8 @@ def render_audition (
 	"""Render start -> loop x N -> short fade, for A/B listening.
 
 	Plays the real head (0..start), then repeats the baked loop body until
-	total_seconds, then a 30 ms fade so the file itself ends cleanly.  Shape and
-	dtype follow ``audio``.
+	total_seconds, then a 30 ms fade so the file itself ends cleanly.  Shape
+	follows ``audio``; the result is always float32.
 	"""
 
 	body = bake_loop_body(audio, loop)

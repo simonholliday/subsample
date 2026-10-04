@@ -286,12 +286,17 @@ def save_cache (
 		captured_at: ISO 8601 capture timestamp for live recordings; None for
 		             reference samples and file imports whose capture time is
 		             unknown.
+		channel_format: "pcm", or "b_format_ambix" for a first-order ambisonic
+		             sample, whose W channel was the analysis source.
 		preview_data: Optional compact visual-preview block (envelopes,
 		             per-band energies, onset/beat markers, accent colour,
 		             badge text) serialised into the sidecar, so the PNG
 		             preview can be redrawn without re-analysing.  When
 		             None, the ``preview`` key is omitted — loaders treat
 		             missing preview as "no preview available".
+		loop:        The seamless loop found by compute_loop, written as the
+		             top-level ``loop`` block, or None (JSON null) for a sound
+		             that is not loopable.
 	"""
 
 	effective_level = level if level is not None else subsample.analysis.LevelResult(peak=0.0, rms=0.0)
@@ -345,14 +350,14 @@ def load_cache (audio_path: pathlib.Path) -> SampleAssets | None:
 	"""Load cached analysis results if the sidecar is valid.
 
 	Checks analysis version and audio MD5 before returning cached data.
-	Returns None (and logs the reason) if:
-	  - The sidecar file does not exist
-	  - The JSON is malformed or missing expected keys
-	  - The analysis version does not match ANALYSIS_VERSION
-	  - The audio MD5 does not match the current file content
+	Returns None (and logs the reason) if the sidecar file does not exist, or
+	its JSON is malformed or missing expected keys.
 
-	When returning None due to a stale cache (version or MD5 mismatch), logs
-	a WARNING because re-analysis will cause noticeable delay.
+	A stale sidecar (its analysis version is not ANALYSIS_VERSION, or its audio
+	MD5 does not match the file) is not refused: the audio is analysed again,
+	the sidecar rewritten without a preview block, and the fresh result
+	returned, with an INFO line saying why.  A caller that wants the preview
+	block kept heals through ensure_sample_assets instead.
 
 	Args:
 		audio_path: Path to the audio file.
@@ -419,8 +424,9 @@ def _reanalyze_and_save (
 	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
 
 	Called when a sidecar is stale (version or MD5 mismatch) and the audio
-	file is available. Uses default AnalysisConfig values — the same defaults
-	used by the main capture pipeline when no explicit config is given.
+	file is available.  Analyses with the process-wide AnalysisConfig that
+	set_analysis_config() wired from config.yaml, so a healed sidecar carries
+	the same tempo priors a live capture would.
 
 	Logs at INFO level so the user understands the per-file analysis delay.
 
@@ -598,7 +604,7 @@ def ensure_sample_assets (
 	``with_preview`` lets the caller suppress PNG work when previews are
 	disabled in config — the JSON sidecar still tracks audio changes, but
 	no PNG is written and the preview block is not embedded.  Returns the
-	same tuple shape as ``load_cache`` / ``load_sidecar``.
+	same ``SampleAssets`` dataclass as ``load_cache`` / ``load_sidecar``.
 
 	Args:
 		audio_path:   Path to the audio file.

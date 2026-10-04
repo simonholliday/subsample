@@ -376,7 +376,9 @@ class BankManager:
 		caller omits it), and there is no ``default_program`` parameter.
 
 		If the previously active bank's program number still exists in the
-		new set, it remains active.  Otherwise the first bank becomes active.
+		new set, it remains active.  Otherwise the bank with the lowest program
+		number becomes active, which need not be the first in the list, the
+		one __init__ falls back to.
 
 		Args:
 			banks:        New list of loaded Bank objects.

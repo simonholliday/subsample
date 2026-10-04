@@ -654,7 +654,7 @@ def _unit_rows (matrix: numpy.ndarray) -> numpy.ndarray:
 # sound) and ordering samples so sonically-alike ones are adjacent (so a
 # manual audition compares like with like).  Both build on the same weighted
 # feature vector the ranking path uses, so "similar" means the same thing
-# everywhere.  See scripts/catalog_samples.py.
+# everywhere.  See subsample/tools/catalog_samples.py.
 # ---------------------------------------------------------------------------
 
 

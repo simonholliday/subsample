@@ -587,7 +587,8 @@ class SampleProcessor:
 			band_energy:   Per-band energy fractions / decay rates — part of the
 			               58-dim fingerprint, written into the sidecar.
 			filename_base: If provided, used as the filename stem instead of the
-			               timestamp format. Collision handling still applies.
+			               timestamp format.  A file already at that name is
+			               replaced, as when a file is cut into samples again.
 			sample_rate:   Sample rate for writing. Defaults to config value.
 			bit_depth:     Bit depth for writing. Defaults to config value.
 			channel_format: "pcm" or "b_format_ambix"; passed through to the

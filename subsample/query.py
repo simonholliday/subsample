@@ -342,9 +342,9 @@ class WherePredicate:
 	Numeric dimensions (``duration``, ``duration_beats``, ``onsets``,
 	``tempo``, ``pitch_hz``, ``quantized_beats``) each carry a Range; an
 	empty Range means "no filter on this dimension".  Non-numeric fields (``pitched``,
-	``reference``, ``name``, ``name_list``, ``name_glob``, ``name_regex``,
-	``name_path``, ``directory``) remain flat Optionals — they aren't
-	comparison predicates.
+	``loopable``, ``reference``, ``name``, ``name_list``, ``name_glob``,
+	``name_regex``, ``name_path``, ``directory``, ``sample_id``) remain flat
+	Optionals — they aren't comparison predicates.
 
 	The four name-matching forms (``name``, ``name_list``, ``name_glob``,
 	``name_regex``) are mutually exclusive at parse time; at most one is
@@ -597,8 +597,8 @@ class _ScorerSpec:
 	                sort last.
 	  "exclude"   — records whose score is None are dropped from the result
 	                entirely.  Used for scorers where "no score" means "not
-	                eligible" (e.g. quantize_match on a non-quantized
-	                sample)."""
+	                eligible" (e.g. beat_match on a sample with no grid
+	                profile)."""
 
 	fn:         _ScoreFn
 	on_missing: _OnMissing = "sort_last"
@@ -804,7 +804,7 @@ class OrderClause:
 	dir:    "asc" or "desc".
 	params: Frozen key-value pairs for parameterised scorers.  Empty for
 	        the built-in per-sample field scorers; populated for e.g.
-	        ``{by: quantize_match, pattern: [1, 0, 1, 0, 1]}``."""
+	        ``{by: beat_match, pattern: [1, 0, 1, 0, 1]}``."""
 
 	by:     str
 	dir:    typing.Literal["asc", "desc"] = "asc"
@@ -2826,8 +2826,8 @@ def _parse_select_spec (
 			order = ()
 
 	# Validate every scorer name up-front so errors surface at startup, not
-	# at trigger time.  Use valid_order_names() so newly-registered scorers
-	# (e.g. future quantize_match) are recognised automatically.
+	# at trigger time.  Use valid_order_names() so a newly registered scorer
+	# is recognised automatically.
 	valid_names = valid_order_names()
 	for clause in order:
 		if clause.by not in valid_names:

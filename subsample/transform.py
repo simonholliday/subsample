@@ -2715,10 +2715,13 @@ def _apply_filter (
 
 	"""Shared implementation for low-pass, high-pass, and band-pass filters.
 
-	Uses a 2nd-order Butterworth (resonance_db == 0) or Chebyshev Type I
-	(resonance_db > 0) filter applied via second-order sections for numerical
-	stability.  Band-pass bandwidth is derived from Q (quality factor):
-	lower Q = wider band, higher Q = narrower band.
+	Uses a Butterworth (resonance_db == 0) or Chebyshev Type I
+	(resonance_db > 0) filter designed at order 2, applied via second-order
+	sections for numerical stability.  Low- and high-pass filters are therefore
+	2nd order (12 dB/octave); scipy doubles a band-pass design's order, so the
+	band-pass is 4th order, 2nd order on each skirt.  Band-pass bandwidth is
+	derived from Q (quality factor): lower Q = wider band, higher Q = narrower
+	band.
 	"""
 
 	# Empty input is a no-op — scipy.signal.sosfilt raises on a zero-length

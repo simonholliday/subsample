@@ -88,9 +88,14 @@ def parse_map_includes (
 	Returns:
 		Ordered list of MapInclude.  Empty when raw is None or an empty list.
 
+	The same map may be included more than once, each on its own channel, so
+	one set can play from two controllers; it reads the same samples either
+	way.  Included twice on one channel, or twice with no channel, its notes
+	clash, and load_ensemble refuses the (channel, note) claimed twice.
+
 	Raises:
 		ValueError: If any entry is malformed, or two entries bind the same
-		            channel, or the same map is included twice.
+		            channel.
 	"""
 
 	if raw is None:
@@ -104,7 +109,6 @@ def parse_map_includes (
 
 	includes: list[MapInclude] = []
 	seen_channels: dict[int, str] = {}
-	seen_paths: set[str] = set()
 
 	for index, entry in enumerate(raw):
 		map_raw, channel_raw = _split_entry(entry, index)
@@ -147,16 +151,6 @@ def parse_map_includes (
 			seen_channels[channel] = map_raw
 
 		resolved = str((ensemble_dir / map_raw).resolve())
-
-		# Including the same file twice is always a mistake: with the same
-		# binding it is a duplicate, and with different bindings it would need
-		# two independent copies of one set's samples.
-		if resolved in seen_paths:
-			raise ValueError(
-				f"MIDI map maps[{index}]: {map_raw!r} is included more than once"
-			)
-
-		seen_paths.add(resolved)
 		includes.append(MapInclude(map_path=resolved, channel=channel))
 
 	_log.debug("Ensemble declares %d included map(s)", len(includes))

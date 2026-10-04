@@ -94,15 +94,23 @@ class TestParseMapIncludes:
 				self.DIR,
 			)
 
-	def test_duplicate_include_is_rejected (self) -> None:
+	def test_one_set_may_be_included_on_two_channels (self) -> None:
 
-		"""Always a mistake: with one binding it is a duplicate, with two it
-		would need independent copies of one set's samples."""
+		"""Refused as "included more than once", though player.midi_maps, which
+		is published as giving the same result, played one set on two channels
+		from the same samples.  Simon chose to allow it in both (#3081, L-21).
+		A real duplicate is still refused, by the note rule at load."""
 
-		with pytest.raises(ValueError, match="more than once"):
-			subsample.ensemble.parse_map_includes(
-				["kit/midi-map.yaml", "kit/midi-map.yaml"], self.DIR,
-			)
+		includes = subsample.ensemble.parse_map_includes(
+			[
+				{"channel": 10, "map": "kit/midi-map.yaml"},
+				{"channel": 11, "map": "kit/midi-map.yaml"},
+			],
+			self.DIR,
+		)
+
+		assert [include.channel for include in includes] == [10, 11]
+		assert includes[0].map_path == includes[1].map_path
 
 	@pytest.mark.parametrize("channel", [0, 17, -1])
 	def test_out_of_range_channel (self, channel: int) -> None:
