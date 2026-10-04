@@ -1016,7 +1016,6 @@ def _load_bank (
 	transform_processor = subsample.transform.TransformProcessor(
 		sample_rate=cfg.recorder.audio.sample_rate,
 		output_sample_rate=output_sample_rate,
-		bit_depth=cfg.recorder.audio.bit_depth,
 		on_complete=_on_transform_complete,
 		on_idle=_on_transform_idle,
 		disk_cache=variant_disk_cache,
@@ -1767,7 +1766,6 @@ def _main_impl () -> None:
 			_transform_processor = subsample.transform.TransformProcessor(
 				sample_rate=cfg.recorder.audio.sample_rate,
 				output_sample_rate=output_sample_rate,
-				bit_depth=cfg.recorder.audio.bit_depth,
 				on_complete=_on_transform_complete,
 				on_idle=_on_transform_idle,
 				disk_cache=_variant_disk_cache,
@@ -2173,6 +2171,13 @@ def _main_impl () -> None:
 					loop           = result.loop,
 					audio_sample_rate = output_sample_rate or result.params.sample_rate,
 				)
+
+				# An analysis that outlasts the receiver's wait at stop ends here
+				# after the transform workers it would hand variants to are gone.
+				# The sample would last only until the restart anyway.
+				if shutdown_event.is_set():
+					_log.info("OSC /sample/import: shutting down - not adding %s", file_path)
+					return
 
 				_integrate_sample(record, instrument_library, similarity_matrix,
 				                  transform_manager, _player_cell, app_events)

@@ -51,7 +51,7 @@ Data flow
   SampleRecord added to InstrumentLibrary
       → TransformManager.on_sample_added()
           → TransformProcessor.enqueue(record, spec)   [base variant]
-              → worker: _pcm_to_float32 → handler chain → compute_level
+              → worker: pcm_to_float32 → handler chain → compute_level
                   → TransformCache.put(result)
                       → on_complete callback
 
@@ -1055,7 +1055,11 @@ _VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
 #    engine ignores the one at the start: stretch_quantize, and a beat count's
 #    fit, put each hit after the first out by the first segment's error
 #    (#3881).
-TRANSFORM_VERSION: str = "5"
+# 6: look-ahead in compress, limit and gate reads the gain early rather than
+#    delaying the sound, so a limited or gated render starts on time and keeps
+#    its end, and slices a quantise step published before it stay true (L-3 of
+#    the 2026-09-21 review).
+TRANSFORM_VERSION: str = "6"
 
 
 def variant_cache_key (
@@ -1453,7 +1457,6 @@ class TransformProcessor:
 	def __init__ (
 		self,
 		sample_rate:        int,
-		bit_depth:          int,
 		output_sample_rate: typing.Optional[int] = None,
 		on_complete:        typing.Optional[_OnTransformComplete] = None,
 		on_idle:            typing.Optional[typing.Callable[[int], None]] = None,
@@ -1461,7 +1464,6 @@ class TransformProcessor:
 	) -> None:
 
 		self._sample_rate        = sample_rate
-		self._bit_depth          = bit_depth
 		# Output sample rate for the playback device.  If different from the
 		# capture rate, _execute() resamples AFTER all DSP steps so the
 		# anti-alias filter catches any artifacts from the processing chain.
@@ -1645,7 +1647,7 @@ class TransformProcessor:
 			)
 
 			# Convert integer PCM to float32 preserving all channels.
-			audio = _pcm_to_float32(record.audio, self._bit_depth)
+			audio = pcm_to_float32(record.audio)
 
 			# Peak-normalise to 0.9 full-scale before the processing chain.
 			# In float32 this is lossless, and brings quiet samples up to a
@@ -1930,7 +1932,7 @@ class TransformManager:
 		The base variant is a float32, peak-normalised copy at the PLAYER OUTPUT
 		sample rate (like every variant; see _execute), with no DSP applied.
 		Every sample gets one — regardless of pitch stability — so the playback
-		path never needs to call _pcm_to_float32() at trigger time.
+		path never needs to call pcm_to_float32() at trigger time.
 
 		On a miss, enqueues the base variant for background production and
 		returns None.  The caller should fall back to _render() for this
@@ -1965,7 +1967,7 @@ class TransformManager:
 
 		Always enqueues a base variant (identity spec — float32, peak-normalised,
 		no DSP) so the playback path has a pre-converted copy ready for every
-		sample without calling _pcm_to_float32() at trigger time.
+		sample without calling pcm_to_float32() at trigger time.
 
 		Pitch and time-stretch variants are NOT enqueued here — they are
 		driven by MidiPlayer.update_assignments(), which reads the MIDI map
@@ -2014,7 +2016,7 @@ class TransformManager:
 # Internal audio helpers
 # ---------------------------------------------------------------------------
 
-def _pcm_to_float32 (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
+def pcm_to_float32 (audio: numpy.ndarray) -> numpy.ndarray:
 
 	"""Convert integer PCM to float32, preserving all channels.
 
@@ -2022,19 +2024,23 @@ def _pcm_to_float32 (audio: numpy.ndarray, bit_depth: int) -> numpy.ndarray:
 	the resulting float32 values are on the same scale as original LevelResult
 	measurements (i.e. peaks near 1.0 for a full-scale recording).
 
+	The divisor follows the array's dtype, not the configured capture depth:
+	an imported file keeps its own (int16 for 16-bit, int32 for 24- and
+	32-bit), so a 24-bit import under a 16-bit config would otherwise convert
+	about 65536 times too hot.
+
 	Unlike to_mono_float(), channels are NOT mixed down — a stereo (n, 2) input
 	produces a float32 (n, 2) output.  Transforms operate per-channel.
 
 	Args:
-		audio:     Shape (n_frames, channels), dtype int16 or int32.
-		           int32 is used for both 24-bit (left-shifted) and native 32-bit.
-		bit_depth: 16, 24, or 32.
+		audio: Shape (n_frames, channels), dtype int16 or int32.
+		       int32 is used for both 24-bit (left-shifted) and native 32-bit.
 
 	Returns:
 		Shape (n_frames, channels), dtype float32, values in [-1.0, 1.0].
 	"""
 
-	divisor: float = 32768.0 if bit_depth == 16 else 2147483648.0
+	divisor: float = 32768.0 if audio.dtype == numpy.int16 else 2147483648.0
 
 	return audio.astype(numpy.float32) / divisor
 
@@ -2871,8 +2877,9 @@ def _compress (
 	1. Convert to dB.
 	2. Gain computer with soft knee (piecewise quadratic transition).
 	3. One-pole ballistics (attack/release smoothing per sample).
-	4. Optional look-ahead: audio is delayed so the gain envelope
-	   anticipates transients before they arrive.
+	4. Optional look-ahead: each sample takes the gain computed for one
+	   a little later, so reduction begins before a transient arrives,
+	   without delaying the sound.
 	5. Apply gain + makeup.
 
 	Multi-channel: the envelope is computed from the max absolute value
@@ -2956,22 +2963,12 @@ def _compress (
 
 	lookahead_samples = int(round(lookahead_ms / 1000.0 * sample_rate))
 
-	# Cap the delay to half the buffer.  Truncating the delayed signal back to
-	# n_frames discards the last `lookahead_samples`; if the window meets or
-	# exceeds the sample length the kept portion is all zero-pad and the whole
-	# output goes silent (a real hazard for short clicks / hat ticks at the
-	# default 5 ms look-ahead).  Capping keeps the bulk of a short sample
-	# audible — anticipation is meaningless once the window rivals the content.
+	# Capped at half the buffer: anticipation is meaningless once the window
+	# rivals the content, and on a click shorter than the window every sample
+	# would take the gain from after the sound had ended.
 	lookahead_samples = min(lookahead_samples, n_frames // 2)
 
-	if lookahead_samples > 0:
-		# Delay the audio relative to the gain curve.  The gain curve was
-		# computed from the original signal, so gain reduction begins
-		# before the delayed peak arrives.
-		pad = numpy.zeros(
-			(lookahead_samples,) + audio_f64.shape[1:], dtype=numpy.float64,
-		)
-		audio_f64 = numpy.concatenate([pad, audio_f64], axis=0)[:n_frames]
+	smoothed = _advance_gain(smoothed, lookahead_samples)
 
 	# ── Apply gain + makeup ─────────────────────────────────────────
 
@@ -2986,6 +2983,24 @@ def _compress (
 		audio_f64 *= linear_gain[:, numpy.newaxis]
 
 	return audio_f64.astype(numpy.float32)
+
+
+def _advance_gain (gain: numpy.ndarray, frames: int) -> numpy.ndarray:
+
+	"""Give each sample the gain computed for the one `frames` later, which is look-ahead.
+
+	Rendering is offline, so the gain can be read early instead of delaying
+	the audio against it.  The two sound alike, but a delay made the rendered
+	sound start late by the look-ahead and lose as much from its end, and left
+	the slice positions a quantise step earlier in the chain had published
+	that much early.  The last samples, with nothing after them, hold the
+	final gain.
+	"""
+
+	if frames <= 0:
+		return gain
+
+	return numpy.concatenate([gain[frames:], numpy.full(frames, gain[-1], dtype=gain.dtype)])
 
 
 def _resolve_compress_params (
@@ -3299,18 +3314,12 @@ def _apply_gate (
 		else:
 			smoothed[i] = alpha_r * smoothed[i - 1] + (1.0 - alpha_r) * raw_gain[i]
 
-	# Lookahead: delay the audio relative to the gain envelope.
+	# Look-ahead: the gate opens before a hit arrives.  Capped at half the
+	# sample, as _compress caps it.
 	lookahead_samples = int(lookahead_ms * sample_rate / 1000.0)
-
-	# Cap the look-ahead to half the sample, mirroring _compress: the pad-
-	# then-slice below discards the last `lookahead_samples`, so a window
-	# meeting or exceeding the sample length would silence it entirely
-	# (e.g. an explicit 50 ms look-ahead on a 30 ms tick).
 	lookahead_samples = min(lookahead_samples, n_frames // 2)
 
-	if lookahead_samples > 0:
-		audio_f64 = numpy.pad(audio_f64, ((lookahead_samples, 0), (0, 0)), mode="constant")
-		audio_f64 = audio_f64[:n_frames]
+	smoothed = _advance_gain(smoothed, lookahead_samples)
 
 	# Apply gain.
 	result = audio_f64 * smoothed[:, numpy.newaxis]
@@ -4159,6 +4168,20 @@ def _apply_vocoder (
 		_log.warning("Vocoder: could not build filter bank - returning dry")
 		return audio
 
+	# The zero-phase filters pad each end by three times the filter's length
+	# and refuse a buffer no longer than that padding: 27 frames for these
+	# band-passes.  A sound that short has no envelope to impose, and it never
+	# grows, so it is passed through unchanged and kept, as hpss does.
+	min_frames = max(3 * (2 * len(sos) + 1) for sos in (*mod_filters, *car_filters)) + 1
+
+	if n_frames < min_frames:
+		_warn_once(
+			"vocoder-too-short",
+			f"Vocoder: {n_frames} frames is too short to vocode (it needs {min_frames}) - "
+			"the audio is passed through unchanged",
+		)
+		return audio
+
 	n_bands = min(len(mod_filters), len(car_filters))
 
 	result = numpy.zeros_like(audio)
@@ -4278,17 +4301,19 @@ def _resolve_cc (
 	if not isinstance(value, subsample.query.CcBinding):
 		return value if value is not None else default
 
-	if value.channel is not None and cc_state is not None:
-		cc_val = cc_state.get((value.channel - 1, value.cc))
+	# A binding to one channel reads only that channel.  With no channel state
+	# it rests, rather than taking the CC's last value from any channel.
+	cc_val: typing.Optional[int] = None
 
-		if cc_val is not None:
-			return value.resolve(cc_val)
+	if value.channel is not None:
+		if cc_state is not None:
+			cc_val = cc_state.get((value.channel - 1, value.cc))
 
 	elif cc_omni is not None:
 		cc_val = cc_omni.get(value.cc)
 
-		if cc_val is not None:
-			return value.resolve(cc_val)
+	if cc_val is not None:
+		return value.resolve(cc_val)
 
 	rest = value.default_value
 

@@ -456,7 +456,7 @@ class TestSourceSampleRate:
 		# Processor configured for a 44100 recorder feeding a 48000 output — the
 		# exact mismatch that mis-rendered disk-loaded (48000) audio.
 		processor = subsample.transform.TransformProcessor(
-			sample_rate=44100, output_sample_rate=out_sr, bit_depth=16,
+			sample_rate=44100, output_sample_rate=out_sr,
 		)
 		processor._on_complete = lambda r: captured.append(r)
 		processor._disk_cache = None
@@ -489,7 +489,7 @@ class TestTransformProcessor:
 	"""TransformProcessor deduplicates in-flight jobs; raises on unregistered handlers."""
 
 	def test_enqueue_skips_record_with_no_audio (self) -> None:
-		processor = subsample.transform.TransformProcessor(sample_rate=44100, bit_depth=16)
+		processor = subsample.transform.TransformProcessor(sample_rate=44100)
 		record    = _make_record(audio=None)
 		spec      = subsample.transform.TransformSpec(
 			steps=(subsample.transform.PitchShift(target_midi_note=60),)
@@ -517,7 +517,6 @@ class TestTransformProcessor:
 
 			processor = subsample.transform.TransformProcessor(
 				sample_rate=44100,
-				bit_depth=16,
 				on_complete=completed.append,
 			)
 
@@ -566,7 +565,6 @@ class TestTransformProcessor:
 
 			processor = subsample.transform.TransformProcessor(
 				sample_rate=44100,
-				bit_depth=16,
 				on_complete=completed.append,
 			)
 
@@ -626,7 +624,7 @@ class TestAFailedRenderIsTriedAgain:
 
 		idle = threading.Event()
 		processor = subsample.transform.TransformProcessor(
-			sample_rate=44100, bit_depth=16, on_idle=lambda _count: idle.set(),
+			sample_rate=44100, on_idle=lambda _count: idle.set(),
 		)
 
 		now = [0.0]
@@ -745,7 +743,6 @@ class TestTransformManager:
 		)
 		processor = subsample.transform.TransformProcessor(
 			sample_rate=44100,
-			bit_depth=16,
 			on_complete=cache.put,
 		)
 		cfg = subsample.config.TransformConfig()
@@ -841,7 +838,7 @@ class TestTransformManager:
 		lib   = subsample.library.InstrumentLibrary(max_memory_bytes=100 * 1024 * 1024)
 		cache = subsample.transform.TransformCache(max_memory_bytes=50 * 1024 * 1024)
 		processor = subsample.transform.TransformProcessor(
-			sample_rate=44100, bit_depth=16, on_complete=cache.put,
+			sample_rate=44100, on_complete=cache.put,
 		)
 		cfg = subsample.config.TransformConfig(auto_pitch=False)
 		manager = subsample.transform.TransformManager(
@@ -876,7 +873,7 @@ class TestTransformManagerGetVariant:
 			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
 		)
 		processor = subsample.transform.TransformProcessor(
-			sample_rate=44100, bit_depth=16, on_complete=cache.put, disk_cache=disk,
+			sample_rate=44100, on_complete=cache.put, disk_cache=disk,
 		)
 		manager = subsample.transform.TransformManager(
 			cache=cache, processor=processor, instrument_library=lib,
@@ -1044,7 +1041,6 @@ class TestSampleRateConversion:
 		processor = subsample.transform.TransformProcessor(
 			sample_rate=44100,
 			output_sample_rate=48000,
-			bit_depth=16,
 			on_complete=completed.append,
 		)
 
@@ -1068,7 +1064,6 @@ class TestSampleRateConversion:
 		processor = subsample.transform.TransformProcessor(
 			sample_rate=44100,
 			output_sample_rate=44100,
-			bit_depth=16,
 			on_complete=completed.append,
 		)
 
@@ -1087,7 +1082,6 @@ class TestSampleRateConversion:
 		processor = subsample.transform.TransformProcessor(
 			sample_rate=44100,
 			output_sample_rate=48000,
-			bit_depth=16,
 			on_complete=completed.append,
 		)
 
@@ -1114,15 +1108,27 @@ class TestAudioHelpers:
 
 	def test_pcm_to_float32_preserves_channels (self) -> None:
 		pcm = numpy.array([[1000, -1000], [2000, -2000]], dtype=numpy.int16)
-		out = subsample.transform._pcm_to_float32(pcm, bit_depth=16)
+		out = subsample.transform.pcm_to_float32(pcm)
 		assert out.shape == (2, 2)
 		assert out.dtype == numpy.float32
 
 	def test_pcm_to_float32_normalises_16bit (self) -> None:
 		# Full-scale positive int16 → ~1.0
 		pcm = numpy.array([[32767]], dtype=numpy.int16)
-		out = subsample.transform._pcm_to_float32(pcm, bit_depth=16)
+		out = subsample.transform.pcm_to_float32(pcm)
 		assert abs(out[0, 0] - 1.0) < 0.001
+
+	def test_pcm_to_float32_takes_its_scale_from_the_array (self) -> None:
+
+		"""An imported 24-bit file stays int32 under a 16-bit capture config.
+		The render worker divided by the configured depth, so it converted such
+		a file about 65536 times too hot; only the normalise after it hid that."""
+
+		pcm = numpy.array([[2147483647, -2147483648]], dtype=numpy.int32)
+		out = subsample.transform.pcm_to_float32(pcm)
+
+		assert abs(out[0, 0] - 1.0) < 0.001
+		assert abs(out[0, 1] + 1.0) < 0.001
 
 	def test_mix_to_mono_stereo (self) -> None:
 		audio = numpy.array([[1.0, 0.0], [0.5, 0.5]], dtype=numpy.float32)
@@ -2569,6 +2575,23 @@ class TestCcResolution:
 		cc_state_wrong = {(0, 1): 127}
 		spec2 = subsample.transform.spec_from_process(process, cc_state=cc_state_wrong)
 		assert spec2.steps[0].amount == 0.5  # default = midpoint
+
+	def test_a_channel_binding_with_no_channel_state_rests (self) -> None:
+
+		"""With no per-channel state, a binding to channel 10 took the CC's last
+		value from whatever channel sent it, which is the omni binding's job."""
+
+		binding = subsample.query.CcBinding(cc=1, min_val=0.0, max_val=1.0, channel=10)
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(
+				name="pad_quantize",
+				params=(("tempo", 120), ("strength", binding)),
+			),
+		))
+
+		spec = subsample.transform.spec_from_process(process, cc_state=None, cc_omni={1: 127})
+
+		assert spec.steps[0].amount == 0.5  # resting at the midpoint, not 1.0
 
 	def test_cc_binding_omni (self) -> None:
 		"""Omni CcBinding (channel=None) uses cc_omni (last-write-wins)."""
@@ -4641,6 +4664,7 @@ class TestReviewRegressions:
 		assert result.shape == audio.shape
 		assert float(numpy.max(numpy.abs(result))) > 0.0   # not silent
 
+
 	def test_transform_cache_reput_does_not_inflate_memory (self) -> None:
 
 		"""Re-putting the same key (disk-promote + worker on_complete) must not
@@ -4693,6 +4717,49 @@ class TestReviewRegressions:
 		result = subsample.transform._apply_pitch(audio, 44100, record, step)
 
 		assert result is audio   # identity passthrough, pyrubberband not invoked
+
+
+class TestLookAheadKeepsTiming:
+
+	"""Look-ahead delayed the sound against its gain curve, so a limited or
+	gated render started late by the look-ahead and lost as much from its end,
+	and the slices a quantise step earlier in the chain had published were that
+	much early.  Reading the gain early instead keeps the sound where it was."""
+
+	SR = 44100
+
+	_STEPS = [
+		pytest.param(subsample.transform._apply_limit, subsample.transform.Limit(threshold_db=-6.0, lookahead_ms=5.0), id="limit"),
+		pytest.param(subsample.transform._apply_compress, subsample.transform.Compress(threshold_db=-20.0, ratio=4.0, lookahead_ms=5.0), id="compress"),
+		pytest.param(subsample.transform._apply_gate, subsample.transform.Gate(threshold_db=-40.0, lookahead_ms=5.0), id="gate"),
+	]
+
+	@pytest.mark.parametrize("handler, step", _STEPS)
+	def test_a_hit_starts_where_it_was_played (self, handler: typing.Any, step: typing.Any) -> None:
+
+		audio = numpy.zeros((8820, 1), dtype=numpy.float32)
+		hit_at = 4410
+		t = numpy.arange(2205) / self.SR
+		audio[hit_at:hit_at + 2205, 0] = (0.9 * numpy.sin(2 * numpy.pi * 220.0 * t) * numpy.exp(-t * 20.0)).astype(numpy.float32)
+
+		rendered = handler(audio, self.SR, _make_record(sample_id=1), step)
+
+		first_in  = int(numpy.argmax(numpy.abs(audio[:, 0]) > 1e-4))
+		first_out = int(numpy.argmax(numpy.abs(rendered[:, 0]) > 1e-4))
+
+		assert first_in == hit_at + 1   # sin(0) is 0, so the first audible sample is the next
+		assert first_out == first_in
+
+	@pytest.mark.parametrize("handler, step", _STEPS)
+	def test_a_sound_keeps_its_end (self, handler: typing.Any, step: typing.Any) -> None:
+
+		# A burst in the last 100 frames, which a 5 ms delay pushed off the end.
+		audio = numpy.zeros((4410, 1), dtype=numpy.float32)
+		audio[-100:, 0] = 0.9 * numpy.sign(numpy.sin(numpy.arange(100) * 0.7) + 1e-9)
+
+		rendered = handler(audio, self.SR, _make_record(sample_id=1), step)
+
+		assert float(numpy.max(numpy.abs(rendered[-100:, 0]))) > 0.1
 
 
 class TestReverseThenQuantize:
@@ -5216,6 +5283,48 @@ class TestShortBuffersAndDenseTakes:
 		separated = subsample.transform._apply_hpss(audio, keep)
 
 		assert numpy.all(numpy.isfinite(separated))
+
+	@pytest.mark.parametrize("frames", [2, 10, 27])
+	def test_a_vocoder_passes_a_sound_too_short_to_filter_through (
+		self, frames: int, tmp_path: pathlib.Path, caplog: typing.Any,
+	) -> None:
+
+		"""The zero-phase band filters refuse a buffer of 27 frames or fewer.
+		The render raised, logged a traceback and was tried again after every
+		pause, for a sound that can never be long enough.  It passes through
+		unchanged instead, with one warning."""
+
+		subsample.transform._WARN_ONCE_SEEN.discard("vocoder-too-short")
+		subsample.transform._segment_bounds_local.fell_back = False
+		carrier_path = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier_path, sr=self.SR, duration=0.2)
+
+		audio = numpy.random.default_rng(4).normal(0.0, 0.2, (frames, 2)).astype(numpy.float32)
+		step = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=16)
+
+		with caplog.at_level("WARNING"):
+			rendered = subsample.transform._apply_vocoder(audio, self.SR, _make_record(sample_id=1), step)
+
+		numpy.testing.assert_array_equal(rendered, audio)
+		assert any("too short to vocode" in r.message for r in caplog.records)
+		# A sound that never grows gives the same answer every time, so the
+		# pass-through is kept rather than marked as a fallback.
+		assert subsample.transform._segment_bounds_local.fell_back is False
+
+	def test_a_vocoder_still_renders_the_shortest_sound_it_can_filter (self, tmp_path: pathlib.Path) -> None:
+
+		"""28 frames is the first length the filters accept, so it is vocoded."""
+
+		carrier_path = tmp_path / "carrier.wav"
+		_write_carrier_wav(carrier_path, sr=self.SR, duration=0.2)
+
+		audio = numpy.random.default_rng(4).normal(0.0, 0.2, (28, 1)).astype(numpy.float32)
+		step = subsample.transform.Vocoder(carrier_path=str(carrier_path), bands=16)
+		rendered = subsample.transform._apply_vocoder(audio, self.SR, _make_record(sample_id=1), step)
+
+		assert rendered.shape == audio.shape
+		assert numpy.all(numpy.isfinite(rendered))
+		assert not numpy.allclose(rendered, audio, atol=0.01)
 
 	def test_a_take_with_more_hits_than_grid_points_keeps_its_own_rhythm (self) -> None:
 

@@ -418,6 +418,27 @@ class TestInstrumentLibrary:
 		assert lib.find_by_path(p) == second.sample_id
 		assert len(lib) == 1
 
+	def test_a_readd_of_the_same_sample_id_is_counted_once (self) -> None:
+
+		"""Re-adding a sample under its own id counted its bytes and its place
+		in the eviction order twice: the library thought itself fuller than it
+		was, and evicted others to make room for a sample it already held."""
+
+		# The limit fits exactly two 2000-byte records.
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=4000)
+		kick  = _make_instrument_record("kick", n_frames=1000)
+		snare = _make_instrument_record("snare", n_frames=1000)
+
+		lib.add(kick)
+		lib.add(snare)
+		evicted = lib.add(dataclasses.replace(kick))
+
+		assert evicted == []
+		assert lib.memory_used == 4000
+		assert len(lib) == 2
+		assert [r.name for r in lib.samples()] == ["snare", "kick"]
+		assert lib.find_by_name("kick") == kick.sample_id
+
 	def test_same_stem_different_path_coexist (self) -> None:
 		"""Two records sharing a stem but at different paths COEXIST — identity is
 		the resolved filepath (the take-folder case, at unit level)."""

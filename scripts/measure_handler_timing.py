@@ -235,7 +235,6 @@ def main () -> int:
 	transform_processor = subsample.transform.TransformProcessor(
 		sample_rate=cfg.recorder.audio.sample_rate,
 		output_sample_rate=output_sr,
-		bit_depth=cfg.recorder.audio.bit_depth,
 		on_complete=_on_complete,
 		disk_cache=variant_disk_cache,
 	)

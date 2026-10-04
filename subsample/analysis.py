@@ -14,7 +14,7 @@ Spectral metrics (AnalysisResult) — normalised to [0.0, 1.0]:
   release            — 0 = instant cutoff, 1 = long sustain/decay tail
   spectral_centroid  — 0 = very bassy, 1 = very trebly
   spectral_bandwidth — 0 = narrow/pure tone, 1 = wide/spectrally complex
-  zcr                — 0 = smooth/DC, 1 = maximally noisy (zero crossing rate)
+  zcr                — 0 = smooth/DC, 1 = as noisy as white noise or more (zero crossing rate)
   harmonic_ratio     — 0 = purely percussive, 1 = purely harmonic (HPSS energy ratio)
   spectral_contrast  — 0 = flat spectrum, 1 = strong spectral peaks-vs-valleys
   voiced_fraction    — 0 = unpitched/noise, 1 = clearly pitched throughout (pyin)
@@ -146,6 +146,9 @@ warnings.filterwarnings(
 #     decay, and the decay's wiggles passed as hits: the GM references read 2 to
 #     32 onsets each and now 1 to 3, and on 60 real captures most counts fell
 #     while 16 whose first attack had read as past 50 ms now start at 0.
+#
+# Waiting for the next bump, because each would change every fingerprint alone:
+#   - zcr divided by librosa's true maximum, 1.0, rather than 0.5 (_ZCR_MAX).
 ANALYSIS_VERSION: str = "18"
 
 # ---------------------------------------------------------------------------
@@ -177,10 +180,15 @@ _FREQ_MIN_HZ: float = 20.0
 # equivalent for typical audio signals.
 _ACTIVE_THRESHOLD_RATIO: float = 0.1
 
-# Zero crossing rate: the theoretical maximum is 0.5 (every consecutive pair
-# of samples has opposite sign — alternating +1, -1, +1, ...). A linear map
-# from [0, 0.5] to [0, 1] is appropriate since ZCR is already perceptually
-# linear (unlike time and frequency, which are logarithmic).
+# Zero crossing rate: librosa counts crossings per sample, so a signal that
+# alternates sign every sample measures 1.0 and white noise about 0.5.  The
+# linear map divides by 0.5, so 1.0 means as noisy as white noise, and brighter
+# noise (closed hats, cabasa, shakers) saturates there: of the 47 shipped GM
+# references only the cabasa reaches it, but the hats crowd into 0.9 to 1.0.
+# Dividing by librosa's true maximum, 1.0, would keep them apart, but it changes
+# every fingerprint, so it waits for the next ANALYSIS_VERSION bump.  The map
+# is linear because ZCR is already perceptually linear (unlike time and
+# frequency, which are logarithmic).
 _ZCR_MAX: float = 0.5
 
 # Spectral contrast: mean contrast across all sub-bands in dB. librosa
@@ -348,9 +356,9 @@ class AnalysisResult:
 
 	zcr: float
 	"""Zero crossing rate, linearly mapped from [0, 0.5] to [0, 1].
-	0.0 = pure DC / very smooth signal, 1.0 = maximally noisy (every sample
-	alternates sign). Complements spectral_flatness from the time domain:
-	percussive transients and noise both produce high ZCR."""
+	0.0 = pure DC / very smooth signal, 1.0 = as noisy as white noise, where
+	brighter noise saturates (see _ZCR_MAX). Complements spectral_flatness
+	from the time domain: percussive transients and noise both produce high ZCR."""
 
 	harmonic_ratio: float
 	"""Fraction of total energy in the harmonic component after HPSS
@@ -2592,15 +2600,17 @@ def _compute_zcr (
 	It is a time-domain indicator of noisiness: percussive transients and noise
 	produce many sign changes (high ZCR), while smooth tonal signals produce few.
 
-	The theoretical maximum is 0.5 (every sample alternates sign), so a simple
-	linear map from [0, 0.5] → [0, 1] is used — no log scale needed.
+	librosa gives about 0.5 for white noise and 1.0 for a signal that
+	alternates sign every sample.  A linear map from [0, 0.5] → [0, 1] is used,
+	so brighter noise than white saturates at 1.0 (see _ZCR_MAX); no log scale
+	is needed.
 
 	Args:
 		mono:   Float32 audio, shape (n_frames,).
 		params: FFT params (used for consistent frame sizing).
 
 	Returns:
-		ZCR score in [0.0, 1.0]. 0 = smooth/DC, 1 = maximally noisy.
+		ZCR score in [0.0, 1.0]. 0 = smooth/DC, 1 = as noisy as white noise or more.
 	"""
 
 	zcr_frames = librosa.feature.zero_crossing_rate(

@@ -334,7 +334,10 @@ class LevelDetector:
 
 		if self._exceeds_threshold(chunk_rms):
 			self._state = DetectorState.RECORDING
-			chunk_start = current_frame - self._chunk_size
+			# The chunk's own length, not the configured one: the last chunk of
+			# an imported file is usually shorter, and measuring back a whole
+			# chunk_size put its onset that many frames early.
+			chunk_start = current_frame - chunk.shape[0]
 			self._recording_start_frame = max(0, chunk_start + self._onset_offset(chunk))
 			self._hold_chunks_remaining = self._hold_chunks_total
 			# This triggering chunk is frame 1 of the new recording; seed the tail
@@ -390,7 +393,7 @@ class LevelDetector:
 			and self._recording_chunks > self._retrigger_guard_chunks
 			and self._exceeds_retrigger(chunk_rms)
 		):
-			boundary = max(0, current_frame - self._chunk_size + self._onset_offset(chunk))
+			boundary = max(0, current_frame - chunk.shape[0] + self._onset_offset(chunk))
 			start_frame = self._recording_start_frame
 			self._recording_start_frame = boundary
 			self._recording_chunks = 1

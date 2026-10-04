@@ -51,6 +51,12 @@ import subsample.config
 import subsample.library
 
 
+# Decimal places every similarity score is rounded to (see _score_matrix).  Far
+# finer than any difference between two sounds, and far coarser than float64's
+# own error, so two fingerprints that are the same score the same.
+_SCORE_DECIMALS: int = 9
+
+
 @dataclasses.dataclass(frozen=True)
 class RankedMatch:
 
@@ -218,30 +224,13 @@ class SimilarityMatrix:
 			)
 
 		ref_names = list(self._ref_vectors.keys())
-		ref_matrix = numpy.array(
-			[self._ref_vectors[n] for n in ref_names], dtype=numpy.float32
-		)  # M × D
+		ref_matrix = numpy.array([self._ref_vectors[n] for n in ref_names])  # M × D
 
 		inst_matrix = numpy.array(
 			[_build_feature_vector(r, self._similarity_cfg) for r in records],
-			dtype=numpy.float32,
 		)  # N × D
 
-		# Normalise rows; zero-norm vectors stay zero (cosine score is 0.0).
-		# numpy.divide(..., where=, out=) keeps the division off the zero
-		# rows entirely — a numpy.where(..., a/b, 0.0) form would compute
-		# a/b on every row before masking, raising a "divide by zero"
-		# RuntimeWarning on each startup that contained a silent sample.
-		inst_norms = numpy.linalg.norm(inst_matrix, axis=1, keepdims=True)
-		ref_norms  = numpy.linalg.norm(ref_matrix,  axis=1, keepdims=True)
-
-		inst_normed = numpy.zeros_like(inst_matrix)
-		numpy.divide(inst_matrix, inst_norms, where=inst_norms > 0, out=inst_normed)
-
-		ref_normed = numpy.zeros_like(ref_matrix)
-		numpy.divide(ref_matrix, ref_norms, where=ref_norms > 0, out=ref_normed)
-
-		scores_matrix = (inst_normed @ ref_normed.T).astype(numpy.float64)  # N × M
+		scores_matrix = _score_matrix(inst_matrix, ref_matrix)  # N × M
 
 		with self._lock:
 
@@ -607,19 +596,52 @@ def _l2_normalize (v: numpy.ndarray) -> numpy.ndarray:
 
 def _cosine_similarity (a: numpy.ndarray, b: numpy.ndarray) -> float:
 
-	"""Cosine similarity between two 1-D arrays.
+	"""Cosine similarity between two 1-D arrays, scored as _score_matrix scores it.
 
 	Returns 0.0 if either vector is all-zero (degenerate case — a silent or
 	perfectly flat recording produces a zero spectral fingerprint).
 	"""
 
-	norm_a = float(numpy.linalg.norm(a))
-	norm_b = float(numpy.linalg.norm(b))
+	return float(_score_matrix(a[numpy.newaxis, :], b[numpy.newaxis, :])[0, 0])
 
-	if norm_a < 1e-9 or norm_b < 1e-9:
-		return 0.0
 
-	return float(numpy.dot(a, b) / (norm_a * norm_b))
+def _score_matrix (rows: numpy.ndarray, references: numpy.ndarray) -> numpy.ndarray:
+
+	"""Cosine similarity of every row against every reference row, N × M.
+
+	Every score in a ranking goes through here, whether a library is scored in
+	one batch at startup or a capture is scored on its own.  The two used to
+	compute in float32 by different routes, which disagreed in the seventh
+	decimal on most scores.  Exact ties are ordinary (a duplicate import, the
+	same kit loaded twice), and both routes break a tie by insertion order, so
+	the same library ranked its duplicates differently depending on how it was
+	loaded.  Working in float64 and rounding to _SCORE_DECIMALS makes a tie a
+	tie on both.
+
+	A zero-norm row (a silent or perfectly flat recording) scores 0.0.
+	"""
+
+	unit_rows       = _unit_rows(rows.astype(numpy.float64))
+	unit_references = _unit_rows(references.astype(numpy.float64))
+	scores: numpy.ndarray = numpy.round(unit_rows @ unit_references.T, _SCORE_DECIMALS)
+
+	return scores
+
+
+def _unit_rows (matrix: numpy.ndarray) -> numpy.ndarray:
+
+	"""Each row scaled to unit length; a row of negligible norm stays zero.
+
+	numpy.divide(..., where=, out=) keeps the division off the zero rows
+	entirely: computing a/b on every row before masking raised a "divide by
+	zero" RuntimeWarning on each startup that contained a silent sample.
+	"""
+
+	norms = numpy.linalg.norm(matrix, axis=1, keepdims=True)
+	unit  = numpy.zeros_like(matrix)
+	numpy.divide(matrix, norms, where=norms >= 1e-9, out=unit)
+
+	return unit
 
 
 # ---------------------------------------------------------------------------

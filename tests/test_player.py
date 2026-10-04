@@ -10,6 +10,7 @@ import random
 import re
 import sys
 import threading
+import time
 import types
 import typing
 import unittest.mock
@@ -1406,6 +1407,7 @@ class TestResolveRelease:
 	def _player (self, sample_rate: int = 44100, cc_state: typing.Optional[dict] = None) -> unittest.mock.MagicMock:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._output_sample_rate = sample_rate
+		player._release_fade_frames = round(subsample.player._RELEASE_FADE_SECONDS * sample_rate)
 		player._snapshot_cc_state.return_value = (cc_state or {}, {})
 		return player
 
@@ -1460,6 +1462,36 @@ class TestResolveRelease:
 		player._snapshot_cc_state.return_value = ({}, {72: 127})
 		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(player, spec, self._record(0.5))
 		assert frames == round(3000.0 / 1000.0 * 44100)
+
+	@pytest.mark.parametrize("time_ms", [0.0, 4.0, 9.9])
+	def test_a_release_under_10_ms_fades_over_10_ms (self, time_ms: float) -> None:
+
+		"""A release of 0 stopped the sound on the next sample, an instant cut
+		that clicks.  Nothing shorter than the declick a release-less note gets
+		is played."""
+
+		spec = subsample.query.ReleaseSpec(time=time_ms, curve="cosine")
+		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
+
+		assert frames == 441
+
+	def test_a_release_knob_turned_fully_down_fades_over_10_ms (self) -> None:
+
+		"""The knob's travel starts at 0 ms, which was the same instant cut."""
+
+		spec = subsample.player._parse_release({"cc": 72}, "a")
+		assert spec is not None
+		player = self._player(48000)
+		player._snapshot_cc_state.return_value = ({}, {72: 0})
+		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(player, spec, self._record())
+
+		assert frames == 480
+
+	def test_a_release_of_10_ms_or_more_is_as_written (self) -> None:
+		spec = subsample.query.ReleaseSpec(time=20.0, curve="cosine")
+		frames, _curve, _to_end = subsample.player.MidiPlayer._resolve_release(self._player(44100), spec, self._record())
+
+		assert frames == 882
 
 
 class TestReleaseCallback:
@@ -4040,7 +4072,7 @@ class TestRuntimeSafetyGuards:
 		)
 
 		applied: list[subsample.player.NoteMap] = []
-		player._apply_rule_set = lambda nm, zt, ccs: applied.append(nm)  # type: ignore[method-assign]
+		player._apply_rule_set_locked = lambda nm, zt, ccs: applied.append(nm)  # type: ignore[method-assign]
 
 		player.reload_midi_map(result)
 
@@ -6352,6 +6384,58 @@ class TestReloadMidiMap:
 		assert (9, 38) not in player._note_map
 		assert player._mapped_ccs == mapped_ccs_before
 
+	def test_a_failed_reload_restores_the_tempo_and_note_state_it_changed (self) -> None:
+
+		"""Re-evaluation adopts a clock tempo and prunes the round-robin and
+		last-played state of assignments the new rules do not have, both
+		before it can fail.  The rollback restored the rules only, so the old
+		rules ran at a tempo their variants were not baked for, and their
+		notes lost their place in a round-robin and their fallback sound."""
+
+		asgn_old = _make_assignment(name="Kicks", reference="BD0025")
+		old_map  = _make_note_map(asgn_old, channel=9, notes=[36])
+
+		asgn_new = _make_assignment(name="Snares", reference="SD0010")
+		new_map  = _make_note_map(asgn_new, channel=9, notes=[38])
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map=old_map,
+			sample_rate=44100,
+			bit_depth=16,
+			target_bpm=120.0,
+		)
+
+		old_key = (9, 36, id(asgn_old))
+		fallback = typing.cast(subsample.transform.TransformResult, object())
+		player._last_played[old_key] = fallback
+		player._segment_counters[old_key] = 3
+
+		# A note on the new rules plays while they are being validated.
+		new_key = (9, 38, id(asgn_new))
+		played = typing.cast(subsample.transform.TransformResult, object())
+
+		def adopt_prune_play_and_fail () -> None:
+			player._target_bpm = 140.0
+			player._prune_stale_layer_state()
+			player._last_played[new_key] = played
+			raise ValueError("simulated failure after the prune")
+
+		with unittest.mock.patch.object(player, "update_assignments", side_effect=adopt_prune_play_and_fail):
+			with pytest.raises(ValueError, match="after the prune"):
+				player.reload_midi_map(self._wrap(new_map))
+
+		assert player._note_map == old_map
+		assert player._target_bpm == 120.0
+		assert player._last_played[old_key] is fallback
+		assert player._segment_counters[old_key] == 3
+
+		# What was written during the attempt is not taken back.
+		assert player._last_played[new_key] is played
+
 
 # ---------------------------------------------------------------------------
 # MidiPlayer — combined program (preset) switch
@@ -6516,7 +6600,7 @@ class TestProgramPresetSwitch:
 
 	def test_apply_rule_set_restores_on_failure (self) -> None:
 
-		"""_apply_rule_set restores all four fields when update_assignments raises."""
+		"""_apply_rule_set restores the rule fields when update_assignments raises."""
 
 		player, _lib_dir, _lib_preset, top_map, preset_map = self._make_player(threading.Event())
 
@@ -6534,6 +6618,80 @@ class TestProgramPresetSwitch:
 		assert player._note_map == top_map
 		assert player._mapped_ccs == ccs_before
 		assert player._zone_templates == zones_before
+
+	def test_a_program_change_during_a_reload_plays_the_edited_map (self) -> None:
+
+		"""A Program Change to a `directory:` program reads the top-level rules.
+		It read them before waiting for a reload that was still validating, so
+		once the reload finished, the switch installed the rules from before
+		the edit, and the edit was lost until the file was saved again."""
+
+		top_map = _make_note_map(_make_assignment(name="Top", reference="BD0025"), channel=9, notes=[36])
+		edited  = _make_note_map(_make_assignment(name="Edited", reference="SD0010"), channel=9, notes=[38])
+
+		banks = [
+			subsample.bank.Bank(
+				name=f"Directory {program}", directory=pathlib.Path(f"/tmp/dir{program}"), program=program,
+				instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+				similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+				transform_manager=None,
+			)
+			for program in (0, 2)
+		]
+		bm = subsample.bank.BankManager(banks, bank_channel=10, default_program=0)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=banks[0].instrument_library,
+			similarity_matrix=banks[0].similarity_matrix,
+			midi_map=top_map,
+			sample_rate=44100,
+			bit_depth=16,
+			bank_manager=bm,
+		)
+
+		validating = threading.Event()
+		release    = threading.Event()
+		calls      = 0
+
+		def slow_first_validation () -> None:
+			nonlocal calls
+			calls += 1
+
+			if calls == 1:
+				validating.set()
+				release.wait(timeout=5.0)
+
+		result = subsample.player.MidiMapResult(
+			note_map=edited, bank_definitions=[], bank_channel=subsample.bank.DEFAULT_BANK_CHANNEL,
+		)
+
+		with unittest.mock.patch.object(player, "update_assignments", side_effect=slow_first_validation):
+			reload = threading.Thread(target=player.reload_midi_map, args=(result,))
+			reload.start()
+			assert validating.wait(timeout=5.0)
+
+			switch = threading.Thread(
+				target=player._handle_message,
+				args=(mido.Message("program_change", channel=9, program=2),),
+			)
+			switch.start()
+
+			# Before the fix the switch went ahead to read the top-level rules and
+			# then waited; give it the time to, then let the reload finish.
+			deadline = time.monotonic() + 0.5
+
+			while bm.active_bank.program != 2 and time.monotonic() < deadline:
+				time.sleep(0.01)
+
+			release.set()
+			reload.join(timeout=5.0)
+			switch.join(timeout=5.0)
+
+		assert bm.active_bank.program == 2
+		assert player._top_level_note_map == edited
+		assert player._note_map == edited
 
 
 # ---------------------------------------------------------------------------

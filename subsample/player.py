@@ -24,7 +24,10 @@ Concurrency control:
   - _rules_lock (reentrant) serialises rule-set re-evaluation:
     update_assignments and _apply_rule_set (hot-reload / program-change
     swap) never interleave, so the swap's install→validate→rollback
-    window cannot be observed by a concurrent re-evaluation.
+    window cannot be observed by a concurrent re-evaluation.  It also
+    guards the top-level rule snapshot (_top_level_*): a map reload holds
+    it from its preset check to its snapshot refresh, and a Program Change
+    from its pool switch to its rule swap.
     Lock-ordering rule: _rules_lock is outermost, then _state_lock;
     never acquire either while holding any of the others.
 
@@ -89,8 +92,8 @@ import subsample.yaml_numbers
 _log = logging.getLogger(__name__)
 
 # Cosine fade-out duration applied when a note_off is received and no explicit
-# release: is configured.  Long enough to prevent a click on hard cutoff; short
-# enough to be imperceptible.  Stored as seconds; converted to frames in
+# release: is configured, and the shortest a configured release may be.  Long
+# enough to prevent a click on hard cutoff; short enough to be imperceptible.  Stored as seconds; converted to frames in
 # MidiPlayer.__init__() using the actual output sample rate so the duration is
 # correct regardless of device.
 _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
@@ -5546,57 +5549,11 @@ class MidiPlayer:
 				# POOL back too, not just the rules (see the except below).
 				previous_program = active.program if active is not None else None
 
-				if bm.switch_to(msg.program):
-					# Both dicts are guarded by _state_lock — clear them
-					# together so any concurrent reader (e.g. _select_segment
-					# RMW) sees a consistent post-switch state.
-					with self._state_lock:
-						self._last_played.clear()
-						self._segment_counters.clear()
-
-					bank = bm.active_bank
-
-					if bank.note_map is not None:
-						# `map:` preset — swap the RULES too (assignments /
-						# zones / CCs), not just the pool.
-						rule_set = (
-							bank.note_map,
-							bank.zone_templates or (),
-							bank.mapped_ccs or set(),
-						)
-					else:
-						# `directory:` shorthand — reuse the top-level rules.
-						# Restore the immutable snapshot (a prior `map:` preset
-						# may have replaced the active base) and re-query it
-						# against the swapped pool.
-						rule_set = (
-							self._top_level_note_map,
-							self._top_level_zone_templates,
-							self._top_level_mapped_ccs,
-						)
-
-					# _apply_rule_set runs update_assignments() against the
-					# now-active bank's library and rolls back on failure, so a
-					# broken kit (or a query that raises) never kills the player
-					# thread mid-set.
-					try:
-						self._apply_rule_set(*rule_set)
-					except Exception as exc:
-						# The rules rolled back, but switch_to already committed the
-						# POOL to the new bank — leaving _effective_* serving the new
-						# library under the old rules (largely silence).  Switch the
-						# pool back so pool and rules are consistent again.
-						if previous_program is not None:
-							bm.switch_to(previous_program)
-							with self._state_lock:
-								self._last_played.clear()
-								self._segment_counters.clear()
-
-						_log.error(
-							"Program %d (%s) rules failed to apply - staying on the "
-							"previous program: %s",
-							msg.program, bank.name, exc,
-						)
+				# Held from the pool switch to the end of the rule swap, so a map
+				# reload on the watcher thread can neither decide on the old pool
+				# nor refresh the top-level rules while this reads them.
+				with self._rules_lock:
+					self._switch_program_locked(bm, msg.program, previous_program)
 			return
 
 		# Control Change: update CC state and debounce re-evaluation for
@@ -5819,8 +5776,9 @@ class MidiPlayer:
 		then uses the player's global default declick length, so behaviour is
 		unchanged.  ``release: full`` returns ``(None, 0, True)`` — the third
 		element tells the note-off handler to play to the natural end with no
-		fade.  Otherwise returns the fade length in output-rate frames and the
-		curve code (0=cosine, 1=exponential).
+		fade.  Otherwise returns the fade length in output-rate frames, never
+		shorter than that default declick, and the curve code (0=cosine,
+		1=exponential).
 
 		A CC-bound release time is frozen HERE, at note-on, from a CC snapshot —
 		so turning the knob shapes the notes you play next, not the one already
@@ -5857,7 +5815,9 @@ class MidiPlayer:
 			# matching the reshape auto-release mapping (30 + 170 * release).
 			time_ms = 30.0 + 170.0 * record.spectral.release
 
-		frames = max(1, round(float(time_ms) / 1000.0 * self._output_sample_rate))
+		# Never shorter than the declick a release-less note gets: an instant cut
+		# clicks, and a knob turned fully down reached one.
+		frames = max(self._release_fade_frames, round(float(time_ms) / 1000.0 * self._output_sample_rate))
 		return frames, curve_code, False
 
 	def _resolve_loop (
@@ -6283,12 +6243,7 @@ class MidiPlayer:
 		if record.audio is None:
 			return None
 
-		# The divisor must match the ARRAY's dtype, not the configured capture
-		# depth: imported files keep their native dtype (int16 for 16-bit,
-		# int32 for 24/32-bit), so a 24-bit import under a 16-bit config would
-		# otherwise render ~65536x too hot on this fallback path.
-		record_depth = 16 if record.audio.dtype == numpy.int16 else 32
-		float_audio = subsample.transform._pcm_to_float32(record.audio, record_depth)
+		float_audio = subsample.transform.pcm_to_float32(record.audio)
 
 		# Last-resort fallback: resample to the output rate when the record's PCM
 		# is at a different rate (a live capture at the recorder rate under a
@@ -7096,7 +7051,8 @@ class MidiPlayer:
 		the Program Change handler's preset switch.  Swaps the note map, zone
 		templates and CC set, then runs ``update_assignments()`` to validate
 		and re-materialise against the *currently active* library/pool.  If
-		validation raises, all four fields are restored and the exception is
+		validation raises, the rules are restored, with the clock tempo and
+		the per-note state it had already changed, and the exception is
 		re-raised so the caller can stay live under the previous rules.
 
 		Thread-safety: dict and tuple rebinds are atomic under the GIL, so any
@@ -7137,6 +7093,17 @@ class MidiPlayer:
 		old_map_quantizes  = self._map_quantizes
 		old_map_beat_filters = self._map_beat_filters
 
+		# update_assignments() adopts a clock tempo and prunes the per-note state
+		# of assignments the new rules retire, both before it can raise.  Kept
+		# so a rollback restores them too: the old rules' variants were baked at
+		# the old tempo, and their notes' round-robin positions and last-played
+		# fallbacks were pruned only because the new rules did not have them.
+		old_target_bpm = self._target_bpm
+
+		with self._state_lock:
+			old_last_played      = dict(self._last_played)
+			old_segment_counters = dict(self._segment_counters)
+
 		# Apply the new configuration first so update_assignments()
 		# validates against what the player would actually run with.  This
 		# is the canonical validation path — we don't duplicate query
@@ -7174,7 +7141,18 @@ class MidiPlayer:
 			self._mapped_ccs     = old_mapped_ccs
 			self._map_quantizes  = old_map_quantizes
 			self._map_beat_filters = old_map_beat_filters
+			self._target_bpm     = old_target_bpm
 			self._sync_clock_tracker()
+
+			# Put back only what the failed attempt pruned: a note that played
+			# during the attempt keeps the state it wrote since.
+			with self._state_lock:
+				for key, value in old_last_played.items():
+					self._last_played.setdefault(key, value)
+
+				for key, count in old_segment_counters.items():
+					self._segment_counters.setdefault(key, count)
+
 			raise
 
 		# Validation succeeded — clear caches whose entries reference the
@@ -7198,6 +7176,74 @@ class MidiPlayer:
 		# rollback path above we never reached here, and _choke_map was not
 		# touched during the try, so it still matches the restored old base map.
 		self._choke_map = _build_choke_map(self._base_note_map)
+
+	def _switch_program_locked (
+		self,
+		bm: subsample.bank.BankManager,
+		program: int,
+		previous_program: typing.Optional[int],
+	) -> None:
+
+		"""Switch the pool to a program and swap in its rules — caller must hold _rules_lock.
+
+		The body of the Program Change handler.  Holding _rules_lock across the
+		pool switch, the read of the top-level rules and their swap keeps a map
+		reload on the watcher thread from landing in between: it would otherwise
+		see the old pool when deciding whether a preset is live, or refresh the
+		three top-level fields while this reads them one at a time.
+		"""
+
+		if bm.switch_to(program):
+			# Both dicts are guarded by _state_lock — clear them
+			# together so any concurrent reader (e.g. _select_segment
+			# RMW) sees a consistent post-switch state.
+			with self._state_lock:
+				self._last_played.clear()
+				self._segment_counters.clear()
+
+			bank = bm.active_bank
+
+			if bank.note_map is not None:
+				# `map:` preset — swap the RULES too (assignments /
+				# zones / CCs), not just the pool.
+				rule_set = (
+					bank.note_map,
+					bank.zone_templates or (),
+					bank.mapped_ccs or set(),
+				)
+			else:
+				# `directory:` shorthand — reuse the top-level rules.
+				# Restore the immutable snapshot (a prior `map:` preset
+				# may have replaced the active base) and re-query it
+				# against the swapped pool.
+				rule_set = (
+					self._top_level_note_map,
+					self._top_level_zone_templates,
+					self._top_level_mapped_ccs,
+				)
+
+			# _apply_rule_set_locked runs update_assignments() against the
+			# now-active bank's library and rolls back on failure, so a
+			# broken kit (or a query that raises) never kills the player
+			# thread mid-set.
+			try:
+				self._apply_rule_set_locked(*rule_set)
+			except Exception as exc:
+				# The rules rolled back, but switch_to already committed the
+				# POOL to the new bank — leaving _effective_* serving the new
+				# library under the old rules (largely silence).  Switch the
+				# pool back so pool and rules are consistent again.
+				if previous_program is not None:
+					bm.switch_to(previous_program)
+					with self._state_lock:
+						self._last_played.clear()
+						self._segment_counters.clear()
+
+				_log.error(
+					"Program %d (%s) rules failed to apply - staying on the "
+					"previous program: %s",
+					program, bank.name, exc,
+				)
 
 	def reload_midi_map (self, new_result: MidiMapResult) -> None:
 
@@ -7245,32 +7291,38 @@ class MidiPlayer:
 			new_result.note_map, new_result.zone_templates,
 		)
 
-		# A `map:` preset is live — don't clobber it with the top-level rules.
-		# Refresh the snapshot so the edit takes effect on the next non-preset
-		# switch (whose _apply_rule_set validates it and rolls back on failure);
-		# we can't validate here without applying, which would replace the preset.
-		if self._bank_manager is not None and self._bank_manager.active_bank.note_map is not None:
+		# Held from the preset check to the snapshot refresh, as the Program
+		# Change handler holds it from its pool switch to its rule swap: the
+		# check and the act then see one program, and the handler never reads
+		# the three top-level fields half refreshed.
+		with self._rules_lock:
+
+			# A `map:` preset is live — don't clobber it with the top-level rules.
+			# Refresh the snapshot so the edit takes effect on the next non-preset
+			# switch (whose _apply_rule_set validates it and rolls back on failure);
+			# we can't validate here without applying, which would replace the preset.
+			if self._bank_manager is not None and self._bank_manager.active_bank.note_map is not None:
+				self._top_level_note_map       = stripped_map
+				self._top_level_zone_templates = stripped_zones
+				self._top_level_mapped_ccs     = new_ccs
+				_log.info(
+					"MIDI map reloaded (top-level): a map: preset is active, so the "
+					"edit applies to directory programs / on the next non-preset switch",
+				)
+				return
+
+			old_count = len(self._note_map)
+
+			# Apply the new rules FIRST: update_assignments validates them and
+			# _apply_rule_set rolls back the live rules + re-raises on failure.  Only
+			# refresh the top-level snapshot once they are known good — otherwise a
+			# broken hot-edit would become the snapshot a later `directory:` switch
+			# restores, even though it never applied cleanly here.
+			self._apply_rule_set_locked(stripped_map, stripped_zones, new_ccs)
+
 			self._top_level_note_map       = stripped_map
 			self._top_level_zone_templates = stripped_zones
 			self._top_level_mapped_ccs     = new_ccs
-			_log.info(
-				"MIDI map reloaded (top-level): a map: preset is active, so the "
-				"edit applies to directory programs / on the next non-preset switch",
-			)
-			return
-
-		old_count = len(self._note_map)
-
-		# Apply the new rules FIRST: update_assignments validates them and
-		# _apply_rule_set rolls back the live rules + re-raises on failure.  Only
-		# refresh the top-level snapshot once they are known good — otherwise a
-		# broken hot-edit would become the snapshot a later `directory:` switch
-		# restores, even though it never applied cleanly here.
-		self._apply_rule_set(stripped_map, stripped_zones, new_ccs)
-
-		self._top_level_note_map       = stripped_map
-		self._top_level_zone_templates = stripped_zones
-		self._top_level_mapped_ccs     = new_ccs
 
 		_log.info(
 			"MIDI map reloaded: %d note(s)%s (was %d)",

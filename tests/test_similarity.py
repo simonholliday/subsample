@@ -1025,3 +1025,42 @@ class TestTieOrderingIsStable:
 		matrix.bulk_add(records)
 
 		assert [m.sample_id for m in matrix.get_matches("REF")] == [200 + i for i in range(8)]
+
+	def test_a_duplicate_captured_live_ranks_as_one_loaded_at_startup (self) -> None:
+
+		"""The batch at startup and a live capture computed a score by different
+		float32 routes, which disagreed in the seventh decimal on most scores.
+		So a duplicate of a loaded sound, captured live, did not tie with its
+		twin: it ranked ahead of or behind it by that rounding, where a library
+		loaded with both in it ranks the twin first."""
+
+		rng = numpy.random.default_rng(7)
+		fields = (
+			"spectral_flatness", "attack", "release", "spectral_centroid",
+			"spectral_bandwidth", "zcr", "harmonic_ratio", "spectral_contrast",
+			"voiced_fraction", "log_attack_time", "spectral_flux",
+			"spectral_rolloff", "spectral_slope",
+		)
+
+		def random_record (name: str) -> subsample.library.SampleRecord:
+			spectral = _make_spectral(**{field: float(rng.random()) for field in fields})
+			timbre   = _make_timbre(*(tuple(float(v) for v in rng.standard_normal(13)) for _ in range(3)))
+			return _make_record(name, spectral, timbre)
+
+		references = [random_record(f"REF{i}") for i in range(6)]
+		library    = subsample.library.ReferenceLibrary(references)
+		loaded     = [random_record(f"s{i}") for i in range(30)]
+		twins      = [dataclasses.replace(record, sample_id=10_000 + i) for i, record in enumerate(loaded)]
+
+		live = subsample.similarity.SimilarityMatrix(library, _DEFAULT_CFG)
+		live.bulk_add(loaded)
+
+		for twin in twins:
+			live.add(twin)
+
+		at_startup = subsample.similarity.SimilarityMatrix(library, _DEFAULT_CFG)
+		at_startup.bulk_add(loaded + twins)
+
+		for reference in references:
+			assert [m.sample_id for m in live.get_matches(reference.name)] == \
+			       [m.sample_id for m in at_startup.get_matches(reference.name)]

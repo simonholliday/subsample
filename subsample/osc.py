@@ -17,6 +17,7 @@ when an instance is actually created.
 
 import logging
 import pathlib
+import queue
 import threading
 import typing
 
@@ -28,6 +29,14 @@ import subsample.loopfind
 
 
 _log = logging.getLogger(__name__)
+
+# How many /sample/import messages may wait while one is being analysed.  Each
+# import analyses a whole file, so a burst beyond this is refused with a warning
+# rather than queued without limit.
+_IMPORT_QUEUE_LIMIT: int = 64
+
+# How long stop() waits for the import being analysed when it is called.
+_STOP_WAIT_SECONDS: float = 10.0
 
 
 class OscEventSender:
@@ -128,11 +137,14 @@ class OscEventSender:
 
 class OscReceiver:
 
-	"""Listen for /sample/import OSC messages and trigger file import.
+	"""Listen for /sample/import OSC messages and import each file in turn.
 
-	Runs a threaded UDP server on a daemon thread.  The on_import callback
-	is invoked from the server's handler thread with the file path string
-	extracted from the OSC message arguments.
+	A UDP server on one daemon thread takes each message and queues its path;
+	one import worker, on another, hands the paths to the on_import callback
+	one at a time, in the order they arrived.  A thread per message, as before,
+	analysed every file of a burst at once with no limit, and stop() could not
+	wait for them.  At most _IMPORT_QUEUE_LIMIT paths wait; one past that is
+	refused with a warning.
 
 	SECURITY: ``/sample/import`` reads/loads an arbitrary filesystem path
 	supplied by the sender, so the server binds to loopback (127.0.0.1) by
@@ -149,6 +161,8 @@ class OscReceiver:
 		host: str = "127.0.0.1",
 	) -> None:
 
+		"""Bind the UDP socket now, so a busy port fails at construction."""
+
 		import pythonosc.dispatcher
 		import pythonosc.osc_server
 
@@ -156,20 +170,25 @@ class OscReceiver:
 		dispatcher.map("/sample/import", self._handle_import)
 
 		self._on_import = on_import
-		self._server = pythonosc.osc_server.ThreadingOSCUDPServer(
+		self._server = pythonosc.osc_server.BlockingOSCUDPServer(
 			(host, port), dispatcher,
 		)
-		# Run per-datagram handler threads as daemons so stop()'s bounded
-		# join(timeout) is not defeated by server_close(), which otherwise joins
-		# every in-flight /sample/import handler with NO timeout (ThreadingMixIn
-		# block_on_close=True) — a first-time analysis can take seconds, hanging
-		# shutdown well past the intended bound.
-		self._server.daemon_threads = True
+
+		# None is the worker's signal to stop.
+		self._imports: queue.Queue[typing.Optional[str]] = queue.Queue(maxsize=_IMPORT_QUEUE_LIMIT)
 		self._thread: typing.Optional[threading.Thread] = None
+		self._worker: typing.Optional[threading.Thread] = None
 
 	def start (self) -> None:
 
-		"""Launch the OSC server on a daemon thread."""
+		"""Launch the OSC server and the import worker on daemon threads."""
+
+		self._worker = threading.Thread(
+			target=self._work,
+			name="osc-import",
+			daemon=True,
+		)
+		self._worker.start()
 
 		self._thread = threading.Thread(
 			target=self._server.serve_forever,
@@ -181,11 +200,17 @@ class OscReceiver:
 
 	def stop (self) -> None:
 
-		"""Shut down the OSC server and wait for the thread to exit."""
+		"""Stop listening, drop the imports still waiting, and wait for the one running.
+
+		The wait is bounded by _STOP_WAIT_SECONDS: a first-time analysis of a
+		long file can take longer, and shutdown should not hang on a file the
+		musician did not ask to keep.  An import still running after that is
+		left to its daemon thread, and the caller should not act on it.
+		"""
 
 		# Guard against stop() before start(): BaseServer.shutdown() waits on
 		# an event only serve_forever() sets, so it would block forever.
-		if self._thread is None:
+		if self._thread is None or self._worker is None:
 			self._server.server_close()
 			return
 
@@ -196,20 +221,59 @@ class OscReceiver:
 		# bound UDP socket so a later start on the same port can rebind.
 		self._server.server_close()
 
+		dropped = 0
+
+		while True:
+			try:
+				self._imports.get_nowait()
+			except queue.Empty:
+				break
+
+			dropped += 1
+
+		if dropped:
+			_log.info("OSC receiver stopped with %d import(s) still waiting - not imported", dropped)
+
+		self._imports.put(None)
+		self._worker.join(timeout=_STOP_WAIT_SECONDS)
+
+		if self._worker.is_alive():
+			_log.warning("OSC receiver stopped while an import was still being analysed - it is abandoned")
+
 		_log.debug("OSC receiver stopped")
 
 	def _handle_import (self, address: str, *args: typing.Any) -> None:
 
-		"""Dispatch a /sample/import message to the on_import callback."""
+		"""Queue a /sample/import message's path for the import worker."""
 
 		if not args:
 			_log.warning("OSC /sample/import received with no arguments - ignoring")
 			return
 
 		file_path = str(args[0])
-		_log.info("OSC /sample/import: %s", file_path)
 
 		try:
-			self._on_import(file_path)
-		except Exception:
-			_log.warning("OSC /sample/import handler failed for %s", file_path, exc_info=True)
+			self._imports.put_nowait(file_path)
+		except queue.Full:
+			_log.warning(
+				"OSC /sample/import: %d imports are already waiting - ignoring %s",
+				_IMPORT_QUEUE_LIMIT, file_path,
+			)
+			return
+
+		_log.info("OSC /sample/import: %s", file_path)
+
+	def _work (self) -> None:
+
+		"""Import each queued path in turn, until stop() sends None."""
+
+		while True:
+			file_path = self._imports.get()
+
+			if file_path is None:
+				return
+
+			try:
+				self._on_import(file_path)
+			except Exception:
+				_log.warning("OSC /sample/import handler failed for %s", file_path, exc_info=True)

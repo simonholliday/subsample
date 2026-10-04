@@ -270,6 +270,29 @@ class InstrumentLibrary:
 		evicted: list[int] = []
 		with self._lock:
 
+			# A re-add of the SAME sample_id replaces the record in place.  Drop
+			# the old copy's bytes, index key and place in the eviction order
+			# first, or each is counted twice: the total runs high and evicts
+			# too early, and evicting the stale order entry later would pop the
+			# live record.  Not reported as evicted, since the id is still live.
+			existing = self._index.pop(record.sample_id, None)
+
+			if existing is not None:
+				self._total_bytes -= existing.audio.nbytes if existing.audio is not None else 0
+
+				existing_key = self._id_to_key.pop(record.sample_id, None)
+
+				if existing_key is not None:
+					if self._path_index.get(existing_key) == record.sample_id:
+						del self._path_index[existing_key]
+				elif self._name_index.get(existing.name) == record.sample_id:
+					del self._name_index[existing.name]
+
+				try:
+					self._order.remove(record.sample_id)
+				except ValueError:
+					pass
+
 			# De-dup by IDENTITY (resolved filepath).  A same-PATH re-add is a
 			# normal flow — the recorder re-writes a filename, a sample is
 			# re-analysed with a fresh sample_id — so drop the prior record;

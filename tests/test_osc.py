@@ -228,9 +228,12 @@ class TestOscReceiver:
 
 		assert receiver._thread is not None
 		assert receiver._thread.is_alive()
+		assert receiver._worker is not None
+		assert receiver._worker.is_alive()
 
 		receiver.stop()
 		assert not receiver._thread.is_alive()
+		assert not receiver._worker.is_alive()
 
 	def test_import_message_calls_callback (self) -> None:
 		"""A /sample/import message invokes the on_import callback."""
@@ -307,6 +310,153 @@ class TestOscReceiver:
 
 		finally:
 			receiver.stop()
+
+	def test_a_burst_of_imports_is_analysed_one_at_a_time_in_order (self) -> None:
+
+		"""Each message had a thread of its own, so a burst analysed every file
+		at once, with no limit on how many."""
+
+		import pythonosc.udp_client
+
+		release  = threading.Event()
+		done     = threading.Event()
+		lock     = threading.Lock()
+		running  = 0
+		most     = 0
+		received: list[str] = []
+
+		def on_import (path: str) -> None:
+			nonlocal running, most
+
+			with lock:
+				running += 1
+				most = max(most, running)
+
+			release.wait(timeout=5.0)
+
+			with lock:
+				running -= 1
+				received.append(path)
+
+			if len(received) == 3:
+				done.set()
+
+		receiver, port = self._make_receiver(on_import)
+
+		try:
+			client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", port)
+
+			for name in ("a", "b", "c"):
+				client.send_message("/sample/import", [f"/tmp/{name}.wav"])
+
+			_wait_until(lambda: receiver._imports.qsize() == 2)
+			release.set()
+
+			assert done.wait(timeout=5.0), "imports not all delivered"
+			assert received == ["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav"]
+			assert most == 1
+
+		finally:
+			release.set()
+			receiver.stop()
+
+	def test_an_import_past_the_queue_limit_is_refused (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A burst beyond the limit is refused with a warning, not queued."""
+
+		import pythonosc.udp_client
+
+		monkeypatch.setattr(subsample.osc, "_IMPORT_QUEUE_LIMIT", 2)
+
+		started  = threading.Event()
+		release  = threading.Event()
+		received: list[str] = []
+
+		def on_import (path: str) -> None:
+			started.set()
+			release.wait(timeout=5.0)
+			received.append(path)
+
+		receiver, port = self._make_receiver(on_import)
+
+		try:
+			client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", port)
+			client.send_message("/sample/import", ["/tmp/running.wav"])
+			assert started.wait(timeout=5.0)
+
+			with caplog.at_level("WARNING", logger="subsample.osc"):
+				for name in ("one", "two", "three"):
+					client.send_message("/sample/import", [f"/tmp/{name}.wav"])
+
+				_wait_until(lambda: any("already waiting" in r.message for r in caplog.records))
+
+			assert any("/tmp/three.wav" in r.message for r in caplog.records if "already waiting" in r.message)
+
+			release.set()
+			_wait_until(lambda: len(received) == 3)
+			assert received == ["/tmp/running.wav", "/tmp/one.wav", "/tmp/two.wav"]
+
+		finally:
+			release.set()
+			receiver.stop()
+
+	def test_stop_drops_waiting_imports_and_waits_for_the_running_one (
+		self, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""stop() returned while imports were still running on daemon threads,
+		which could then add a sample after the transform workers had shut
+		down.  It now waits for the one running and imports nothing more."""
+
+		import pythonosc.udp_client
+
+		started  = threading.Event()
+		release  = threading.Event()
+		received: list[str] = []
+
+		def on_import (path: str) -> None:
+			started.set()
+			release.wait(timeout=5.0)
+			received.append(path)
+
+		receiver, port = self._make_receiver(on_import)
+		client = pythonosc.udp_client.SimpleUDPClient("127.0.0.1", port)
+		client.send_message("/sample/import", ["/tmp/running.wav"])
+		assert started.wait(timeout=5.0)
+
+		client.send_message("/sample/import", ["/tmp/waiting1.wav"])
+		client.send_message("/sample/import", ["/tmp/waiting2.wav"])
+		_wait_until(lambda: receiver._imports.qsize() == 2)
+
+		stopper = threading.Thread(target=receiver.stop)
+
+		with caplog.at_level("INFO", logger="subsample.osc"):
+			stopper.start()
+			_wait_until(lambda: any("still waiting" in r.message for r in caplog.records))
+
+			# The waiting imports are dropped, and stop() waits on the running one.
+			assert stopper.is_alive()
+
+			release.set()
+			stopper.join(timeout=5.0)
+
+		assert not stopper.is_alive()
+		assert received == ["/tmp/running.wav"]
+		assert receiver._worker is not None and not receiver._worker.is_alive()
+		assert any("2 import(s) still waiting" in r.message for r in caplog.records)
+
+
+def _wait_until (condition: typing.Callable[[], bool], timeout: float = 5.0) -> None:
+
+	"""Poll a condition another thread will make true, failing after the timeout."""
+
+	deadline = time.monotonic() + timeout
+
+	while not condition():
+		assert time.monotonic() < deadline, "condition never became true"
+		time.sleep(0.01)
 
 
 # ---------------------------------------------------------------------------

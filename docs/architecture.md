@@ -87,6 +87,12 @@ library evicts them. An assignment covering several notes gives them successive
 ranks, the first note the best match and the next the second, unless it
 repitches.
 
+Every score goes through `similarity._score_matrix`, in float64 and rounded to
+nine places, whether the library is scored in one batch at start or a capture is
+scored alone. Exact ties are ordinary (a duplicate import, the same kit loaded
+twice) and both paths break them by insertion order, so a sample's twin ranks
+the same however the two arrived.
+
 ## Transform pipeline
 
 ```
@@ -165,6 +171,11 @@ to Subsample's handler on its own dedicated thread as it arrives. There is no
 polling loop, so there is no fixed input-latency floor. On the output side,
 PortAudio's ALSA backend keeps several periods of `buffer_frames` in flight, so
 the delay a note meets is a few buffers, not one.
+
+The OSC receiver takes `/sample/import` messages on one thread and imports them
+on another, one at a time and in order, with at most 64 waiting. At stop it drops
+those still waiting and gives the one being analysed ten seconds to finish; one
+that finishes later is not added, since shutdown has begun.
 
 ### Native dependencies
 
@@ -310,7 +321,11 @@ holds one active bank for the whole player, so a Program Change switches the kit
 on every MIDI channel (decision #3974). A switch installs the new program's
 rules, validates them against its samples and rolls back to the previous
 program on failure. A `map:` preset's rules are loaded with the map that names
-it (`player.load_preset_map`, #3886).
+it (`player.load_preset_map`, #3886). The switch holds the player's
+`_rules_lock` from its pool switch to the end of its rule swap, and a map reload
+holds it from its check for a live preset to its refresh of the top-level rules,
+so a switch to a `directory:` program never installs the rules from before an
+edit that was still being validated.
 
 An ensemble file's `maps:` block and `player.midi_maps` reach the same loader,
 `player.load_ensemble`. Includes are flat, one level, so there are no cycles to

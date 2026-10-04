@@ -512,7 +512,7 @@ def _lookahead (
 	description: str,
 ) -> Parameter:
 
-	"""How far ahead a dynamics processor looks, which delays the rendered sound by as much."""
+	"""How far ahead a dynamics processor looks, so it acts before a peak or a hit arrives."""
 
 	return Parameter(
 		name="lookahead", forms=_NUMBER, unit="ms",
@@ -692,7 +692,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 			),
 			_lookahead(
 				0.0, None, (0.0, 20.0), 5.0,
-				"How far ahead the compressor looks, so it acts before a peak arrives. The rendered sound starts this much later and loses as much from its end. At 0 there is no look-ahead.",
+				"How far ahead the compressor looks, so it acts before a peak arrives. At 0 there is no look-ahead.",
 			),
 		),
 		examples=({"threshold": -20.0, "ratio": 8.0, "attack": 10.0},),
@@ -721,7 +721,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 			),
 			_lookahead(
 				5.0, None, (0.0, 20.0), 10.0,
-				"How far ahead the limiter looks, so it catches a peak before it passes the ceiling. The rendered sound starts this much later and loses as much from its end. At 0 there is no look-ahead.",
+				"How far ahead the limiter looks, so it catches a peak before it passes the ceiling. At 0 there is no look-ahead.",
 			),
 		),
 		examples=({"threshold": -0.5},),
@@ -789,7 +789,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 			),
 			_lookahead(
 				None, "sample", (0.0, 20.0), 2.0,
-				"How far ahead the gate looks, so it opens before a hit arrives. The rendered sound starts this much later and loses as much from its end. Left out, it follows the sample: a little for a percussive sound, none for a sustained one.",
+				"How far ahead the gate looks, so it opens before a hit arrives. Left out, it follows the sample: a little for a percussive sound, none for a sustained one.",
 			),
 		),
 		examples=({"threshold": -40.0, "hold": 20.0},),

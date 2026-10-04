@@ -1041,7 +1041,7 @@ def _release_time () -> dict[str, typing.Any]:
 	import subsample.player
 
 	return {
-		"description": "How long the fade after note-off lasts. A knob's value is read as each note is struck, so it shapes the notes played next. Bound to a knob with no `default:`, it keeps the adaptive tail until the knob first moves.",
+		"description": "How long the fade after note-off lasts. Anything under 10 ms fades over 10 ms, so a sound never stops with a click. A knob's value is read as each note is struck, so it shapes the notes played next. Bound to a knob with no `default:`, it keeps the adaptive tail until the knob first moves.",
 		"anyOf": [
 			{"type": "number", "minimum": 0},
 			{"$ref": "#/$defs/cc_binding"},

@@ -428,6 +428,56 @@ class TestOnsetRefinement:
 		start, _end = result
 		assert start == 1024 - 512  # exactly the chunk boundary, no shift
 
+	def test_a_strike_in_a_short_final_chunk_starts_where_it_lands (self) -> None:
+
+		"""An imported file rarely divides into whole chunks, so its last chunk
+		is short.  Measuring back a whole chunk_size from that chunk's end put
+		a strike in it chunk_size - len(chunk) frames early: here 312 frames of
+		whatever came before, at the head of the sample."""
+
+		sr, cs = 48000, 512
+		detector = _make_detector(
+			threshold_db=10.0, hold_seconds=0.01, sample_rate=sr, chunk_size=cs,
+		)
+		detector.process_chunk(numpy.full((cs, 1), 10, dtype=numpy.int16), current_frame=cs)
+
+		final = numpy.full((200, 1), 10, dtype=numpy.int16)
+		final[100:] = 8000
+		detector.process_chunk(final, current_frame=cs + 200)
+
+		bounds = detector.finalize(current_frame=cs + 200)
+
+		assert bounds is not None
+		start, _end = bounds
+		# The strike is 100 frames into the final chunk, which begins at 512.
+		assert cs + 50 < start <= cs + 100
+
+	def test_a_retrigger_in_a_short_final_chunk_splits_where_it_lands (self) -> None:
+
+		"""The same measurement placed a re-strike's boundary early, cutting the
+		end of the previous sound into the next."""
+
+		detector = _make_detector(
+			threshold_db=20.0, hold_seconds=0.3,
+			release_threshold_db=6.0, retrigger_threshold_db=12.0,
+			sample_rate=1000, chunk_size=100,
+		)
+		detector.process_chunk(_loud_chunk(amplitude=100), current_frame=100)
+
+		frame = 100
+		for amp in [8000, 4000, 2000, 1200, 900, 800, 750, 720]:
+			frame += 100
+			assert detector.process_chunk(_loud_chunk(amplitude=amp), current_frame=frame) is None
+
+		final = numpy.full(40, 720, dtype=numpy.int16)
+		final[20:] = 10000
+		split = detector.process_chunk(final, current_frame=frame + 40)
+
+		assert split is not None
+		_start, boundary = split
+		# The re-strike is 20 frames into the final chunk, which begins at `frame`.
+		assert frame < boundary <= frame + 20
+
 
 class TestReleaseThreshold:
 
