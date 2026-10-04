@@ -1981,6 +1981,85 @@ class TestPresetsLoadWithTheirMap:
 			bank.transform_manager.shutdown()
 
 
+class TestAMapKnowsTheFilesItIsReadFrom:
+
+	"""MidiMapResult.source_files: what player.watch_midi_map watches (#389).
+
+	Only the file player.midi_map named was watched, so an edit to a set an
+	ensemble includes, or to a definitions file, did nothing until a restart,
+	though the reload re-reads every one of them.  The loader now says which
+	files it read, so whatever the map is read from is what is watched.
+	"""
+
+	@staticmethod
+	def _write (path: pathlib.Path, text: str) -> pathlib.Path:
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_text(text, encoding="utf-8")
+		return path.resolve()
+
+	def _names (self, tmp_path: pathlib.Path) -> pathlib.Path:
+		return self._write(tmp_path / "names.yaml", "notes: { kick: 36 }\n")
+
+	def _set (self, path: pathlib.Path, note: int, definitions: str = "") -> pathlib.Path:
+		return self._write(path, definitions + TestLoadConfiguredMap._SET.format(channel=10, note=note))
+
+	def test_a_plain_map_is_read_from_itself_and_its_definitions (self, tmp_path: pathlib.Path) -> None:
+		names = self._names(tmp_path)
+		path = self._set(tmp_path / "kit.yaml", 42, "definitions: { my: names.yaml }\n")
+
+		result = subsample.player.load_configured_map(
+			TestLoadConfiguredMap._cfg(midi_map=str(path)), ["BD0025"],
+		)
+
+		assert result.source_files == (path, names)
+
+	def test_an_ensemble_is_read_from_every_set_and_each_definitions_file_once (
+		self, tmp_path: pathlib.Path,
+	) -> None:
+		names = self._names(tmp_path)
+		a = self._set(tmp_path / "setA" / "midi-map.yaml", 42, "definitions: { my: ../names.yaml }\n")
+		b = self._set(tmp_path / "setB" / "kit.yaml", 38)
+		ensemble = self._write(tmp_path / "ensemble.yaml", (
+			"definitions: { my: names.yaml }\n"
+			"maps:\n  - setA/midi-map.yaml\n  - { channel: 12, map: setB/kit.yaml }\n"
+		))
+
+		result = subsample.player.load_configured_map(
+			TestLoadConfiguredMap._cfg(midi_map=str(ensemble)), ["BD0025"],
+		)
+
+		assert result.source_files == (ensemble, names, a, b)
+
+	def test_the_config_form_is_read_from_its_sets (self, tmp_path: pathlib.Path) -> None:
+		a = self._set(tmp_path / "setA" / "midi-map.yaml", 42)
+		b = self._set(tmp_path / "setB" / "kit.yaml", 38)
+
+		result = subsample.player.load_configured_map(
+			TestLoadConfiguredMap._cfg(midi_map=None, midi_maps={10: str(a), 12: str(b)}),
+			["BD0025"],
+		)
+
+		assert result.source_files == (a, b)
+
+	def test_a_presets_own_file_is_not_among_them (self, tmp_path: pathlib.Path) -> None:
+
+		"""A preset's own file takes a restart, so watching it would promise a reload it cannot give."""
+
+		preset = self._set(tmp_path / "kits" / "brushes.yaml", 38)
+		path = self._write(
+			tmp_path / "map.yaml",
+			TestPresetsLoadWithTheirMap._PROGRAMS.format(preset="kits/brushes.yaml"),
+		)
+
+		result = subsample.player.load_configured_map(
+			TestLoadConfiguredMap._cfg(midi_map=str(path)), ["BD0025"],
+		)
+
+		assert 3 in result.presets
+		assert result.source_files == (path,)
+		assert preset not in result.source_files
+
+
 class TestDrainingCapturesOnTheWayOut:
 
 	"""Ctrl+C used to throw away captures that were still being analysed.

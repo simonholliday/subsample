@@ -248,7 +248,7 @@ def _map_terms () -> dict[str, typing.Any]:
 			}]],
 		},
 		"maps": {
-			"description": "Other maps to play at the same time, each on its own MIDI channel, which makes this map an ensemble. A map included here may not include maps or declare programs of its own; this file may declare `programs:`. Two maps may not claim the same note on the same MIDI channel. Only this file is watched for edits, so a change to an included map takes a restart.",
+			"description": "Other maps to play at the same time, each on its own MIDI channel, which makes this map an ensemble. A map included here may not include maps or declare programs of its own; this file may declare `programs:`. Two maps may not claim the same note on the same MIDI channel. With `player.watch_midi_map` on, an edit to this file or to a map it includes reloads them together, and a map added here is watched from the reload that reads it.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/included_map"},
 			"examples": [["drums.yaml", {"map": "bass.yaml", "channel": 2}]],

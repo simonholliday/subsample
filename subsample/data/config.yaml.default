@@ -302,19 +302,22 @@ player:
   # This is the config shorthand for an ensemble file, for a project that
   # would rather keep its channel assignments here.  Both go through the same
   # loader, so identical bindings give identical results.  Prefer an ensemble
-  # file when you want to name channels from a `definitions:` vocabulary
-  # (`channel: my.kit`) or to reload while running - `definitions:` is a
-  # map-level feature this file cannot see, and config.yaml is not watched.
+  # file when you want to name MIDI channels from a `definitions:` vocabulary
+  # (`channel: my.kit`) or to reload the bindings while running -
+  # `definitions:` is a map-level feature this file cannot see, and
+  # config.yaml is not watched.
   #
   # Mutually exclusive with midi_map above.  Pair with `library.directory: null`
   # to load ONLY the samples these sets name.
 
   # watch_midi_map: false
-  # When true, monitor the midi_map file at runtime for changes and reload
-  # assignments without restarting.  Enables a "live-coding" workflow where
-  # you edit sample assignments in your text editor and they take effect on
-  # the next MIDI trigger.  Requires midi_map to be set.  Debounced: rapid
-  # saves from text editors are coalesced into a single reload.
+  # When true, watch the files the MIDI map is read from - the map, each set
+  # an ensemble includes or midi_maps names, and their definitions: files -
+  # and reload the assignments when one changes, without restarting.  Enables
+  # a "live-coding" workflow where you edit sample assignments in your text
+  # editor and they take effect on the next MIDI trigger.  Requires midi_map
+  # or midi_maps.  Debounced: rapid saves from text editors are coalesced
+  # into a single reload.
 
   # strict_midi_map: true
   # When true (default), reject unknown `where:` keys, processors, processor

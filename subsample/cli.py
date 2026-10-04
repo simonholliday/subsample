@@ -1951,31 +1951,29 @@ def _main_impl () -> None:
 	# reloaded without restarting — enables live-coding of sample routing.
 	midi_map_watcher: typing.Optional[subsample.watcher.MidiMapWatcher] = None
 
-	# Only the file named by player.midi_map is watched.  An ensemble's INCLUDED
-	# sets are not — editing one takes effect on restart.  Say so rather than
-	# leaving the user to wonder why their edit did nothing; multi-file reload is
-	# a follow-up, and for a set on a shared drive it could not work anyway
+	# Every file the map is read from is watched: the map, each set an ensemble
+	# includes or player.midi_maps names, and every definitions file they mount
+	# (MidiMapResult.source_files, #389).  config.yaml itself is not, so a set
+	# added to or removed from player.midi_maps still takes a restart.  On a
+	# shared drive a write made by another machine is never seen at all
 	# (inotify only sees writes made through the local mount by this machine).
-	if cfg.player.watch_midi_map and cfg.player.enabled:
-		if cfg.player.midi_maps is not None:
-			_log.warning(
-				"watch_midi_map is on, but player.midi_maps names the sets in "
-				"config.yaml, which is not watched - edits to a set need a restart",
-			)
-		elif cfg.player.midi_map is not None and subsample.player.is_ensemble(
-			pathlib.Path(cfg.player.midi_map),
-		):
-			_log.info(
-				"Watching the ensemble %s; edits to the sets it includes need "
-				"a restart", cfg.player.midi_map,
-			)
-
 	if (
 		cfg.player.watch_midi_map
-		and cfg.player.midi_map is not None
 		and cfg.player.enabled
+		and preloaded_midi_map_result is not None
 	):
-		_midi_map_watch_path = pathlib.Path(cfg.player.midi_map)
+		if cfg.player.midi_maps is not None:
+			_log.info(
+				"Watching the sets player.midi_maps names; config.yaml is not "
+				"watched, so adding or removing a set needs a restart",
+			)
+
+		# A map: preset's folder is the top-level map's; the config form has no
+		# map file and no programs, so its presets are none.
+		_midi_map_dir = (
+			pathlib.Path(cfg.player.midi_map).parent
+			if cfg.player.midi_map is not None else pathlib.Path.cwd()
+		)
 
 		# Snapshot the bank state at startup so the live-reload callback can
 		# detect bank-related edits that hot-reload doesn't cover yet.
@@ -1990,10 +1988,12 @@ def _main_impl () -> None:
 			Program-set edits (the `programs:` block, `program_channel:`, and
 			`default_program:`) are not hot-reloadable in this version — the
 			callback warns and keeps the current program state.  Editing a
-			`map:` preset's OWN file is also not watched (only the top-level
-			map is) and needs a restart, so a broken preset is only warned of
-			here: it does not hold up an edit to the top-level map.  Top-level
-			assignment edits reload as normal.
+			`map:` preset's OWN file is also not watched (it is not among the
+			map's source files) and needs a restart, so a broken preset is only
+			warned of here: it does not hold up an edit to the map.  Edits to
+			the map, a set it includes or a definitions file reload as normal,
+			and once the map parses, the watcher follows the files it was
+			read from this time (#389).
 			"""
 
 			player = _player_cell[0]
@@ -2017,8 +2017,13 @@ def _main_impl () -> None:
 				)
 				return
 
+			# Follow the files this edit is read from, even if a later check
+			# keeps the old map: a set the edit names is the one being worked on.
+			if midi_map_watcher is not None:
+				midi_map_watcher.watch(result.source_files)
+
 			_warn_of_broken_presets(
-				result, _midi_map_watch_path.parent, reference_library.names(),
+				result, _midi_map_dir, reference_library.names(),
 				cfg.player.strict_midi_map,
 			)
 
@@ -2099,12 +2104,23 @@ def _main_impl () -> None:
 					exc,
 				)
 
+		watched = preloaded_midi_map_result.source_files
+
 		midi_map_watcher = subsample.watcher.MidiMapWatcher(
-			path=_midi_map_watch_path,
+			paths=watched,
 			on_changed=_on_midi_map_changed,
 		)
+
+		# The map is the first of its source files; the rest are what it reads.
+		if cfg.player.midi_map is not None:
+			watching = cfg.player.midi_map + (
+				f" and the {len(watched) - 1} file(s) it reads" if len(watched) > 1 else ""
+			)
+		else:
+			watching = f"the {len(watched)} file(s) player.midi_maps reads"
+
 		if _start_watcher(midi_map_watcher, "MIDI map"):
-			print(f"  MIDI map     : watching {cfg.player.midi_map} for changes")
+			print(f"  MIDI map     : watching {watching} for changes")
 		else:
 			midi_map_watcher = None
 

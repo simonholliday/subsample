@@ -784,45 +784,113 @@ _MIDI_MAP_DEBOUNCE_SECONDS: float = 0.5
 
 class MidiMapWatcher:
 
-	"""Watch a MIDI map YAML file for changes and invoke a callback on reload.
+	"""Watch the files a MIDI map is read from, and invoke a callback on a change.
 
-	Monitors the parent directory of the target file and filters events to
-	the target filename only.  A short debounce window absorbs the multiple
-	writes that text editors commonly produce during a single save operation.
+	The files are every one the map's rules come from: the map, each set an
+	ensemble includes, and every ``definitions:`` file any of them mounts
+	(``MidiMapResult.source_files``, #389).  An edit to any of them reloads
+	the whole map, since the reload re-reads every file anyway.  ``watch()``
+	replaces the list, so a set added to an ensemble is watched from the
+	reload that reads it.
 
-	The callback receives the path to the changed file.  Parsing, validation,
-	and delivery to the player are the caller's responsibility — this class
-	handles only filesystem watching and debounce.
+	Each file's directory is watched and events are filtered to the files
+	themselves.  A short debounce window absorbs the multiple writes that
+	text editors commonly produce during a single save, and saves to several
+	files in quick succession, so they count as one change.
+
+	The callback receives the path of the file that changed last.  Parsing,
+	validation, and delivery to the player are the caller's responsibility -
+	this class handles only filesystem watching and debounce.
 	"""
 
 	def __init__ (
 		self,
-		path: pathlib.Path,
+		paths: typing.Iterable[pathlib.Path],
 		on_changed: typing.Callable[[pathlib.Path], None],
 	) -> None:
 
-		self._path = path.resolve()
 		self._on_changed = on_changed
 
 		self._timer: typing.Optional[threading.Timer] = None
 		self._lock = threading.Lock()
 		self._stopped = False
 
+		# The file that changed last, handed to the callback.
+		self._changed: typing.Optional[pathlib.Path] = None
+
 		# In-flight gate, as in InstrumentWatcher: _fire deregisters itself at
 		# entry, so stop() waits on this rather than joining the timer.
 		self._in_flight = 0
 		self._idle = threading.Condition(self._lock)
 
-		handler = _MidiMapFileHandler(self._path.name, self._on_file_event)
+		# The files watched, and the observer's watch on each of their
+		# directories.  The handler reads _files on the observer thread; it is
+		# only ever replaced whole, under _lock.
+		self._files: frozenset[pathlib.Path] = frozenset()
+		self._directories: dict[pathlib.Path, typing.Any] = {}
+
+		self._handler = _MidiMapFileHandler(self._is_watched, self._on_file_event)
 		self._observer: typing.Any = watchdog.observers.Observer()
-		self._observer.schedule(handler, str(self._path.parent), recursive=False)
+
+		self.watch(paths)
 
 	def start (self) -> None:
 
 		"""Start the background observer thread."""
 
 		self._observer.start()
-		_log.info("MIDI map watcher started on %s", self._path)
+
+		with self._lock:
+			files = sorted(self._files)
+
+		_log.info(
+			"MIDI map watcher started on %s",
+			", ".join(str(path) for path in files),
+		)
+
+	def watch (self, paths: typing.Iterable[pathlib.Path]) -> None:
+
+		"""Watch exactly these files from now on, replacing the list.
+
+		Called with the files a successful reload read, so a set an ensemble
+		gains is watched from then on, and one it drops is let go.  A
+		directory that can no longer be watched is let go with a warning.
+		"""
+
+		files = frozenset(path.resolve() for path in paths)
+
+		with self._lock:
+			if self._stopped:
+				return
+
+			if files == self._files:
+				return
+
+			first   = not self._files
+			wanted  = {path.parent for path in files}
+			current = set(self._directories)
+
+			for directory in current - wanted:
+				try:
+					self._observer.unschedule(self._directories.pop(directory))
+				except (KeyError, OSError) as exc:
+					_log.debug("MIDI map watcher: could not let go of %s: %s", directory, exc)
+
+			for directory in sorted(wanted - current):
+				try:
+					self._directories[directory] = self._observer.schedule(
+						self._handler, str(directory), recursive=False,
+					)
+				except OSError as exc:
+					_log.warning(
+						"MIDI map watcher: cannot watch %s, so an edit there needs a "
+						"restart: %s", directory, exc,
+					)
+
+			self._files = files
+
+		if not first:
+			_log.info("MIDI map watcher: now watching %d file(s)", len(files))
 
 	def stop (self) -> None:
 
@@ -845,6 +913,16 @@ class MidiMapWatcher:
 
 		_log.debug("MIDI map watcher stopped")
 
+	def _is_watched (self, path: pathlib.Path) -> bool:
+
+		"""Whether an event's path is one of the watched files.
+
+		Watchdog reports a path under the directory it was given, which is
+		resolved, so a watched file's event path is the resolved path itself.
+		"""
+
+		return path in self._files
+
 	def _on_file_event (self, path: pathlib.Path) -> None:
 
 		"""Schedule (or reschedule) a debounced callback for the changed file.
@@ -857,6 +935,8 @@ class MidiMapWatcher:
 		with self._lock:
 			if self._stopped:
 				return
+
+			self._changed = path
 
 			if self._timer is not None:
 				self._timer.cancel()
@@ -875,13 +955,14 @@ class MidiMapWatcher:
 			self._timer = None
 
 			# Don't fire a reload into a torn-down player if stop() already ran.
-			if self._stopped:
+			if self._stopped or self._changed is None:
 				return
 
+			changed = self._changed
 			self._in_flight += 1
 
 		try:
-			self._on_changed(self._path)
+			self._on_changed(changed)
 		finally:
 			with self._lock:
 				self._in_flight -= 1
@@ -890,7 +971,7 @@ class MidiMapWatcher:
 
 class _MidiMapFileHandler (watchdog.events.FileSystemEventHandler):
 
-	"""Watchdog event handler that filters for a specific filename.
+	"""Watchdog event handler that passes on events for the watched files only.
 
 	Handles on_modified, on_created (editors that delete + recreate), and
 	on_moved (editors that write a temp file then rename into place).
@@ -898,25 +979,25 @@ class _MidiMapFileHandler (watchdog.events.FileSystemEventHandler):
 
 	def __init__ (
 		self,
-		target_name: str,
+		is_watched: typing.Callable[[pathlib.Path], bool],
 		callback: typing.Callable[[pathlib.Path], None],
 	) -> None:
 
 		super().__init__()
-		self._target_name = target_name
+		self._is_watched = is_watched
 		self._callback = callback
 
 	def on_modified (self, event: watchdog.events.FileSystemEvent) -> None:
 
-		"""Forward modification events for the target file."""
+		"""Forward modification events for a watched file."""
 
-		self._dispatch_if_target(event)
+		self._dispatch_if_watched(event)
 
 	def on_created (self, event: watchdog.events.FileSystemEvent) -> None:
 
 		"""Forward creation events (editors that delete + recreate)."""
 
-		self._dispatch_if_target(event)
+		self._dispatch_if_watched(event)
 
 	def on_moved (self, event: watchdog.events.FileSystemEvent) -> None:
 
@@ -927,17 +1008,17 @@ class _MidiMapFileHandler (watchdog.events.FileSystemEventHandler):
 
 		dest = pathlib.Path(str(getattr(event, "dest_path", "")))
 
-		if dest.name == self._target_name:
+		if self._is_watched(dest):
 			self._callback(dest)
 
-	def _dispatch_if_target (self, event: watchdog.events.FileSystemEvent) -> None:
+	def _dispatch_if_watched (self, event: watchdog.events.FileSystemEvent) -> None:
 
-		"""Call the callback if the event is for the target file."""
+		"""Call the callback if the event is for a watched file."""
 
 		if event.is_directory:
 			return
 
 		path = pathlib.Path(str(event.src_path))
 
-		if path.name == self._target_name:
+		if self._is_watched(path):
 			self._callback(path)

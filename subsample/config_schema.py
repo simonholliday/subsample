@@ -477,20 +477,23 @@ def json_schema () -> dict[str, typing.Any]:
 					"watch_midi_map": _setting(
 						"boolean",
 						"""
-						Reloads the MIDI map about half a second after its file
-						changes, so an edit takes effect on the next note without a
-						restart.  Several saves in
-						quick succession count as one change, and a map that fails to
-						load is reported while the one already loaded keeps playing.
-						Only the file `midi_map` names is watched: an edit to a set an
-						ensemble includes, or to a `definitions:` file, needs a
-						restart, and so does a change to `programs:`,
-						`program_channel:` or `default_program:`.  Watching relies on
-						the file system's notice of a change, which does not cross
-						machines, so a map on a network drive edited from another
-						machine is not reloaded.  A reload also warns of any `map:`
-						preset a restart would stop on, since a preset's own file is
-						not watched.  Requires `midi_map`.
+						Reloads the MIDI map about half a second after a file it is
+						read from changes, so an edit takes effect on the next note
+						without a restart.  Those files are the map, each set an
+						ensemble includes or `midi_maps` names, and every
+						`definitions:` file any of them mounts, and a set added to an
+						ensemble is watched from the reload that reads it.  Several
+						saves in quick succession count as one change, and a map that
+						fails to load is reported while the one already loaded keeps
+						playing.  A change to `programs:`, `program_channel:` or
+						`default_program:` needs a restart, and so does an edit to a
+						`map:` preset's own file, which is not watched, or to
+						`midi_maps` itself, since `config.yaml` is not watched.
+						Watching relies on the file system's notice of a change, which
+						does not cross machines, so a map on a network drive edited
+						from another machine is not reloaded.  A reload also warns of
+						any `map:` preset a restart would stop on.  Requires
+						`midi_map` or `midi_maps`.
 						""",
 						default=False,
 					),

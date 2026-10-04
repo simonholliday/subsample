@@ -816,7 +816,7 @@ class TestMidiMapWatcher:
 			done.set()
 
 		midi_map_path = self._make_midi_map_file(tmp_path)
-		watcher = subsample.watcher.MidiMapWatcher(path=midi_map_path, on_changed=on_changed)
+		watcher = subsample.watcher.MidiMapWatcher(paths=[midi_map_path], on_changed=on_changed)
 		watcher.start()
 
 		try:
@@ -848,7 +848,7 @@ class TestMidiMapWatcher:
 			done.set()
 
 		midi_map_path = self._make_midi_map_file(tmp_path)
-		watcher = subsample.watcher.MidiMapWatcher(path=midi_map_path, on_changed=on_changed)
+		watcher = subsample.watcher.MidiMapWatcher(paths=[midi_map_path], on_changed=on_changed)
 		watcher.start()
 
 		try:
@@ -879,7 +879,7 @@ class TestMidiMapWatcher:
 		called = threading.Event()
 		midi_map_path = self._make_midi_map_file(tmp_path)
 		watcher = subsample.watcher.MidiMapWatcher(
-			path=midi_map_path,
+			paths=[midi_map_path],
 			on_changed=lambda _p: called.set(),
 		)
 		watcher.start()
@@ -896,13 +896,77 @@ class TestMidiMapWatcher:
 
 		assert not triggered, "Callback fired for unrelated file"
 
+	def test_a_change_to_any_watched_file_triggers_the_callback (self, tmp_path: pathlib.Path) -> None:
+
+		"""#389: a set an ensemble includes, in a folder of its own, reloads the map when edited."""
+
+		received: list[pathlib.Path] = []
+		done = threading.Event()
+
+		def on_changed (path: pathlib.Path) -> None:
+			received.append(path)
+			done.set()
+
+		(tmp_path / "setA").mkdir()
+		ensemble = self._make_midi_map_file(tmp_path, "ensemble.yaml")
+		kit = self._make_midi_map_file(tmp_path / "setA", "kit.yaml")
+		watcher = subsample.watcher.MidiMapWatcher(paths=[ensemble, kit], on_changed=on_changed)
+		watcher.start()
+
+		try:
+			import time
+			time.sleep(0.2)
+
+			kit.write_text("assignments:\n  - name: edited\n", encoding="utf-8")
+			triggered = done.wait(timeout=_TIMEOUT)
+		finally:
+			watcher.stop()
+
+		assert triggered, "Callback not called within timeout"
+		assert received[0] == kit.resolve()
+
+	def test_watch_replaces_the_list (self, tmp_path: pathlib.Path) -> None:
+
+		"""A set dropped from an ensemble is let go, and one added is followed."""
+
+		called = threading.Event()
+		received: list[pathlib.Path] = []
+
+		def on_changed (path: pathlib.Path) -> None:
+			received.append(path)
+			called.set()
+
+		(tmp_path / "old").mkdir()
+		(tmp_path / "new").mkdir()
+		dropped = self._make_midi_map_file(tmp_path / "old", "kit.yaml")
+		added = self._make_midi_map_file(tmp_path / "new", "kit.yaml")
+		watcher = subsample.watcher.MidiMapWatcher(paths=[dropped], on_changed=on_changed)
+		watcher.start()
+
+		try:
+			import time
+			watcher.watch([added])
+			time.sleep(0.2)
+
+			dropped.write_text("assignments: []  # edited\n", encoding="utf-8")
+			let_go = not called.wait(timeout=subsample.watcher._MIDI_MAP_DEBOUNCE_SECONDS + 1.0)
+
+			added.write_text("assignments: []  # edited\n", encoding="utf-8")
+			followed = called.wait(timeout=_TIMEOUT)
+		finally:
+			watcher.stop()
+
+		assert let_go, "Callback fired for a file no longer watched"
+		assert followed, "Callback not called for the newly watched file"
+		assert received == [added.resolve()]
+
 	def test_stop_is_clean (self, tmp_path: pathlib.Path) -> None:
 
 		"""start() then stop() terminates cleanly without hanging."""
 
 		midi_map_path = self._make_midi_map_file(tmp_path)
 		watcher = subsample.watcher.MidiMapWatcher(
-			path=midi_map_path,
+			paths=[midi_map_path],
 			on_changed=lambda _p: None,
 		)
 		watcher.start()
@@ -919,7 +983,7 @@ class TestMidiMapWatcher:
 
 		fired = []
 		watcher = subsample.watcher.MidiMapWatcher(
-			path=midi_map_path,
+			paths=[midi_map_path],
 			on_changed=lambda p: fired.append(p),
 		)
 		watcher.start()

@@ -294,9 +294,13 @@ system's notice of a change, which does not cross machines (#3887; polling is
 #3972).
 
 **The map watcher** (`MidiMapWatcher`) fires half a second after the last save
-of the file `player.midi_map` names. The reload parses the map again and swaps
-the active note map, keeping the old one when the new one fails to parse or
-validate.
+of any file the map is read from. The loader records those files as
+`MidiMapResult.source_files`: the map, each set an ensemble includes or
+`player.midi_maps` names, and every `definitions:` file any of them mounts, but
+not a `map:` preset's, since programs take a restart (#389). The reload parses
+the map again and swaps the active note map, keeping the old one when the new
+one fails to parse or validate. Once it parses, the watcher follows the files it
+was read from this time, so a set added to an ensemble is watched from then on.
 
 ## Programs and ensembles
 
@@ -311,6 +315,16 @@ it (`player.load_preset_map`, #3886).
 An ensemble file's `maps:` block and `player.midi_maps` reach the same loader,
 `player.load_ensemble`. Includes are flat, one level, so there are no cycles to
 detect.
+
+A set shared between projects, or kept on a network drive, carries two costs
+worth knowing before designing around it. The map watcher sees only writes this
+machine makes (see Watchers), so a set edited from another machine is reloaded
+only at the next start. And an `ANALYSIS_VERSION` bump makes every project that
+loads the set analyse its samples again, perhaps over the network, perhaps
+several at once, and onto a share that may be read-only, so the new sidecars
+cannot be written and the work repeats at every start. Publishing sidecars with
+a set, rather than regenerating them on demand, would answer the second if it
+comes to matter (Simon's note on #389).
 
 ## Sample previews
 

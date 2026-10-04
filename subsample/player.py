@@ -219,6 +219,12 @@ class MidiMapResult:
 		                  number, loaded without its samples.  Only
 		                  load_configured_map fills it; load_midi_map reads one
 		                  file and leaves it empty.
+		source_files:     Every file these rules were read from, resolved: the
+		                  map, each set an ensemble includes, and every
+		                  ``definitions:`` file any of them mounts, in the order
+		                  read.  A preset's files are not among them, since a
+		                  preset's own file takes a restart.  What
+		                  ``player.watch_midi_map`` watches (#389).
 	"""
 
 	note_map:         NoteMap
@@ -227,6 +233,7 @@ class MidiMapResult:
 	default_bank:     typing.Optional[int]    = None
 	zone_templates:   tuple[ZoneTemplate, ...] = ()
 	presets:          dict[int, "MidiMapResult"] = dataclasses.field(default_factory=dict)
+	source_files:     tuple[pathlib.Path, ...] = ()
 
 
 def _loudness_positions (
@@ -3021,6 +3028,7 @@ def load_midi_map (
 			note_map={},
 			bank_definitions=[],
 			bank_channel=subsample.bank.DEFAULT_BANK_CHANNEL,
+			source_files=(path.resolve(),),
 		)
 
 	if not isinstance(raw, dict):
@@ -3149,6 +3157,7 @@ def load_midi_map (
 			bank_definitions=bank_definitions,
 			bank_channel=bank_channel,
 			default_bank=default_bank,
+			source_files=(path.resolve(), *definitions.paths),
 		)
 
 	# Resolve template inheritance before parsing: each assignment that names a
@@ -3528,6 +3537,7 @@ def load_midi_map (
 		bank_channel=bank_channel,
 		default_bank=default_bank,
 		zone_templates=tuple(zone_templates),
+		source_files=(path.resolve(), *definitions.paths),
 	)
 
 
@@ -3610,9 +3620,14 @@ def load_ensemble (
 	# config form has no such file and so contributes none.
 	own: typing.Optional[MidiMapResult] = None
 
+	# Every file the merged rules come from, for the map watcher (#389).  Two
+	# sets may mount the same definitions file, which is watched once.
+	sources: list[pathlib.Path] = []
+
 	if path is not None:
 		own = load_midi_map(path, reference_names, strict=strict)
 		_merge_into(merged_note_map, claimed_by, own, label, merged_zone_templates)
+		sources.extend(own.source_files)
 
 	for include in includes:
 		include_path = pathlib.Path(include.map_path)
@@ -3645,6 +3660,7 @@ def load_ensemble (
 		_merge_into(
 			merged_note_map, claimed_by, result, include_path.name, merged_zone_templates,
 		)
+		sources.extend(result.source_files)
 
 	# Zone-tuned assignments claim a channel exclusively, and until now that
 	# could only ever be checked within one map.  Re-run it across the merged
@@ -3663,6 +3679,7 @@ def load_ensemble (
 		bank_channel=own.bank_channel if own is not None else subsample.bank.DEFAULT_BANK_CHANNEL,
 		default_bank=own.default_bank if own is not None else None,
 		zone_templates=tuple(merged_zone_templates),
+		source_files=tuple(dict.fromkeys(sources)),
 	)
 
 
