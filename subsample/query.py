@@ -1646,6 +1646,30 @@ def _has_any_name_form (other_kwargs: dict[str, typing.Any]) -> bool:
 	return any(k in other_kwargs for k in _NAME_FORM_KWARGS)
 
 
+def _where_text (key: str, value: typing.Any, assignment_name: str) -> str:
+
+	"""The text a ``where:`` key names a sound, file or folder by, or a ValueError.
+
+	``str()`` would turn an empty key (YAML ``null``) into the name ``'None'``,
+	and a bare number or ``true`` into a name nobody wrote.  The map then loaded
+	and the note played silence, because nothing is called that.
+	"""
+
+	if value is None or value == "":
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: '{key}' is empty.  "
+			f"Write what it names, or leave the key out."
+		)
+
+	if not isinstance(value, str):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: '{key}' must be text "
+			f"(got {value!r}).  Quote it if it is a number."
+		)
+
+	return value
+
+
 def _parse_name_list (
 	value: list[typing.Any],
 	assignment_name: str,
@@ -1939,7 +1963,7 @@ def _parse_where (
 			other_kwargs["loopable"] = value
 
 		elif key == "reference":
-			ref = str(value)
+			ref = _where_text(key, value, assignment_name)
 			if is_path_like(ref):
 				other_kwargs["reference"] = str((midi_map_dir / ref).resolve())
 			else:
@@ -1959,7 +1983,7 @@ def _parse_where (
 				field_name, raw_pattern = _parse_name_operator_dict(value, assignment_name)
 				other_kwargs[field_name] = raw_pattern
 			else:
-				raw_name = str(value)
+				raw_name = _where_text(key, value, assignment_name)
 				if is_path_like(raw_name):
 					# Legacy behaviour: a path-like `name:` value is treated as
 					# an implicit path reference.  Preserved indefinitely; new
@@ -1978,12 +2002,13 @@ def _parse_where (
 					f"'name' form (exact, list, matches, regex) or 'path' "
 					f"may be used per where block."
 				)
-			raw_path = str(value)
+			raw_path = _where_text(key, value, assignment_name)
 			other_kwargs["name"]      = pathlib.Path(raw_path).stem
 			other_kwargs["name_path"] = str((midi_map_dir / raw_path).resolve())
 
 		elif key == "directory":
-			other_kwargs["directory"] = str((midi_map_dir / str(value)).resolve())
+			directory = _where_text(key, value, assignment_name)
+			other_kwargs["directory"] = str((midi_map_dir / directory).resolve())
 
 		else:
 			if _STRICT_MODE:

@@ -1513,6 +1513,36 @@ class TestValuesAreWrittenAsTheirType:
 		with pytest.raises(ValueError, match="'name' must be text"):
 			_load(tmp_path, _map(assignments=[_assignment(name=808)]))
 
+	@pytest.mark.parametrize("key", ["reference", "name", "path", "directory"])
+	@pytest.mark.parametrize("written", [None, ""])
+	def test_a_where_key_left_empty_is_refused (
+		self, tmp_path: pathlib.Path, key: str, written: typing.Optional[str],
+	) -> None:
+
+		"""An empty key became the name 'None', so the map loaded and the note played silence."""
+
+		with pytest.raises(ValueError, match=f"'{key}' is empty"):
+			_load(tmp_path, _map(assignments=[_assignment(select={"where": {key: written}})]))
+
+	@pytest.mark.parametrize("key", ["reference", "name", "path", "directory"])
+	@pytest.mark.parametrize("written", [808, True])
+	def test_a_where_key_that_is_not_text_is_refused (
+		self, tmp_path: pathlib.Path, key: str, written: typing.Any,
+	) -> None:
+
+		"""A bare number or `true` named a sound nobody wrote, as `str()` spelt it."""
+
+		with pytest.raises(ValueError, match=f"'{key}' must be text"):
+			_load(tmp_path, _map(assignments=[_assignment(select={"where": {key: written}})]))
+
+	def test_a_quoted_number_still_names_a_sound (self, tmp_path: pathlib.Path) -> None:
+
+		"""The way out the message offers works."""
+
+		result = _load(tmp_path, _map(assignments=[_assignment(select={"where": {"name": "808"}})]))
+
+		assert _first(result).select[0].where.name == "808"
+
 	@pytest.mark.parametrize("key", [
 		key for key in subsample.query.NUMERIC_YAML_KEYS
 		if key not in subsample.query.EXACT_WHERE_KEYS
