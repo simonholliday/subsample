@@ -102,4 +102,9 @@ filterwarnings = [
 	# librosa emits this when pyin finds no voiced frames (e.g. silent test audio).
 	# Expected and handled downstream; suppressed here to keep test output clean.
 	"ignore::UserWarning:librosa",
+	# analysis.py ignores librosa's "n_fft=... is too large" by its message, since
+	# librosa zero-pads and the result is correct.  pytest resets the filters set at
+	# import, and librosa 1.0 reports this one from the line in Subsample that called
+	# it, so the filter above no longer matches it; this one mirrors the app's.
+	"ignore:n_fft=:UserWarning",
 ]
