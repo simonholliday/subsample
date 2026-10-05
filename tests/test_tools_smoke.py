@@ -15,18 +15,25 @@ import numpy
 import pytest
 import soundfile
 
+import subsample.cache
+import subsample.config
 import subsample.tools._shared
 import subsample.tools.analyze_file
 import subsample.tools.similarity_report
 import subsample.tools.suggest_loops
 
 
-def _write_tone (path: pathlib.Path, seconds: float = 0.5, sr: int = 44100) -> None:
+def _write_tone (
+	path:      pathlib.Path,
+	seconds:   float = 0.5,
+	sr:        int = 44100,
+	frequency: float = 220.0,
+) -> None:
 
 	"""Write a short mono sine tone the analysis pipeline can fingerprint."""
 
 	t = numpy.linspace(0.0, seconds, int(sr * seconds), endpoint=False)
-	tone = (0.4 * numpy.sin(2.0 * numpy.pi * 220.0 * t)).astype(numpy.float32)
+	tone = (0.4 * numpy.sin(2.0 * numpy.pi * frequency * t)).astype(numpy.float32)
 	soundfile.write(str(path), tone, sr, subtype="PCM_16")
 
 
@@ -222,3 +229,114 @@ class TestSimilarFindsTheSameReferencesTheAppDoes:
 		empty.mkdir()
 
 		assert subsample.tools.similarity_report.main(["--reference-dir", str(empty)]) == 1
+
+
+class TestSimilarToOneSound:
+
+	"""`subsample similar <sound>`: the library's nearest matches to one sound (#2676)."""
+
+	def _project (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+
+		"""A project whose library holds tones at three pitches and two takes both named 01."""
+
+		monkeypatch.chdir(tmp_path)
+		captures = tmp_path / "samples" / "captures"
+		(captures / "a").mkdir(parents=True)
+		(captures / "b").mkdir()
+
+		for name, frequency in (("low", 110.0), ("mid", 440.0), ("high", 1760.0)):
+			_write_tone(captures / f"{name}.wav", frequency=frequency)
+
+		_write_tone(captures / "a" / "01.wav", frequency=220.0)
+		_write_tone(captures / "b" / "01.wav", frequency=880.0)
+
+		return captures
+
+	def _listed (self, out: str) -> list[str]:
+
+		"""The files the report lists, in its order."""
+
+		return [line.split()[-1] for line in out.splitlines() if line.startswith("  ") and line.split()[-1].endswith(".wav")]
+
+	def test_a_sample_named_from_the_library_is_left_out_of_its_matches (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		capsys: pytest.CaptureFixture[str],
+	) -> None:
+		self._project(tmp_path, monkeypatch)
+
+		assert subsample.tools.similarity_report.main(["mid", "--top", "3"]) == 0
+
+		out    = capsys.readouterr().out
+		listed = self._listed(out)
+
+		assert out.startswith("Reference: mid\n")
+		assert len(listed) == 3
+		assert not any(path.endswith("mid.wav") for path in listed)
+
+	def test_a_file_from_elsewhere_is_analysed_and_its_nearest_match_comes_first (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		capsys: pytest.CaptureFixture[str],
+	) -> None:
+		self._project(tmp_path, monkeypatch)
+		elsewhere = tmp_path / "elsewhere"
+		elsewhere.mkdir()
+		probe = elsewhere / "probe.wav"
+		_write_tone(probe, frequency=450.0)
+
+		assert subsample.tools.similarity_report.main([str(probe), "--top", "2"]) == 0
+
+		listed = self._listed(capsys.readouterr().out)
+
+		assert listed[0].endswith("mid.wav")
+		assert subsample.cache.cache_path(probe).exists(), "the help says the analysis is kept beside it"
+
+	def test_a_library_file_given_by_path_is_left_out_too (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		capsys: pytest.CaptureFixture[str],
+	) -> None:
+		captures = self._project(tmp_path, monkeypatch)
+
+		assert subsample.tools.similarity_report.main([str(captures / "high.wav"), "--top", "0"]) == 0
+
+		listed = self._listed(capsys.readouterr().out)
+
+		assert len(listed) == 4
+		assert not any(path.endswith("high.wav") for path in listed)
+
+	def test_a_name_two_samples_share_is_refused_naming_both (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		capsys: pytest.CaptureFixture[str],
+	) -> None:
+		self._project(tmp_path, monkeypatch)
+
+		assert subsample.tools.similarity_report.main(["01"]) == 1
+
+		err = capsys.readouterr().err
+
+		assert "a/01.wav" in err and "b/01.wav" in err
+
+	def test_a_sound_that_is_neither_a_file_nor_a_name_is_refused (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+		capsys: pytest.CaptureFixture[str],
+	) -> None:
+		self._project(tmp_path, monkeypatch)
+
+		assert subsample.tools.similarity_report.main(["nothing"]) == 1
+		assert "neither an audio file nor the name of a sample" in capsys.readouterr().err
+
+	def test_a_sound_and_a_reference_directory_are_refused_together (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		self._project(tmp_path, monkeypatch)
+
+		assert subsample.tools.similarity_report.main(["mid", "--reference-dir", str(tmp_path)]) == 1
+
+	def test_a_sound_needs_no_references (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		self._project(tmp_path, monkeypatch)
+		empty = tmp_path / "refs"
+		empty.mkdir()
+		monkeypatch.setattr(subsample.config, "reference_directory", lambda _cfg: empty)
+
+		assert subsample.tools.similarity_report.main(["mid"]) == 0

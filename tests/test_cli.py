@@ -464,7 +464,7 @@ _PARSERS: dict[str, tuple[str, list[str]]] = {
 	),
 	"subsample.tools.similarity_report": (
 		"subsample similar",
-		["-h", "--help", "--top", "--config", "--reference-dir"],
+		["-h", "--help", "sound", "--top", "--config", "--reference-dir"],
 	),
 	"subsample.tools.suggest_loops": (
 		"subsample loops",

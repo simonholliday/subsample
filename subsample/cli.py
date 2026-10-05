@@ -90,7 +90,7 @@ _TOOL_COMMANDS: dict[str, tuple[str, str]] = {
 	"import":  ("subsample.tools.import_samples",    "import pre-trimmed audio files into the sample library"),
 	"catalog": ("subsample.tools.catalog_samples",   "CSV catalogue of every sample's detected properties, with curation aids"),
 	"analyze": ("subsample.tools.analyze_file",      "analyse audio files and print their detected metrics"),
-	"similar": ("subsample.tools.similarity_report", "rank library samples against each reference by similarity"),
+	"similar": ("subsample.tools.similarity_report", "rank library samples against each reference, or one sound, by similarity"),
 	"loops":   ("subsample.tools.suggest_loops",     "find and audition click-free loop points in sustained samples"),
 }
 """Subcommand name → (tool module, one-line description).  The first CLI
