@@ -872,6 +872,12 @@ class PickSpec:
 	based ``order:`` (``quietest`` or ``loudest``).  ``spacing: loudness`` makes
 	the mapping follow the samples' actual levels rather than their even rank
 	positions.  See the field comments and ``resolve_index``.
+
+	``pick: round_robin`` (or ``pick: {mode: round_robin, lte: 4}``, with the
+	range form's bounds) takes the ranks in turn instead: each note-on plays the
+	next rank, starting again after the last.  The turn is the player's, kept
+	for each note (see ``resolve_index``'s ``turn``); ``start`` is where a note
+	begins it, so each note of a list opens on its own rank.
 	"""
 
 	lo: typing.Optional[int]
@@ -896,11 +902,12 @@ class PickSpec:
 	# finely at the quiet end.  "loudness" needs the pool's per-sample levels at
 	# trigger time (passed to resolve_index); when they are absent or degenerate
 	# it falls back to "rank".
-	mode:      str  = "range"       # "range" | "velocity"
+	mode:      str  = "range"       # "range" | "velocity" | "round_robin"
 	variation: int  = 0             # selection spread: total ± MIDI-velocity window
 	curve:     str  = "linear"      # "linear" | "logarithmic" | "exponential"
 	ascending: bool = True          # True when the level order is quietest-first
 	spacing:   str  = "rank"        # "rank" (even) | "loudness" (proportional to level)
+	start:     int  = 0             # round_robin: the turn this note begins on, its place in its list
 
 	def resolve_index (
 		self,
@@ -909,6 +916,7 @@ class PickSpec:
 		vel_lo:     int = 0,
 		vel_hi:     int = 127,
 		positions:  typing.Optional[list[float]] = None,
+		turn:       int = 0,
 	) -> int:
 
 		"""Return a 0-indexed rank into a ranked list of length ``ranked_len``.
@@ -938,6 +946,11 @@ class PickSpec:
 		``positions`` is None or the wrong length (the variant-state slow path
 		may omit it, or the pool has a single distinct level) it falls back to
 		even rank spacing.
+
+		Round-robin mode: ``turn`` counts the note-ons this note has played
+		before, so the rank is the next in [lo, hi] after the note's ``start``,
+		wrapping after the last.  The bounds resolve and clamp as a range's do,
+		so a pool that grows or shrinks keeps the turn going over what is there.
 		"""
 
 		if self.mode == "velocity":
@@ -970,6 +983,9 @@ class PickSpec:
 		hi = ranked_len if self.hi is None else min(self.hi, ranked_len)
 		lo = 1          if self.lo is None else self.lo
 		lo = min(lo, hi)
+
+		if self.mode == "round_robin":
+			return lo - 1 + (self.start + turn) % (hi - lo + 1)
 
 		return random.randint(lo, hi) - 1
 
@@ -2321,16 +2337,23 @@ def _parse_order (
 
 VALID_PICK_OPERATORS: typing.Final[tuple[str, ...]] = ("gte", "lte", "gt", "lt", "eq")
 
+VALID_PICK_MODES: typing.Final[tuple[str, ...]] = ("velocity", "round_robin")
+"""The long form's ``mode`` words, each of which is also a pick written alone."""
+
 VALID_VELOCITY_PICK_KEYS: typing.Final[tuple[str, ...]] = ("mode", "variation", "curve", "spacing")
+
+VALID_ROUND_ROBIN_PICK_KEYS: typing.Final[tuple[str, ...]] = ("mode", "gte", "lte", "gt", "lt")
+"""The round-robin long form's keys: its mode, and the range form's bounds but ``eq``,
+since a turn of one rank is ``pick: N``."""
 
 
 def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> PickSpec:
 
 	"""Parse the long form ``pick: {mode: velocity, variation, curve, spacing}``.
 
-	Reached from _parse_pick only when the pick dict carries a ``mode`` key (the
-	operator dict never does), so the two dict shapes never collide.  The
-	returned ``ascending`` is a placeholder True — it is finalised from the
+	Reached from _parse_pick only when the pick dict's ``mode`` is ``velocity``
+	(the operator dict never carries a mode), so the dict shapes never collide.
+	The returned ``ascending`` is a placeholder True — it is finalised from the
 	``order:`` clause in _parse_select_spec, the only site that sees both order
 	and pick.  ``lo``/``hi`` are None (open) so a velocity pick reaches the whole
 	pool and the existing _ranks_for formula already spans every rank.
@@ -2350,14 +2373,6 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 			"valid keys: %s",
 			assignment_name, sorted(unknown),
 			", ".join(sorted(VALID_VELOCITY_PICK_KEYS)),
-		)
-
-	mode = str(raw.get("mode", ""))
-
-	if mode != "velocity":
-		raise ValueError(
-			f"MIDI map assignment {assignment_name!r}: 'pick' mode must be "
-			f"'velocity' (got {raw.get('mode')!r})"
 		)
 
 	# bool is a subclass of int — reject it the same way the scalar/operator
@@ -2395,6 +2410,136 @@ def _parse_velocity_pick (raw: dict[str, typing.Any], assignment_name: str) -> P
 	return PickSpec(None, None, "velocity", variation, curve, True, spacing)
 
 
+def _parse_round_robin_pick (raw: dict[str, typing.Any], assignment_name: str) -> PickSpec:
+
+	"""Parse the long form ``pick: {mode: round_robin, gte, lte, gt, lt}``.
+
+	The bounds narrow the turn to part of the ranking, as they narrow a range
+	pick's draw; left out, the turn takes in every match, as ``pick:
+	round_robin`` does.
+	"""
+
+	unknown = set(raw.keys()).difference(VALID_ROUND_ROBIN_PICK_KEYS)
+
+	if unknown and _STRICT_MODE:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: unknown 'pick' key(s) "
+			f"{sorted(unknown)} for a round-robin pick.  Valid keys: "
+			f"{', '.join(sorted(VALID_ROUND_ROBIN_PICK_KEYS))}"
+		)
+	elif unknown:
+		_log.warning(
+			"MIDI map assignment %r: unknown round-robin 'pick' key(s) %s ignored - "
+			"valid keys: %s",
+			assignment_name, sorted(unknown),
+			", ".join(sorted(VALID_ROUND_ROBIN_PICK_KEYS)),
+		)
+
+	# Only the keys kept, so an `eq` warned about above is not then obeyed.
+	bounds = {key: value for key, value in raw.items() if key in VALID_ROUND_ROBIN_PICK_KEYS}
+	lo, hi = _rank_bounds(bounds, assignment_name)
+
+	return PickSpec(lo, hi, "round_robin")
+
+
+def _rank_bounds (raw: dict[str, typing.Any], assignment_name: str) -> tuple[int, typing.Optional[int]]:
+
+	"""The ranks a dict of pick operators bounds, as (lo, hi), hi None when open.
+
+	Shared by the range form, ``{gte: 2, lte: 5}``, and the round-robin long
+	form, ``{mode: round_robin, lte: 4}``, which take their bounds alike.  A
+	dict with no bound is the whole ranking, (1, None).
+	"""
+
+	# eq pins both bounds; other operators define lo (gte/gt) and hi (lte/lt).
+	# A lower-bound-only dict (gte / gt) leaves the upper bound open — "rank
+	# N to the last match" — stored as hi=None.
+	eq_val  = raw.get("eq")
+	gte_val = raw.get("gte")
+	gt_val  = raw.get("gt")
+	lte_val = raw.get("lte")
+	lt_val  = raw.get("lt")
+
+	# Conflicting operator combinations must not be silently resolved by
+	# precedence: eq pins both bounds (nothing can combine with it), and
+	# gte/gt (or lte/lt) express the same bound two ways.
+	if eq_val is not None and any(v is not None for v in (gte_val, gt_val, lte_val, lt_val)):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pick 'eq' cannot be "
+			f"combined with other operators (got {sorted(raw.keys())})"
+		)
+
+	if gte_val is not None and gt_val is not None:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pick cannot combine "
+			f"'gte' and 'gt' - use one lower bound"
+		)
+
+	if lte_val is not None and lt_val is not None:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pick cannot combine "
+			f"'lte' and 'lt' - use one upper bound"
+		)
+
+	if eq_val is not None:
+		if not isinstance(eq_val, int) or isinstance(eq_val, bool) or eq_val < 1:
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick 'eq' must be "
+				f"a positive integer (got {eq_val!r})"
+			)
+		return eq_val, eq_val
+
+	dict_lo: int = 1
+
+	if gte_val is not None:
+		if not isinstance(gte_val, int) or isinstance(gte_val, bool):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick 'gte' must "
+				f"be an integer (got {gte_val!r})"
+			)
+		dict_lo = gte_val
+	elif gt_val is not None:
+		if not isinstance(gt_val, int) or isinstance(gt_val, bool):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick 'gt' must "
+				f"be an integer (got {gt_val!r})"
+			)
+		dict_lo = gt_val + 1
+
+	dict_hi: typing.Optional[int] = None
+
+	if lte_val is not None:
+		if not isinstance(lte_val, int) or isinstance(lte_val, bool):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick 'lte' must "
+				f"be an integer (got {lte_val!r})"
+			)
+		dict_hi = lte_val
+	elif lt_val is not None:
+		if not isinstance(lt_val, int) or isinstance(lt_val, bool):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: pick 'lt' must "
+				f"be an integer (got {lt_val!r})"
+			)
+		dict_hi = lt_val - 1
+
+	# dict_hi left as None means an open upper bound (lower-bound-only dict).
+
+	if dict_lo < 1 or (dict_hi is not None and dict_hi < 1):
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pick bounds must be "
+			f">= 1 (got lo={dict_lo}, hi={dict_hi})"
+		)
+
+	if dict_hi is not None and dict_lo > dict_hi:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: pick 'lo' must be "
+			f"<= 'hi' (got lo={dict_lo}, hi={dict_hi})"
+		)
+
+	return dict_lo, dict_hi
+
+
 def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 
 	"""Parse the ``pick:`` value from a select spec.
@@ -2403,14 +2548,17 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 	  - missing / None      → PickSpec(1, 1)      (best match)
 	  - "any"               → PickSpec(None, None) (uniform draw across all matches)
 	  - "velocity"          → PickSpec(None, None, "velocity")  (velocity → rank)
+	  - "round_robin"       → PickSpec(None, None, "round_robin")  (every match in turn)
 	  - int n               → PickSpec(n, n)      (exact rank, n >= 1)
 	  - [lo, hi]            → PickSpec(lo, hi)    (random rank in range, both >= 1, lo <= hi)
 	  - [lo, null] / [null, hi] → open-ended range (None = best match / last match)
 	  - {mode: velocity, variation, curve, spacing} → velocity pick, long form (_parse_velocity_pick)
+	  - {mode: round_robin, gte, lte, gt, lt} → round robin over those ranks (_parse_round_robin_pick)
 	  - {gte, lte, gt, lt, eq: ...} → equivalent range; a lower-bound-only dict
 	    (gte / gt) leaves the upper bound open (hi=None)
 
-	The range form re-rolls on every note-on (see ``PickSpec.resolve_index``).
+	The range form re-rolls on every note-on, and round robin takes the next
+	rank (see ``PickSpec.resolve_index``).
 	"""
 
 	if raw is None:
@@ -2418,18 +2566,19 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 
 	# "any" is the read-aloud shortcut for the fully-open range [None, None] —
 	# a uniform draw across every match, no magic count to write.  "velocity" is
-	# the shorthand for a default velocity pick (no variation, linear curve); the
-	# long form pick: {mode: velocity, ...} is handled in the dict branch below.
+	# the shorthand for a default velocity pick (no variation, linear curve), and
+	# "round_robin" for a turn through every match; their long forms, pick:
+	# {mode: ..., ...}, are handled in the dict branch below.
 	if isinstance(raw, str):
 		if raw == "any":
 			return PickSpec(None, None)
 
-		if raw == "velocity":
-			return PickSpec(None, None, "velocity")
+		if raw in VALID_PICK_MODES:
+			return PickSpec(None, None, raw)
 
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: 'pick' string must be "
-			f"'any' or 'velocity' (got {raw!r})"
+			f"'any', 'round_robin' or 'velocity' (got {raw!r})"
 		)
 
 	# bool is a subclass of int in Python — reject explicitly so 'pick: true'
@@ -2481,12 +2630,23 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 		return PickSpec(lo, hi)
 
 	if isinstance(raw, dict):
-		# Velocity pick long form is dispatched before the operator-key sweep
-		# below (which would otherwise reject mode/variation/curve).  The
-		# operator dict {gte, lte, ...} never carries a "mode" key, so keying on
-		# its presence is unambiguous.
+		# The long forms are dispatched before the operator-key sweep below
+		# (which would otherwise reject mode/variation/curve).  The operator
+		# dict {gte, lte, ...} never carries a "mode" key, so keying on its
+		# presence is unambiguous.
 		if "mode" in raw:
-			return _parse_velocity_pick(raw, assignment_name)
+			mode = raw["mode"]
+
+			if mode == "velocity":
+				return _parse_velocity_pick(raw, assignment_name)
+
+			if mode == "round_robin":
+				return _parse_round_robin_pick(raw, assignment_name)
+
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: 'pick' mode must be "
+				f"'velocity' or 'round_robin' (got {mode!r})"
+			)
 
 		unknown = set(raw.keys()).difference(VALID_PICK_OPERATORS)
 
@@ -2504,102 +2664,18 @@ def _parse_pick (raw: typing.Any, assignment_name: str) -> PickSpec:
 				", ".join(sorted(VALID_PICK_OPERATORS)),
 			)
 
-		# eq pins both bounds; other operators define lo (gte/gt) and hi (lte/lt).
-		# A lower-bound-only dict (gte / gt) leaves the upper bound open — "rank
-		# N to the last match" — stored as hi=None.
-		eq_val  = raw.get("eq")
-		gte_val = raw.get("gte")
-		gt_val  = raw.get("gt")
-		lte_val = raw.get("lte")
-		lt_val  = raw.get("lt")
-
 		# An operator-less dict has no bounds to act on.  Reject it so a bare
 		# `pick: {}` doesn't silently mean "any" — write `pick: any` for that.
-		if all(v is None for v in (eq_val, gte_val, gt_val, lte_val, lt_val)):
+		if all(raw.get(operator) is None for operator in VALID_PICK_OPERATORS):
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: 'pick' dict must "
 				f"include at least one of "
 				f"{', '.join(sorted(VALID_PICK_OPERATORS))}; got {raw!r}"
 			)
 
-		# Conflicting operator combinations must not be silently resolved by
-		# precedence: eq pins both bounds (nothing can combine with it), and
-		# gte/gt (or lte/lt) express the same bound two ways.
-		if eq_val is not None and any(v is not None for v in (gte_val, gt_val, lte_val, lt_val)):
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: pick 'eq' cannot be "
-				f"combined with other operators (got {sorted(raw.keys())})"
-			)
+		lo, hi = _rank_bounds(raw, assignment_name)
 
-		if gte_val is not None and gt_val is not None:
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: pick cannot combine "
-				f"'gte' and 'gt' - use one lower bound"
-			)
-
-		if lte_val is not None and lt_val is not None:
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: pick cannot combine "
-				f"'lte' and 'lt' - use one upper bound"
-			)
-
-		if eq_val is not None:
-			if not isinstance(eq_val, int) or isinstance(eq_val, bool) or eq_val < 1:
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: pick 'eq' must be "
-					f"a positive integer (got {eq_val!r})"
-				)
-			return PickSpec(eq_val, eq_val)
-
-		dict_lo: int = 1
-
-		if gte_val is not None:
-			if not isinstance(gte_val, int) or isinstance(gte_val, bool):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: pick 'gte' must "
-					f"be an integer (got {gte_val!r})"
-				)
-			dict_lo = gte_val
-		elif gt_val is not None:
-			if not isinstance(gt_val, int) or isinstance(gt_val, bool):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: pick 'gt' must "
-					f"be an integer (got {gt_val!r})"
-				)
-			dict_lo = gt_val + 1
-
-		dict_hi: typing.Optional[int] = None
-
-		if lte_val is not None:
-			if not isinstance(lte_val, int) or isinstance(lte_val, bool):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: pick 'lte' must "
-					f"be an integer (got {lte_val!r})"
-				)
-			dict_hi = lte_val
-		elif lt_val is not None:
-			if not isinstance(lt_val, int) or isinstance(lt_val, bool):
-				raise ValueError(
-					f"MIDI map assignment {assignment_name!r}: pick 'lt' must "
-					f"be an integer (got {lt_val!r})"
-				)
-			dict_hi = lt_val - 1
-
-		# dict_hi left as None means an open upper bound (lower-bound-only dict).
-
-		if dict_lo < 1 or (dict_hi is not None and dict_hi < 1):
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: pick bounds must be "
-				f">= 1 (got lo={dict_lo}, hi={dict_hi})"
-			)
-
-		if dict_hi is not None and dict_lo > dict_hi:
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: pick 'lo' must be "
-				f"<= 'hi' (got lo={dict_lo}, hi={dict_hi})"
-			)
-
-		return PickSpec(dict_lo, dict_hi)
+		return PickSpec(lo, hi)
 
 	raise ValueError(
 		f"MIDI map assignment {assignment_name!r}: 'pick' must be 'any', an "

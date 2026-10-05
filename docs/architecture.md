@@ -131,7 +131,9 @@ either. The first failure logs its traceback, and a repeat logs one line.
 MIDI note_on
     → _resolve_sample_id: indexed pick from the pre-computed candidate cache
         (rebuilt when the library changes, not per-trigger; variant-state
-         selects - quantized_beats / beat_match - fall back to a live query)
+         selects - quantized_beats / beat_match - fall back to a live query;
+         a round-robin pick takes the layer's next turn from _pick_turns,
+         kept per channel, note and assignment until the rules change)
     → transform_manager.get_variant(sample_id, spec, from_disk=False)  → processed variant
         (memory cache, else enqueue: the render worker loads it from the disk
          cache or renders it, and this note falls back to a previous/base variant)

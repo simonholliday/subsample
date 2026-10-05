@@ -18,8 +18,8 @@ Concurrency control:
   - _mix_matrix_lock guards _mix_matrix_cache (handler + reload).
   - _cc_debounce_lock guards _cc_debounce_timer (handler + cleanup).
   - _state_lock guards the small mutable dicts (_cc_state, _cc_omni,
-    _cc_last_log, _segment_counters, _last_played) that are touched by
-    both _handle_message (rtmidi thread) and update_assignments
+    _cc_last_log, _segment_counters, _pick_turns, _last_played) that are
+    touched by both _handle_message (rtmidi thread) and update_assignments
     (watcher / CC debounce / on-complete threads).
   - _rules_lock (reentrant) serialises rule-set re-evaluation:
     update_assignments and _apply_rule_set (hot-reload swap) never
@@ -136,7 +136,9 @@ _RELEASE_EXP_K: float = 9.0
 # range).  For multi-note assignments without explicit pick, each note
 # gets a single-rank PickSpec(i, i) distributing across ranked matches.
 # The actual rank is drawn at note-on by PickSpec.resolve_index() — single
-# ranks are deterministic, ranges re-roll.
+# ranks are deterministic, ranges re-roll, and a round robin takes the note's
+# next turn.  A round-robin pick on a list carries each note's place in the
+# list as its ``start``, so the notes do not all open on the same rank.
 NoteMap = dict[
 	tuple[int, int],
 	list[tuple[subsample.query.Assignment, subsample.query.PickSpec]],
@@ -310,7 +312,9 @@ def _ranks_for (pick_spec: subsample.query.PickSpec, ranked_len: int) -> range:
 	yields lo..hi inclusive, clamped to ranked_len so requests past the end
 	collapse onto the last rank (mirrors resolve_index's clamping).  An open
 	bound (None — from ``pick: any`` / ``[2, null]`` / ``{gte: 2}``) resolves
-	the same way resolve_index does: open lo → 1, open hi → ranked_len.
+	the same way resolve_index does: open lo → 1, open hi → ranked_len.  A
+	round-robin pick comes round to every rank in its bounds, so it reaches
+	the same span as a range with those bounds.
 
 	A velocity pick can land on any rank in the pool (velocity chooses the
 	index at trigger time), so every rank must be pre-baked — the same full
@@ -336,9 +340,19 @@ def _format_pick_suffix (pick_spec: subsample.query.PickSpec) -> str:
 	Returns an empty string for the default best-match pick so unannotated
 	notes stay terse; otherwise a leading-space suffix: `` pick 3`` (scalar),
 	`` pick 2-5`` (closed range), `` pick 2+`` (open upper), `` pick any``
-	(both ends open), or `` pick velocity`` (velocity mode, with the curve and
-	± spread appended when non-default).  An open lower bound reads as rank 1.
+	(both ends open), `` pick velocity`` (velocity mode, with the curve and
+	± spread appended when non-default), or `` pick round_robin`` (with its
+	bounds, `` 1-4`` or `` 2+``, when it has any).  An open lower bound reads
+	as rank 1.
 	"""
+
+	if pick_spec.mode == "round_robin":
+		first = 1 if pick_spec.lo is None else pick_spec.lo
+
+		if pick_spec.hi is None:
+			return " pick round_robin" if first == 1 else f" pick round_robin {first}+"
+
+		return f" pick round_robin {first}-{pick_spec.hi}"
 
 	if pick_spec.mode == "velocity":
 		# A velocity pick carries lo=hi=None, which would otherwise read as
@@ -3557,6 +3571,11 @@ def load_midi_map (
 
 			if explicit_pick or process.has_repitch() or len(notes) == 1:
 				pick_spec = chain_pick if chain_pick is not None else select_specs[0].pick
+
+				# A round robin begins each note's turn at its place in the
+				# list, so the notes do not all open on the same sound.
+				if pick_spec.mode == "round_robin":
+					pick_spec = dataclasses.replace(pick_spec, start=note_idx)
 			else:
 				rank = note_idx + 1
 				pick_spec = subsample.query.PickSpec(rank, rank)
@@ -4756,14 +4775,19 @@ class MidiPlayer:
 		# members that share a velocity range.
 		self._segment_counters: dict[tuple[int, int, int], int] = {}
 
+		# Per-note turn for a round-robin pick: how many note-ons each layer
+		# has played, keyed and cleared exactly as _segment_counters is.  Its
+		# own dict, so a layer with both round robins steps each once a note.
+		self._pick_turns: dict[tuple[int, int, int], int] = {}
+
 		# Single lock for the small mutable dicts touched by both
 		# _handle_message (rtmidi callback thread) and the threads that run
 		# update_assignments (watcher, CC debounce timer, on-complete).
 		# Protects: _cc_state, _cc_omni, _cc_last_log, _segment_counters,
-		# _last_played.  All critical sections are sub-microsecond — one
-		# lock is simpler than per-dict locking and there is no deadlock
-		# topology because _state_lock is never acquired alongside any
-		# other player lock.
+		# _pick_turns, _last_played.  All critical sections are
+		# sub-microsecond — one lock is simpler than per-dict locking and
+		# there is no deadlock topology because _state_lock is never
+		# acquired alongside any other player lock.
 		#
 		# Lock ordering rule (enforced by code review, not the runtime):
 		# _rules_lock is outermost, then _state_lock.  Never acquire
@@ -4828,7 +4852,9 @@ class MidiPlayer:
 		flat_entries: list[tuple[int, int, subsample.query.Assignment, subsample.query.PickSpec]] = []
 		for (ch, note), entries in self._note_map.items():
 			for asgn, pick_spec in entries:
-				flat_entries.append((ch, note, asgn, pick_spec))
+				# A round robin's start differs note by note, but it is one
+				# pick written once, so it must not read as distributed.
+				flat_entries.append((ch, note, asgn, dataclasses.replace(pick_spec, start=0)))
 
 		# Sort by (channel, note, velocity_trigger) so layers of the same
 		# note print together in ascending velocity order.
@@ -6338,7 +6364,16 @@ class MidiPlayer:
 		# switch it back while this runs (_undo_switch, #4488).
 		eff_library, eff_transform = self._effective_pool()
 
-		sample_id = self._resolve_sample_id(assignment, pick_spec, eff_library, msg.velocity)
+		# A round robin plays this layer's next turn.  RMW under _state_lock,
+		# as _select_segment's is, so a reload's clear never loses a step.
+		turn = 0
+
+		if pick_spec.mode == "round_robin":
+			with self._state_lock:
+				turn = self._pick_turns.get(state_key, 0)
+				self._pick_turns[state_key] = turn + 1
+
+		sample_id = self._resolve_sample_id(assignment, pick_spec, eff_library, msg.velocity, turn)
 
 		if sample_id is None:
 			_log.debug(
@@ -6777,6 +6812,7 @@ class MidiPlayer:
 		pick_spec:   subsample.query.PickSpec,
 		eff_library: subsample.library.InstrumentLibrary,
 		velocity:    int,
+		turn:        int = 0,
 	) -> typing.Optional[int]:
 
 		"""Resolve an assignment to one concrete sample id for a single trigger.
@@ -6797,7 +6833,8 @@ class MidiPlayer:
 		velocity — the rescale compresses loudness, and using it here would make
 		the quiet end of the pool unreachable).  It is consulted only by a
 		velocity pick; the layer's own velocity_trigger window is forwarded so a
-		narrow velocity layer still spans its whole pool.
+		narrow velocity layer still spans its whole pool.  ``turn`` is consulted
+		only by a round-robin pick: how many times this layer has played.
 		"""
 
 		vel_lo, vel_hi = assignment.velocity_trigger
@@ -6809,7 +6846,7 @@ class MidiPlayer:
 				return None
 
 			index = pick_spec.resolve_index(
-				len(cached.ids), velocity, vel_lo, vel_hi, cached.loudness,
+				len(cached.ids), velocity, vel_lo, vel_hi, cached.loudness, turn,
 			)
 			return cached.ids[index]
 
@@ -6839,7 +6876,7 @@ class MidiPlayer:
 
 			if ranked:
 				index = pick_spec.resolve_index(
-					len(ranked), velocity, vel_lo, vel_hi, _loudness_positions(ranked),
+					len(ranked), velocity, vel_lo, vel_hi, _loudness_positions(ranked), turn,
 				)
 				return ranked[index].sample_id
 
@@ -6940,11 +6977,11 @@ class MidiPlayer:
 
 	def _prune_stale_layer_state (self) -> None:
 
-		"""Drop _last_played / _segment_counters entries for retired assignments.
+		"""Drop _last_played / _segment_counters / _pick_turns entries for retired assignments.
 
-		Both dicts are keyed by (channel, note, id(Assignment)).  Manual
+		All three dicts are keyed by (channel, note, id(Assignment)).  Manual
 		assignments keep their identity across re-evaluations, so their
-		round-robin position and variant-transition fallback survive; zone-
+		round-robin positions and variant-transition fallback survive; zone-
 		derived assignments are re-minted by every _materialize_zones run, and
 		rule swaps (reload / preset switch) replace the whole map — keys
 		referencing retired objects can never match again, and each orphaned
@@ -6963,6 +7000,9 @@ class MidiPlayer:
 
 			for key in [k for k in self._segment_counters if k[2] not in live_ids]:
 				del self._segment_counters[key]
+
+			for key in [k for k in self._pick_turns if k[2] not in live_ids]:
+				del self._pick_turns[key]
 
 	def update_assignments (self) -> None:
 
@@ -7411,12 +7451,13 @@ class MidiPlayer:
 
 		self._sync_clock_tracker()
 
-		# Both dicts are guarded by _state_lock — clear them together so any
-		# concurrent reader (e.g. _select_segment RMW) sees a consistent
+		# All three dicts are guarded by _state_lock — clear them together so
+		# any concurrent reader (e.g. _select_segment RMW) sees a consistent
 		# post-switch state.
 		with self._state_lock:
 			self._last_played.clear()
 			self._segment_counters.clear()
+			self._pick_turns.clear()
 
 		with self._mix_matrix_lock:
 			self._mix_matrix_cache.clear()
@@ -7492,6 +7533,7 @@ class MidiPlayer:
 		with self._state_lock:
 			old_last_played      = dict(self._last_played)
 			old_segment_counters = dict(self._segment_counters)
+			old_pick_turns       = dict(self._pick_turns)
 
 		# Apply the new configuration first so update_assignments()
 		# validates against what the player would actually run with.  This
@@ -7549,16 +7591,20 @@ class MidiPlayer:
 				for key, count in old_segment_counters.items():
 					self._segment_counters.setdefault(key, count)
 
+				for key, turn in old_pick_turns.items():
+					self._pick_turns.setdefault(key, turn)
+
 			raise
 
 		# Validation succeeded — clear caches whose entries reference the
 		# old assignments by identity so the next note_on rebuilds them.
-		# _segment_counters clear is under _state_lock so it serialises
-		# against the round_robin RMW in _select_segment.
+		# The round-robin clears are under _state_lock so they serialise
+		# against the RMWs in _select_segment and _trigger_one.
 		with self._mix_matrix_lock:
 			self._mix_matrix_cache.clear()
 		with self._state_lock:
 			self._segment_counters.clear()
+			self._pick_turns.clear()
 		# The old Assignment ids the fail-musical-loop warn-dedup keyed on are gone
 		# with the swap, so clear it — otherwise it grows unbounded across reloads
 		# and a reused id could suppress a genuine warning.  Lock-free: the set is

@@ -130,15 +130,21 @@ _OLDER_ORDER_TITLES: typing.Final[dict[str, str]] = {
 }
 
 _PICK_WORDS: typing.Final[dict[str, tuple[str, str]]] = {
-	"any":      ("Any", "A match at random on every note, each as likely as the next."),
-	"velocity": ("Velocity", "The match that suits how hard the note is struck, from the quiet end of the ranking to the loud end. The ranking must be by `level`."),
+	"any":         ("Any", "A match at random on every note, each as likely as the next."),
+	"velocity":    ("Velocity", "The match that suits how hard the note is struck, from the quiet end of the ranking to the loud end. The ranking must be by `level`."),
+	"round_robin": ("Round robin", "Every match in turn, from the best down, starting again after the last. Each note keeps its own place in the turn, and each note of a list starts one rank on from the note before, so they do not all open on the same sound."),
+}
+
+_PICK_MODES: typing.Final[dict[str, tuple[str, str]]] = {
+	"velocity":    ("Velocity", "Chooses by how hard the note is struck, with `variation`, `curve` and `spacing` beside it."),
+	"round_robin": ("Round robin", "Takes the matches in turn. `gte`, `gt`, `lte` and `lt` beside it narrow the turn to part of the ranking."),
 }
 
 _RANK_BOUNDS: typing.Final[dict[str, str]] = {
-	"gte": "The first rank drawn from.",
-	"lte": "The last rank drawn from.",
-	"gt":  "Draws from the ranks after this one.",
-	"lt":  "Draws from the ranks before this one.",
+	"gte": "The first rank chosen from.",
+	"lte": "The last rank chosen from.",
+	"gt":  "Chooses from the ranks after this one.",
+	"lt":  "Chooses from the ranks before this one.",
 	"eq":  "Always this rank.",
 }
 
@@ -909,10 +915,19 @@ def _pick () -> dict[str, typing.Any]:
 
 	rank: dict[str, typing.Any] = {"$ref": "#/$defs/rank"}
 
-	velocity_terms = {
+	bounds = {
+		operator: {"description": description, **rank}
+		for operator, description in in_order(
+			subsample.query.VALID_PICK_OPERATORS, _RANK_BOUNDS, "pick operator",
+		).items()
+	}
+
+	# The long forms share one object, so the reference names `mode` once with
+	# both its words; each mode then admits only its own keys beside it.
+	long_terms = {
 		"mode": {
-			"description": "Chooses by velocity, with the settings beside it.",
-			"const": "velocity",
+			"description": "How the pick chooses, which decides the keys that may sit beside it.",
+			"oneOf": _words(subsample.query.VALID_PICK_MODES, _PICK_MODES, "pick mode"),
 		},
 		"variation": {
 			"description": "How far the choice may stray from the velocity played, in velocity values across both directions: 10 strays up to 5 either way. The loudness still follows the velocity played.",
@@ -932,12 +947,22 @@ def _pick () -> dict[str, typing.Any]:
 			"oneOf": _words(subsample.query.VALID_PICK_SPACINGS, _PICK_SPACINGS, "pick spacing"),
 			"default": "rank",
 		},
+		**{operator: bounds[operator] for operator in subsample.query.VALID_ROUND_ROBIN_PICK_KEYS if operator != "mode"},
+	}
+
+	long_keys = tuple(dict.fromkeys((
+		*subsample.query.VALID_VELOCITY_PICK_KEYS, *subsample.query.VALID_ROUND_ROBIN_PICK_KEYS,
+	)))
+
+	keys_of_mode = {
+		"velocity":    subsample.query.VALID_VELOCITY_PICK_KEYS,
+		"round_robin": subsample.query.VALID_ROUND_ROBIN_PICK_KEYS,
 	}
 
 	return {
-		"description": "Which of the ranked samples plays: a rank, a range of ranks drawn from at random on every note, `any` for any match at random, or `velocity` to choose by how hard the note is struck. Left out, a single note plays the best match, and each note of a list plays the next rank unless the assignment repitches.",
+		"description": "Which of the ranked samples plays: a rank, a range of ranks drawn from at random on every note, `any` for any match at random, `round_robin` for every match in turn, or `velocity` to choose by how hard the note is struck. Left out, a single note plays the best match, and each note of a list plays the next rank unless the assignment repitches.",
 		"anyOf": [
-			{"oneOf": _words(("any", "velocity"), _PICK_WORDS, "pick word")},
+			{"oneOf": _words(("any", *subsample.query.VALID_PICK_MODES), _PICK_WORDS, "pick word")},
 			dict(rank),
 			{
 				"type": "array",
@@ -947,25 +972,25 @@ def _pick () -> dict[str, typing.Any]:
 			},
 			{
 				"type": "object",
-				"properties": {
-					operator: {"description": description, **rank}
-					for operator, description in in_order(
-						subsample.query.VALID_PICK_OPERATORS, _RANK_BOUNDS, "pick operator",
-					).items()
-				},
+				"properties": bounds,
 				"minProperties": 1,
 				"additionalProperties": False,
 			},
 			{
 				"type": "object",
-				"properties": in_order(
-					subsample.query.VALID_VELOCITY_PICK_KEYS, velocity_terms, "velocity pick key",
-				),
+				"properties": in_order(long_keys, long_terms, "long pick key"),
 				"required": ["mode"],
 				"additionalProperties": False,
+				"allOf": [
+					{
+						"if":   {"properties": {"mode": {"const": mode}}, "required": ["mode"]},
+						"then": {"propertyNames": {"enum": list(keys)}},
+					}
+					for mode, keys in in_order(subsample.query.VALID_PICK_MODES, keys_of_mode, "pick mode").items()
+				],
 			},
 		],
-		"examples": [2, [1, 4], {"gte": 3}, {"mode": "velocity", "variation": 10}],
+		"examples": [2, [1, 4], {"gte": 3}, {"mode": "velocity", "variation": 10}, {"mode": "round_robin", "lte": 4}],
 	}
 
 

@@ -2110,6 +2110,87 @@ class TestVelocityPick:
 			subsample.query.parse_select({"directory": "snare", "order": "loudest"}, "a")
 
 
+class TestRoundRobinPick:
+
+	"""pick: round_robin — every match in turn (#2674)."""
+
+	def _turns (self, spec: subsample.query.PickSpec, ranked_len: int, count: int) -> list[int]:
+
+		"""The 1-indexed ranks a note plays on its first ``count`` note-ons."""
+
+		return [spec.resolve_index(ranked_len, turn=turn) + 1 for turn in range(count)]
+
+	# --- parsing ---
+
+	def test_the_word_alone_takes_every_match (self) -> None:
+		assert subsample.query._parse_pick("round_robin", "a") == subsample.query.PickSpec(None, None, "round_robin")
+
+	def test_the_long_form_takes_the_range_forms_bounds (self) -> None:
+		parse = subsample.query._parse_pick
+
+		assert parse({"mode": "round_robin"}, "a") == subsample.query.PickSpec(1, None, "round_robin")
+		assert parse({"mode": "round_robin", "lte": 4}, "a") == subsample.query.PickSpec(1, 4, "round_robin")
+		assert parse({"mode": "round_robin", "gte": 2}, "a") == subsample.query.PickSpec(2, None, "round_robin")
+		assert parse({"mode": "round_robin", "gt": 1, "lt": 5}, "a") == subsample.query.PickSpec(2, 4, "round_robin")
+
+	def test_parse_invalid_raises (self) -> None:
+		bad: list[typing.Any] = [
+			{"mode": "round_robin", "eq": 2},
+			{"mode": "round_robin", "variation": 10},
+			{"mode": "round_robin", "lte": 0},
+			{"mode": "round_robin", "gte": 4, "lte": 2},
+			{"mode": "round_robin", "gte": 2, "gt": 1},
+			{"mode": "round_robin", "lte": True},
+			{"mode": "roundrobin"},
+			"Round_robin",
+		]
+
+		for raw in bad:
+			with pytest.raises(ValueError):
+				subsample.query._parse_pick(raw, "a")
+
+	def test_no_ranking_is_required (self) -> None:
+		"""Unlike a velocity pick, a turn follows whatever order the select gives."""
+
+		specs = subsample.query.parse_select({"where": {"directory": "x"}, "pick": "round_robin"}, "a")
+
+		assert specs[0].pick.mode == "round_robin"
+
+	# --- resolve_index ---
+
+	def test_each_note_on_plays_the_next_match_and_starts_again (self) -> None:
+		spec = subsample.query.PickSpec(None, None, "round_robin")
+
+		assert self._turns(spec, 3, 7) == [1, 2, 3, 1, 2, 3, 1]
+
+	def test_bounds_narrow_the_turn (self) -> None:
+		assert self._turns(subsample.query.PickSpec(1, 2, "round_robin"), 5, 5) == [1, 2, 1, 2, 1]
+		assert self._turns(subsample.query.PickSpec(3, None, "round_robin"), 5, 4) == [3, 4, 5, 3]
+
+	def test_a_start_begins_the_turn_further_on (self) -> None:
+		spec = subsample.query.PickSpec(None, None, "round_robin", start=2)
+
+		assert self._turns(spec, 3, 4) == [3, 1, 2, 3]
+
+	def test_the_turn_follows_a_pool_that_shrinks (self) -> None:
+		"""A bound past the end is clamped as a range's is, so the turn keeps to what is there."""
+
+		spec = subsample.query.PickSpec(1, 4, "round_robin")
+
+		assert self._turns(spec, 2, 4) == [1, 2, 1, 2]
+
+	def test_a_single_match_plays_every_time (self) -> None:
+		assert self._turns(subsample.query.PickSpec(None, None, "round_robin", start=3), 1, 3) == [1, 1, 1]
+
+	def test_nothing_is_drawn_at_random (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		def _refuse (*_args: typing.Any) -> int:
+			raise AssertionError("a round robin drew at random")
+
+		monkeypatch.setattr(random, "randint", _refuse)
+
+		assert self._turns(subsample.query.PickSpec(None, None, "round_robin"), 4, 4) == [1, 2, 3, 4]
+
+
 class TestExtractSpec:
 
 	"""Tests for ExtractSpec — the channel-pattern extraction spec dataclass."""

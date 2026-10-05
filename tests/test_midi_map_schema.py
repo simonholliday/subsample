@@ -16,6 +16,7 @@ import logging
 import pathlib
 import typing
 
+import jsonschema
 import pytest
 import yaml
 
@@ -760,6 +761,8 @@ def _word_lists () -> list[typing.Any]:
 		pytest.param("/$defs/assignment/properties/mode", subsample.query.VALID_MODES, id="mode"),
 		pytest.param("/$defs/order_clause/anyOf/1/properties/by", subsample.query.valid_order_names(), id="order-by"),
 		pytest.param("/$defs/order_clause/anyOf/0", tuple(subsample.query.LEGACY_ORDER_TOKENS), id="order-token"),
+		pytest.param("/$defs/pick/anyOf/0", ("any", *subsample.query.VALID_PICK_MODES), id="pick-word"),
+		pytest.param("/$defs/pick/anyOf/4/properties/mode", subsample.query.VALID_PICK_MODES, id="pick-mode"),
 		pytest.param("/$defs/pick/anyOf/4/properties/curve", subsample.query.VALID_PICK_CURVES, id="pick-curve"),
 		pytest.param("/$defs/pick/anyOf/4/properties/spacing", subsample.query.VALID_PICK_SPACINGS, id="pick-spacing"),
 		pytest.param("/$defs/release/anyOf/3/properties/curve", subsample.query.VALID_RELEASE_CURVES, id="release-curve"),
@@ -795,6 +798,20 @@ class TestWordsComeFromTheParser:
 		]))
 
 		assert _release(result).curve == curve
+
+	@pytest.mark.parametrize("mode", subsample.query.VALID_PICK_MODES)
+	def test_every_pick_mode_loads_alone_and_in_the_long_form (self, tmp_path: pathlib.Path, mode: str) -> None:
+
+		"""Each mode the schema publishes is a pick written alone, and the long form's mode."""
+
+		for pick in (mode, {"mode": mode}):
+			result = _load(tmp_path, _map(assignments=[_assignment(select={
+				"where": {"pitched": True},
+				"order": "loudest",
+				"pick":  pick,
+			})]))
+
+			assert _first(result).select[0].pick.mode == mode
 
 	@pytest.mark.parametrize("curve", subsample.query.VALID_PICK_CURVES)
 	def test_every_pick_curve_loads (self, tmp_path: pathlib.Path, curve: str) -> None:
@@ -1139,6 +1156,10 @@ def _is_a_bound (path: str) -> bool:
 	if path.startswith("/$defs/pick/anyOf/3/properties/"):
 		return operator in subsample.query.VALID_PICK_OPERATORS
 
+	# The round-robin long form takes the same bounds, beside its mode.
+	if path.startswith("/$defs/pick/anyOf/4/properties/"):
+		return operator in subsample.query.VALID_PICK_OPERATORS
+
 	return False
 
 
@@ -1422,11 +1443,58 @@ class TestEachNoteOfAListPlaysTheNextRank:
 
 		assert {result.note_map[(0, note)][0][1] for note in (60, 61)} == {subsample.query.PickSpec(None, None)}
 
+	def test_a_round_robin_starts_each_note_of_a_list_one_rank_on (self, tmp_path: pathlib.Path) -> None:
+
+		"""#2674: every note takes the same turn, each from its own place, so a list opens on several sounds."""
+
+		result = _load(tmp_path, _map(assignments=[
+			_assignment(notes=[60, 61, 62], select={"where": {"pitched": True}, "pick": "round_robin"}),
+		]))
+
+		picks = [result.note_map[(0, note)][0][1] for note in (60, 61, 62)]
+
+		assert picks == [
+			subsample.query.PickSpec(None, None, "round_robin", start=start) for start in (0, 1, 2)
+		]
+
 	def test_the_schema_publishes_no_single_default_for_pick (self) -> None:
 
 		"""A default of the best match would be wrong for every note of a list but the first."""
 
 		assert "default" not in _at("/$defs/pick")
+
+
+class TestAPickModeTakesOnlyItsOwnKeys:
+
+	"""#2674: the long forms share one object in the schema, so it says which keys go with each mode."""
+
+	@pytest.mark.parametrize(("pick", "loads"), [
+		pytest.param({"mode": "round_robin", "lte": 4}, True, id="round-robin-with-a-bound"),
+		pytest.param({"mode": "round_robin", "gt": 1, "lt": 5}, True, id="round-robin-with-two-bounds"),
+		pytest.param({"mode": "velocity", "variation": 10}, True, id="velocity-with-variation"),
+		pytest.param({"mode": "round_robin", "variation": 10}, False, id="round-robin-with-variation"),
+		pytest.param({"mode": "velocity", "lte": 4}, False, id="velocity-with-a-bound"),
+		pytest.param({"mode": "round_robin", "eq": 2}, False, id="round-robin-with-eq"),
+	])
+	def test_the_schema_admits_what_the_parser_loads (
+		self, tmp_path: pathlib.Path, pick: dict[str, typing.Any], loads: bool,
+	) -> None:
+
+		"""A long form the schema admits is one that loads, and one it refuses does not."""
+
+		validator = jsonschema.Draft202012Validator({"$ref": "#/$defs/pick", "$defs": _SCHEMA["$defs"]})
+		mapping   = _map(assignments=[_assignment(select={
+			"where": {"pitched": True}, "order": "loudest", "pick": pick,
+		})])
+
+		try:
+			_load(tmp_path, mapping)
+			loaded = True
+		except ValueError:
+			loaded = False
+
+		assert validator.is_valid(pick) is loads
+		assert loaded is loads
 
 
 class TestAnEmptyListIsRefusedWhereItCanOnlyBeAMistake:

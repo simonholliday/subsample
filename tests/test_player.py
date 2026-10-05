@@ -6459,6 +6459,7 @@ class TestReloadMidiMap:
 		fallback = typing.cast(subsample.transform.TransformResult, object())
 		player._last_played[old_key] = fallback
 		player._segment_counters[old_key] = 3
+		player._pick_turns[old_key] = 4
 
 		# A note on the new rules plays while they are being validated.
 		new_key = (9, 38, id(asgn_new))
@@ -6478,6 +6479,7 @@ class TestReloadMidiMap:
 		assert player._target_bpm == 120.0
 		assert player._last_played[old_key] is fallback
 		assert player._segment_counters[old_key] == 3
+		assert player._pick_turns[old_key] == 4
 
 		# What was written during the attempt is not taken back.
 		assert player._last_played[new_key] is played
