@@ -128,7 +128,7 @@ either. The first failure logs its traceback, and a repeat logs one line.
 ## Playback path
 
 ```
-MIDI note_on
+MIDI note_on, or an OSC /note/on (play_osc_note, at its bundle's time)
     → _resolve_sample_id: indexed pick from the pre-computed candidate cache
         (rebuilt when the library changes, not per-trigger; variant-state
          selects - quantized_beats / beat_match - fall back to a live query;
@@ -192,6 +192,19 @@ on another, one at a time and in order, with at most 64 waiting. At stop it drop
 those still waiting and gives the one being analysed ten seconds to finish; one
 that finishes later is not added, since shutdown has begun.
 
+A second OSC receiver, `OscNoteReceiver` on its own port, takes `/note/on` and
+`/note/off` (#3610, #603). It reads each packet itself, because python-osc's
+dispatcher sleeps on the server thread until a bundle's time and then hands the
+message on without it. Each note goes to `MidiPlayer.play_osc_note` with its
+bundle's time, or its arrival for a message on its own or a bundle whose time
+has passed, and the player turns that wall-clock time into its own clock, so the
+note is handled as a MIDI note arriving then would be. `_handler_lock`
+serialises the receiver's thread with the MIDI thread, since `_handle_message`
+is written for one at a time; a MIDI message is stamped before it waits. The
+velocity, 0 to 1, picks a velocity layer scaled to 0-127 and reaches the gain
+and a velocity pick unrounded. A note timed ahead is handled at once, and its
+voice waits in `_voices` until its time comes round.
+
 ### Note timing
 
 Every note plays one buffer after it arrived, at the frame within that buffer
@@ -213,6 +226,12 @@ after a stall, starts the span afresh. `_frame_of` places a time in the span: on
 from before it plays at frame 0, late rather than lost, and one after it waits
 for the next buffer. A voice with no time, as a test passing a message straight
 to `_handle_message` gives, starts at frame 0 as before.
+
+An OSC note in a bundle takes the bundle's time as its arrival (#603), so a
+sender that sends ahead has its notes played on their frames however the
+network delays the packets, as long as the two machines' clocks agree. A
+note-off timed ahead releases its voice at its own frame in the same way, and a
+note more than two seconds ahead is warned about, at most once a minute.
 
 A callback that runs early, before a message in its span has arrived, plays that
 message at the start of the next buffer: one buffer of delay cannot absorb

@@ -1895,7 +1895,8 @@ class TestSameNoteSteal:
 		player._note_map = {(9, 36): [(body, pick), (sub, pick)]}
 
 		def _fake_trigger (
-			msg: typing.Any, assignment: typing.Any, pick_spec: typing.Any, effective_velocity: typing.Any, at: typing.Any = None,
+			msg: typing.Any, assignment: typing.Any, pick_spec: typing.Any, effective_velocity: typing.Any,
+			at: typing.Any = None, fine: typing.Any = None,
 		) -> None:
 			with player._voices_lock:
 				player._voices.append(self._make_voice(note=msg.note, channel=msg.channel, looping=True, loop_end=4410))

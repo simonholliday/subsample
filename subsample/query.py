@@ -912,7 +912,7 @@ class PickSpec:
 	def resolve_index (
 		self,
 		ranked_len: int,
-		velocity:   typing.Optional[int] = None,
+		velocity:   typing.Optional[float] = None,
 		vel_lo:     int = 0,
 		vel_hi:     int = 127,
 		positions:  typing.Optional[list[float]] = None,

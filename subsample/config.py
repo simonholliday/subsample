@@ -551,7 +551,7 @@ class OscConfig:
 
 	When enabled, Subsample sends sample events to OSC-compatible apps
 	(sequencers, visualisers, etc.) and optionally receives file import
-	requests from other OSC-compatible apps.
+	requests, and notes to play, from other OSC-compatible apps.
 
 	Requires the optional ``python-osc`` dependency:
 	``pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"``
@@ -580,6 +580,19 @@ class OscConfig:
 	Set to "0.0.0.0" to accept messages from other hosts on a trusted LAN
 	(unauthenticated remote file read/load — only do this on a network you
 	control)."""
+
+	notes_enabled: bool = False
+	"""When True (and enabled is True), start a second OSC receiver that plays
+	each /note/on and /note/off message through the MIDI map (#3610, #603).
+	Its own receiver, so notes can listen on a network while /sample/import
+	stays on loopback."""
+
+	notes_port: int = 9003
+	"""UDP port the note receiver listens on."""
+
+	notes_host: str = "127.0.0.1"
+	"""Interface the note receiver binds to.  "0.0.0.0" is safer here than for
+	receive_host: a note can only play a sound."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1072,6 +1085,7 @@ def _check_values (cfg: "Config") -> None:
 		("transform.max_disk_mb",       cfg.transform.max_disk_mb,      0.0,  1_000_000.0),
 		("osc.send_port",               float(cfg.osc.send_port),       1.0,  65535.0),
 		("osc.receive_port",            float(cfg.osc.receive_port),    1.0,  65535.0),
+		("osc.notes_port",              float(cfg.osc.notes_port),      1.0,  65535.0),
 	)
 
 	for key, value, lowest, highest in ranges:
@@ -1668,6 +1682,9 @@ def _build_config (
 		receive_enabled=_require_bool(osc_raw, "receive_enabled", False, "osc"),
 		receive_port=int(osc_raw.get("receive_port", 9002)),
 		receive_host=str(osc_raw.get("receive_host", "127.0.0.1")),
+		notes_enabled=_require_bool(osc_raw, "notes_enabled", False, "osc"),
+		notes_port=int(osc_raw.get("notes_port", 9003)),
+		notes_host=str(osc_raw.get("notes_host", "127.0.0.1")),
 	)
 
 	# --- Ambisonic ---

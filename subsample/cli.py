@@ -1843,15 +1843,19 @@ def _main_impl () -> None:
 			similarity_matrix, transform_manager, _player_cell,
 		)
 
-	# --- OSC receiver ---
-	# Listens for /sample/import messages and triggers file import.
-	osc_receiver: typing.Any = None
+	# --- OSC receivers ---
+	# One listens for /sample/import messages and triggers file import; the
+	# other plays /note/on and /note/off through the player (#3610, #603).
+	osc_receivers: list[typing.Any] = []
 
 	if cfg.osc.enabled and cfg.osc.receive_enabled:
-		osc_receiver = _start_osc_receiver(
+		osc_receivers.append(_start_osc_receiver(
 			cfg, instrument_library, similarity_matrix, transform_manager,
 			_player_cell, app_events, output_sample_rate, shutdown_event,
-		)
+		))
+
+	if cfg.osc.enabled and cfg.osc.notes_enabled:
+		osc_receivers.append(_start_osc_note_receiver(cfg, _player_cell))
 
 	for t in threads:
 		t.start()
@@ -1859,7 +1863,8 @@ def _main_impl () -> None:
 	startup_failed = _wait_for_shutdown(shutdown_event, threads)
 
 	_shut_down(
-		threads, _processor_cell[0], instrument_watchers, midi_map_watcher, osc_receiver,
+		threads, _processor_cell[0], instrument_watchers, midi_map_watcher,
+		[receiver for receiver in osc_receivers if receiver is not None],
 		bank_manager, transform_manager, startup_failed,
 	)
 
@@ -1907,7 +1912,7 @@ def _shut_down (
 	processor:           typing.Optional[subsample.recorder.SampleProcessor],
 	instrument_watchers: list[subsample.watcher.InstrumentWatcher],
 	midi_map_watcher:    typing.Optional[subsample.watcher.MidiMapWatcher],
-	osc_receiver:        typing.Any,
+	osc_receivers:       list[typing.Any],
 	bank_manager:        typing.Optional[subsample.bank.BankManager],
 	transform_manager:   typing.Optional[subsample.transform.TransformManager],
 	startup_failed:      bool,
@@ -1935,7 +1940,7 @@ def _shut_down (
 	if midi_map_watcher is not None:
 		midi_map_watcher.stop()
 
-	if osc_receiver is not None:
+	for osc_receiver in osc_receivers:
 		osc_receiver.stop()
 
 	# Drain any in-flight transform workers before exiting.
@@ -2357,6 +2362,54 @@ def _start_osc_receiver (
 		# raises OSError here (not ImportError).  Log and continue rather
 		# than letting it escape and skip the rest of startup.
 		_log.warning("OSC receiver could not bind port %d: %s - OSC receive disabled", cfg.osc.receive_port, exc)
+
+	return None
+
+
+def _start_osc_note_receiver (
+	cfg:         subsample.config.Config,
+	player_cell: list[typing.Optional[subsample.player.MidiPlayer]],
+) -> typing.Any:
+
+	"""Start the OSC receiver that plays each /note/on and /note/off through the player.
+
+	Each note goes to the player in player_cell when it arrives, so a note
+	before the player has started, or with the player off, plays nothing.
+	Returns the started subsample.osc.OscNoteReceiver, or None when python-osc
+	is missing or the port is taken; either is logged and the rest of startup
+	goes on.  Typed Any, as _start_osc_receiver's is.
+	"""
+
+	if not cfg.player.enabled:
+		_log.warning("osc.notes_enabled is on but the player is off, so OSC notes will play nothing")
+
+	def _on_note (on: bool, channel: int, note: int, velocity: float, when: float) -> None:
+
+		"""Hand one OSC note to the player, if there is one yet."""
+
+		player = player_cell[0]
+
+		if player is None:
+			_log.debug("OSC note before the player started - not played")
+			return
+
+		player.play_osc_note(on, channel, note, velocity, when)
+
+	try:
+		note_receiver = subsample.osc.OscNoteReceiver(
+			port=cfg.osc.notes_port,
+			on_note=_on_note,
+			host=cfg.osc.notes_host,
+		)
+		note_receiver.start()
+		print(f"  OSC notes    : listening on port {cfg.osc.notes_port}")
+
+		return note_receiver
+
+	except ImportError:
+		_log.warning("OSC notes enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
+	except OSError as exc:
+		_log.warning("OSC note receiver could not bind port %d: %s - OSC notes disabled", cfg.osc.notes_port, exc)
 
 	return None
 

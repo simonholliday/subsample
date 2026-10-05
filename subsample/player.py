@@ -10,10 +10,14 @@ Threading model:
     rtmidi dispatches each incoming message to _safe_handle_message on its
     own dedicated thread — no polling loop, no fixed input-latency floor.
     Sub-millisecond MIDI-to-handler latency on a quiet Linux system.
+  - OSC notes, with osc.notes_enabled, arrive on the OSC note receiver's
+    thread and enter through play_osc_note (#3610, #603).
   - The player's run() thread is purely a lifecycle coordinator: open
     ports, wait for shutdown, then close.
 
 Concurrency control:
+  - _handler_lock lets one message at a time into _handle_message, from
+    the rtmidi thread or the OSC note receiver's; outermost of all.
   - _voices_lock guards _voices (audio callback + handler).
   - _mix_matrix_lock guards _mix_matrix_cache (handler + reload).
   - _cc_debounce_lock guards _cc_debounce_timer (handler + cleanup).
@@ -121,6 +125,12 @@ _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 # that leaves an audible residual).  k=9 gives a musically natural fast-then-slow
 # tail; exp(-9) ≈ 1.2e-4.
 _RELEASE_EXP_K: float = 9.0
+
+# An OSC note timed further ahead than this waits as asked, but is warned
+# about, at most once a minute: a sender whose clock is out of step with this
+# machine's would otherwise leave every note waiting in silence (#603).
+_OSC_FAR_AHEAD_SECONDS:         float = 2.0
+_OSC_FAR_AHEAD_WARNING_SECONDS: float = 60.0
 
 # Note map: (mido_channel, midi_note) → list of (Assignment, PickSpec) layers.
 #
@@ -4611,6 +4621,9 @@ class MidiPlayer:
 		self._clock: typing.Callable[[], float] = time.perf_counter
 		self._span:  typing.Optional[tuple[float, float]] = None
 
+		# When an OSC note timed far ahead was last warned about (monotonic).
+		self._osc_far_ahead_warned: float = float("-inf")
+
 		# Assignment ids already warned that their sample has no usable loop
 		# (mode: loop fail-musical) — so the note-on path warns once, not per hit.
 		self._loop_unavailable_warned: set[int] = set()
@@ -4795,6 +4808,13 @@ class MidiPlayer:
 		# _cc_debounce_lock; never acquire _rules_lock while holding any
 		# other player lock.
 		self._state_lock: threading.Lock = threading.Lock()
+
+		# Serialises the two ways a message reaches _handle_message: rtmidi's
+		# thread (_safe_handle_message) and the OSC note receiver's
+		# (play_osc_note), since the handler is written for one thread at a
+		# time (#3610).  Outermost of every player lock: taken only at those
+		# two entry points, with no other lock held.
+		self._handler_lock: threading.Lock = threading.Lock()
 
 		# Serialises rule-set re-evaluation: update_assignments() and
 		# _apply_rule_set() run under this lock so a watcher / CC-debounce /
@@ -5723,23 +5743,81 @@ class MidiPlayer:
 		mysteriously-dropped notes.
 
 		The message is stamped with the player's clock first, so a note plays
-		one buffer after it arrived however long the handler takes (#600).
+		one buffer after it arrived however long the handler takes (#600), and
+		however long it waits for an OSC note being handled (_handler_lock).
 		"""
 
 		at = self._clock()
 
 		try:
-			self._handle_message(msg, at)
+			with self._handler_lock:
+				self._handle_message(msg, at)
 		except Exception as exc:
 			_log.error(
 				"MIDI handler failed for %r: %s", msg, exc, exc_info=True,
+			)
+
+	def play_osc_note (
+		self,
+		on:       bool,
+		channel:  int,
+		note:     int,
+		velocity: float,
+		when:     float,
+	) -> None:
+
+		"""Play or end a note an OSC /note/on or /note/off sent, at the time it was meant for.
+
+		Called on the OSC note receiver's thread (#3610, #603).  ``channel`` is
+		0-15 and ``velocity`` 0 to 1.  ``when`` is the wall-clock time, in
+		seconds since the epoch, the note was meant for: its bundle's time, or
+		its arrival for a message on its own or one whose time has passed.  It
+		becomes the player's clock as a MIDI note's arrival does, so the note
+		plays one buffer after it, as a MIDI note arriving then would (#4513).
+
+		A velocity layer is chosen from the velocity scaled to 0-127, as a MIDI
+		note's is; gain and a velocity pick read it in full, which is what a
+		decimal velocity is for (#603).  Any velocity above 0 is at least 1,
+		so a quiet note is never read as a note-off.
+		"""
+
+		ahead = when - time.time()
+		at    = self._clock() + ahead
+
+		if ahead > _OSC_FAR_AHEAD_SECONDS:
+			now = time.monotonic()
+
+			if now - self._osc_far_ahead_warned >= _OSC_FAR_AHEAD_WARNING_SECONDS:
+				self._osc_far_ahead_warned = now
+				_log.warning(
+					"OSC note timed %.1f s ahead - it will wait that long.  Is the "
+					"sending machine's clock in step with this one's?", ahead,
+				)
+
+		fine: typing.Optional[float] = None
+
+		if on and velocity > 0.0:
+			fine = velocity * 127.0
+			msg  = mido.Message("note_on", channel=channel, note=note, velocity=max(1, round(fine)))
+		elif on:
+			msg = mido.Message("note_on", channel=channel, note=note, velocity=0)
+		else:
+			msg = mido.Message("note_off", channel=channel, note=note)
+
+		try:
+			with self._handler_lock:
+				self._handle_message(msg, at, fine)
+		except Exception as exc:
+			_log.error(
+				"OSC note handler failed for %r: %s", msg, exc, exc_info=True,
 			)
 
 	def _select_velocity_layers (
 		self,
 		entries:  list[tuple[subsample.query.Assignment, subsample.query.PickSpec]],
 		velocity: int,
-	) -> list[tuple[subsample.query.Assignment, subsample.query.PickSpec, int]]:
+		fine:     typing.Optional[float] = None,
+	) -> list[tuple[subsample.query.Assignment, subsample.query.PickSpec, float]]:
 
 		"""Find every velocity layer covering ``velocity`` with its effective velocity.
 
@@ -5761,7 +5839,12 @@ class MidiPlayer:
 		visible when they differ.
 		"""
 
-		covering: list[tuple[subsample.query.Assignment, subsample.query.PickSpec, int]] = []
+		covering: list[tuple[subsample.query.Assignment, subsample.query.PickSpec, float]] = []
+
+		# The layer is chosen by the 7-bit velocity, as MIDI's is, and the
+		# effective velocity carried from the fine one when an OSC note gave
+		# one, unrounded (#603).
+		played = velocity if fine is None else fine
 
 		for asgn, pick in entries:
 			lo, hi = asgn.velocity_trigger
@@ -5770,32 +5853,47 @@ class MidiPlayer:
 				continue
 
 			if asgn.velocity_rescale_to is None:
-				covering.append((asgn, pick, velocity))
+				covering.append((asgn, pick, played))
 				continue
 
 			out_lo, out_hi = asgn.velocity_rescale_to
 
 			# Linear remap.  trigger_lo < trigger_hi is enforced at parse
 			# time when rescale_to is set, so the divisor is always > 0.
-			scaled = out_lo + (velocity - lo) / (hi - lo) * (out_hi - out_lo)
-			effective = max(0, min(127, int(round(scaled))))
+			scaled = out_lo + (played - lo) / (hi - lo) * (out_hi - out_lo)
+
+			if fine is None:
+				effective: float = max(0, min(127, int(round(scaled))))
+			else:
+				effective = max(0.0, min(127.0, scaled))
 
 			covering.append((asgn, pick, effective))
 
 		return covering
 
-	def _handle_message (self, msg: mido.Message, at: typing.Optional[float] = None) -> None:
+	def _handle_message (
+		self,
+		msg:  mido.Message,
+		at:   typing.Optional[float] = None,
+		fine: typing.Optional[float] = None,
+	) -> None:
 
 		"""Dispatch a single MIDI message via the select/process pipeline.
 
-		Runs on rtmidi's dedicated callback thread (see ``run()``).  Must stay
+		Runs on rtmidi's dedicated callback thread (see ``run()``), or on the
+		OSC note receiver's, never both at once (_handler_lock).  Must stay
 		fast — any slow operation here stalls MIDI dispatch for the lifetime
 		of the port.
 
 		``at`` is when the message arrived on the player's clock: each voice it
 		starts or releases takes effect one buffer later, at the frame that
 		falls on (#600).  None, as a test passing a message straight in gives,
-		takes effect at the start of the next buffer.
+		takes effect at the start of the next buffer.  An OSC note's ``at`` is
+		its bundle's time, which may still be ahead (#603).
+
+		``fine`` is an OSC note's velocity on the 0-127 scale, unrounded; the
+		velocity layer is still chosen by ``msg.velocity``, and gain and a
+		velocity pick read ``fine`` instead (see play_osc_note).
 
 		note_off (and note_on with velocity=0) marks matching active voices as
 		releasing so the audio callback fades them out over the assignment's
@@ -5948,7 +6046,7 @@ class MidiPlayer:
 		# than one only when stacked members deliberately overlap.  Empty means
 		# the velocity fell into a coverage gap (already WARNINGed at load) —
 		# log DEBUG and stop.
-		layers = self._select_velocity_layers(entries, msg.velocity)
+		layers = self._select_velocity_layers(entries, msg.velocity, fine)
 
 		if not layers:
 			_log.debug(
@@ -5971,7 +6069,7 @@ class MidiPlayer:
 		# once; stacked members sound together as one composite hit.  Each call
 		# is independent, so one layer finding no sample never silences another.
 		for assignment, pick_spec, effective_velocity in layers:
-			self._trigger_one(msg, assignment, pick_spec, effective_velocity, at)
+			self._trigger_one(msg, assignment, pick_spec, effective_velocity, at, fine)
 
 	def _build_trigger_spec (
 		self,
@@ -6319,8 +6417,9 @@ class MidiPlayer:
 		msg:                mido.Message,
 		assignment:         subsample.query.Assignment,
 		pick_spec:          subsample.query.PickSpec,
-		effective_velocity: int,
+		effective_velocity: float,
 		at:                 typing.Optional[float] = None,
+		fine:               typing.Optional[float] = None,
 	) -> None:
 
 		"""Render one assignment for a note-on and enqueue its voice.
@@ -6335,7 +6434,8 @@ class MidiPlayer:
 		audio.  All per-assignment settings (gain, pan, output routing, mode,
 		process) come off ``assignment``, so stacked members keep independent
 		voices.  ``at`` is when the note-on arrived, which the voice starts
-		from (see _Voice.starts_at).
+		from (see _Voice.starts_at).  ``fine`` is an OSC note's unrounded
+		velocity, which a velocity pick reads in place of ``msg.velocity``.
 		"""
 
 		pan_weights      = assignment.pan_weights
@@ -6373,7 +6473,8 @@ class MidiPlayer:
 				turn = self._pick_turns.get(state_key, 0)
 				self._pick_turns[state_key] = turn + 1
 
-		sample_id = self._resolve_sample_id(assignment, pick_spec, eff_library, msg.velocity, turn)
+		played    = msg.velocity if fine is None else fine
+		sample_id = self._resolve_sample_id(assignment, pick_spec, eff_library, played, turn)
 
 		if sample_id is None:
 			_log.debug(
@@ -6516,7 +6617,7 @@ class MidiPlayer:
 	def _render (
 		self,
 		record: subsample.library.SampleRecord,
-		velocity: int,
+		velocity: float,
 		mix_matrix: numpy.ndarray,
 		gain_db: float = 0.0,
 	) -> typing.Optional[numpy.ndarray]:
@@ -6811,7 +6912,7 @@ class MidiPlayer:
 		assignment:  subsample.query.Assignment,
 		pick_spec:   subsample.query.PickSpec,
 		eff_library: subsample.library.InstrumentLibrary,
-		velocity:    int,
+		velocity:    float,
 		turn:        int = 0,
 	) -> typing.Optional[int]:
 
@@ -7977,7 +8078,7 @@ class MidiPlayer:
 		self,
 		audio: numpy.ndarray,
 		level: subsample.analysis.LevelResult,
-		velocity: int,
+		velocity: float,
 		mix_matrix: numpy.ndarray,
 		gain_db: float = 0.0,
 	) -> numpy.ndarray:
@@ -7994,7 +8095,8 @@ class MidiPlayer:
 			level:      LevelResult for this audio (peak + rms), used for gain calc.
 			velocity:   The note's velocity (0-127) after the assignment's
 			            `velocity: rescale`, when it has one, so not always the
-			            raw value of the triggering note_on message.
+			            raw value of the triggering note_on message, and
+			            not always whole: an OSC note's is not (#603).
 			mix_matrix: float32 array, shape (output_channels, in_channels).
 			            Built by _get_mix_matrix() from channel.build_mix_matrix().
 			gain_db:    Per-assignment level offset in dB (from Assignment.gain_db).

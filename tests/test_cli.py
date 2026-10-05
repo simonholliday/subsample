@@ -2598,7 +2598,7 @@ class TestShutDown:
 		receiver.stop.side_effect = lambda: calls.append("osc")
 
 		subsample.cli._shut_down(
-			typing.cast(list[threading.Thread], threads), None, [watcher], map_watcher, receiver,
+			typing.cast(list[threading.Thread], threads), None, [watcher], map_watcher, [receiver],
 			bank_manager, typing.cast(typing.Optional[subsample.transform.TransformManager], transform_manager),
 			startup_failed,
 		)

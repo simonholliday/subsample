@@ -24,7 +24,7 @@
 # and transform sections below - these override the global split.
 
 # ---------------------------------------------------------------------------
-# osc - send sample events and receive file import requests via OSC
+# osc - send sample events and receive file import requests and notes via OSC
 # ---------------------------------------------------------------------------
 # OSC (Open Sound Control) integration for communicating with other apps.
 # Requires the optional python-osc dependency: pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"
@@ -35,6 +35,9 @@
 #
 # Receiver: listens for /sample/import messages containing a file path,
 # and triggers analysis and import of the specified audio file into the library.
+#
+# Note receiver: plays each /note/on and /note/off message through the MIDI
+# map, as MIDI notes play.  A message in a bundle plays at the bundle's time.
 
 # osc:
 #   enabled: false
@@ -46,6 +49,11 @@
 #                               # reads an arbitrary path, so binding to
 #                               # "0.0.0.0" exposes unauthenticated remote file
 #                               # read/load - only do so on a trusted LAN.
+#   notes_enabled: false
+#   notes_port: 9003
+#   notes_host: "127.0.0.1"     # loopback by default; "0.0.0.0" is safer here
+#                               # than for receive_host: a note can only play
+#                               # a sound.
 
 # ---------------------------------------------------------------------------
 # ambisonic - first-order B-format (AmbiX) rotation and decoding

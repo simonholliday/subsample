@@ -468,6 +468,238 @@ def _wait_until (condition: typing.Callable[[], bool], timeout: float = 5.0) -> 
 # OscConfig loading tests
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# OscNoteReceiver tests (#3610, #603)
+# ---------------------------------------------------------------------------
+
+_Note = tuple[bool, int, int, float, float]
+
+
+def _bundle (when: float, *messages: tuple[str, list[typing.Any]]) -> bytes:
+
+	"""The datagram of a bundle of these messages, timed for ``when`` (seconds since the epoch)."""
+
+	import pythonosc.osc_bundle_builder
+	import pythonosc.osc_message_builder
+
+	# python-osc annotates the timestamp as an int, though it takes seconds as a float.
+	builder = pythonosc.osc_bundle_builder.OscBundleBuilder(typing.cast(int, when))
+
+	for address, args in messages:
+		message = pythonosc.osc_message_builder.OscMessageBuilder(address=address)
+
+		for arg in args:
+			message.add_arg(arg)
+
+		builder.add_content(message.build())
+
+	return builder.build().dgram
+
+
+class TestOscNoteReceiver:
+
+	"""The note receiver hands each note on with the time it was meant for, without waiting for it."""
+
+	def _start (self) -> tuple[subsample.osc.OscNoteReceiver, int, list[_Note], threading.Event]:
+
+		"""A started receiver on an OS-assigned port, the port, what it hands on, and an event per note."""
+
+		notes: list[_Note] = []
+		heard = threading.Event()
+
+		def on_note (on: bool, channel: int, note: int, velocity: float, when: float) -> None:
+			notes.append((on, channel, note, velocity, when))
+			heard.set()
+
+		receiver = subsample.osc.OscNoteReceiver(port=0, on_note=on_note)
+		receiver.start()
+
+		return receiver, receiver._server.server_address[1], notes, heard
+
+	def _send (self, port: int, address: str, args: list[typing.Any]) -> None:
+
+		"""Send one message on its own."""
+
+		import pythonosc.udp_client
+
+		pythonosc.udp_client.SimpleUDPClient("127.0.0.1", port).send_message(address, args)
+
+	def _send_raw (self, port: int, datagram: bytes) -> None:
+
+		"""Send a datagram as it is."""
+
+		import socket
+
+		with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+			sock.sendto(datagram, ("127.0.0.1", port))
+
+	def test_start_stop_lifecycle (self) -> None:
+
+		receiver, _port, _notes, _heard = self._start()
+
+		assert receiver._thread is not None and receiver._thread.is_alive()
+
+		receiver.stop()
+
+		assert not receiver._thread.is_alive()
+
+	def test_stop_before_start_does_not_hang (self) -> None:
+
+		receiver = subsample.osc.OscNoteReceiver(port=0, on_note=lambda *_args: None)
+
+		receiver.stop()
+
+	def test_a_note_on_its_own_plays_as_it_arrives (self) -> None:
+
+		receiver, port, notes, heard = self._start()
+
+		try:
+			before = time.time()
+			self._send(port, "/note/on", [10, 36, 0.5])
+
+			assert heard.wait(timeout=5.0)
+		finally:
+			receiver.stop()
+
+		on, channel, note, velocity, when = notes[0]
+
+		assert (on, channel, note, velocity) == (True, 9, 36, 0.5)
+		assert before <= when <= time.time()
+
+	def test_a_note_off_carries_the_channel_and_the_note (self) -> None:
+
+		receiver, port, notes, heard = self._start()
+
+		try:
+			self._send(port, "/note/off", [1, 60])
+
+			assert heard.wait(timeout=5.0)
+		finally:
+			receiver.stop()
+
+		assert notes[0][:4] == (False, 0, 60, 0.0)
+
+	def test_a_bundle_timed_ahead_is_handed_on_at_once_with_its_time (self) -> None:
+
+		"""python-osc's own dispatcher would sleep until the time, and then forget it."""
+
+		receiver, port, notes, heard = self._start()
+		meant_for = time.time() + 30.0
+
+		try:
+			self._send_raw(port, _bundle(meant_for, ("/note/on", [1, 38, 1.0])))
+
+			assert heard.wait(timeout=5.0), "the receiver waited for the bundle's time"
+		finally:
+			receiver.stop()
+
+		assert notes[0][:4] == (True, 0, 38, 1.0)
+		assert notes[0][4] == pytest.approx(meant_for, abs=0.001)
+
+	def test_a_bundle_whose_time_has_passed_plays_as_it_arrives (self) -> None:
+
+		receiver, port, notes, heard = self._start()
+
+		try:
+			before = time.time()
+			self._send_raw(port, _bundle(before - 30.0, ("/note/on", [1, 38, 1.0])))
+
+			assert heard.wait(timeout=5.0)
+		finally:
+			receiver.stop()
+
+		assert notes[0][4] >= before
+
+	def test_a_bundles_notes_keep_their_order_and_time (self) -> None:
+
+		receiver, port, notes, _heard = self._start()
+		meant_for = time.time() + 10.0
+
+		try:
+			self._send_raw(port, _bundle(
+				meant_for, ("/note/on", [1, 36, 0.8]), ("/note/off", [1, 36]),
+			))
+
+			deadline = time.monotonic() + 5.0
+
+			while len(notes) < 2 and time.monotonic() < deadline:
+				time.sleep(0.01)
+		finally:
+			receiver.stop()
+
+		assert [note[0] for note in notes] == [True, False]
+		assert all(note[4] == pytest.approx(meant_for, abs=0.001) for note in notes)
+
+	@pytest.mark.parametrize("args", [
+		pytest.param([0, 36, 0.5], id="channel-0"),
+		pytest.param([17, 36, 0.5], id="channel-17"),
+		pytest.param([1, 128, 0.5], id="note-128"),
+		pytest.param([1, 36, 1.5], id="velocity-above-1"),
+		pytest.param([1, 36, -0.1], id="velocity-below-0"),
+		pytest.param([1, 36], id="no-velocity"),
+		pytest.param(["one", 36, 0.5], id="channel-as-text"),
+		pytest.param([1.5, 36, 0.5], id="channel-with-a-fraction"),
+	])
+	def test_a_note_written_wrongly_is_ignored_with_a_warning (
+		self, args: list[typing.Any], caplog: pytest.LogCaptureFixture,
+	) -> None:
+		receiver, port, notes, _heard = self._start()
+
+		try:
+			with caplog.at_level(logging.WARNING, logger="subsample.osc"):
+				self._send(port, "/note/on", args)
+				self._send(port, "/note/off", [1, 99])
+
+				deadline = time.monotonic() + 5.0
+
+				while not notes and time.monotonic() < deadline:
+					time.sleep(0.01)
+		finally:
+			receiver.stop()
+
+		# Only the well-formed note-off sent after it got through.
+		assert [note[:3] for note in notes] == [(False, 0, 99)]
+		assert any("/note/on" in record.message for record in caplog.records)
+
+	def test_whole_numbers_written_as_decimals_and_a_velocity_of_1_are_read (self) -> None:
+
+		receiver, port, notes, heard = self._start()
+
+		try:
+			self._send(port, "/note/on", [16.0, 127.0, 1])
+
+			assert heard.wait(timeout=5.0)
+		finally:
+			receiver.stop()
+
+		assert notes[0][:4] == (True, 15, 127, 1.0)
+
+	def test_a_mistake_sent_on_every_note_is_warned_about_once (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		receiver = subsample.osc.OscNoteReceiver(port=0, on_note=lambda *_args: None)
+
+		try:
+			with caplog.at_level(logging.WARNING, logger="subsample.osc"):
+				for _ in range(5):
+					receiver._handle("/note/on", [0, 36, 0.5], time.time())
+		finally:
+			receiver.stop()
+
+		assert len([record for record in caplog.records if "/note/on" in record.message]) == 1
+
+	def test_another_address_is_ignored (self) -> None:
+
+		calls: list[_Note] = []
+		receiver = subsample.osc.OscNoteReceiver(port=0, on_note=lambda *args: calls.append(args))
+
+		try:
+			receiver._handle("/sample/import", ["/tmp/x.wav"], time.time())
+		finally:
+			receiver.stop()
+
+		assert calls == []
+
+
 class TestOscConfig:
 
 	def test_default_config_has_osc_disabled (self) -> None:
@@ -483,6 +715,9 @@ class TestOscConfig:
 		assert cfg.osc.send_port == 9000
 		assert cfg.osc.receive_enabled is False
 		assert cfg.osc.receive_port == 9002
+		assert cfg.osc.notes_enabled is False
+		assert cfg.osc.notes_port == 9003
+		assert cfg.osc.notes_host == "127.0.0.1"
 
 	def test_explicit_osc_yaml_parsed (self, tmp_path: pathlib.Path) -> None:
 		"""Explicit osc YAML section is parsed correctly."""
@@ -504,6 +739,9 @@ class TestOscConfig:
 				"  send_port: 8000\n"
 				"  receive_enabled: true\n"
 				"  receive_port: 9999\n"
+				"  notes_enabled: true\n"
+				"  notes_port: 9100\n"
+				"  notes_host: \"0.0.0.0\"\n"
 			)
 
 		cfg = subsample.config.load_config(user_config)
@@ -513,3 +751,91 @@ class TestOscConfig:
 		assert cfg.osc.send_port == 8000
 		assert cfg.osc.receive_enabled is True
 		assert cfg.osc.receive_port == 9999
+		assert cfg.osc.notes_enabled is True
+		assert cfg.osc.notes_port == 9100
+		assert cfg.osc.notes_host == "0.0.0.0"
+
+
+class TestTheNoteReceiverReachesThePlayer:
+
+	"""cli starts the note receiver and hands each note to the player there is when it arrives."""
+
+	def _cfg (self, player_enabled: bool = True) -> subsample.config.Config:
+
+		"""The default config with OSC notes on, on a port the OS chooses."""
+
+		import dataclasses
+
+		cfg = subsample.config.load_config(subsample.config._locate_default_config())
+
+		return dataclasses.replace(
+			cfg,
+			osc=dataclasses.replace(cfg.osc, enabled=True, notes_enabled=True, notes_port=0),
+			player=dataclasses.replace(cfg.player, enabled=player_enabled),
+		)
+
+	def test_a_note_reaches_the_player_in_the_cell (self) -> None:
+
+		import pythonosc.udp_client
+
+		import subsample.cli
+
+		player = unittest.mock.MagicMock()
+		heard  = threading.Event()
+		player.play_osc_note.side_effect = lambda *args: heard.set()
+
+		receiver = subsample.cli._start_osc_note_receiver(self._cfg(), [player])
+
+		try:
+			port = receiver._server.server_address[1]
+			pythonosc.udp_client.SimpleUDPClient("127.0.0.1", port).send_message("/note/on", [10, 36, 0.5])
+
+			assert heard.wait(timeout=5.0)
+		finally:
+			receiver.stop()
+
+		on, channel, note, velocity, _when = player.play_osc_note.call_args.args
+
+		assert (on, channel, note, velocity) == (True, 9, 36, 0.5)
+
+	def test_a_note_before_the_player_starts_plays_nothing (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		import subsample.cli
+
+		receiver = subsample.cli._start_osc_note_receiver(self._cfg(), [None])
+
+		try:
+			with caplog.at_level(logging.DEBUG, logger="subsample.cli"):
+				receiver._handle("/note/on", [10, 36, 0.5], time.time())
+		finally:
+			receiver.stop()
+
+		assert any("before the player started" in record.message for record in caplog.records)
+
+	def test_notes_with_the_player_off_are_warned_about (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		import subsample.cli
+
+		with caplog.at_level(logging.WARNING, logger="subsample.cli"):
+			receiver = subsample.cli._start_osc_note_receiver(self._cfg(player_enabled=False), [None])
+
+		receiver.stop()
+
+		assert any("player is off" in record.message for record in caplog.records)
+
+	def test_a_port_in_use_disables_notes_and_startup_goes_on (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		import dataclasses
+		import socket
+
+		import subsample.cli
+
+		with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as taken:
+			taken.bind(("127.0.0.1", 0))
+			cfg = self._cfg()
+			cfg = dataclasses.replace(cfg, osc=dataclasses.replace(cfg.osc, notes_port=taken.getsockname()[1]))
+
+			with caplog.at_level(logging.WARNING, logger="subsample.cli"):
+				assert subsample.cli._start_osc_note_receiver(cfg, [None]) is None
+
+		assert any("could not bind" in record.message for record in caplog.records)

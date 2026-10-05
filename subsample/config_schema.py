@@ -87,14 +87,22 @@ def json_schema () -> dict[str, typing.Any]:
 				`receive_enabled`, a `/sample/import` message naming an audio file
 				has Subsample analyse the file where it is and add it to the library
 				until the next restart; to keep it, put it in `library.directory` as
-				well.  Requires the optional `python-osc` package.
+				well.  Requires the optional `python-osc` package.  With
+				`notes_enabled`, `/note/on` and `/note/off` messages play notes
+				through the MIDI map, as MIDI notes do: `/note/on` carries the MIDI
+				channel, 1 to 16, the note, 0 to 127, and the velocity as a decimal
+				from 0 to 1, and `/note/off` the MIDI channel and the note.  A message in
+				a bundle plays at the bundle's time, as a MIDI note arriving then
+				would; one on its own, or one whose time has passed, plays as it
+				arrives.  A bundle from another machine needs that machine's clock
+				to agree with this one's.
 				""",
 				{
 					"enabled": _setting(
 						"boolean",
 						"""
 						Turns OSC on.  When `false`, Subsample creates neither the
-						sender nor the receiver, whatever the other `osc` settings say.
+						sender nor any receiver, whatever the other `osc` settings say.
 						""",
 						default=False,
 					),
@@ -130,6 +138,31 @@ def json_schema () -> dict[str, typing.Any]:
 						so the default accepts messages from this machine only.  Set
 						`0.0.0.0` to accept them from other hosts on a network you
 						control.
+						""",
+						default="127.0.0.1",
+						examples=["0.0.0.0"],
+					),
+					"notes_enabled": _setting(
+						"boolean",
+						"""
+						Starts an OSC receiver for notes, apart from the one for
+						imports.  Has no effect unless `enabled` is `true`, and plays
+						nothing unless the player is on.
+						""",
+						default=False,
+					),
+					"notes_port": _setting(
+						"integer",
+						"UDP port the note receiver listens on.",
+						default=9003,
+					),
+					"notes_host": _setting(
+						"string",
+						"""
+						Network interface the note receiver binds to.  The default
+						accepts notes from this machine only.  `0.0.0.0` accepts them
+						from other hosts as well, which is safer here than for
+						`receive_host`: a note can only play a sound.
 						""",
 						default="127.0.0.1",
 						examples=["0.0.0.0"],

@@ -6,6 +6,9 @@ in-memory instrument library from other OSC-compatible applications.  Files
 are read in place (not copied); the sample is available for playback until
 the next restart.
 
+A second receiver, OscNoteReceiver, takes /note/on and /note/off messages and
+hands each note to the player with the time its bundle names (#3610, #603).
+
 Requires the optional ``python-osc`` dependency::
 
     pip install subsample[osc]
@@ -18,7 +21,9 @@ when an instance is actually created.
 import logging
 import pathlib
 import queue
+import socketserver
 import threading
+import time
 import typing
 
 import numpy
@@ -279,3 +284,210 @@ class OscReceiver:
 				self._on_import(file_path)
 			except Exception:
 				_log.warning("OSC /sample/import handler failed for %s", file_path, exc_info=True)
+
+
+# How often the note receiver repeats a warning about one kind of bad message.
+# A sender with a mistake sends it on every note, and once a minute says it.
+_NOTE_WARNING_SECONDS: float = 60.0
+
+
+class _NoteRequestHandler (socketserver.BaseRequestHandler):
+
+	"""Hand one UDP packet to the note receiver that owns the server."""
+
+	def handle (self) -> None:
+
+		"""Pass the packet's bytes on; the receiver reads the notes in it."""
+
+		server = typing.cast(_NoteServer, self.server)
+		server.receiver._handle_packet(self.request[0])
+
+
+class _NoteServer (socketserver.UDPServer):
+
+	"""A UDP server that knows the note receiver it serves."""
+
+	def __init__ (self, address: tuple[str, int], receiver: "OscNoteReceiver") -> None:
+
+		"""Bind the socket now, so a busy port fails at construction."""
+
+		self.receiver = receiver
+		super().__init__(address, _NoteRequestHandler)
+
+
+class OscNoteReceiver:
+
+	"""Listen for /note/on and /note/off, and hand each note on with the time it is meant for.
+
+	#3610 and #603, as #4513 decided them: ``/note/on <channel 1-16> <note
+	0-127> <velocity 0.0-1.0>`` and ``/note/off <channel> <note>``.  A message
+	in a bundle is meant for the bundle's time; one on its own, or one whose
+	time has passed, for when it arrived.  on_note receives (on, channel 0-15,
+	note, velocity, when), ``when`` in seconds since the epoch, as a timetag
+	reads, and the player places the note one buffer after it, as it would a
+	MIDI note arriving then.
+
+	Each packet is read here rather than through python-osc's dispatcher,
+	which, for a bundle timed ahead, sleeps on the server thread until the
+	time comes and then hands the message on without it.  A note-on's work is
+	short, so on_note runs on the server thread and notes keep their order.
+
+	A note can only play a sound, so binding beyond loopback exposes nothing
+	more than that, unlike OscReceiver's arbitrary-path import.
+	"""
+
+	def __init__ (
+		self,
+		port:    int,
+		on_note: typing.Callable[[bool, int, int, float, float], None],
+		host:    str = "127.0.0.1",
+	) -> None:
+
+		"""Bind the UDP socket now, so a busy port fails at construction; python-osc is needed from here."""
+
+		import pythonosc.osc_packet
+
+		self._packet      = pythonosc.osc_packet.OscPacket
+		self._parse_error = pythonosc.osc_packet.ParseError
+
+		self._on_note = on_note
+		self._server  = _NoteServer((host, port), self)
+		self._thread: typing.Optional[threading.Thread] = None
+
+		# When each kind of bad message was last warned about.
+		self._warned: dict[str, float] = {}
+
+	def start (self) -> None:
+
+		"""Launch the server on a daemon thread."""
+
+		self._thread = threading.Thread(
+			target=self._server.serve_forever,
+			name="osc-notes",
+			daemon=True,
+		)
+		self._thread.start()
+		_log.info("OSC note receiver listening on port %d", self._server.server_address[1])
+
+	def stop (self) -> None:
+
+		"""Stop listening and release the port."""
+
+		# shutdown() waits on an event only serve_forever() sets, so it would
+		# block forever before start().
+		if self._thread is not None:
+			self._server.shutdown()
+			self._thread.join(timeout=5.0)
+
+		self._server.server_close()
+		_log.debug("OSC note receiver stopped")
+
+	def _handle_packet (self, data: bytes) -> None:
+
+		"""Read every message in one packet, a bundle's in time order, and play each."""
+
+		try:
+			packet = self._packet(data)
+		except self._parse_error:
+			self._warn("packet", "OSC note receiver: a packet that is not OSC - ignored")
+			return
+
+		for timed in packet.messages:
+			try:
+				self._handle(timed.message.address, list(timed.message.params), timed.time)
+			except Exception:
+				_log.warning("OSC note handler failed for %s", timed.message.address, exc_info=True)
+
+	def _handle (self, address: str, params: list[typing.Any], when: float) -> None:
+
+		"""Check one message's arguments and pass its note on, or say what is wrong with it."""
+
+		if address == "/note/on":
+			if len(params) != 3:
+				self._warn(address, "OSC /note/on needs a channel, a note and a velocity - ignored")
+				return
+
+			channel, note, velocity = _channel(params[0]), _note(params[1]), _velocity(params[2])
+
+			if channel is None or note is None or velocity is None:
+				self._warn(
+					address,
+					f"OSC /note/on {params}: the channel must be 1 to 16, the note 0 to "
+					f"127 and the velocity a decimal from 0 to 1 - ignored",
+				)
+				return
+
+			self._on_note(True, channel, note, velocity, when)
+			return
+
+		if address == "/note/off":
+			if len(params) != 2:
+				self._warn(address, "OSC /note/off needs a channel and a note - ignored")
+				return
+
+			channel, note = _channel(params[0]), _note(params[1])
+
+			if channel is None or note is None:
+				self._warn(address, f"OSC /note/off {params}: the channel must be 1 to 16 and the note 0 to 127 - ignored")
+				return
+
+			self._on_note(False, channel, note, 0.0, when)
+			return
+
+		_log.debug("OSC note receiver: %s is not a note address - ignored", address)
+
+	def _warn (self, kind: str, message: str) -> None:
+
+		"""Log a warning about one kind of bad message, at most once a minute."""
+
+		now = time.monotonic()
+
+		if now - self._warned.get(kind, -_NOTE_WARNING_SECONDS) < _NOTE_WARNING_SECONDS:
+			return
+
+		self._warned[kind] = now
+		_log.warning("%s", message)
+
+
+def _whole (value: typing.Any, lowest: int, highest: int) -> typing.Optional[int]:
+
+	"""A whole number in [lowest, highest], from an int or a float with nothing after the point, else None."""
+
+	if isinstance(value, bool):
+		return None
+
+	if isinstance(value, float) and value.is_integer():
+		value = int(value)
+
+	if not isinstance(value, int) or not lowest <= value <= highest:
+		return None
+
+	return value
+
+
+def _channel (value: typing.Any) -> typing.Optional[int]:
+
+	"""A MIDI channel as a message writes it, 1 to 16, as the player numbers it, 0 to 15."""
+
+	channel = _whole(value, 1, 16)
+
+	return None if channel is None else channel - 1
+
+
+def _note (value: typing.Any) -> typing.Optional[int]:
+
+	"""A MIDI note number, 0 to 127."""
+
+	return _whole(value, 0, 127)
+
+
+def _velocity (value: typing.Any) -> typing.Optional[float]:
+
+	"""A velocity from 0 to 1, as a decimal or as 0 or 1."""
+
+	if isinstance(value, bool) or not isinstance(value, (int, float)):
+		return None
+
+	velocity = float(value)
+
+	return velocity if 0.0 <= velocity <= 1.0 else None
