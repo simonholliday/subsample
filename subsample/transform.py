@@ -2119,7 +2119,9 @@ def _mix_to_mono (audio: numpy.ndarray) -> numpy.ndarray:
 	if audio.shape[1] == 1:
 		return audio[:, 0]
 
-	return numpy.mean(audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]  # numpy.mean with axis+dtype overload resolves to scalar in mypy; actual return is ndarray
+	# numpy before 2.5 types a mean over one axis as a scalar; asarray satisfies
+	# both, and hands back the array it is given without copying it.
+	return numpy.asarray(numpy.mean(audio, axis=1, dtype=numpy.float32))
 
 
 def _compute_grid_energy_profile (

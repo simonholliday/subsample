@@ -2269,7 +2269,9 @@ def to_mono_float (
 		return float_audio[:, 0]
 
 	# Mix stereo (or multi-channel) to mono
-	return numpy.mean(float_audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]  # numpy.mean with axis+dtype overload resolves to scalar in mypy; actual return is ndarray
+	# numpy before 2.5 types a mean over one axis as a scalar; asarray satisfies
+	# both, and hands back the array it is given without copying it.
+	return numpy.asarray(numpy.mean(float_audio, axis=1, dtype=numpy.float32))
 
 
 def log_normalize (value: float, min_ref: float, max_ref: float) -> float:

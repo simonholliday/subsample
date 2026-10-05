@@ -227,9 +227,8 @@ def _refuse_repeated_keys (
 			_refuse_repeated_keys(loader, value_node, path, walked)
 			continue
 
-		# types-PyYAML leaves construct_object unannotated; it returns the value.
 		name = f"{path}.{key_node.value}" if path else str(key_node.value)
-		key  = loader.construct_object(key_node, deep=True)  # type: ignore[no-untyped-call]
+		key  = loader.construct_object(key_node, deep=True)
 		line = key_node.start_mark.line + 1
 
 		if key in first_lines:
@@ -251,7 +250,6 @@ def load (stream: typing.Union[str, typing.IO[str]]) -> typing.Any:
 	"""
 
 	# yaml.load's own steps, with the check between parsing and building.
-	# types-PyYAML leaves construct_document and dispose unannotated.
 	loader = _Yaml12Loader(stream)
 
 	try:
@@ -262,7 +260,7 @@ def load (stream: typing.Union[str, typing.IO[str]]) -> typing.Any:
 
 		_refuse_repeated_keys(loader, node, "", set())
 
-		return loader.construct_document(node)  # type: ignore[no-untyped-call]
+		return loader.construct_document(node)
 
 	finally:
-		loader.dispose()  # type: ignore[no-untyped-call]
+		loader.dispose()

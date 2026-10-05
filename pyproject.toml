@@ -45,7 +45,7 @@ dev = [
 	"scipy-stubs>=1.4",
 	"types-jsonschema>=4.21",
 	"types-pyaudio>=0.2.16",
-	"types-PyYAML>=6.0.12",
+	"types-PyYAML>=6.0.12.20260906",
 ]
 
 [tool.setuptools_scm]

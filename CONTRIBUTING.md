@@ -26,6 +26,12 @@ mypy
 That checks the package, the tests and the maintainer scripts: the folders
 listed under `[tool.mypy]` in `pyproject.toml`.
 
+## On GitHub
+
+Every push and pull request runs the tests and the type check on Linux and
+macOS, under Python 3.12 and 3.14 (`.github/workflows/tests.yml`). The
+workflow also lists the system libraries a fresh machine needs first.
+
 ## Maintainer scripts
 
 The scripts in `scripts/` are maintainer tools and need a repo

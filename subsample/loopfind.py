@@ -145,9 +145,9 @@ def _to_mono (audio: numpy.ndarray) -> numpy.ndarray:
 	if audio.ndim == 1:
 		return audio.astype(numpy.float32, copy=False)
 
-	# numpy.mean with axis+dtype resolves to a scalar-or-ndarray union in mypy;
-	# the actual return with axis=1 is always an ndarray.
-	return numpy.mean(audio, axis=1, dtype=numpy.float32)  # type: ignore[return-value]
+	# numpy before 2.5 types a mean over one axis as a scalar; asarray satisfies
+	# both, and hands back the array it is given without copying it.
+	return numpy.asarray(numpy.mean(audio, axis=1, dtype=numpy.float32))
 
 
 def find_sustain_region (mono: numpy.ndarray, sample_rate: int) -> typing.Optional[tuple[int, int]]:

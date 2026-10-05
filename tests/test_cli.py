@@ -2369,8 +2369,8 @@ class TestRunRecorder:
 
 		writer = processor_class.return_value
 		assert [call.args[0] is self._TRIMMED for call in writer.enqueue.call_args_list] == [True, True, True]
-		assert cell[0] is writer, "the shutdown path can see the queue it has to wait for"
 		writer.shutdown.assert_called_once()
+		assert cell[0] is writer, "the shutdown path can see the queue it has to wait for"
 		reader_class.return_value.stop.assert_called_once()
 		pa.terminate.assert_called_once()
 
