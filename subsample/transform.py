@@ -791,6 +791,18 @@ class TransformResult:
 	"""Per-grid-slot RMS energy normalized to [0, 1].  None when no quantize
 	step (TimeStretch or PadQuantize) was applied.  See GridEnergyProfile."""
 
+	hit_time: float = 0.0
+	"""Seconds into ``audio`` its hit comes, measured on the audio as it plays
+	(subsample.analysis.measure_hit_time): 0.0 when no quieter lead-in comes
+	before its loudest moment.  A timed note starts the sound this much early,
+	so the hit lands on the note's time (#604).  Measured after every step, so
+	a repitch, stretch or reverse needs no scaling."""
+
+	segment_hit_times: typing.Optional[tuple[float, ...]] = None
+	"""hit_time for each segment in segment_bounds, measured on the segment
+	alone, which is what a voice playing one segment starts from.  None when
+	there are no segments."""
+
 # ---------------------------------------------------------------------------
 # TransformCache
 # ---------------------------------------------------------------------------
@@ -1255,11 +1267,14 @@ class VariantDiskCache:
 
 			level    = subsample.analysis.LevelResult(peak=peak, rms=rms)
 			duration = n_frames / sample_rate
+			hit, segment_hits = _hit_times(audio, sample_rate, segment_bounds)
 
 			return TransformResult(
 				key=key, audio=audio, duration=duration, level=level,
 				segment_bounds=segment_bounds,
 				energy_profile=energy_profile,
+				hit_time=hit,
+				segment_hit_times=segment_hits,
 			)
 
 		except OSError as exc:
@@ -1817,10 +1832,14 @@ class TransformProcessor:
 
 					break
 
+			hit, segment_hits = _hit_times(audio, self._output_sample_rate, segment_bounds)
+
 			result = TransformResult(
 				key=key, audio=audio, duration=duration, level=level,
 				segment_bounds=segment_bounds,
 				energy_profile=energy_profile,
+				hit_time=hit,
+				segment_hit_times=segment_hits,
 			)
 
 			# A handler that passed the audio through because it could not reach
@@ -2122,6 +2141,30 @@ def _mix_to_mono (audio: numpy.ndarray) -> numpy.ndarray:
 	# numpy before 2.5 types a mean over one axis as a scalar; asarray satisfies
 	# both, and hands back the array it is given without copying it.
 	return numpy.asarray(numpy.mean(audio, axis=1, dtype=numpy.float32))
+
+
+def _hit_times (
+	audio:          numpy.ndarray,
+	sample_rate:    int,
+	segment_bounds: typing.Optional[tuple[tuple[int, int], ...]],
+) -> tuple[float, typing.Optional[tuple[float, ...]]]:
+
+	"""Where the hit comes in a render, and in each of its segments (#604).
+
+	Measured here, on the render worker, so a note-on only reads the result.
+	The cost is one pass over the audio, small beside any step that made it.
+	"""
+
+	mono = _mix_to_mono(audio)
+	hit  = subsample.analysis.measure_hit_time(mono, sample_rate)
+
+	if segment_bounds is None:
+		return hit, None
+
+	return hit, tuple(
+		subsample.analysis.measure_hit_time(mono[start:end], sample_rate)
+		for start, end in segment_bounds
+	)
 
 
 def _compute_grid_energy_profile (

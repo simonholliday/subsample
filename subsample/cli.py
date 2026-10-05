@@ -2383,7 +2383,7 @@ def _start_osc_note_receiver (
 	if not cfg.player.enabled:
 		_log.warning("osc.notes_enabled is on but the player is off, so OSC notes will play nothing")
 
-	def _on_note (on: bool, channel: int, note: int, velocity: float, when: float) -> None:
+	def _on_note (on: bool, channel: int, note: int, velocity: float, when: float, timed: bool) -> None:
 
 		"""Hand one OSC note to the player, if there is one yet."""
 
@@ -2393,7 +2393,7 @@ def _start_osc_note_receiver (
 			_log.debug("OSC note before the player started - not played")
 			return
 
-		player.play_osc_note(on, channel, note, velocity, when)
+		player.play_osc_note(on, channel, note, velocity, when, timed)
 
 	try:
 		note_receiver = subsample.osc.OscNoteReceiver(

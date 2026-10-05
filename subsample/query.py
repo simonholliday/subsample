@@ -1319,6 +1319,11 @@ one_shot — plays to the sample's natural end and ignores note-off (default).
 gated    — note-off releases the voice (the old ``one_shot: false``).
 loop     — holds a seamless loop while the key is down, then releases past it."""
 
+VALID_ALIGNMENTS: typing.Final[tuple[str, ...]] = ("hit", "start")
+"""What lands on a timed note's time (``align:``, #604):
+hit   — the sound starts early by its hit's time, so the hit lands (default).
+start — the sound starts from its beginning on the time."""
+
 
 @dataclasses.dataclass(frozen=True)
 class LoopSpec:
@@ -1437,6 +1442,12 @@ class Assignment:
 	arrival fast-damps this assignment's sounding voices with the player's
 	~10 ms declick, overriding ``release:`` (a choke is a physical damp, not a
 	note-off).  None = no choke.  See ChokeSpec."""
+
+	align: str = "hit"
+	"""What lands on a timed note's time (``align:``), one of VALID_ALIGNMENTS.
+	``hit`` starts the sound early by where its hit comes, so the hit lands on
+	the time; ``start`` plays it from its beginning on the time (#604).  Only a
+	timed note, an OSC note in a bundle, reads it."""
 
 
 # ---------------------------------------------------------------------------

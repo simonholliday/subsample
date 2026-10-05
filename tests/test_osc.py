@@ -472,7 +472,7 @@ def _wait_until (condition: typing.Callable[[], bool], timeout: float = 5.0) -> 
 # OscNoteReceiver tests (#3610, #603)
 # ---------------------------------------------------------------------------
 
-_Note = tuple[bool, int, int, float, float]
+_Note = tuple[bool, int, int, float, float, bool]
 
 
 def _bundle (when: float, *messages: tuple[str, list[typing.Any]]) -> bytes:
@@ -507,8 +507,8 @@ class TestOscNoteReceiver:
 		notes: list[_Note] = []
 		heard = threading.Event()
 
-		def on_note (on: bool, channel: int, note: int, velocity: float, when: float) -> None:
-			notes.append((on, channel, note, velocity, when))
+		def on_note (on: bool, channel: int, note: int, velocity: float, when: float, timed: bool) -> None:
+			notes.append((on, channel, note, velocity, when, timed))
 			heard.set()
 
 		receiver = subsample.osc.OscNoteReceiver(port=0, on_note=on_note)
@@ -561,7 +561,7 @@ class TestOscNoteReceiver:
 		finally:
 			receiver.stop()
 
-		on, channel, note, velocity, when = notes[0]
+		on, channel, note, velocity, when, _timed = notes[0]
 
 		assert (on, channel, note, velocity) == (True, 9, 36, 0.5)
 		assert before <= when <= time.time()
@@ -794,9 +794,9 @@ class TestTheNoteReceiverReachesThePlayer:
 		finally:
 			receiver.stop()
 
-		on, channel, note, velocity, _when = player.play_osc_note.call_args.args
+		on, channel, note, velocity, _when, timed = player.play_osc_note.call_args.args
 
-		assert (on, channel, note, velocity) == (True, 9, 36, 0.5)
+		assert (on, channel, note, velocity, timed) == (True, 9, 36, 0.5, False)
 
 	def test_a_note_before_the_player_starts_plays_nothing (self, caplog: pytest.LogCaptureFixture) -> None:
 

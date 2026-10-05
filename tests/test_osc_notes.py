@@ -29,18 +29,19 @@ class _Handled:
 
 		"""Nothing handled yet."""
 
-		self.calls: list[tuple[mido.Message, typing.Optional[float], typing.Optional[float]]] = []
+		self.calls: list[tuple[mido.Message, typing.Optional[float], typing.Optional[float], bool]] = []
 
 	def __call__ (
 		self,
-		msg:  mido.Message,
-		at:   typing.Optional[float] = None,
-		fine: typing.Optional[float] = None,
+		msg:   mido.Message,
+		at:    typing.Optional[float] = None,
+		fine:  typing.Optional[float] = None,
+		timed: bool = False,
 	) -> None:
 
 		"""Record one message."""
 
-		self.calls.append((msg, at, fine))
+		self.calls.append((msg, at, fine, timed))
 
 
 def _player_handling () -> tuple[subsample.player.MidiPlayer, _Handled, timing._Clock]:
@@ -90,7 +91,7 @@ class TestTheTimeANoteIsMeantFor:
 
 		def _trigger (
 			msg: mido.Message, assignment: typing.Any, pick_spec: typing.Any, effective_velocity: float,
-			at: typing.Optional[float] = None, fine: typing.Optional[float] = None,
+			at: typing.Optional[float] = None, fine: typing.Optional[float] = None, timed: bool = False,
 		) -> None:
 			timing._voice(player, starts_at=at, click=True, one_shot=True)
 
@@ -142,7 +143,7 @@ class TestVelocity:
 
 		player.play_osc_note(True, 9, 36, velocity, time.time())
 
-		msg, _at, given = handled.calls[0]
+		msg, _at, given, _timed = handled.calls[0]
 
 		assert (msg.type, msg.velocity) == ("note_on", coarse)
 		assert given == pytest.approx(fine)
@@ -153,7 +154,7 @@ class TestVelocity:
 
 		player.play_osc_note(True, 9, 36, 0.0, time.time())
 
-		msg, _at, given = handled.calls[0]
+		msg, _at, given, _timed = handled.calls[0]
 
 		assert (msg.type, msg.velocity, given) == ("note_on", 0, None)
 
@@ -163,7 +164,7 @@ class TestVelocity:
 
 		player.play_osc_note(False, 9, 36, 0.0, time.time())
 
-		msg, _at, given = handled.calls[0]
+		msg, _at, given, _timed = handled.calls[0]
 
 		assert (msg.type, msg.channel, msg.note, given) == ("note_off", 9, 36, None)
 
@@ -231,7 +232,7 @@ class TestOscNotesTakeTurnsWithMidi:
 		player, handled, _clock = _player_handling()
 		held: list[bool] = []
 
-		def _record (msg: mido.Message, at: typing.Optional[float] = None, fine: typing.Optional[float] = None) -> None:
+		def _record (msg: mido.Message, at: typing.Optional[float] = None, fine: typing.Optional[float] = None, timed: bool = False) -> None:
 			held.append(player._handler_lock.locked())
 
 		player._handle_message = _record  # type: ignore[method-assign]
@@ -248,7 +249,7 @@ class TestOscNotesTakeTurnsWithMidi:
 		release = threading.Event()
 		order: list[str] = []
 
-		def _slow (msg: mido.Message, at: typing.Optional[float] = None, fine: typing.Optional[float] = None) -> None:
+		def _slow (msg: mido.Message, at: typing.Optional[float] = None, fine: typing.Optional[float] = None, timed: bool = False) -> None:
 			if fine is not None:
 				order.append("osc begins")
 				inside.set()

@@ -94,8 +94,11 @@ def json_schema () -> dict[str, typing.Any]:
 				from 0 to 1, and `/note/off` the MIDI channel and the note.  A message in
 				a bundle plays at the bundle's time, as a MIDI note arriving then
 				would; one on its own, or one whose time has passed, plays as it
-				arrives.  A bundle from another machine needs that machine's clock
-				to agree with this one's.
+				arrives.  A sound with a quieter lead-in before its hit, such as a
+				hi-hat pedal, starts early so that the hit lands on the bundle's
+				time, unless its assignment says `align: start`.  A bundle from
+				another machine needs that machine's clock to agree with this
+				one's.
 				""",
 				{
 					"enabled": _setting(

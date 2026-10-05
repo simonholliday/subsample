@@ -1896,7 +1896,7 @@ class TestSameNoteSteal:
 
 		def _fake_trigger (
 			msg: typing.Any, assignment: typing.Any, pick_spec: typing.Any, effective_velocity: typing.Any,
-			at: typing.Any = None, fine: typing.Any = None,
+			at: typing.Any = None, fine: typing.Any = None, timed: bool = False,
 		) -> None:
 			with player._voices_lock:
 				player._voices.append(self._make_voice(note=msg.note, channel=msg.channel, looping=True, loop_end=4410))
@@ -1966,7 +1966,8 @@ class TestReleaseThreadingThroughTrigger:
 		player._resolve_release.return_value = (1234, 1, False)   # sentinel (frames, curve, to_end)
 		player._resolve_loop.return_value    = None               # gated → not a loop voice
 		player._append_voice = lambda *a, **k: subsample.player.MidiPlayer._append_voice(player, *a, **k)
-		player._select_segment.return_value = (rendered, 0.5)
+		player._hit_start    = lambda *a, **k: subsample.player.MidiPlayer._hit_start(player, *a, **k)
+		player._select_segment.return_value = (rendered, 0.5, None)
 		player._get_mix_matrix.return_value = numpy.eye(2, dtype=numpy.float32)
 		player._render_float.return_value = rendered
 		player._render.return_value       = rendered
@@ -2218,7 +2219,7 @@ class TestAQuantisedSoundLoopsOverItsBars:
 			steps=(subsample.transform.TimeStretch(target_bpm=120.0),),
 		)
 		player._effective_transform_manager.get_variant.return_value = variant
-		player._select_segment.return_value = (rendered, 0.5)
+		player._select_segment.return_value = (rendered, 0.5, None)
 		player._get_mix_matrix.return_value = numpy.eye(2, dtype=numpy.float32)
 		player._render_float.return_value = rendered
 
@@ -4762,6 +4763,17 @@ class TestMaterializeZones:
 		# Nothing outside the keyboard range.
 		assert (0, 0)   not in player._note_map
 		assert (0, 127) not in player._note_map
+
+	def test_derived_notes_carry_the_templates_align (self) -> None:
+		"""A zone set to `align: start` plays every note's sound from its start (#604)."""
+
+		import librosa
+
+		record   = self._make_pitched_record("pad", pitch_hz=float(librosa.midi_to_hz(60)))
+		template = dataclasses.replace(self._make_template(channel=0), align="start")
+		player   = self._make_player_with_library([record], (template,))
+
+		assert {asgn.align for entries in player._note_map.values() for asgn, _ in entries} == {"start"}
 
 	def test_no_matching_samples_logs_info (
 		self,
@@ -7640,7 +7652,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, result_level = player._select_segment(audio, level, bounds, "", 0, 60, assignment_id=42)
+		result_audio, result_level, _segment = player._select_segment(audio, level, bounds, "", 0, 60, assignment_id=42)
 
 		assert result_audio is audio
 		assert result_level is level
@@ -7651,7 +7663,7 @@ class TestSelectSegment:
 		audio = numpy.random.randn(1000, 1).astype(numpy.float32)
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, result_level = player._select_segment(audio, level, None, "round_robin", 0, 60, assignment_id=42)
+		result_audio, result_level, _segment = player._select_segment(audio, level, None, "round_robin", 0, 60, assignment_id=42)
 
 		assert result_audio is audio
 		assert result_level is level
@@ -7662,7 +7674,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, _ = player._select_segment(audio, level, bounds, 3, 0, 60, assignment_id=42)
+		result_audio, _, _segment = player._select_segment(audio, level, bounds, 3, 0, 60, assignment_id=42)
 
 		assert result_audio.shape[0] == 1000
 		numpy.testing.assert_array_equal(result_audio, audio[2000:3000])
@@ -7673,7 +7685,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, _ = player._select_segment(audio, level, bounds, 99, 0, 60, assignment_id=42)
+		result_audio, _, _segment = player._select_segment(audio, level, bounds, 99, 0, 60, assignment_id=42)
 
 		numpy.testing.assert_array_equal(result_audio, audio[3000:4000])
 
@@ -7692,7 +7704,7 @@ class TestSelectSegment:
 
 		played = []
 		for _ in range(6):
-			seg, _ = player._select_segment(audio, level, bounds, "round_robin", 0, 60, assignment_id=42)
+			seg, _, _segment = player._select_segment(audio, level, bounds, "round_robin", 0, 60, assignment_id=42)
 			played.append(int(seg[0, 0]))
 
 		# 4 segments, 6 triggers: cycle 1,2,3,4 then wrap to 1,2.
@@ -7707,7 +7719,7 @@ class TestSelectSegment:
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
 		for _ in range(20):
-			seg, _ = player._select_segment(audio, level, bounds, "random", 0, 60, assignment_id=42)
+			seg, _, _segment = player._select_segment(audio, level, bounds, "random", 0, 60, assignment_id=42)
 			assert seg.shape[0] == 1000
 
 	def test_segment_mode_parsed_from_yaml_string (self) -> None:
@@ -9038,7 +9050,7 @@ class TestRandomPanThroughTrigger:
 		player._resolve_release.return_value = (0, 0, False)
 		player._resolve_loop.return_value    = None
 		player._append_voice = lambda *a, **k: None
-		player._select_segment.return_value  = (rendered, 0.5)
+		player._select_segment.return_value  = (rendered, 0.5, None)
 		player._get_mix_matrix.return_value  = numpy.eye(2, dtype=numpy.float32)
 		player._render_float.return_value    = rendered
 

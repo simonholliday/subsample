@@ -141,7 +141,8 @@ MIDI note_on, or an OSC /note/on (play_osc_note, at its bundle's time)
     → _render()                        → on-the-fly fallback (first trigger only)
     → _render_float(): apply gain · velocity² · anti-clip ceiling
     → append _Voice (float32 stereo, pre-rendered, stamped with the
-        note-on's arrival time)
+        note-on's arrival time, or for an OSC note in a bundle, that time
+        less where the sound's hit comes: _hit_start)
     ↓
 PyAudio callback (PortAudio high-priority thread)
     → _advance_span: the arrival times this buffer plays, one buffer back
@@ -193,12 +194,15 @@ those still waiting and gives the one being analysed ten seconds to finish; one
 that finishes later is not added, since shutdown has begun.
 
 A second OSC receiver, `OscNoteReceiver` on its own port, takes `/note/on` and
-`/note/off` (#3610, #603). It reads each packet itself, because python-osc's
-dispatcher sleeps on the server thread until a bundle's time and then hands the
-message on without it. Each note goes to `MidiPlayer.play_osc_note` with its
-bundle's time, or its arrival for a message on its own or a bundle whose time
-has passed, and the player turns that wall-clock time into its own clock, so the
-note is handled as a MIDI note arriving then would be. `_handler_lock`
+`/note/off` (#3610, #603). It reads each packet itself, walking bundles with
+python-osc's `OscBundle`, because python-osc's dispatcher sleeps on the server
+thread until a bundle's time and then hands the message on without it, and its
+`OscPacket` gives a message on its own and one whose time has passed the same
+time. Each note goes to `MidiPlayer.play_osc_note` with its bundle's time, or its
+arrival for a message on its own or a bundle whose time has passed, and whether
+it came in a bundle with a time of its own (`timed`, for impact timing below).
+The player turns that wall-clock time into its own clock, so the note is handled
+as a MIDI note arriving then would be. `_handler_lock`
 serialises the receiver's thread with the MIDI thread, since `_handle_message`
 is written for one at a time; a MIDI message is stamped before it waits. The
 velocity, 0 to 1, picks a velocity layer scaled to 0-127 and reaches the gain
@@ -232,6 +236,23 @@ sender that sends ahead has its notes played on their frames however the
 network delays the packets, as long as the two machines' clocks agree. A
 note-off timed ahead releases its voice at its own frame in the same way, and a
 note more than two seconds ahead is warned about, at most once a minute.
+
+Such a note also starts its sound early, by where the sound's hit comes, so the
+hit lands on the note's time (#604, `_hit_start`). The sequencer cannot do this
+itself, since Subsample picks the sample. Where the hit comes is measured on the
+audio a voice will play, after the process chain: each render records
+`TransformResult.hit_time`, and `segment_hit_times` for a quantised one's
+segments, measured on the render worker (`transform._hit_times`) as it renders or
+reads a render from disk, so a note-on only reads it. The raw-sample fallback
+reads the sample's own analysis. `analysis.hit_time` turns an impact into a hit
+only after a lead-in at least 10 dB quieter (`HIT_LEAD_IN_DB`): the impact marks
+where the loudest moment begins, which for an open hi-hat's bloom or a field
+recording is not a hit, and measured on 5387 samples only 234 move. A MIDI note,
+an OSC note on its own and an assignment with `align: start` never move. A note
+that arrives with less lead than its hit needs keeps its early start, which
+`_frame_of` places at the next buffer's first frame, so the whole sound plays
+and the hit lands late by the shortfall. `_warn_hit_late` says so at most once a
+minute, naming the largest lead any timed sound has needed (`_hit_lead_needed`).
 
 A callback that runs early, before a message in its span has arrived, plays that
 message at the start of the next buffer: one buffer of delay cannot absorb

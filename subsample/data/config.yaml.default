@@ -37,7 +37,9 @@
 # and triggers analysis and import of the specified audio file into the library.
 #
 # Note receiver: plays each /note/on and /note/off message through the MIDI
-# map, as MIDI notes play.  A message in a bundle plays at the bundle's time.
+# map, as MIDI notes play.  A message in a bundle plays at the bundle's time,
+# and a sound with a quieter lead-in before its hit starts early so the hit
+# lands on it (the map's align: says which).
 
 # osc:
 #   enabled: false

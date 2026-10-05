@@ -247,6 +247,15 @@ _IMPACT_BACKTRACK_SECONDS: float = 0.400
 # this reports 0.0 ms for every one, while preserving the pedal close's 41.8 ms.
 _IMPACT_MIN_QUIET_MS: float = 3.0
 
+# How far below a sound's peak what comes before its impact must sit for the
+# impact to be a hit worth landing on a timed note's time (hit_time, #604).
+# Across the 5387 samples in the author's library, a hi-hat pedal close's foot
+# sits 15 to 30 dB below the cymbals meeting, while an open hi-hat's bloom and a
+# field recording's loudest moment come within 2 dB of what precedes them, so
+# moving those would start their first strike early.  At -10 dB, 234 of the
+# 5387 move: median 9 ms, at most 0.9 s.  A silent lead-in reads -120 dB.
+HIT_LEAD_IN_DB: typing.Final[float] = -10.0
+
 # Floor for a level reported in dB relative to the sample's own peak — the
 # pre-impact region, and each attack.  Digital silence would otherwise be -inf,
 # which is not representable in strict JSON.
@@ -496,9 +505,12 @@ class RhythmResult:
 	recording) will report whichever is loudest; impact_pre_level_db is how a
 	consumer tells that case apart.
 
-	Intended for a sequencer that wants a note's transient to land ON the beat:
-	trigger the note this many seconds early.  Nothing in Subsample's own
-	playback path consumes it — the player still starts every voice at sample 0."""
+	Subsample's player lands a timed note's hit on its time with it: an OSC note
+	sent ahead in a bundle starts its sound early by hit_time, which is this
+	value when impact_pre_level_db shows a quieter lead-in, and 0.0 otherwise
+	(#604).  It measures the sound as it plays, after its processors, so this
+	stored value is the unprocessed sample's.  A sequencer driving another
+	sampler can trigger the note this many seconds early to the same end."""
 
 	impact_pre_level_db: typing.Optional[float] = None
 	"""Peak level of the audio BEFORE impact_time, in dB relative to the sample's
@@ -957,8 +969,8 @@ def _compute_impact (
 	if peak_value <= valley_value:
 		# An exactly flat envelope: digital silence or DC.  A steady tone does
 		# not reach this branch, since its envelope ripples with the waveform,
-		# and can report an arbitrary impact (a 440 Hz sine reads 0.19 s).
-		# Nothing in playback reads impact; it is published for a sequencer.
+		# and can report an arbitrary impact (a 440 Hz sine reads 0.19 s); its
+		# lead-in is as loud as its peak, so hit_time leaves it where it is.
 		return (0.0, None)
 
 	threshold = valley_value + _ENVELOPE_THRESHOLD_RATIO * (peak_value - valley_value)
@@ -1021,6 +1033,29 @@ def _pre_impact_level_db (
 		return _LEVEL_FLOOR_DB
 
 	return max(_LEVEL_FLOOR_DB, 20.0 * math.log10(pre_peak / overall_peak))
+
+
+def hit_time (impact_time: float, impact_pre_level_db: typing.Optional[float]) -> float:
+
+	"""How far into a sound its hit comes, for landing the hit on a timed note's time (#604).
+
+	The impact, when what comes before it is at least HIT_LEAD_IN_DB below the
+	sound's peak, and otherwise 0.0: the impact marks where the loudest moment
+	begins, which is a hit only after a quieter lead-in.  The player starts a
+	timed note's sound this much early.
+	"""
+
+	if impact_pre_level_db is None or impact_pre_level_db > HIT_LEAD_IN_DB:
+		return 0.0
+
+	return impact_time
+
+
+def measure_hit_time (mono: numpy.ndarray, sample_rate: int) -> float:
+
+	"""hit_time of audio as it is, such as a processed variant as it will play (#604)."""
+
+	return hit_time(*_compute_impact(mono, sample_rate))
 
 
 def _refine_onsets_to_attacks (

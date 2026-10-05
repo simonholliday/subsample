@@ -264,6 +264,9 @@ _DEFAULT_PROBES: dict[str, tuple[dict[str, typing.Any], _Reading]] = {
 	"$defs/assignment/properties/stack": (
 		_map(), lambda result: _first(result).stack,
 	),
+	"$defs/assignment/properties/align": (
+		_map(), lambda result: _first(result).align,
+	),
 	"$defs/template/properties/name": (
 		_map(templates={"base": {}}, assignments=[
 			{k: v for k, v in _assignment(template="base").items() if k != "name"},
@@ -281,6 +284,10 @@ _DEFAULT_PROBES: dict[str, tuple[dict[str, typing.Any], _Reading]] = {
 	"$defs/template/properties/stack": (
 		_map(templates={"base": {}}, assignments=[_assignment(template="base")]),
 		lambda result: _first(result).stack,
+	),
+	"$defs/template/properties/align": (
+		_map(templates={"base": {}}, assignments=[_assignment(template="base")]),
+		lambda result: _first(result).align,
 	),
 	"$defs/notes/anyOf/2/anyOf/1/properties/range": (
 		_map(assignments=[_assignment(notes="zone-tuned", process=[{"repitch": True}])]),
@@ -759,6 +766,7 @@ def _word_lists () -> list[typing.Any]:
 
 	return [
 		pytest.param("/$defs/assignment/properties/mode", subsample.query.VALID_MODES, id="mode"),
+		pytest.param("/$defs/assignment/properties/align", subsample.query.VALID_ALIGNMENTS, id="align"),
 		pytest.param("/$defs/order_clause/anyOf/1/properties/by", subsample.query.valid_order_names(), id="order-by"),
 		pytest.param("/$defs/order_clause/anyOf/0", tuple(subsample.query.LEGACY_ORDER_TOKENS), id="order-token"),
 		pytest.param("/$defs/pick/anyOf/0", ("any", *subsample.query.VALID_PICK_MODES), id="pick-word"),
@@ -787,6 +795,13 @@ class TestWordsComeFromTheParser:
 		"""Every playback mode the schema publishes is one a map may write."""
 
 		assert _load(tmp_path, _map(assignments=[_assignment(mode=mode)])).note_map
+
+	@pytest.mark.parametrize("align", subsample.query.VALID_ALIGNMENTS)
+	def test_every_alignment_loads (self, tmp_path: pathlib.Path, align: str) -> None:
+
+		"""Every word `align` publishes is one a map may write, and the assignment carries it."""
+
+		assert _first(_load(tmp_path, _map(assignments=[_assignment(align=align)]))).align == align
 
 	@pytest.mark.parametrize("curve", subsample.query.VALID_RELEASE_CURVES)
 	def test_every_release_curve_loads (self, tmp_path: pathlib.Path, curve: str) -> None:

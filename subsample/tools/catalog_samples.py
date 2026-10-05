@@ -509,10 +509,10 @@ columns:
                  blank when no clean loop point was found
   impact_ms      how far into the file the loudest event begins: 0 for a
                  struck drum, later for a hi-hat pedal or a shaker drawn
-                 back before the beat; a sequencer can trigger the note that
-                 much early so the hit lands on the beat, and Subsample's own
-                 playback ignores it; it varies from take to take, so use
-                 each sample's own
+                 back before the beat; a note sent ahead over OSC starts
+                 the sound that much early, so the hit lands on its time,
+                 if impact_pre_db is -10 or lower; it varies from take to
+                 take
   impact_pre_db  the level before that event, against the sample's peak;
                  near 0 dB, the file holds several events of similar
                  loudness

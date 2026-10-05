@@ -323,9 +323,11 @@ class OscNoteReceiver:
 	0-127> <velocity 0.0-1.0>`` and ``/note/off <channel> <note>``.  A message
 	in a bundle is meant for the bundle's time; one on its own, or one whose
 	time has passed, for when it arrived.  on_note receives (on, channel 0-15,
-	note, velocity, when), ``when`` in seconds since the epoch, as a timetag
-	reads, and the player places the note one buffer after it, as it would a
-	MIDI note arriving then.
+	note, velocity, when, timed), ``when`` in seconds since the epoch, as a
+	timetag reads, and the player places the note one buffer after it, as it
+	would a MIDI note arriving then.  ``timed`` is True for a message in a
+	bundle with a time of its own, even one that has passed, whose sound the
+	player starts early enough for its hit to land on that time (#604).
 
 	Each packet is read here rather than through python-osc's dispatcher,
 	which, for a bundle timed ahead, sleeps on the server thread until the
@@ -339,16 +341,24 @@ class OscNoteReceiver:
 	def __init__ (
 		self,
 		port:    int,
-		on_note: typing.Callable[[bool, int, int, float, float], None],
+		on_note: typing.Callable[[bool, int, int, float, float, bool], None],
 		host:    str = "127.0.0.1",
 	) -> None:
 
 		"""Bind the UDP socket now, so a busy port fails at construction; python-osc is needed from here."""
 
-		import pythonosc.osc_packet
+		import pythonosc.osc_bundle
+		import pythonosc.osc_message
+		import pythonosc.parsing.osc_types
 
-		self._packet      = pythonosc.osc_packet.OscPacket
-		self._parse_error = pythonosc.osc_packet.ParseError
+		self._bundle       = pythonosc.osc_bundle.OscBundle
+		self._message      = pythonosc.osc_message.OscMessage
+		self._immediately  = pythonosc.parsing.osc_types.IMMEDIATELY
+		self._parse_errors = (
+			pythonosc.osc_bundle.ParseError,
+			pythonosc.osc_message.ParseError,
+			pythonosc.parsing.osc_types.ParseError,
+		)
 
 		self._on_note = on_note
 		self._server  = _NoteServer((host, port), self)
@@ -387,18 +397,60 @@ class OscNoteReceiver:
 		"""Read every message in one packet, a bundle's in time order, and play each."""
 
 		try:
-			packet = self._packet(data)
-		except self._parse_error:
+			messages = self._messages(data)
+		except self._parse_errors:
+			messages = None
+
+		if messages is None:
 			self._warn("packet", "OSC note receiver: a packet that is not OSC - ignored")
 			return
 
-		for timed in packet.messages:
+		for when, timed, message in messages:
 			try:
-				self._handle(timed.message.address, list(timed.message.params), timed.time)
+				self._handle(message.address, list(message.params), when, timed)
 			except Exception:
-				_log.warning("OSC note handler failed for %s", timed.message.address, exc_info=True)
+				_log.warning("OSC note handler failed for %s", message.address, exc_info=True)
 
-	def _handle (self, address: str, params: list[typing.Any], when: float) -> None:
+	def _messages (self, data: bytes) -> typing.Optional[list[tuple[float, bool, typing.Any]]]:
+
+		"""Every message in a packet as (when, timed, message), a bundle's in time order; None for a packet that is neither.
+
+		python-osc's OscPacket reads packets the same way, but gives a message
+		on its own and one in a bundle whose time has passed the same time,
+		now, and impact timing (#604) has to tell them apart.
+		"""
+
+		now = time.time()
+
+		if self._bundle.dgram_is_bundle(data):
+			found: list[tuple[float, bool, typing.Any]] = []
+			self._walk(self._bundle(data), now, found)
+
+			# Stable, so messages at one time keep the order they were sent in.
+			return sorted(found, key=lambda item: item[0])
+
+		if self._message.dgram_is_message(data):
+			return [(now, False, self._message(data))]
+
+		return None
+
+	def _walk (self, bundle: typing.Any, now: float, found: list[tuple[float, bool, typing.Any]]) -> None:
+
+		"""Add a bundle's messages to ``found``, and those of every bundle inside it, each with its bundle's time."""
+
+		# A bundle marked "immediately" carries no time of its own, so its
+		# messages are as untimed as one sent alone.  A time that has passed
+		# plays as it arrives, but its notes are still timed.
+		timed = bundle.timestamp != self._immediately
+		when  = max(bundle.timestamp, now) if timed else now
+
+		for content in bundle:
+			if isinstance(content, self._message):
+				found.append((when, timed, content))
+			else:
+				self._walk(content, now, found)
+
+	def _handle (self, address: str, params: list[typing.Any], when: float, timed: bool = False) -> None:
 
 		"""Check one message's arguments and pass its note on, or say what is wrong with it."""
 
@@ -417,7 +469,7 @@ class OscNoteReceiver:
 				)
 				return
 
-			self._on_note(True, channel, note, velocity, when)
+			self._on_note(True, channel, note, velocity, when, timed)
 			return
 
 		if address == "/note/off":
@@ -431,7 +483,7 @@ class OscNoteReceiver:
 				self._warn(address, f"OSC /note/off {params}: the channel must be 1 to 16 and the note 0 to 127 - ignored")
 				return
 
-			self._on_note(False, channel, note, 0.0, when)
+			self._on_note(False, channel, note, 0.0, when, timed)
 			return
 
 		_log.debug("OSC note receiver: %s is not a note address - ignored", address)

@@ -60,6 +60,11 @@ _MODES: typing.Final[dict[str, tuple[str, str]]] = {
 	"loop":     ("Loop", "Loops while the key is held, and releases past the loop at note-off. A sound its `process` quantises loops over its whole bars, and one it repitches or reverses plays gated instead."),
 }
 
+_ALIGNMENTS: typing.Final[dict[str, tuple[str, str]]] = {
+	"hit":   ("Hit", "The sound starts early by as long as its hit takes to arrive, so the hit lands on the note's time. Subsample finds the hit in the sound as it plays, after its processors, and moves the sound only when a lead-in at least 10 dB quieter comes before the hit, as the foot of a hi-hat pedal comes before the cymbals meet. A note sent with too little time to spare starts its sound at once, from the beginning, and the hit lands late, with a warning that says how far ahead to send notes."),
+	"start": ("Start", "The sound starts on the note's time, from its beginning, as a pad or a reversed swell may want."),
+}
+
 _MEASUREMENTS: typing.Final[dict[str, str]] = {
 	"duration":        "The sample's length, kept within bounds. A length is measured from the audio, so it is written as a range: one value would keep only a sample measured at exactly that, which almost none is.",
 	"duration_beats":  "The sample's length in beats at the session tempo, where a beat is a quarter note, kept within bounds. A map that uses it needs a session tempo. It is worked out from a measured length, so it is written as a range rather than as one value.",
@@ -454,6 +459,11 @@ def _assignment_terms () -> dict[str, typing.Any]:
 			"default": False,
 		},
 		"silenced_by": {"$ref": "#/$defs/silenced_by"},
+		"align": {
+			"description": "What lands on the time an OSC note in a bundle names: the sound's hit, or its start. A MIDI note, or an OSC note sent on its own, starts its sound as it arrives, whatever this says.",
+			"oneOf": _words(subsample.query.VALID_ALIGNMENTS, _ALIGNMENTS, "align"),
+			"default": "hit",
+		},
 	}
 
 

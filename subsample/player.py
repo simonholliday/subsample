@@ -56,7 +56,9 @@ the spacing they were played with instead of each starting at the next buffer
 boundary.  _safe_handle_message stamps each message with the player's clock;
 the callback moves a span of arrival times on by one buffer per call
 (_advance_span) and places each voice in it (_frame_of).  That costs half a
-buffer of latency on average, and one at most.
+buffer of latency on average, and one at most.  An OSC note in a bundle is
+placed by its bundle's time instead (#603), and starts its sound early by
+where the sound's hit comes, so the hit lands on that time (_hit_start, #604).
 
 Per-voice gain is controlled by cfg.player.max_polyphony: each voice's RMS
 target is 1.0 / max_polyphony, so N voices at max velocity sum to
@@ -131,6 +133,13 @@ _RELEASE_EXP_K: float = 9.0
 # machine's would otherwise leave every note waiting in silence (#603).
 _OSC_FAR_AHEAD_SECONDS:         float = 2.0
 _OSC_FAR_AHEAD_WARNING_SECONDS: float = 60.0
+
+# A timed note sent too late for its sound to start early enough lands its hit
+# late, and is warned about at most once a minute (#604).  A shortfall under a
+# millisecond is not: nobody hears it, and the span a buffer plays can end that
+# far past the clock when a callback runs early (_advance_span).
+_HIT_LATE_WARNING_SECONDS:   float = 60.0
+_HIT_LATE_TOLERANCE_SECONDS: float = 0.001
 
 # Note map: (mido_channel, midi_note) → list of (Assignment, PickSpec) layers.
 #
@@ -242,6 +251,9 @@ class ZoneTemplate:
 	pan_spec:            typing.Optional[subsample.query.PanSpec]      = None
 	"""Random pan for the zone (see Assignment.pan_spec); copied verbatim into
 	every derived note so each strike draws its own position."""
+	align:               str                                         = "hit"
+	"""What lands on a timed note's time (see Assignment.align), copied into
+	every derived note."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3022,7 +3034,7 @@ VALID_MAP_KEYS: typing.Final[tuple[str, ...]] = (
 VALID_ASSIGNMENT_KEYS: typing.Final[tuple[str, ...]] = (
 	"name", "template", "channel", "notes", "velocity", "select", "process",
 	"mode", "loop", "release", "extract", "gain", "pan", "output", "stack",
-	"silenced_by",
+	"silenced_by", "align",
 )
 
 
@@ -3453,6 +3465,14 @@ def load_midi_map (
 
 		silenced_by = _parse_silenced_by(assignment_raw.get("silenced_by"), name, note_namespaces)
 
+		align = assignment_raw.get("align", "hit")
+
+		if not isinstance(align, str) or align not in subsample.query.VALID_ALIGNMENTS:
+			raise ValueError(
+				f"MIDI map assignment {name!r}: invalid align {align!r} "
+				f"- expected one of {sorted(subsample.query.VALID_ALIGNMENTS)}"
+			)
+
 		# Extract segment playback mode from quantize step parameters.
 		# parse_process has already refused any value other than round_robin,
 		# random or a hit number from 1, so the value is used as it stands.
@@ -3528,6 +3548,7 @@ def load_midi_map (
 				stack=stack,
 				release=release,
 				pan_spec=pan_spec,
+				align=align,
 			))
 			continue
 
@@ -3552,6 +3573,7 @@ def load_midi_map (
 			velocity_rescale_to=velocity_rescale_to,
 			stack=stack,
 			silenced_by=silenced_by,
+			align=align,
 		)
 
 		# Per-note pick distribution:
@@ -4119,6 +4141,16 @@ def _release (voice: _Voice, at: typing.Optional[float]) -> None:
 	voice.releasing = True
 
 
+def _hit_of (result: subsample.transform.TransformResult, segment: typing.Optional[int]) -> float:
+
+	"""Where the hit comes in what a voice plays of a render: one segment's, or the whole render's (#604)."""
+
+	if segment is not None and result.segment_hit_times is not None:
+		return result.segment_hit_times[segment]
+
+	return result.hit_time
+
+
 # How strongly each audio callback draws the span of arrival times it plays
 # towards its own clock (_advance_span).  The span moves on by exactly one
 # buffer per callback, so a callback that is early or late by scheduling jitter
@@ -4623,6 +4655,13 @@ class MidiPlayer:
 
 		# When an OSC note timed far ahead was last warned about (monotonic).
 		self._osc_far_ahead_warned: float = float("-inf")
+
+		# Impact timing (#604): when a timed note that landed its hit late was
+		# last warned about (monotonic), and the furthest any timed note's sound
+		# has had to start early, which the warning names as the lead the set
+		# needs.  Only the note handler touches them, under _handler_lock.
+		self._hit_late_warned: float = float("-inf")
+		self._hit_lead_needed: float = 0.0
 
 		# Assignment ids already warned that their sample has no usable loop
 		# (mode: loop fail-musical) — so the note-on path warns once, not per hit.
@@ -5574,6 +5613,71 @@ class MidiPlayer:
 
 		return max(0, min(frame_count - 1, int((at - start) * self._output_sample_rate)))
 
+	def _hit_start (
+		self,
+		at:         typing.Optional[float],
+		timed:      bool,
+		hit:        float,
+		assignment: subsample.query.Assignment,
+	) -> typing.Optional[float]:
+
+		"""When a voice starts: when its note is meant for, or for a timed note, early by its hit (#604).
+
+		A timed note is an OSC note sent in a bundle, ahead of its time, so the
+		sound can start ``hit`` seconds early and its hit land on that time.  A
+		MIDI note, or an OSC note on its own, gives no notice, so its sound
+		plays from the beginning as it arrives; so does any note of an
+		assignment set to ``align: start``.
+
+		A note that came too late for that starts at once, from its sound's
+		beginning (_frame_of places a start before the span at the buffer's
+		first frame), so its hit lands late by the shortfall, which is warned
+		about (_warn_hit_late).  Runs on the note handler's thread.
+		"""
+
+		if at is None or not timed or hit <= 0.0 or assignment.align != "hit":
+			return at
+
+		starts_at = at - hit
+		self._hit_lead_needed = max(self._hit_lead_needed, hit)
+
+		# The earliest start the next buffer can still place on its frame is
+		# the end of the span the last buffer played: anything before it plays
+		# at the next buffer's first frame instead (_frame_of).
+		now  = self._clock()
+		span = self._span
+		late = (span[1] if span is not None else now) - starts_at
+
+		if late > _HIT_LATE_TOLERANCE_SECONDS:
+			self._warn_hit_late(assignment, at - now, hit, late)
+
+		return starts_at
+
+	def _warn_hit_late (
+		self,
+		assignment: subsample.query.Assignment,
+		ahead:      float,
+		hit:        float,
+		late:       float,
+	) -> None:
+
+		"""Say that a timed note's hit lands late, and how far ahead notes need sending, at most once a minute (#604)."""
+
+		now = time.monotonic()
+
+		if now - self._hit_late_warned < _HIT_LATE_WARNING_SECONDS:
+			return
+
+		self._hit_late_warned = now
+		_log.warning(
+			"OSC note for %r arrived %.0f ms before its time, but its hit is %.0f ms "
+			"into the sound, so the hit lands %.0f ms late.  The sounds played so "
+			"far need notes sent at least %.0f ms ahead; align: start plays a sound "
+			"from its start instead.",
+			assignment.name, max(0.0, ahead) * 1000.0, hit * 1000.0, late * 1000.0,
+			self._hit_lead_needed * 1000.0,
+		)
+
 	def _snapshot_cc_state (
 		self,
 	) -> tuple[dict[tuple[int, int], int], dict[int, int]]:
@@ -5764,6 +5868,7 @@ class MidiPlayer:
 		note:     int,
 		velocity: float,
 		when:     float,
+		timed:    bool = False,
 	) -> None:
 
 		"""Play or end a note an OSC /note/on or /note/off sent, at the time it was meant for.
@@ -5774,6 +5879,11 @@ class MidiPlayer:
 		its arrival for a message on its own or one whose time has passed.  It
 		becomes the player's clock as a MIDI note's arrival does, so the note
 		plays one buffer after it, as a MIDI note arriving then would (#4513).
+
+		``timed`` says the note came in a bundle with a time of its own, even
+		one that has passed, so its sound starts early enough for its hit to
+		land on that time (#604, see _hit_start).  A message on its own is not
+		timed, and starts its sound from the beginning, as a MIDI note does.
 
 		A velocity layer is chosen from the velocity scaled to 0-127, as a MIDI
 		note's is; gain and a velocity pick read it in full, which is what a
@@ -5806,7 +5916,7 @@ class MidiPlayer:
 
 		try:
 			with self._handler_lock:
-				self._handle_message(msg, at, fine)
+				self._handle_message(msg, at, fine, timed)
 		except Exception as exc:
 			_log.error(
 				"OSC note handler failed for %r: %s", msg, exc, exc_info=True,
@@ -5873,9 +5983,10 @@ class MidiPlayer:
 
 	def _handle_message (
 		self,
-		msg:  mido.Message,
-		at:   typing.Optional[float] = None,
-		fine: typing.Optional[float] = None,
+		msg:   mido.Message,
+		at:    typing.Optional[float] = None,
+		fine:  typing.Optional[float] = None,
+		timed: bool = False,
 	) -> None:
 
 		"""Dispatch a single MIDI message via the select/process pipeline.
@@ -5893,7 +6004,10 @@ class MidiPlayer:
 
 		``fine`` is an OSC note's velocity on the 0-127 scale, unrounded; the
 		velocity layer is still chosen by ``msg.velocity``, and gain and a
-		velocity pick read ``fine`` instead (see play_osc_note).
+		velocity pick read ``fine`` instead (see play_osc_note).  ``timed``
+		marks an OSC note sent in a bundle, whose sound starts early enough
+		for its hit to land on ``at`` (#604, _hit_start); a MIDI note is never
+		timed.
 
 		note_off (and note_on with velocity=0) marks matching active voices as
 		releasing so the audio callback fades them out over the assignment's
@@ -6069,7 +6183,7 @@ class MidiPlayer:
 		# once; stacked members sound together as one composite hit.  Each call
 		# is independent, so one layer finding no sample never silences another.
 		for assignment, pick_spec, effective_velocity in layers:
-			self._trigger_one(msg, assignment, pick_spec, effective_velocity, at, fine)
+			self._trigger_one(msg, assignment, pick_spec, effective_velocity, at, fine, timed)
 
 	def _build_trigger_spec (
 		self,
@@ -6420,6 +6534,7 @@ class MidiPlayer:
 		effective_velocity: float,
 		at:                 typing.Optional[float] = None,
 		fine:               typing.Optional[float] = None,
+		timed:              bool = False,
 	) -> None:
 
 		"""Render one assignment for a note-on and enqueue its voice.
@@ -6434,8 +6549,10 @@ class MidiPlayer:
 		audio.  All per-assignment settings (gain, pan, output routing, mode,
 		process) come off ``assignment``, so stacked members keep independent
 		voices.  ``at`` is when the note-on arrived, which the voice starts
-		from (see _Voice.starts_at).  ``fine`` is an OSC note's unrounded
-		velocity, which a velocity pick reads in place of ``msg.velocity``.
+		from (see _Voice.starts_at), or for a timed note, earlier by where the
+		hit comes in what the voice plays (_hit_start, #604).  ``fine`` is an
+		OSC note's unrounded velocity, which a velocity pick reads in place of
+		``msg.velocity``.
 		"""
 
 		pan_weights      = assignment.pan_weights
@@ -6533,7 +6650,7 @@ class MidiPlayer:
 					variant = eff_transform.get_variant(sample_id, spec, from_disk=False)
 
 					if variant is not None:
-						seg_audio, seg_level = self._select_segment(
+						seg_audio, seg_level, segment = self._select_segment(
 							variant.audio, variant.level, variant.segment_bounds,
 							assignment.segment_mode, msg.channel, msg.note,
 							id(assignment),
@@ -6544,7 +6661,8 @@ class MidiPlayer:
 						if bar_loop:
 							rendered, loop_cfg = self._looped_on_its_bars(rendered, variant)
 
-						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, at)
+						starts_at = self._hit_start(at, timed, _hit_of(variant, segment), assignment)
+						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at)
 						with self._state_lock:
 							self._last_played[state_key] = variant
 						_log.debug(
@@ -6562,7 +6680,7 @@ class MidiPlayer:
 						prev = self._last_played.get(state_key)
 
 					if prev is not None and prev.key.sample_id == sample_id:
-						seg_audio, seg_level = self._select_segment(
+						seg_audio, seg_level, segment = self._select_segment(
 							prev.audio, prev.level, prev.segment_bounds,
 							assignment.segment_mode, msg.channel, msg.note,
 							id(assignment),
@@ -6573,7 +6691,8 @@ class MidiPlayer:
 						if bar_loop:
 							rendered, loop_cfg = self._looped_on_its_bars(rendered, prev)
 
-						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, at)
+						starts_at = self._hit_start(at, timed, _hit_of(prev, segment), assignment)
+						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at)
 						_log.debug(
 							"note %d (vel %d → %d) → %r → %r (previous variant)  (%.2fs)",
 							msg.note, msg.velocity, effective_velocity, assignment.name, record.name, prev.duration,
@@ -6586,14 +6705,15 @@ class MidiPlayer:
 			base = eff_transform.get_base(sample_id)
 
 			if base is not None:
-				seg_audio, seg_level = self._select_segment(
+				seg_audio, seg_level, segment = self._select_segment(
 					base.audio, base.level, base.segment_bounds,
 					assignment.segment_mode, msg.channel, msg.note,
 					id(assignment),
 				)
 				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 				rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
-				self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, at)
+				starts_at = self._hit_start(at, timed, _hit_of(base, segment), assignment)
+				self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at)
 				_log.debug(
 					"note %d (vel %d → %d) → %r → %r (base variant)  (%.2fs)",
 					msg.note, msg.velocity, effective_velocity, assignment.name, record.name, base.duration,
@@ -6607,7 +6727,10 @@ class MidiPlayer:
 		if original is None:
 			return
 
-		self._append_voice(original, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, at)
+		# The sample as analysed, so its own measurement holds.
+		hit = subsample.analysis.hit_time(record.rhythm.impact_time, record.rhythm.impact_pre_level_db) if timed else 0.0
+		starts_at = self._hit_start(at, timed, hit, assignment)
+		self._append_voice(original, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at)
 
 		_log.debug(
 			"note %d (vel %d → %d) → %r → %r  (%.2fs)",
@@ -6879,6 +7002,7 @@ class MidiPlayer:
 					velocity_trigger    = template.velocity_trigger,
 					velocity_rescale_to = template.velocity_rescale_to,
 					stack               = template.stack,
+					align               = template.align,
 				)
 				pick = subsample.query.PickSpec(1, 1)
 
@@ -7899,13 +8023,15 @@ class MidiPlayer:
 		channel: int,
 		note: int,
 		assignment_id: int,
-	) -> tuple[numpy.ndarray, subsample.analysis.LevelResult]:
+	) -> tuple[numpy.ndarray, subsample.analysis.LevelResult, typing.Optional[int]]:
 
 		"""Select a segment from quantized audio, or return the full audio.
 
 		When segment_mode is active and bounds are available, slices the audio
 		to a single segment and recomputes the level.  Otherwise returns the
-		original audio and level unchanged.
+		original audio and level unchanged.  The third value is the index of
+		the segment chosen, or None for the full audio, so the caller can read
+		that segment's own hit time (_hit_of).
 
 		``assignment_id`` is ``id()`` of the layer's Assignment; it extends the
 		round_robin counter key so each layer on the same (channel, note) —
@@ -7920,7 +8046,7 @@ class MidiPlayer:
 		"""
 
 		if not segment_mode or segment_bounds is None or not segment_bounds:
-			return audio, level
+			return audio, level, None
 
 		if isinstance(segment_mode, int):
 			idx = max(0, min(segment_mode - 1, len(segment_bounds) - 1))
@@ -7936,7 +8062,7 @@ class MidiPlayer:
 		elif segment_mode == "random":
 			idx = random.randint(0, len(segment_bounds) - 1)
 		else:
-			return audio, level
+			return audio, level, None
 
 		start, end = segment_bounds[idx]
 		segment_audio = audio[start:end]
@@ -7946,7 +8072,7 @@ class MidiPlayer:
 		)
 		seg_level = subsample.analysis.compute_level(mono)
 
-		return segment_audio, seg_level
+		return segment_audio, seg_level, idx
 
 	def _get_mix_matrix (
 		self,
