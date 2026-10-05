@@ -55,7 +55,7 @@ def network_filesystem (path: pathlib.Path) -> typing.Optional[str]:
 
 def _mount (path: pathlib.Path) -> typing.Optional[tuple[pathlib.Path, str]]:
 
-	"""The mount point path is under and its file system type, or None where neither can be had."""
+	"""The mount point of the file system path is on and its type, or None where neither can be had."""
 
 	if sys.platform == "linux":
 		return _linux_mount(path)
@@ -141,7 +141,12 @@ class _StatFS (ctypes.Structure):
 
 def _macos_mount (path: pathlib.Path) -> typing.Optional[tuple[pathlib.Path, str]]:
 
-	"""The mount path is under, as statfs reports it for the nearest folder that exists."""
+	"""The mount of the file system path is on, as statfs reports it for the nearest folder that exists.
+
+	The mount point is not always a prefix of path: macOS reaches its data
+	volume through firmlinks, so a folder in /private/var is on the volume
+	mounted at /System/Volumes/Data.
+	"""
 
 	existing = path.resolve()
 

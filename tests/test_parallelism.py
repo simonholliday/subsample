@@ -16,9 +16,12 @@ import subsample.parallelism
 
 def _pin_cpus (monkeypatch: pytest.MonkeyPatch, count: int) -> None:
 
-	"""Make usable_cpu_count() report exactly ``count`` CPUs."""
+	"""Make usable_cpu_count() report exactly ``count`` CPUs.
 
-	monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(count)))
+	macOS and Windows have no affinity API, so there the test adds one.
+	"""
+
+	monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(count)), raising=False)
 
 
 def test_idle_leaves_headroom (monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,7 +101,12 @@ def test_cap_blas_threads_pins_to_one () -> None:
 	# numpy must be imported for a BLAS backend to exist at all: without it
 	# threadpool_info() is empty and `all([])` is vacuously True, so this test
 	# asserted nothing when the file ran on its own.
-	import numpy  # noqa: F401  — imported for its BLAS backend, not for use
+	import numpy
+
+	# numpy for Apple silicon is built on Apple's Accelerate, which threadpoolctl
+	# can neither see nor limit, so with it there is nothing to pin.
+	if numpy.show_config(mode="dicts")["Build Dependencies"]["blas"]["name"] == "accelerate":
+		pytest.skip("this numpy uses Apple's Accelerate, which threadpoolctl cannot limit")
 
 	subsample.parallelism.cap_blas_threads()
 	subsample.parallelism.cap_blas_threads()  # idempotent — must not raise

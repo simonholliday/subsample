@@ -261,11 +261,14 @@ class TestInstrumentWatcherAudioPath:
 		directory: pathlib.Path,
 		callback: typing.Callable[[subsample.library.SampleRecord], None],
 		with_preview: bool = False,
+		known_sidecars: typing.Optional[set[pathlib.Path]] = None,
 	) -> subsample.watcher.InstrumentWatcher:
+
+		"""Construct a watcher with no samples loaded at startup by default."""
 
 		return subsample.watcher.InstrumentWatcher(
 			directory=directory,
-			known_sidecars=set(),
+			known_sidecars=known_sidecars or set(),
 			on_sample_loaded=callback,
 			with_preview=with_preview,
 		)
@@ -523,6 +526,11 @@ class TestInstrumentWatcherAudioPath:
 
 		The freshness gate, not a known-paths set, is what suppresses this: the
 		sidecar still matches the bytes, so there is nothing to do.
+
+		The watcher knows the sidecar, as the app's does for every sample it
+		loaded at startup.  macOS reports a file made in the half-minute before
+		a watch began, so a watcher that did not know it would load the
+		sidecar written above as new.
 		"""
 
 		originals = _fast_audio_timings()
@@ -532,7 +540,10 @@ class TestInstrumentWatcherAudioPath:
 		subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
 
 		called = threading.Event()
-		watcher = self._make_watcher(tmp_path, lambda _r: called.set())
+		watcher = self._make_watcher(
+			tmp_path, lambda _r: called.set(),
+			known_sidecars={subsample.cache.cache_path(wav_path).resolve()},
+		)
 		watcher.start()
 
 		try:
@@ -879,27 +890,40 @@ class TestMidiMapWatcher:
 
 	def test_unrelated_file_ignored (self, tmp_path: pathlib.Path) -> None:
 
-		"""Changes to other files in the same directory do not trigger the callback."""
+		"""Changes to other files in the same directory do not trigger the callback.
 
+		The test asks which files the callback named, not whether it ran:
+		macOS reports a file made in the half-minute before a watch began, so
+		the map written just before this one started may be heard as new.
+		"""
+
+		received: list[pathlib.Path] = []
 		called = threading.Event()
+
+		def on_changed (path: pathlib.Path) -> None:
+			received.append(path)
+			called.set()
+
 		midi_map_path = self._make_midi_map_file(tmp_path)
-		watcher = subsample.watcher.MidiMapWatcher(
-			paths=[midi_map_path],
-			on_changed=lambda _p: called.set(),
-		)
+		other = tmp_path / "other.yaml"
+		watcher = subsample.watcher.MidiMapWatcher(paths=[midi_map_path], on_changed=on_changed)
 		watcher.start()
 
 		try:
-			import time
 			time.sleep(0.2)
 
-			# Write a different file in the same directory.
-			(tmp_path / "other.yaml").write_text("unrelated: true\n", encoding="utf-8")
-			triggered = called.wait(timeout=_TIMEOUT)
+			# The watched file first, to show the watcher is listening.
+			midi_map_path.write_text("assignments: []  # edited\n", encoding="utf-8")
+			listening = called.wait(timeout=_TIMEOUT)
+
+			# Then a different file in the same directory.
+			other.write_text("unrelated: true\n", encoding="utf-8")
+			time.sleep(subsample.watcher._MIDI_MAP_DEBOUNCE_SECONDS + 1.0)
 		finally:
 			watcher.stop()
 
-		assert not triggered, "Callback fired for unrelated file"
+		assert listening, "Callback not called for the watched file"
+		assert other.resolve() not in received, "Callback fired for unrelated file"
 
 	def test_a_change_to_any_watched_file_triggers_the_callback (self, tmp_path: pathlib.Path) -> None:
 
@@ -932,7 +956,12 @@ class TestMidiMapWatcher:
 
 	def test_watch_replaces_the_list (self, tmp_path: pathlib.Path) -> None:
 
-		"""A set dropped from an ensemble is let go, and one added is followed."""
+		"""A set dropped from an ensemble is let go, and one added is followed.
+
+		The test asks which files the callback named, not whether it ran:
+		macOS reports a file made in the half-minute before a watch began, so
+		the added set, written just before it was watched, may be heard as new.
+		"""
 
 		called = threading.Event()
 		received: list[pathlib.Path] = []
@@ -949,21 +978,23 @@ class TestMidiMapWatcher:
 		watcher.start()
 
 		try:
-			import time
 			watcher.watch([added])
 			time.sleep(0.2)
 
+			# Apart by more than the debounce, which would otherwise fold the
+			# two edits into one callback naming only the last.
 			dropped.write_text("assignments: []  # edited\n", encoding="utf-8")
-			let_go = not called.wait(timeout=subsample.watcher._MIDI_MAP_DEBOUNCE_SECONDS + 1.0)
+			time.sleep(subsample.watcher._MIDI_MAP_DEBOUNCE_SECONDS + 1.0)
+			called.clear()
 
 			added.write_text("assignments: []  # edited\n", encoding="utf-8")
 			followed = called.wait(timeout=_TIMEOUT)
 		finally:
 			watcher.stop()
 
-		assert let_go, "Callback fired for a file no longer watched"
+		assert dropped.resolve() not in received, "Callback fired for a file no longer watched"
 		assert followed, "Callback not called for the newly watched file"
-		assert received == [added.resolve()]
+		assert received[-1] == added.resolve()
 
 	def test_stop_is_clean (self, tmp_path: pathlib.Path) -> None:
 

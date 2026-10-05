@@ -88,13 +88,15 @@ def usable_cpu_count () -> int:
 	is Linux-only, hence the fallback.
 	"""
 
-	try:
+	# Asked with hasattr rather than by catching AttributeError: mypy checking
+	# for macOS knows the function is missing there and refuses a bare call to
+	# it, but understands this test.
+	if hasattr(os, "sched_getaffinity"):
 		return len(os.sched_getaffinity(0))
 
-	except AttributeError:
-		# No affinity API (macOS, Windows) — the machine count is the best
-		# available answer there.
-		return os.cpu_count() or 1
+	# No affinity API (macOS, Windows) — the machine count is the best
+	# available answer there.
+	return os.cpu_count() or 1
 
 
 def analysis_worker_count (player_active: bool) -> int:
@@ -171,7 +173,8 @@ def cap_blas_threads () -> None:
 	Subsample parallelises across samples, never within one, so a multi-threaded
 	BLAS pool underneath the worker pool only oversubscribes the CPU and can
 	disturb the real-time audio thread.  Safe to call more than once; the limit
-	holds until the process exits.
+	holds until the process exits.  numpy for Apple silicon is built on Apple's
+	Accelerate, which threadpoolctl cannot limit, so there this does nothing.
 	"""
 
 	global _blas_limiter

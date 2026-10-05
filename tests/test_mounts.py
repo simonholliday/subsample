@@ -142,14 +142,17 @@ class TestThisMachine:
 
 		"""statfs's answer is read from the right places in its record.
 
-		A layout read wrongly would give a mount point the folder is not under,
-		or a type that is not a Mac's local disk.
+		A layout read wrongly would give a mount point of another file system,
+		or a type that is not a Mac's local disk.  The mount point is compared
+		by device, not by path: macOS reaches its data volume through firmlinks,
+		so a temporary folder in /private/var is on the volume mounted at
+		/System/Volumes/Data without being under that path.
 		"""
 
 		mount = subsample.mounts._mount(tmp_path)
 
 		assert mount is not None
-		assert tmp_path.resolve().is_relative_to(mount[0])
+		assert mount[0].stat().st_dev == tmp_path.stat().st_dev
 		assert mount[1] in {"apfs", "hfs"}
 		assert subsample.mounts.network_filesystem(tmp_path) is None
 
