@@ -1954,6 +1954,7 @@ class TestReleaseThreadingThroughTrigger:
 		player._voices_lock = threading.Lock()
 		player._resolve_sample_id.return_value = 1
 		player._effective_instrument_library.get.return_value = record
+		player._effective_pool = lambda: (player._effective_instrument_library, player._effective_transform_manager)
 		player._resolve_release.return_value = (1234, 1, False)   # sentinel (frames, curve, to_end)
 		player._resolve_loop.return_value    = None               # gated → not a loop voice
 		player._append_voice = lambda *a, **k: subsample.player.MidiPlayer._append_voice(player, *a, **k)
@@ -2195,6 +2196,7 @@ class TestAQuantisedSoundLoopsOverItsBars:
 		player._loop_collapsed_warned = set()
 		player._resolve_sample_id.return_value = 1
 		player._effective_instrument_library.get.return_value = record
+		player._effective_pool = lambda: (player._effective_instrument_library, player._effective_transform_manager)
 		player._resolve_release.return_value = (1234, 1, False)
 		player._append_voice = lambda *a, **k: subsample.player.MidiPlayer._append_voice(player, *a, **k)
 		player._looped_on_its_bars = lambda *a: subsample.player.MidiPlayer._looped_on_its_bars(player, *a)
@@ -2223,6 +2225,11 @@ class TestAQuantisedSoundLoopsOverItsBars:
 
 		player._resolve_loop.assert_not_called()
 		assert len(player._voices) == 1
+
+		# A note-on looks in memory only; a variant on disk is the worker's to load (#4488).
+		player._effective_transform_manager.get_variant.assert_called_once_with(
+			1, player._build_trigger_spec.return_value, from_disk=False,
+		)
 
 		return typing.cast(subsample.player._Voice, player._voices[0])
 
@@ -6477,6 +6484,14 @@ class TestProgramPresetSwitch:
 	active.
 	"""
 
+	@staticmethod
+	def _settled (player: subsample.player.MidiPlayer) -> None:
+		"""Wait for the re-evaluation a Program Change arms on the worker to finish."""
+		timer = player._cc_debounce_timer
+		if timer is not None:
+			timer.join(timeout=5.0)
+			assert not timer.is_alive(), "the switch never settled"
+
 	def _make_player (
 		self,
 		shutdown_event: threading.Event,
@@ -6548,6 +6563,7 @@ class TestProgramPresetSwitch:
 		with unittest.mock.patch.object(player, "update_assignments"):
 			# Switch to the map preset (program 1) on the bank channel (mido 9).
 			player._handle_message(mido.Message("program_change", channel=9, program=1))
+			self._settled(player)
 			assert player._effective_instrument_library is lib_preset   # pool swapped
 			assert player._note_map == preset_map                       # rules swapped
 			assert (9, 50) in player._note_map
@@ -6555,6 +6571,7 @@ class TestProgramPresetSwitch:
 
 			# Switch back to the directory program (0): rules revert to top-level.
 			player._handle_message(mido.Message("program_change", channel=9, program=0))
+			self._settled(player)
 			assert player._effective_instrument_library is lib_dir
 			assert player._note_map == top_map
 			assert (9, 36) in player._note_map
@@ -6580,6 +6597,7 @@ class TestProgramPresetSwitch:
 		):
 			with caplog.at_level(logging.ERROR, logger="subsample.player"):
 				player._handle_message(mido.Message("program_change", channel=9, program=1))
+				self._settled(player)
 
 		# The rules rolled back AND the pool switched back to the previous
 		# program (0 = directory), so _effective_* and _note_map agree — no
@@ -6600,6 +6618,7 @@ class TestProgramPresetSwitch:
 
 		with unittest.mock.patch.object(player, "update_assignments"):
 			player._handle_message(mido.Message("program_change", channel=9, program=1))
+			self._settled(player)
 			assert player._effective_instrument_library is lib_preset
 
 		# The SAME program again: the pre-check returns before switch_to runs.
@@ -6714,6 +6733,7 @@ class TestProgramPresetSwitch:
 			release.set()
 			reload.join(timeout=5.0)
 			switch.join(timeout=5.0)
+			self._settled(player)
 
 		assert bm.active_bank.program == 2
 		assert player._top_level_note_map == edited
@@ -6723,6 +6743,167 @@ class TestProgramPresetSwitch:
 # ---------------------------------------------------------------------------
 # MidiPlayer._render_float — gain_db
 # ---------------------------------------------------------------------------
+
+class TestProgramChangeOffTheRulesLock:
+
+	"""A Program Change switches at once on the MIDI thread, and its program is
+	re-ranked on the re-evaluation worker (M19 of the 2026-09-21 review, #4488).
+	It used to re-rank on the MIDI thread, after waiting for any re-bake in
+	progress, and every note-off, panic and clock pulse behind it waited too."""
+
+	def _player (self) -> tuple[subsample.player.MidiPlayer, subsample.bank.BankManager, subsample.player.NoteMap, subsample.player.NoteMap]:
+		"""Programs 0 and 2 play the top-level rules from their own folders; program 1 is a `map:` preset."""
+		top_map    = _make_note_map(_make_assignment(name="Top", reference="BD0025"), channel=9, notes=[36])
+		preset_map = _make_note_map(_make_assignment(name="Preset", reference="BD0025"), channel=9, notes=[50])
+
+		banks = [
+			subsample.bank.Bank(
+				name=f"Program {program}", directory=pathlib.Path(f"/tmp/p{program}"), program=program,
+				instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+				similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+				transform_manager=None,
+				note_map=preset_map if program == 1 else None,
+				zone_templates=() if program == 1 else None,
+				mapped_ccs=set() if program == 1 else None,
+			)
+			for program in (0, 1, 2)
+		]
+		bm = subsample.bank.BankManager(banks, bank_channel=10, default_program=0)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device", threading.Event(),
+			instrument_library=banks[0].instrument_library,
+			similarity_matrix=banks[0].similarity_matrix,
+			midi_map=top_map, sample_rate=44100, bit_depth=16, bank_manager=bm,
+		)
+
+		return player, bm, top_map, preset_map
+
+	@staticmethod
+	def _program (number: int) -> mido.Message:
+		return mido.Message("program_change", channel=9, program=number)
+
+	@staticmethod
+	def _settled (player: subsample.player.MidiPlayer) -> None:
+		"""Wait for whatever re-evaluation is armed to finish."""
+		timer = player._cc_debounce_timer
+		if timer is not None:
+			timer.join(timeout=5.0)
+			assert not timer.is_alive(), "the re-evaluation never finished"
+
+	def test_a_program_change_does_not_wait_for_a_re_evaluation (self) -> None:
+		player, bm, _top_map, preset_map = self._player()
+		holding = threading.Event()
+		release = threading.Event()
+
+		def re_evaluating () -> None:
+			with player._rules_lock:
+				holding.set()
+				release.wait(timeout=5.0)
+
+		busy = threading.Thread(target=re_evaluating)
+		busy.start()
+		assert holding.wait(timeout=5.0)
+
+		try:
+			with unittest.mock.patch.object(player, "update_assignments"):
+				switch = threading.Thread(target=player._handle_message, args=(self._program(1),))
+				switch.start()
+				switch.join(timeout=1.0)
+
+				assert not switch.is_alive(), "the Program Change waited for the re-evaluation"
+				assert bm.active_bank.program == 1
+				assert player._note_map == preset_map, "its notes play the new program from this instant"
+				assert player._pending_switch is not None, "re-ranked once the re-evaluation is done"
+
+				release.set()
+				self._settled(player)
+
+			assert player._pending_switch is None
+		finally:
+			release.set()
+			busy.join(timeout=5.0)
+
+	def test_a_re_evaluation_of_the_old_program_does_not_overwrite_the_new (self) -> None:
+		"""A ranking that began before the switch would hand the new program's
+		notes the old program's samples, or its rules back."""
+		player, _bm, top_map, preset_map = self._player()
+		[top_assignment] = {id(a): a for entries in top_map.values() for a, _p in entries}.values()
+		ranking = threading.Event()
+		release = threading.Event()
+
+		def slow_query (*args: typing.Any, **kwargs: typing.Any) -> list[subsample.library.SampleRecord]:
+			ranking.set()
+			release.wait(timeout=5.0)
+			return []
+
+		with unittest.mock.patch.object(subsample.query, "query", side_effect=slow_query):
+			stale = threading.Thread(target=player._rebuild_candidate_cache)
+			stale.start()
+			assert ranking.wait(timeout=5.0)
+
+			with unittest.mock.patch.object(player, "update_assignments"):
+				player._handle_message(self._program(1))
+				self._settled(player)
+
+			release.set()
+			stale.join(timeout=5.0)
+
+		assert id(top_assignment) not in player._candidate_cache
+		assert player._note_map == preset_map
+
+		stale_map = dict(top_map)
+		player._publish_note_map(player._rules_generation - 1, stale_map)
+		assert player._note_map == preset_map
+
+	def test_a_failure_after_a_newer_switch_does_not_undo_it (self, caplog: pytest.LogCaptureFixture) -> None:
+		"""Program 1 fails to re-rank after the musician has already moved on to
+		program 2: going back to program 0 would play neither."""
+		player, bm, top_map, _preset_map = self._player()
+		calls = 0
+
+		def first_fails () -> None:
+			nonlocal calls
+			calls += 1
+			if calls == 1:
+				player._handle_message(self._program(2))
+				raise ValueError("program 1's rules are broken")
+
+		with unittest.mock.patch.object(player, "update_assignments", side_effect=first_fails):
+			with caplog.at_level(logging.ERROR, logger="subsample.player"):
+				player._handle_message(self._program(1))
+				first = player._cc_debounce_timer
+				assert first is not None
+				first.join(timeout=5.0)
+				self._settled(player)
+
+		assert bm.active_bank.program == 2
+		assert player._note_map == top_map
+		assert "back to the previous program" not in caplog.text
+		assert player._pending_switch is None
+
+	def test_a_reference_path_is_looked_up_once_and_again_after_a_reload (self, tmp_path: pathlib.Path) -> None:
+		"""Resolving it read the filesystem on the MIDI thread at every trigger."""
+		carrier = tmp_path / "carrier.wav"
+		carrier.write_bytes(b"RIFF")
+		assignment = subsample.query.Assignment(
+			name="Vox", select=(subsample.query.SelectSpec(where=subsample.query.WherePredicate(reference=str(carrier))),),
+		)
+		subsample.player._REFERENCE_PATHS.clear()
+
+		assert subsample.player._reference_wav_path(assignment) == str(carrier.resolve())
+
+		carrier.unlink()
+		assert subsample.player._reference_wav_path(assignment) == str(carrier.resolve()), "answered from memory"
+
+		player, _bm, top_map, _preset_map = self._player()
+		with unittest.mock.patch.object(player, "_apply_rule_set_locked"):
+			player.reload_midi_map(subsample.player.MidiMapResult(
+				note_map=top_map, bank_definitions=[], bank_channel=subsample.bank.DEFAULT_BANK_CHANNEL,
+			))
+
+		assert subsample.player._reference_wav_path(assignment) is None
+
 
 class TestRulesLockSerialisation:
 
@@ -7785,7 +7966,8 @@ class TestBeatMatchEndToEnd:
 			mock_records.append(r)
 
 		# Mock transform_manager that returns the right profile for each sample_id.
-		def fake_get_variant (sample_id: int, spec: typing.Any) -> typing.Any:
+		def fake_get_variant (sample_id: int, spec: typing.Any, *, from_disk: bool = True) -> typing.Any:
+			assert not from_disk, "ranking reads memory only, never the disk"
 			result = unittest.mock.MagicMock()
 			result.energy_profile = profiles.get(sample_id)
 			return result
@@ -7849,7 +8031,8 @@ class TestBeatMatchEndToEnd:
 			r.level.rms = 0.1
 			mock_records.append(r)
 
-		def fake_get_variant (sample_id: int, spec: typing.Any) -> typing.Any:
+		def fake_get_variant (sample_id: int, spec: typing.Any, *, from_disk: bool = True) -> typing.Any:
+			assert not from_disk, "ranking reads memory only, never the disk"
 			if sample_id not in profiles:
 				return None  # cache miss
 			result = unittest.mock.MagicMock()
@@ -8835,6 +9018,7 @@ class TestRandomPanThroughTrigger:
 		player._voices_lock = threading.Lock()
 		player._resolve_sample_id.return_value = 1
 		player._effective_instrument_library.get.return_value = record
+		player._effective_pool = lambda: (player._effective_instrument_library, player._effective_transform_manager)
 		player._resolve_release.return_value = (0, 0, False)
 		player._resolve_loop.return_value    = None
 		player._append_voice = lambda *a, **k: None

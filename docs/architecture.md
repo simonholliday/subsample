@@ -132,8 +132,9 @@ MIDI note_on
     → _resolve_sample_id: indexed pick from the pre-computed candidate cache
         (rebuilt when the library changes, not per-trigger; variant-state
          selects - quantized_beats / beat_match - fall back to a live query)
-    → transform_manager.get_variant(sample_id, spec)  → processed variant
-        (memory cache → disk cache → enqueue + fall back to a previous/base variant)
+    → transform_manager.get_variant(sample_id, spec, from_disk=False)  → processed variant
+        (memory cache, else enqueue: the render worker loads it from the disk
+         cache or renders it, and this note falls back to a previous/base variant)
     → transform_manager.get_base()     → base variant (all samples)
     → _render()                        → on-the-fly fallback (first trigger only)
     → _render_float(): apply gain · velocity² · anti-clip ceiling
@@ -171,6 +172,15 @@ to Subsample's handler on its own dedicated thread as it arrives. There is no
 polling loop, so there is no fixed input-latency floor. On the output side,
 PortAudio's ALSA backend keeps several periods of `buffer_frames` in flight, so
 the delay a note meets is a few buffers, not one.
+
+Every message waits for the one before it, so the handler does nothing that can
+block (#4488). A note-on looks variants up in memory only: one that is still on
+disk is loaded by a render worker, and that note plays its fallback. A Program
+Change switches the program and installs its rules at once, under a lock held
+only for those swaps. Ranking the new program's samples and preparing its
+variants happen on the re-evaluation worker that CC changes use, and until it
+has finished, each note ranks its candidates as it plays. If the new program's
+rules fail there, the worker switches back to the previous program.
 
 The OSC receiver takes `/sample/import` messages on one thread and imports them
 on another, one at a time and in order, with at most 64 waiting. At stop it drops
@@ -321,13 +331,14 @@ A `programs:` block loads every program at start as a `bank.Bank`: its own
 `InstrumentLibrary`, `SimilarityMatrix` and `TransformManager`. `BankManager`
 holds one active bank for the whole player, so a Program Change switches the kit
 on every MIDI channel (decision #3974). A switch installs the new program's
-rules, validates them against its samples and rolls back to the previous
-program on failure. A `map:` preset's rules are loaded with the map that names
-it (`player.load_preset_map`, #3886). The switch holds the player's
-`_rules_lock` from its pool switch to the end of its rule swap, and a map reload
-holds it from its check for a live preset to its refresh of the top-level rules,
-so a switch to a `directory:` program never installs the rules from before an
-edit that was still being validated.
+rules at once, on the MIDI thread; the re-evaluation worker then ranks its
+samples against them, and switches back to the previous program if they fail
+(#4488). A `map:` preset's rules are loaded with the map that names it
+(`player.load_preset_map`, #3886). The switch, and a map reload's check for a
+live preset and refresh of the top-level rules, take the player's
+`_publish_lock`, so they never interleave. A reload that finishes validating an
+edit after a switch to a `directory:` program gives that program the edit,
+rather than leaving it the rules from before it.
 
 An ensemble file's `maps:` block and `player.midi_maps` reach the same loader,
 `player.load_ensemble`. Includes are flat, one level, so there are no cycles to

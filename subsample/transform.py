@@ -115,6 +115,7 @@ How to add a new transform type
 import collections
 import concurrent.futures
 import dataclasses
+import functools
 import hashlib
 import logging
 import math
@@ -1931,6 +1932,8 @@ class TransformManager:
 		self,
 		sample_id: int,
 		spec:      TransformSpec,
+		*,
+		from_disk: bool = True,
 	) -> typing.Optional[TransformResult]:
 
 		"""Return a cached variant for an arbitrary spec, or None.
@@ -1940,6 +1943,11 @@ class TransformManager:
 
 		Look-up order: memory cache → disk cache → enqueue for computation.
 		Disk hits are promoted into the memory cache for subsequent look-ups.
+
+		``from_disk=False`` skips the disk cache: a miss is enqueued at once,
+		and the render worker finds the file there and promotes it instead.
+		The MIDI thread looks up this way, so a note-on never waits for a
+		file read (M19 of the 2026-09-21 review, #4488).
 		"""
 
 		if not spec.steps:
@@ -1954,11 +1962,9 @@ class TransformManager:
 		record = self._instrument_library.get(sample_id)
 
 		# Check disk cache before enqueuing a (possibly expensive) recompute.
-		# The source hash is the processor's memo, shared with its workers:
-		# get_variant runs on the rtmidi dispatch thread (once per trigger, and
-		# once PER CANDIDATE for variant-state selects), where a full-buffer
-		# hash and tobytes() copy is a latency hazard.
-		if self._disk_cache is not None and record is not None and record.audio is not None:
+		# The source hash is the processor's memo, shared with its workers, so
+		# the re-evaluation threads that look up this way hash each buffer once.
+		if from_disk and self._disk_cache is not None and record is not None and record.audio is not None:
 			audio_md5 = self._processor.audio_md5(record)
 			disk_hit = self._disk_cache.get(audio_md5, spec, key)
 
@@ -4436,6 +4442,19 @@ def _resolved (
 	return held
 
 
+@functools.lru_cache(maxsize=256)
+def _resolved_carrier (carrier: str) -> str:
+
+	"""A vocoder carrier's absolute path, resolved once per path written in a map.
+
+	spec_from_process runs at every note-on that plays a process chain, and
+	resolve() reads the filesystem; the memo keeps that read to the first
+	spec built, which a re-evaluation builds ahead of play.
+	"""
+
+	return str(pathlib.Path(carrier).resolve())
+
+
 def spec_from_process (
 	process:        subsample.query.ProcessSpec,
 	midi_note:      typing.Optional[int]   = None,
@@ -4675,7 +4694,7 @@ def spec_from_process (
 						continue
 				else:
 					# Explicit file path — resolve relative to cwd.
-					carrier_str = str(pathlib.Path(carrier_str).resolve())
+					carrier_str = _resolved_carrier(carrier_str)
 
 				steps.append(Vocoder(
 					carrier_path=carrier_str,

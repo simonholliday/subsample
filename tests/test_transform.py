@@ -936,6 +936,46 @@ class TestTransformManagerGetVariant:
 		assert cache.get(key) is not None             # promoted into memory
 		manager.shutdown()
 
+	def test_a_memory_only_lookup_leaves_the_disk_to_the_worker (self, tmp_path: pathlib.Path) -> None:
+
+		"""A note-on looks up without reading the disk: the miss is queued, and the
+		render worker finds the file and keeps it in memory for the next note (#4488)."""
+
+		manager, cache, lib, disk, _processor = self._make_stack(tmp_path)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+		spec = self._spec()
+		key = subsample.transform.TransformKey(sample_id=1, spec=spec)
+
+		marker = numpy.full((100, 1), 0.123, dtype=numpy.float32)
+		disk.put(
+			hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest(), spec,
+			subsample.transform.TransformResult(
+				key=key, audio=marker, duration=0.1,
+				level=subsample.analysis.LevelResult(peak=0.123, rms=0.1),
+			),
+		)
+
+		readers: list[int] = []
+		read = disk.get
+
+		def spied (*args: typing.Any, **kwargs: typing.Any) -> typing.Optional[subsample.transform.TransformResult]:
+			readers.append(threading.get_ident())
+			return read(*args, **kwargs)
+
+		with unittest.mock.patch.object(disk, "get", side_effect=spied):
+			assert manager.get_variant(1, spec, from_disk=False) is None
+
+			deadline = time.monotonic() + 5.0
+			while cache.get(key) is None and time.monotonic() < deadline:
+				time.sleep(0.01)
+
+		promoted = cache.get(key)
+		assert promoted is not None, "the worker never loaded it"
+		numpy.testing.assert_array_equal(promoted.audio, marker)
+		assert threading.get_ident() not in readers, "the lookup read the disk itself"
+		manager.shutdown()
+
 	def test_source_md5_is_hashed_once_for_every_lookup_and_job (self, tmp_path: pathlib.Path) -> None:
 
 		"""get_variant runs on the rtmidi thread, and each worker job needs the
@@ -4096,6 +4136,27 @@ class TestVocoder:
 		))
 		spec = subsample.transform.spec_from_process(process)
 		assert len(spec.steps) == 0
+
+	def test_an_explicit_carrier_is_resolved_once (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""Every note-on that plays the chain builds its spec; only the first reads the filesystem (#4488)."""
+		subsample.transform._resolved_carrier.cache_clear()
+		resolved: list[pathlib.Path] = []
+		resolve = pathlib.Path.resolve
+
+		def counted (self: pathlib.Path, strict: bool = False) -> pathlib.Path:
+			resolved.append(self)
+			return resolve(self, strict=strict)
+
+		monkeypatch.setattr(pathlib.Path, "resolve", counted)
+		process = subsample.query.ProcessSpec(steps=(
+			subsample.query.ProcessorStep(name="vocoder", params=(("carrier", "pads/choir.wav"),)),
+		))
+
+		first  = subsample.transform.spec_from_process(process)
+		second = subsample.transform.spec_from_process(process)
+
+		assert first == second
+		assert resolved == [pathlib.Path("pads/choir.wav")]
 
 	def test_spec_from_process_vocoder_no_carrier (self) -> None:
 		"""vocoder: true (no carrier) → step skipped."""

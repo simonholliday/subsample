@@ -22,14 +22,21 @@ Concurrency control:
     both _handle_message (rtmidi thread) and update_assignments
     (watcher / CC debounce / on-complete threads).
   - _rules_lock (reentrant) serialises rule-set re-evaluation:
-    update_assignments and _apply_rule_set (hot-reload / program-change
-    swap) never interleave, so the swap's install→validate→rollback
-    window cannot be observed by a concurrent re-evaluation.  It also
-    guards the top-level rule snapshot (_top_level_*): a map reload holds
-    it from its preset check to its snapshot refresh, and a Program Change
-    from its pool switch to its rule swap.
-    Lock-ordering rule: _rules_lock is outermost, then _state_lock;
-    never acquire either while holding any of the others.
+    update_assignments and _apply_rule_set (hot-reload swap) never
+    interleave, so the swap's install→validate→rollback window cannot be
+    observed by a concurrent re-evaluation.  The MIDI thread never takes
+    it: a re-evaluation holds it throughout, and every message would wait.
+  - _publish_lock guards installing a rule set, publishing what a
+    re-evaluation derived from one (the working note map, the candidate
+    cache), and the top-level rule snapshot (_top_level_*).  Held only
+    for pointer swaps, so a Program Change takes it on the MIDI thread:
+    it switches the pool and installs the program's rules at once, and
+    the re-evaluation worker re-ranks them and settles the switch
+    (#4488).  _rules_generation, bumped by every install, keeps a
+    re-evaluation of older rules from publishing over newer ones.
+    Lock-ordering rule: _rules_lock is outermost, then _publish_lock,
+    then _state_lock; never acquire _rules_lock or _publish_lock while
+    holding any of the others.
 
 Mixing architecture: a PyAudio callback stream requests N frames at regular
 intervals. Each triggered note adds a _Voice (pre-rendered multichannel float32
@@ -143,6 +150,22 @@ class _Candidates:
 
 	ids:      list[int]
 	loudness: typing.Optional[list[float]]
+
+
+@dataclasses.dataclass(frozen=True)
+class _PendingSwitch:
+
+	"""A Program Change installed on the MIDI thread whose re-evaluation has not finished.
+
+	The re-evaluation that settles it switches back to ``previous_program`` if
+	the new program's rules fail, unless a newer rule set has been installed
+	since (``generation`` no longer the current one).
+	"""
+
+	generation:       int
+	program:          int
+	name:             str
+	previous_program: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -677,9 +700,13 @@ def _build_variant_lookup (
 
 	def _lookup (sample_id: int) -> typing.Optional[subsample.transform.TransformResult]:
 
-		"""The sample's variant for this spec if it has baked, else None (and it is queued)."""
+		"""The sample's variant for this spec if it is in memory, else None (and it is queued).
 
-		return transform_manager.get_variant(sample_id, spec)
+		Memory only: a note-on ranks through this once per candidate, and a
+		variant still on disk is loaded by the render worker instead (#4488).
+		"""
+
+		return transform_manager.get_variant(sample_id, spec, from_disk=False)
 
 	return _lookup
 
@@ -2428,13 +2455,23 @@ def _load_instrument_from_path (
 	)
 
 
+_REFERENCE_PATHS: dict[str, typing.Optional[str]] = {}
+"""Each path-like reference a map names, and the file it resolves to, or None
+when there is none.  Filled by the first lookup, which a re-evaluation makes
+before a note can, and emptied on a map reload."""
+
+
 def _reference_wav_path (assignment: subsample.query.Assignment) -> typing.Optional[str]:
 
 	"""Resolve the reference sample WAV path for an assignment.
 
 	Returns the absolute path string if the assignment's primary select spec
-	has a path-based reference, or None otherwise.  Used by the vocoder
-	processor to resolve ``carrier: reference``.
+	has a path-based reference to a file that exists, or None otherwise.  Used
+	by the vocoder processor to resolve ``carrier: reference``.
+
+	Every note-on that plays a process chain asks, so the answer is kept in
+	_REFERENCE_PATHS: resolving and checking the file read the filesystem
+	on the MIDI thread at every trigger (#4488).
 	"""
 
 	if not assignment.select:
@@ -2442,16 +2479,18 @@ def _reference_wav_path (assignment: subsample.query.Assignment) -> typing.Optio
 
 	ref = assignment.select[0].where.reference
 
-	if ref is None:
+	if ref is None or not subsample.query.is_path_like(ref):
 		return None
 
-	if subsample.query.is_path_like(ref):
-		resolved = pathlib.Path(ref).resolve()
+	if ref in _REFERENCE_PATHS:
+		return _REFERENCE_PATHS[ref]
 
-		if resolved.exists():
-			return str(resolved)
+	resolved = pathlib.Path(ref).resolve()
+	path     = str(resolved) if resolved.exists() else None
 
-	return None
+	_REFERENCE_PATHS[ref] = path
+
+	return path
 
 
 def _resolve_path_references (
@@ -4688,6 +4727,23 @@ class MidiPlayer:
 		# _apply_rule_set calls update_assignments() on the same thread.
 		self._rules_lock: threading.RLock = threading.RLock()
 
+		# Guards installing a rule set and publishing what a re-evaluation
+		# derived from one, and the top-level snapshot (_top_level_*).  Held
+		# only for pointer swaps, so the MIDI thread can take it for a Program
+		# Change, which must never wait on _rules_lock: that is held for a whole
+		# re-evaluation, and every message behind the switch would wait with it
+		# (#4488).  Order: _rules_lock, then _publish_lock, then BankManager's
+		# own lock; the other player locks are never taken while holding it.
+		self._publish_lock: threading.Lock = threading.Lock()
+
+		# Bumped by every rule install.  A re-evaluation reads it before it reads
+		# the rules and publishes only while it is unchanged, so one that ranked
+		# an older rule set never overwrites a newer one.
+		self._rules_generation: int = 0
+
+		# A Program Change still waiting for its re-evaluation, or None.
+		self._pending_switch: typing.Optional[_PendingSwitch] = None
+
 		# Materialise zone-tuned templates against the active library so
 		# the startup log shows the derived per-sample zones rather than
 		# an empty NoteMap.  Subsequent re-materialisation happens at the
@@ -4815,6 +4871,18 @@ class MidiPlayer:
 	# and transform lookups to the active bank.  When None (single-directory
 	# mode), the directly-passed instances are used.
 
+	def _effective_pool (
+		self,
+	) -> tuple[subsample.library.InstrumentLibrary, typing.Optional[subsample.transform.TransformManager]]:
+
+		"""The active program's library and transform pipeline, from one read of which program that is."""
+
+		if self._bank_manager is not None:
+			bank = self._bank_manager.active_bank
+			return bank.instrument_library, typing.cast(typing.Optional[subsample.transform.TransformManager], bank.transform_manager)
+
+		return self._instrument_library, self._transform_manager
+
 	@property
 	def _effective_instrument_library (self) -> subsample.library.InstrumentLibrary:
 
@@ -4931,7 +4999,7 @@ class MidiPlayer:
 			# reentrant, so the _materialize_zones/_rebuild_candidate_cache calls
 			# (which may take it again) are fine.
 			with self._rules_lock:
-				self._top_level_note_map, self._top_level_zone_templates = self._strip_oob_routing_rules(
+				top_note_map, top_zone_templates = self._strip_oob_routing_rules(
 					self._top_level_note_map, self._top_level_zone_templates,
 				)
 
@@ -4942,13 +5010,17 @@ class MidiPlayer:
 								_bank.note_map, _bank.zone_templates or (),
 							)
 
-				active_bank = self._bank_manager.active_bank if self._bank_manager is not None else None
-				if active_bank is not None and active_bank.note_map is not None:
-					self._base_note_map  = active_bank.note_map
-					self._zone_templates = active_bank.zone_templates or ()
-				else:
-					self._base_note_map  = self._top_level_note_map
-					self._zone_templates = self._top_level_zone_templates
+				with self._publish_lock:
+					self._top_level_note_map       = top_note_map
+					self._top_level_zone_templates = top_zone_templates
+
+					active_bank = self._bank_manager.active_bank if self._bank_manager is not None else None
+					if active_bank is not None and active_bank.note_map is not None:
+						self._base_note_map  = active_bank.note_map
+						self._zone_templates = active_bank.zone_templates or ()
+					else:
+						self._base_note_map  = self._top_level_note_map
+						self._zone_templates = self._top_level_zone_templates
 
 				# Rebuild the working map and selection cache from the fixed sources.
 				self._materialize_zones()
@@ -5419,14 +5491,27 @@ class MidiPlayer:
 			bpm,
 		)
 
+		self._arm_reevaluation(f"MIDI clock {bpm:g} BPM", delay=_CC_DEBOUNCE_SECONDS)
+
+	def _arm_reevaluation (self, context: str, delay: float) -> None:
+
+		"""Re-evaluate on a timer thread after ``delay`` seconds, replacing one not yet started.
+
+		Shared by a CC move, a tempo change and a Program Change, so a burst of
+		them coalesces into one re-evaluation and there is one timer to cancel at
+		shutdown.  Replacing a Program Change's loses nothing: every
+		re-evaluation settles a pending switch (_try_update_assignments).
+		"""
+
 		with self._cc_debounce_lock:
 			if self._cc_debounce_timer is not None:
 				self._cc_debounce_timer.cancel()
 
+			# Defensive timer target: a transient query failure here must not
+			# silently kill the timer thread and stall every later re-evaluation
+			# for the session.
 			self._cc_debounce_timer = threading.Timer(
-				_CC_DEBOUNCE_SECONDS,
-				self._try_update_assignments,
-				args=(f"MIDI clock {bpm:g} BPM",),
+				delay, self._try_update_assignments, args=(context,),
 			)
 			self._cc_debounce_timer.start()
 
@@ -5584,15 +5669,7 @@ class MidiPlayer:
 				if active is not None and active.program == msg.program:
 					return
 
-				# Remember where we came from so a failed rule-apply can roll the
-				# POOL back too, not just the rules (see the except below).
-				previous_program = active.program if active is not None else None
-
-				# Held from the pool switch to the end of the rule swap, so a map
-				# reload on the watcher thread can neither decide on the old pool
-				# nor refresh the top-level rules while this reads them.
-				with self._rules_lock:
-					self._switch_program_locked(bm, msg.program, previous_program)
+				self._switch_program(bm, msg.program, active.program)
 			return
 
 		# Control Change: update CC state and debounce re-evaluation for
@@ -5671,19 +5748,7 @@ class MidiPlayer:
 						msg.channel + 1, msg.control, msg.value,
 					)
 
-				with self._cc_debounce_lock:
-					if self._cc_debounce_timer is not None:
-						self._cc_debounce_timer.cancel()
-
-					# Defensive timer target: a transient query failure here
-					# must not silently kill the timer thread and stall every
-					# subsequent CC-driven re-evaluation for the session.
-					self._cc_debounce_timer = threading.Timer(
-						_CC_DEBOUNCE_SECONDS,
-						self._try_update_assignments,
-						args=(f"CC #{msg.control} debounce",),
-					)
-					self._cc_debounce_timer.start()
+				self._arm_reevaluation(f"CC #{msg.control} debounce", delay=_CC_DEBOUNCE_SECONDS)
 
 			return
 
@@ -6118,15 +6183,10 @@ class MidiPlayer:
 
 		# ── Sample selection ──────────────────────────────────────────────
 		# eff_transform is captured here (not just where the variant lookup
-		# below needs it) so the whole note-on reads one consistent bank.
-		# Safety rests on single-threaded dispatch: program_change and note_on
-		# are both handled by _handle_message on the one rtmidi thread, so no
-		# bank swap can interleave within a handler.  (These are two separate
-		# lock-taking property reads, not one atomic snapshot — anyone who adds
-		# a concurrent switch_to() caller must revisit this.)
-
-		eff_library   = self._effective_instrument_library
-		eff_transform = self._effective_transform_manager
+		# below needs it) so the whole note-on reads one consistent bank: one
+		# read of the active program, because the re-evaluation worker can
+		# switch it back while this runs (_undo_switch, #4488).
+		eff_library, eff_transform = self._effective_pool()
 
 		sample_id = self._resolve_sample_id(assignment, pick_spec, eff_library, msg.velocity)
 
@@ -6170,8 +6230,7 @@ class MidiPlayer:
 
 		# ── Variant lookup based on ProcessSpec ───────────────────────────
 		# eff_transform was captured at the top of the handler alongside
-		# eff_library so both read the same bank for this note-on — guaranteed
-		# by single-threaded rtmidi dispatch (see the capture site above).
+		# eff_library, from one read of the active program (see there).
 
 		if eff_transform is not None:
 
@@ -6183,7 +6242,9 @@ class MidiPlayer:
 				spec = self._build_trigger_spec(assignment, record, msg.note)
 
 				if spec.steps:
-					variant = eff_transform.get_variant(sample_id, spec)
+					# Memory only: a variant still on disk is loaded by the render
+					# worker, and this note plays the fallback below (#4488).
+					variant = eff_transform.get_variant(sample_id, spec, from_disk=False)
 
 					if variant is not None:
 						seg_audio, seg_level = self._select_segment(
@@ -6398,21 +6459,28 @@ class MidiPlayer:
 		guarantee that the rest of the player relies on still holds.
 		"""
 
-		if not self._zone_templates:
+		# The rules are read once, with the generation they were installed as;
+		# a Program Change can install newer ones while this runs (#4488).
+		with self._publish_lock:
+			generation     = self._rules_generation
+			base_note_map  = self._base_note_map
+			zone_templates = self._zone_templates
+
+		if not zone_templates:
 			# No templates — the base map IS the working map.  Copy so any
 			# subsequent runtime mutation (output-routing fix-up in run())
 			# doesn't bleed into the base.
-			self._note_map = dict(self._base_note_map)
+			self._publish_note_map(generation, dict(base_note_map))
 			return
 
 		# Start from a fresh copy of the manual entries; derived entries
 		# are appended per-template below.
-		new_map: NoteMap = {k: list(v) for k, v in self._base_note_map.items()}
+		new_map: NoteMap = {k: list(v) for k, v in base_note_map.items()}
 
 		eff_library    = self._effective_instrument_library
 		eff_similarity = self._effective_similarity_matrix
 
-		for template in self._zone_templates:
+		for template in zone_templates:
 
 			# Run the template's select against the library.  Use the
 			# first select spec only — zone-tuned doesn't support
@@ -6538,9 +6606,20 @@ class MidiPlayer:
 				template.name, n, template.channel + 1, lo_note, hi_note,
 			)
 
-		# Atomic dict rebind: in-flight rtmidi handlers see either the
-		# old map or the new map, never a half-applied state.
-		self._note_map = new_map
+		self._publish_note_map(generation, new_map)
+
+	def _publish_note_map (self, generation: int, note_map: NoteMap) -> None:
+
+		"""Make a materialised map the working one, unless newer rules were installed since it began."""
+
+		with self._publish_lock:
+			if generation != self._rules_generation:
+				_log.debug("Note map for superseded rules discarded")
+				return
+
+			# Atomic dict rebind: in-flight rtmidi handlers see either the
+			# old map or the new map, never a half-applied state.
+			self._note_map = note_map
 
 	def _resolve_sample_id (
 		self,
@@ -6644,6 +6723,10 @@ class MidiPlayer:
 		map reload, CC debounce — refreshes the cache against the live library.
 		"""
 
+		with self._publish_lock:
+			generation = self._rules_generation
+			note_map   = self._note_map
+
 		eff_library    = self._effective_instrument_library
 		eff_similarity = self._effective_similarity_matrix
 		eff_transform  = self._effective_transform_manager
@@ -6657,7 +6740,7 @@ class MidiPlayer:
 		new_cache: dict[int, _Candidates] = {}
 		seen: set[int] = set()
 
-		for entries in self._note_map.values():
+		for entries in note_map.values():
 			for assignment, _pick_spec in entries:
 				assignment_id = id(assignment)
 
@@ -6695,9 +6778,13 @@ class MidiPlayer:
 						loudness=_loudness_positions(ranked),
 					)
 
-		# Atomic dict rebind: in-flight rtmidi handlers see either the old or
-		# the new cache, never a half-built one.
-		self._candidate_cache = new_cache
+		with self._publish_lock:
+			# Rankings of rules or a pool a Program Change has since replaced
+			# would hand its notes sample ids from the wrong program.
+			if generation == self._rules_generation:
+				# Atomic dict rebind: in-flight rtmidi handlers see either the old
+				# or the new cache, never a half-built one.
+				self._candidate_cache = new_cache
 
 		return ranked_by_assignment
 
@@ -6796,6 +6883,9 @@ class MidiPlayer:
 		# Re-derive zone-tuned entries against the current library before
 		# the candidate cache and variant pre-computation walk the NoteMap.
 		# Cheap when no templates are declared (early return inside).
+		with self._publish_lock:
+			generation = self._rules_generation
+
 		self._materialize_zones()
 
 		# Refresh the hot-path sample-selection cache against the current
@@ -6804,6 +6894,13 @@ class MidiPlayer:
 		# runs even without a transform manager, so selection works when only
 		# the player (and no transforms) is configured.
 		candidate_records = self._rebuild_candidate_cache()
+
+		# A Program Change installed newer rules while this ranked these, so
+		# nothing it derived was published, and its own re-evaluation follows:
+		# preparing variants for the rules it replaced would be wasted work.
+		with self._publish_lock:
+			if self._rules_generation != generation:
+				return
 
 		# Drop per-layer state keyed by retired Assignment identities — rule
 		# swaps and zone re-materialisation mint fresh objects, and stale
@@ -6846,6 +6943,9 @@ class MidiPlayer:
 		_total_variants = 0
 
 		for asgn, note_picks in groups.values():
+
+			# Fill the reference-path memo here, so a note-on never resolves it.
+			_reference_wav_path(asgn)
 
 			# Reuse the ranked list _rebuild_candidate_cache already resolved
 			# for this assignment — no second query against the library.
@@ -6986,18 +7086,46 @@ class MidiPlayer:
 		reload path itself does NOT use this — it relies on the raised
 		exception to know whether the new map validated.
 
+		It also settles a Program Change the MIDI thread installed: once a
+		re-evaluation has published for the new program's rules the switch is
+		complete, and if one fails while they are still the live rules, the
+		program is switched back, as the switch itself used to do (#4488).
+
 		``context`` is included in the ERROR log so a stuck behaviour can
 		be traced to the trigger.
 		"""
 
-		try:
-			self.update_assignments()
-		except Exception as exc:
-			_log.error(
-				"Could not refresh note assignments during %s - playback "
-				"continues with the previous set: %s",
-				context, exc,
-			)
+		with self._rules_lock:
+			with self._publish_lock:
+				pending = self._pending_switch
+
+			try:
+				self.update_assignments()
+			except Exception as exc:
+				if pending is not None and self._undo_switch(pending):
+					_log.error(
+						"Program %d (%s) rules failed to apply - back to the "
+						"previous program: %s",
+						pending.program, pending.name, exc,
+					)
+					context = f"the return to program {pending.previous_program}"
+
+					try:
+						self.update_assignments()
+						return
+					except Exception as again:
+						exc = again
+
+				_log.error(
+					"Could not refresh note assignments during %s - playback "
+					"continues with the previous set: %s",
+					context, exc,
+				)
+				return
+
+			with self._publish_lock:
+				if pending is not None and self._pending_switch is pending and self._rules_generation == pending.generation:
+					self._pending_switch = None
 
 	def _strip_oob_routing_rules (
 		self,
@@ -7076,6 +7204,76 @@ class MidiPlayer:
 
 		return fixed_base, fixed_zones
 
+	def _install_rules_locked (
+		self,
+		base_note_map:  NoteMap,
+		zone_templates: tuple[ZoneTemplate, ...],
+		mapped_ccs:     set[int],
+	) -> int:
+
+		"""Install a rule set and return its generation — caller must hold _publish_lock.
+
+		Pointer swaps only, so the MIDI thread can do it.  The working map starts
+		as the manual entries and the candidate cache empties, since both were
+		derived from the rules or the pool being replaced; the re-evaluation that
+		follows every install derives them again.  Until it has, zone-tuned notes
+		are silent and every other note ranks its candidates live.
+		"""
+
+		self._base_note_map    = base_note_map
+		self._note_map         = dict(base_note_map)
+		self._zone_templates   = zone_templates
+		self._mapped_ccs       = mapped_ccs
+		self._candidate_cache  = {}
+		self._choke_map        = _build_choke_map(base_note_map)
+
+		# Derived from the incoming rules rather than threaded through every
+		# caller, so a preset switch back to the top-level rules re-derives it
+		# from those rules automatically.
+		self._map_quantizes    = _uses_quantize(base_note_map, zone_templates)
+		self._map_beat_filters = _uses_beat_filter(base_note_map, zone_templates)
+
+		self._rules_generation += 1
+
+		return self._rules_generation
+
+	def _rules_for_locked (
+		self, bank: subsample.bank.Bank,
+	) -> tuple[NoteMap, tuple[ZoneTemplate, ...], set[int]]:
+
+		"""The rules a program plays — caller must hold _publish_lock.
+
+		A ``map:`` preset carries its own; a ``directory:`` program plays the
+		top-level rules against its own pool.
+		"""
+
+		if bank.note_map is not None:
+			return bank.note_map, bank.zone_templates or (), bank.mapped_ccs or set()
+
+		return self._top_level_note_map, self._top_level_zone_templates, self._top_level_mapped_ccs
+
+	def _forget_previous_rules (self) -> None:
+
+		"""Clear what the player keeps per assignment, after a program change has replaced them.
+
+		Called outside _publish_lock, which these locks are never taken under.
+		"""
+
+		self._sync_clock_tracker()
+
+		# Both dicts are guarded by _state_lock — clear them together so any
+		# concurrent reader (e.g. _select_segment RMW) sees a consistent
+		# post-switch state.
+		with self._state_lock:
+			self._last_played.clear()
+			self._segment_counters.clear()
+
+		with self._mix_matrix_lock:
+			self._mix_matrix_cache.clear()
+
+		self._loop_unavailable_warned.clear()
+		self._loop_collapsed_warned.clear()
+
 	def _apply_rule_set (
 		self,
 		base_note_map: NoteMap,
@@ -7124,12 +7322,15 @@ class MidiPlayer:
 
 		"""Body of _apply_rule_set — caller must hold _rules_lock."""
 
-		old_base_note_map  = self._base_note_map
-		old_note_map       = self._note_map
-		old_zone_templates = self._zone_templates
-		old_mapped_ccs     = self._mapped_ccs
-		old_map_quantizes  = self._map_quantizes
-		old_map_beat_filters = self._map_beat_filters
+		with self._publish_lock:
+			old_base_note_map    = self._base_note_map
+			old_note_map         = self._note_map
+			old_zone_templates   = self._zone_templates
+			old_mapped_ccs       = self._mapped_ccs
+			old_map_quantizes    = self._map_quantizes
+			old_map_beat_filters = self._map_beat_filters
+			old_candidate_cache  = self._candidate_cache
+			old_choke_map        = self._choke_map
 
 		# update_assignments() adopts a clock tempo and prunes the per-note state
 		# of assignments the new rules retire, both before it can raise.  Kept
@@ -7146,16 +7347,9 @@ class MidiPlayer:
 		# validates against what the player would actually run with.  This
 		# is the canonical validation path — we don't duplicate query
 		# logic for a separate dry-run.
-		self._base_note_map  = base_note_map
-		self._note_map       = dict(base_note_map)
-		self._zone_templates = zone_templates
-		self._mapped_ccs     = mapped_ccs
+		with self._publish_lock:
+			installed = self._install_rules_locked(base_note_map, zone_templates, mapped_ccs)
 
-		# Derived from the incoming rules rather than threaded through every
-		# caller, so a preset switch back to the top-level rules re-derives it
-		# from those rules automatically.
-		self._map_quantizes  = _uses_quantize(base_note_map, zone_templates)
-		self._map_beat_filters = _uses_beat_filter(base_note_map, zone_templates)
 		self._sync_clock_tracker()
 
 		try:
@@ -7169,17 +7363,31 @@ class MidiPlayer:
 			# previously-good configuration.  Any variants
 			# update_assignments() may have enqueued before raising are
 			# harmless — they sit in the transform manager's cache for
-			# future calls.  The candidate cache is deliberately NOT
-			# restored: a stale id misses and falls through to the live
-			# query, so the cost is performance-only and self-corrects on
-			# the next update_assignments.
-			self._base_note_map  = old_base_note_map
-			self._note_map       = old_note_map
-			self._zone_templates = old_zone_templates
-			self._mapped_ccs     = old_mapped_ccs
-			self._map_quantizes  = old_map_quantizes
-			self._map_beat_filters = old_map_beat_filters
-			self._target_bpm     = old_target_bpm
+			# future calls.  The candidate cache is restored with the rules:
+			# installing the new ones emptied it, and the old rankings still
+			# fit the old rules and the pool, which has not changed.
+			#
+			# Only while these rules are still the installed ones: a Program
+			# Change during the validation has installed its program's rules,
+			# and restoring the old ones would undo it (#4488).
+			with self._publish_lock:
+				if self._rules_generation != installed:
+					raise
+
+				self._base_note_map    = old_base_note_map
+				self._note_map         = old_note_map
+				self._zone_templates   = old_zone_templates
+				self._mapped_ccs       = old_mapped_ccs
+				self._map_quantizes    = old_map_quantizes
+				self._map_beat_filters = old_map_beat_filters
+				self._candidate_cache  = old_candidate_cache
+				self._choke_map        = old_choke_map
+
+				# A new generation, so a re-evaluation of the failed rules still
+				# in flight cannot publish over the restored ones.
+				self._rules_generation += 1
+
+			self._target_bpm = old_target_bpm
 			self._sync_clock_tracker()
 
 			# Put back only what the failed attempt pruned: a note that played
@@ -7210,78 +7418,66 @@ class MidiPlayer:
 		self._loop_unavailable_warned.clear()
 		self._loop_collapsed_warned.clear()
 
-		# Rebuild the choke table from the newly-applied base map.  On the
-		# rollback path above we never reached here, and _choke_map was not
-		# touched during the try, so it still matches the restored old base map.
-		self._choke_map = _build_choke_map(self._base_note_map)
-
-	def _switch_program_locked (
+	def _switch_program (
 		self,
 		bm: subsample.bank.BankManager,
 		program: int,
-		previous_program: typing.Optional[int],
+		previous_program: int,
 	) -> None:
 
-		"""Switch the pool to a program and swap in its rules — caller must hold _rules_lock.
+		"""Switch to a program at once, and leave its re-ranking to the re-evaluation worker.
 
-		The body of the Program Change handler.  Holding _rules_lock across the
-		pool switch, the read of the top-level rules and their swap keeps a map
-		reload on the watcher thread from landing in between: it would otherwise
-		see the old pool when deciding whether a preset is live, or refresh the
-		three top-level fields while this reads them one at a time.
+		The body of the Program Change handler, on the MIDI thread.  It used to
+		run the whole re-evaluation here, after waiting on _rules_lock for any
+		re-bake in progress, and every note-off, panic and clock pulse behind
+		it waited too (M19 of the 2026-09-21 review, #4488).  Now the pool and
+		the program's rules change under _publish_lock, which is held only for
+		pointer swaps: notes from this instant play the new program, ranking
+		their candidates live until the worker has re-ranked them.  If the new
+		rules fail there, the worker switches back (_undo_switch).
+
+		_publish_lock spans the pool switch and the rule install, so a map
+		reload on the watcher thread can neither decide on the old pool nor
+		refresh the top-level rules while this reads them.
 		"""
 
-		if bm.switch_to(program):
-			# Both dicts are guarded by _state_lock — clear them
-			# together so any concurrent reader (e.g. _select_segment
-			# RMW) sees a consistent post-switch state.
-			with self._state_lock:
-				self._last_played.clear()
-				self._segment_counters.clear()
+		with self._publish_lock:
+			if not bm.switch_to(program):
+				return
 
-			bank = bm.active_bank
+			bank       = bm.active_bank
+			generation = self._install_rules_locked(*self._rules_for_locked(bank))
 
-			if bank.note_map is not None:
-				# `map:` preset — swap the RULES too (assignments /
-				# zones / CCs), not just the pool.
-				rule_set = (
-					bank.note_map,
-					bank.zone_templates or (),
-					bank.mapped_ccs or set(),
-				)
-			else:
-				# `directory:` shorthand — reuse the top-level rules.
-				# Restore the immutable snapshot (a prior `map:` preset
-				# may have replaced the active base) and re-query it
-				# against the swapped pool.
-				rule_set = (
-					self._top_level_note_map,
-					self._top_level_zone_templates,
-					self._top_level_mapped_ccs,
-				)
+			self._pending_switch = _PendingSwitch(
+				generation=generation, program=program, name=bank.name,
+				previous_program=previous_program,
+			)
 
-			# _apply_rule_set_locked runs update_assignments() against the
-			# now-active bank's library and rolls back on failure, so a
-			# broken kit (or a query that raises) never kills the player
-			# thread mid-set.
-			try:
-				self._apply_rule_set_locked(*rule_set)
-			except Exception as exc:
-				# The rules rolled back, but switch_to already committed the
-				# POOL to the new bank — leaving _effective_* serving the new
-				# library under the old rules (largely silence).  Switch the
-				# pool back so pool and rules are consistent again.
-				if previous_program is not None:
-					bm.switch_to(previous_program)
-					with self._state_lock:
-						self._last_played.clear()
-						self._segment_counters.clear()
+		self._forget_previous_rules()
+		self._arm_reevaluation(f"program change to {program}", delay=0.0)
 
-				_log.error(
-					"Program %d (%s) rules failed to apply - staying on the "
-					"previous program: %s",
-					program, bank.name, exc,
-				)
+	def _undo_switch (self, pending: _PendingSwitch) -> bool:
+
+		"""Switch back from a program whose rules failed, if they are still the live ones.
+
+		Runs on the re-evaluation worker.  Returns False, changing nothing, when a
+		newer rule set has been installed since the switch: that one is live now,
+		and its own re-evaluation follows.
+		"""
+
+		bm = self._bank_manager
+
+		with self._publish_lock:
+			if bm is None or self._rules_generation != pending.generation:
+				return False
+
+			bm.switch_to(pending.previous_program)
+			self._install_rules_locked(*self._rules_for_locked(bm.active_bank))
+			self._pending_switch = None
+
+		self._forget_previous_rules()
+
+		return True
 
 	def reload_midi_map (self, new_result: MidiMapResult) -> None:
 
@@ -7329,20 +7525,29 @@ class MidiPlayer:
 			new_result.note_map, new_result.zone_templates,
 		)
 
-		# Held from the preset check to the snapshot refresh, as the Program
-		# Change handler holds it from its pool switch to its rule swap: the
-		# check and the act then see one program, and the handler never reads
-		# the three top-level fields half refreshed.
+		# A reference the edit names may be a different file now.
+		_REFERENCE_PATHS.clear()
+
 		with self._rules_lock:
 
-			# A `map:` preset is live — don't clobber it with the top-level rules.
-			# Refresh the snapshot so the edit takes effect on the next non-preset
-			# switch (whose _apply_rule_set validates it and rolls back on failure);
-			# we can't validate here without applying, which would replace the preset.
-			if self._bank_manager is not None and self._bank_manager.active_bank.note_map is not None:
-				self._top_level_note_map       = stripped_map
-				self._top_level_zone_templates = stripped_zones
-				self._top_level_mapped_ccs     = new_ccs
+			# The preset check and the snapshot refresh hold _publish_lock, which a
+			# Program Change holds from its pool switch to its rule install: the
+			# check and the act then see one program, and the switch never reads
+			# the three top-level fields half refreshed.
+			with self._publish_lock:
+				# A `map:` preset is live — don't clobber it with the top-level rules.
+				# Refresh the snapshot so the edit takes effect on the next non-preset
+				# switch (whose re-evaluation validates it and switches back on
+				# failure); we can't validate here without applying, which would
+				# replace the preset.
+				preset_live = self._bank_manager is not None and self._bank_manager.active_bank.note_map is not None
+
+				if preset_live:
+					self._top_level_note_map       = stripped_map
+					self._top_level_zone_templates = stripped_zones
+					self._top_level_mapped_ccs     = new_ccs
+
+			if preset_live:
 				_log.info(
 					"MIDI map reloaded (top-level): a map: preset is active, so the "
 					"edit applies to directory programs / on the next non-preset switch",
@@ -7358,9 +7563,28 @@ class MidiPlayer:
 			# restores, even though it never applied cleanly here.
 			self._apply_rule_set_locked(stripped_map, stripped_zones, new_ccs)
 
-			self._top_level_note_map       = stripped_map
-			self._top_level_zone_templates = stripped_zones
-			self._top_level_mapped_ccs     = new_ccs
+			with self._publish_lock:
+				self._top_level_note_map       = stripped_map
+				self._top_level_zone_templates = stripped_zones
+				self._top_level_mapped_ccs     = new_ccs
+
+				# A Program Change while the edit was validating installed the
+				# top-level rules from before it.  When the program it chose plays
+				# the top-level rules, it gets the edit, and the switch's own
+				# re-evaluation, waiting for this to finish, settles it.
+				behind = (
+					self._base_note_map is not stripped_map
+					and (self._bank_manager is None or self._bank_manager.active_bank.note_map is None)
+				)
+
+				if behind:
+					generation = self._install_rules_locked(stripped_map, stripped_zones, new_ccs)
+
+					if self._pending_switch is not None:
+						self._pending_switch = dataclasses.replace(self._pending_switch, generation=generation)
+
+			if behind:
+				self._sync_clock_tracker()
 
 		_log.info(
 			"MIDI map reloaded: %d note(s)%s (was %d)",
