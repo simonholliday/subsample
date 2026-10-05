@@ -1856,6 +1856,22 @@ def _main_impl () -> None:
 	for t in threads:
 		t.start()
 
+	startup_failed = _wait_for_shutdown(shutdown_event, threads)
+
+	_shut_down(
+		threads, _processor_cell[0], instrument_watchers, midi_map_watcher, osc_receiver,
+		bank_manager, transform_manager, startup_failed,
+	)
+
+
+def _wait_for_shutdown (shutdown_event: threading.Event, threads: list[threading.Thread]) -> bool:
+
+	"""Block until asked to stop, or until every subsystem thread has stopped by itself.
+
+	Returns True when the subsystems all stopped without anyone asking, which
+	means one failed at startup.
+	"""
+
 	startup_failed = False
 
 	try:
@@ -1883,12 +1899,32 @@ def _main_impl () -> None:
 		print("\nStopping…")
 		shutdown_event.set()
 
+	return startup_failed
+
+
+def _shut_down (
+	threads:             list[threading.Thread],
+	processor:           typing.Optional[subsample.recorder.SampleProcessor],
+	instrument_watchers: list[subsample.watcher.InstrumentWatcher],
+	midi_map_watcher:    typing.Optional[subsample.watcher.MidiMapWatcher],
+	osc_receiver:        typing.Any,
+	bank_manager:        typing.Optional[subsample.bank.BankManager],
+	transform_manager:   typing.Optional[subsample.transform.TransformManager],
+	startup_failed:      bool,
+) -> None:
+
+	"""Stop every subsystem in order, finishing the captures still being analysed first, then exit.
+
+	Raises SystemExit(1) after a startup failure, and hard-exits when a
+	subsystem thread is stuck in a device prompt; otherwise returns.
+	"""
+
 	# Wait for captures still being analysed BEFORE joining with a timeout.
 	# A capture's audio file is written only after its analysis, its preview and
 	# its loop search have run, and pyin alone costs seconds per sample — so a
 	# backlog takes longer than the join timeout below, and the hard exit that
 	# followed threw those recordings away with no message and exit code 0.
-	_drain_captures(_processor_cell[0])
+	_drain_captures(processor)
 
 	for t in threads:
 		t.join(timeout=10.0)

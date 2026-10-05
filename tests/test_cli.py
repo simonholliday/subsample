@@ -5,9 +5,11 @@ import dataclasses
 import importlib
 import logging
 import math
+import os
 import pathlib
 import sys
 import textwrap
+import threading
 import typing
 import unittest.mock
 import wave
@@ -24,6 +26,7 @@ import subsample.config
 import subsample.detector
 import subsample.events
 import subsample.library
+import subsample.loopfind
 import subsample.player
 import subsample.recorder
 import subsample.similarity
@@ -2277,3 +2280,376 @@ class TestAnInterruptedStartupStopsWhatItStarted:
 		assert exit_info.value.code == 130
 		assert stopped == ["workers"], "the pool was stopped, not left to hang"
 		assert "Interrupted" in capsys.readouterr().err
+
+
+def _default_cfg () -> subsample.config.Config:
+
+	"""The shipped default config, as a fresh project has it."""
+
+	return subsample.config.load_config(subsample.config._locate_default_config())
+
+
+class TestRunRecorder:
+
+	"""The capture thread: choosing the device and its inputs, feeding captures
+	to the analysis queue, and stopping cleanly (the 2026-09-21 review's M24:
+	no test reached any of it)."""
+
+	_TRIMMED = numpy.ones((441, 1), dtype=numpy.int16)
+
+	def _cfg (self, **audio: typing.Any) -> subsample.config.Config:
+		cfg = _default_cfg()
+		recorder_audio = dataclasses.replace(cfg.recorder.audio, channels=None, input=None, device=None)
+		return dataclasses.replace(
+			cfg, recorder=dataclasses.replace(cfg.recorder, audio=dataclasses.replace(recorder_audio, **audio)),
+		)
+
+	def _devices (
+		self, monkeypatch: pytest.MonkeyPatch, channels: int = 2, found: bool = True,
+	) -> unittest.mock.MagicMock:
+		"""Stand in for PortAudio and the device prompts; return the stand-in PyAudio."""
+		pa = unittest.mock.MagicMock()
+		pa.get_device_info_by_index.return_value = {"name": "Interface"}
+
+		def find (pa_: typing.Any, name: str) -> int:
+			if not found:
+				raise ValueError(f"no device named {name}")
+			return 3
+
+		monkeypatch.setattr(subsample.audio, "create_pyaudio", lambda: pa)
+		monkeypatch.setattr(subsample.audio, "list_input_devices", lambda pa_: [])
+		monkeypatch.setattr(subsample.audio, "find_device_by_name", find)
+		monkeypatch.setattr(subsample.audio, "select_device", unittest.mock.MagicMock(return_value=0))
+		monkeypatch.setattr(subsample.audio, "get_device_channels", lambda pa_, index: channels)
+		self._input_prompt = unittest.mock.MagicMock(return_value=(0, 2))
+		monkeypatch.setattr(subsample.audio, "select_input_channels", self._input_prompt)
+		return pa
+
+	def _run (
+		self,
+		cfg: subsample.config.Config,
+		monkeypatch: pytest.MonkeyPatch,
+		reads: int = 0,
+		reader: typing.Optional[unittest.mock.MagicMock] = None,
+	) -> tuple[unittest.mock.MagicMock, unittest.mock.MagicMock, list[typing.Optional[subsample.recorder.SampleProcessor]]]:
+		"""Run the capture thread over `reads` chunks, each of which completes a capture; return the reader class, the processor class and the processor cell."""
+		shutdown_event = threading.Event()
+		reader = reader if reader is not None else unittest.mock.MagicMock(overflow_count=0)
+		chunk = numpy.zeros((cfg.recorder.audio.buffer_frames, 1), dtype=numpy.int16)
+		remaining = [reads]
+
+		def read (timeout: float) -> typing.Optional[numpy.ndarray]:
+			if remaining[0] == 0:
+				shutdown_event.set()
+				return None
+			remaining[0] -= 1
+			return chunk
+
+		reader.read.side_effect = read
+		reader_class = unittest.mock.MagicMock(return_value=reader)
+		processor_class = unittest.mock.MagicMock()
+		monkeypatch.setattr(subsample.audio, "AudioReader", reader_class)
+		monkeypatch.setattr(subsample.recorder, "SampleProcessor", processor_class)
+		monkeypatch.setattr(subsample.cli, "_process_chunk", lambda *args: self._TRIMMED)
+
+		cell: list[typing.Optional[subsample.recorder.SampleProcessor]] = [None]
+
+		subsample.cli._run_recorder(
+			cfg, None, subsample.library.InstrumentLibrary(1024 * 1024),
+			subsample.analysis.compute_params(cfg.recorder.audio.sample_rate),
+			None, shutdown_event, store_audio=False, processor_cell=cell,
+		)
+
+		return reader_class, processor_class, cell
+
+	def test_each_capture_goes_to_the_analysis_queue (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		pa = self._devices(monkeypatch)
+
+		reader_class, processor_class, cell = self._run(self._cfg(), monkeypatch, reads=3)
+
+		writer = processor_class.return_value
+		assert [call.args[0] is self._TRIMMED for call in writer.enqueue.call_args_list] == [True, True, True]
+		assert cell[0] is writer, "the shutdown path can see the queue it has to wait for"
+		writer.shutdown.assert_called_once()
+		reader_class.return_value.stop.assert_called_once()
+		pa.terminate.assert_called_once()
+
+	def test_a_one_or_two_channel_device_records_every_channel (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		self._devices(monkeypatch, channels=2)
+
+		reader_class, _processor, _cell = self._run(self._cfg(), monkeypatch)
+
+		assert reader_class.call_args.args[2].channels == 2
+
+	def test_a_device_with_more_channels_asks_which_to_record (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		self._devices(monkeypatch, channels=8)
+
+		reader_class, _processor, _cell = self._run(self._cfg(), monkeypatch)
+
+		recorded = reader_class.call_args.args[2]
+		assert (recorded.channels, recorded.input) == (2, (0, 2))
+		self._input_prompt.assert_called_once_with("Interface", 8)
+
+	def test_chosen_inputs_are_recorded_without_asking (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		self._devices(monkeypatch, channels=4)
+
+		reader_class, _processor, _cell = self._run(self._cfg(input=(1, 3)), monkeypatch)
+
+		recorded = reader_class.call_args.args[2]
+		assert (recorded.channels, recorded.input) == (2, (1, 3))
+		self._input_prompt.assert_not_called()
+
+	def test_overflows_are_reported_when_capture_stops (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		self._devices(monkeypatch)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.cli"):
+			self._run(self._cfg(), monkeypatch, reader=unittest.mock.MagicMock(overflow_count=3))
+
+		assert "Audio overflows detected during capture: 3 - recordings may contain discontinuities" in caplog.text
+
+	def test_a_missing_named_device_asks_instead (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		self._devices(monkeypatch, found=False)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.cli"):
+			reader_class, _processor, _cell = self._run(self._cfg(device="Old Interface"), monkeypatch)
+
+		assert "Configured audio input device 'Old Interface' not found - prompting for selection" in caplog.text
+		assert reader_class.call_args.args[1] == 0, "the device chosen at the prompt"
+
+	def test_an_input_the_device_lacks_stops_before_recording (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		pa = self._devices(monkeypatch, channels=2)
+
+		reader_class, processor_class, _cell = self._run(self._cfg(input=(0, 2)), monkeypatch)
+
+		assert "recorder.audio.input channel 3 exceeds device's 2 input channel(s)" in capsys.readouterr().err
+		reader_class.assert_not_called()
+		processor_class.assert_not_called()
+		pa.terminate.assert_called_once()
+
+	def test_failing_teardown_steps_do_not_cost_the_queued_captures (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		"""An unplugged interface can make the stream and PortAudio refuse to close; the queue still finishes."""
+		pa = self._devices(monkeypatch)
+		pa.terminate.side_effect = OSError("PortAudio not initialised")
+		reader = unittest.mock.MagicMock(overflow_count=0)
+		reader.stop.side_effect = OSError("device unplugged")
+
+		with caplog.at_level(logging.ERROR, logger="subsample.cli"):
+			_reader_class, processor_class, _cell = self._run(self._cfg(), monkeypatch, reader=reader)
+
+		assert "reader.stop() failed during shutdown: device unplugged" in caplog.text
+		assert "pa.terminate() failed during shutdown: PortAudio not initialised" in caplog.text
+		processor_class.return_value.shutdown.assert_called_once()
+
+
+class TestMakeOnComplete:
+
+	"""What happens to a capture once it is analysed."""
+
+	def _capture (self, on_complete: subsample.recorder._OnCompleteCallback, path: pathlib.Path) -> None:
+		on_complete(
+			path,
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(), tests.helpers._make_pitch(),
+			tests.helpers._make_timbre(), tests.helpers._make_level(), tests.helpers._make_band_energy(),
+			1.0, numpy.zeros((4410, 4), dtype=numpy.int16),
+			channel_format="b_ambix",
+			loop=subsample.loopfind.LoopPoints(start=100, end=4000, crossfade=50, junction_flux=0.1),
+		)
+
+	def test_recorder_only_announces_the_capture_and_keeps_nothing (self, tmp_path: pathlib.Path) -> None:
+		"""A recorder sending to another machine over OSC still announces each capture."""
+		library = subsample.library.InstrumentLibrary(1024 * 1024)
+		events = subsample.events.EventEmitter()
+		captured: list[pathlib.Path] = []
+		events.on("sample_captured", lambda **event: captured.append(event["filepath"]))
+
+		on_complete = subsample.cli._make_on_complete(
+			None, library, subsample.analysis.compute_params(44100), None, store_audio=False, app_events=events,
+		)
+		self._capture(on_complete, tmp_path / "take_1.wav")
+
+		assert captured == [tmp_path / "take_1.wav"]
+		assert len(library) == 0
+
+	def test_a_capture_joins_the_library_as_the_recorder_described_it (self, tmp_path: pathlib.Path) -> None:
+		"""H4: a fresh ambisonic capture entered the library as plain PCM, and without its loop."""
+		library = subsample.library.InstrumentLibrary(1024 * 1024)
+
+		on_complete = subsample.cli._make_on_complete(
+			None, library, subsample.analysis.compute_params(48000), None, store_audio=True,
+		)
+		self._capture(on_complete, tmp_path / "take_1.wav")
+
+		[record] = library.samples()
+		assert record.name == "take_1"
+		assert record.filepath == tmp_path / "take_1.wav"
+		assert record.channel_format == "b_ambix"
+		assert record.loop == subsample.loopfind.LoopPoints(start=100, end=4000, crossfade=50, junction_flux=0.1)
+		assert record.audio_sample_rate == 48000
+
+
+class TestApplyActivePresetRules:
+
+	"""A `map:` default program's own rules are live from the first note."""
+
+	def _bank_manager (self, tmp_path: pathlib.Path, note_map: typing.Optional[subsample.player.NoteMap]) -> subsample.bank.BankManager:
+		bank = subsample.bank.Bank(
+			name="kit", directory=tmp_path, program=0,
+			instrument_library=subsample.library.InstrumentLibrary(1024 * 1024),
+			similarity_matrix=typing.cast(subsample.similarity.SimilarityMatrix, None),
+			note_map=note_map, zone_templates=None, mapped_ccs=None,
+		)
+		return subsample.bank.BankManager([bank], bank_channel=10, default_program=0)
+
+	def test_the_active_presets_rules_are_installed (self, tmp_path: pathlib.Path) -> None:
+		note_map: subsample.player.NoteMap = {(9, 36): []}
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+
+		subsample.cli._apply_active_preset_rules(player, self._bank_manager(tmp_path, note_map))
+
+		player._apply_rule_set.assert_called_once_with(note_map, (), set())
+
+	def test_a_directory_program_keeps_the_players_own_rules (self, tmp_path: pathlib.Path) -> None:
+		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
+
+		subsample.cli._apply_active_preset_rules(player, self._bank_manager(tmp_path, None))
+		subsample.cli._apply_active_preset_rules(player, None)
+
+		player._apply_rule_set.assert_not_called()
+
+
+class TestWaitForShutdown:
+
+	"""The main thread's wait, and how it tells a stop from a startup failure."""
+
+	def test_a_requested_stop_is_not_a_failure (self) -> None:
+		event = threading.Event()
+		event.set()
+
+		assert subsample.cli._wait_for_shutdown(event, []) is False
+
+	def test_subsystems_that_all_stop_by_themselves_are_a_failure (self, caplog: pytest.LogCaptureFixture) -> None:
+		"""A bad map or a missing device ends every subsystem thread; the app must not sit there forever."""
+		finished = threading.Thread(target=lambda: None)
+		finished.start()
+		finished.join()
+
+		with caplog.at_level(logging.ERROR, logger="subsample.cli"):
+			assert subsample.cli._wait_for_shutdown(threading.Event(), [finished]) is True
+
+		assert "All subsystems have stopped - exiting." in caplog.text
+
+	def test_ctrl_c_stops_everything (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		event = threading.Event()
+
+		def interrupted (timeout: float) -> bool:
+			raise KeyboardInterrupt
+
+		monkeypatch.setattr(event, "wait", interrupted)
+
+		assert subsample.cli._wait_for_shutdown(event, []) is False
+		assert event.is_set(), "every subsystem is told to stop"
+		assert "Stopping" in capsys.readouterr().out
+
+
+class TestShutDown:
+
+	"""The order things stop in, and how the process ends."""
+
+	class _HardExit (Exception):
+		"""os._exit, which ends the process, raised here instead."""
+
+	def _thread (self, calls: list[str], alive: bool = False) -> unittest.mock.MagicMock:
+		thread = unittest.mock.MagicMock(spec=threading.Thread)
+		thread.join.side_effect = lambda timeout: calls.append("join")
+		thread.is_alive.return_value = alive
+		return thread
+
+	def _shut_down (
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+		calls: list[str],
+		threads: list[unittest.mock.MagicMock],
+		bank_manager: typing.Optional[subsample.bank.BankManager] = None,
+		transform_manager: typing.Optional[unittest.mock.MagicMock] = None,
+		startup_failed: bool = False,
+	) -> None:
+
+		def hard_exit (code: int) -> None:
+			raise self._HardExit(code)
+
+		monkeypatch.setattr(subsample.cli, "_drain_captures", lambda processor: calls.append("drain"))
+		monkeypatch.setattr(os, "_exit", hard_exit)
+
+		watcher = unittest.mock.MagicMock()
+		watcher.stop.side_effect = lambda: calls.append("library watcher")
+		map_watcher = unittest.mock.MagicMock()
+		map_watcher.stop.side_effect = lambda: calls.append("map watcher")
+		receiver = unittest.mock.MagicMock()
+		receiver.stop.side_effect = lambda: calls.append("osc")
+
+		subsample.cli._shut_down(
+			typing.cast(list[threading.Thread], threads), None, [watcher], map_watcher, receiver,
+			bank_manager, typing.cast(typing.Optional[subsample.transform.TransformManager], transform_manager),
+			startup_failed,
+		)
+
+	def test_captures_finish_before_anything_is_given_up_on (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		"""H3: the timed join came first, and a backlog of captures went with the process."""
+		calls: list[str] = []
+		manager = unittest.mock.MagicMock()
+		manager.shutdown.side_effect = lambda: calls.append("renders")
+
+		self._shut_down(monkeypatch, calls, [self._thread(calls)], transform_manager=manager)
+
+		assert calls == ["drain", "join", "library watcher", "map watcher", "osc", "renders"]
+		assert capsys.readouterr().out.endswith("Done.\n")
+
+	def test_every_programs_renders_are_stopped (self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+		calls: list[str] = []
+		banks = []
+		for program in (0, 1):
+			manager = unittest.mock.MagicMock()
+			manager.shutdown.side_effect = lambda program=program: calls.append(f"renders {program}")
+			banks.append(subsample.bank.Bank(
+				name=f"p{program}", directory=tmp_path, program=program,
+				instrument_library=subsample.library.InstrumentLibrary(1024 * 1024),
+				similarity_matrix=typing.cast(subsample.similarity.SimilarityMatrix, None),
+				transform_manager=manager,
+			))
+		unused = unittest.mock.MagicMock()
+
+		self._shut_down(
+			monkeypatch, calls, [], bank_manager=subsample.bank.BankManager(banks, bank_channel=10), transform_manager=unused,
+		)
+
+		assert [call for call in calls if call.startswith("renders")] == ["renders 0", "renders 1"]
+		unused.shutdown.assert_not_called()
+
+	def test_a_startup_failure_exits_non_zero_without_saying_done (
+		self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		with pytest.raises(SystemExit) as exit_info:
+			self._shut_down(monkeypatch, [], [self._thread([])], startup_failed=True)
+
+		assert exit_info.value.code == 1
+		assert "Done." not in capsys.readouterr().out
+
+	def test_a_thread_stuck_at_a_prompt_ends_the_process_cleanly (self, monkeypatch: pytest.MonkeyPatch) -> None:
+		"""A device prompt Ctrl+C cannot reach would otherwise crash the interpreter on its way out."""
+		with pytest.raises(self._HardExit) as exit_info:
+			self._shut_down(monkeypatch, [], [self._thread([], alive=True)])
+
+		assert exit_info.value.args == (0,)
+
