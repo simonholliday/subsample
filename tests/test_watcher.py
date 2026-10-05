@@ -10,7 +10,9 @@ keep the test suite fast: debounce, grace, and stability windows are
 all shortened to sub-second values.
 """
 
+import logging
 import pathlib
+import queue
 import threading
 import time
 import typing
@@ -18,10 +20,12 @@ import unittest.mock
 
 import pytest
 import watchdog.events
+import watchdog.observers.api
 
 import subsample.analysis
 import subsample.cache
 import subsample.library
+import subsample.mounts
 import subsample.watcher
 
 import tests.helpers
@@ -1038,3 +1042,256 @@ class TestACaptureIsIntegratedOnce:
 
 		for timer in watcher._timers.values():
 			timer.cancel()
+
+
+# ---------------------------------------------------------------------------
+# Network drives (#3972)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def shares (monkeypatch: pytest.MonkeyPatch) -> set[pathlib.Path]:
+
+	"""Folders that count as a network drive, polled every 0.1 s; every other folder is local.
+
+	Add a folder to count everything under it as on a share, and take it out
+	to unmount the share.
+	"""
+
+	roots: set[pathlib.Path] = set()
+
+	def network_filesystem (path: pathlib.Path) -> typing.Optional[str]:
+		resolved = path.resolve()
+		return "cifs" if any(resolved.is_relative_to(root) for root in roots) else None
+
+	monkeypatch.setattr(subsample.mounts, "network_filesystem", network_filesystem)
+	monkeypatch.setattr(subsample.watcher, "_POLL_SECONDS", 0.1)
+
+	return roots
+
+
+class TestWatchingANetworkDrive:
+
+	def test_a_sample_written_to_a_network_drive_loads (self, tmp_path: pathlib.Path, shares: set[pathlib.Path]) -> None:
+
+		"""The folder is listed on a timer, so a file another machine writes is seen."""
+
+		shares.add(tmp_path)
+		received: list[subsample.library.SampleRecord] = []
+		done = threading.Event()
+
+		def on_loaded (record: subsample.library.SampleRecord) -> None:
+			received.append(record)
+			done.set()
+
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=tmp_path, known_sidecars=set(), on_sample_loaded=on_loaded,
+		)
+
+		assert isinstance(watcher._observer, subsample.watcher._NetworkDriveObserver)
+
+		watcher.start()
+
+		try:
+			time.sleep(0.2)
+			_write_wav_and_sidecar(tmp_path, "kick")
+			triggered = done.wait(timeout=_TIMEOUT)
+		finally:
+			watcher.stop()
+
+		assert triggered, "Callback not called within timeout"
+		assert [record.name for record in received] == ["kick"]
+		assert not watcher._observer.is_alive()
+
+	def test_a_local_folder_keeps_the_operating_system_s_notices (self, tmp_path: pathlib.Path, shares: set[pathlib.Path]) -> None:
+
+		"""Polling is only for a network drive."""
+
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=tmp_path, known_sidecars=set(), on_sample_loaded=lambda _record: None,
+		)
+
+		assert not isinstance(watcher._observer, subsample.watcher._NetworkDriveObserver)
+
+	def test_the_map_watcher_polls_only_the_folders_on_a_network_drive (
+		self, tmp_path: pathlib.Path, shares: set[pathlib.Path],
+	) -> None:
+
+		"""A set on a share is polled and one on this machine is not, and an edit to either reloads."""
+
+		(tmp_path / "share").mkdir()
+		(tmp_path / "local").mkdir()
+		shares.add(tmp_path / "share")
+
+		shared = tmp_path / "share" / "kit.yaml"
+		local = tmp_path / "local" / "ensemble.yaml"
+		shared.write_text("assignments: []\n", encoding="utf-8")
+		local.write_text("assignments: []\n", encoding="utf-8")
+
+		received: list[pathlib.Path] = []
+		changed = threading.Event()
+
+		def on_changed (path: pathlib.Path) -> None:
+			received.append(path)
+			changed.set()
+
+		watcher = subsample.watcher.MidiMapWatcher(paths=[shared, local], on_changed=on_changed)
+
+		assert watcher._directories[shared.parent.resolve()][0] is watcher._network_observer
+		assert watcher._directories[local.parent.resolve()][0] is watcher._observer
+
+		watcher.start()
+
+		try:
+			time.sleep(0.2)
+			shared.write_text("assignments: []  # edited on another machine\n", encoding="utf-8")
+			shared_seen = changed.wait(timeout=_TIMEOUT)
+
+			changed.clear()
+			local.write_text("assignments: []  # edited here\n", encoding="utf-8")
+			local_seen = changed.wait(timeout=_TIMEOUT)
+
+			# Dropping the shared set lets its folder go from the polling observer.
+			watcher.watch([local])
+			let_go = shared.parent.resolve() not in watcher._directories
+		finally:
+			watcher.stop()
+
+		assert shared_seen, "An edit on the network drive was not seen"
+		assert local_seen, "An edit on this machine was not seen"
+		assert received[0] == shared.resolve()
+		assert received[-1] == local.resolve()
+		assert let_go
+		assert not watcher._observer.is_alive()
+		assert not watcher._network_observer.is_alive()
+
+
+class TestANetworkDriveThatDrops:
+
+	"""The polling emitter, driven by hand: a listing, then a poll at a time.
+
+	watchdog's own stops for good at the first listing that fails, and reads a
+	folder that has gone as empty, reporting every file in it deleted, which
+	would take every sample on the share out of the library mid-set.
+	"""
+
+	def _emitter (self, folder: pathlib.Path) -> tuple[subsample.watcher._NetworkDriveEmitter, watchdog.observers.api.EventQueue]:
+
+		"""An emitter on folder that has taken its first listing, and the queue it reports to."""
+
+		events = watchdog.observers.api.EventQueue()
+		watch = watchdog.observers.api.ObservedWatch(str(folder), recursive=False)
+		emitter = subsample.watcher._NetworkDriveEmitter(events, watch, timeout=0)
+		emitter.on_thread_start()
+
+		return emitter, events
+
+	def _poll (
+		self,
+		emitter: subsample.watcher._NetworkDriveEmitter,
+		events: watchdog.observers.api.EventQueue,
+	) -> list[tuple[str, str]]:
+
+		"""Poll once, and return each file event reported as (kind, file name)."""
+
+		emitter.queue_events(0)
+		reported: list[tuple[str, str]] = []
+
+		while True:
+			try:
+				event, _watch = events.get_nowait()
+			except queue.Empty:
+				return reported
+
+			if not event.is_directory:
+				reported.append((event.event_type, pathlib.Path(str(event.src_path)).name))
+
+	def _share_with_a_kick (self, tmp_path: pathlib.Path, shares: set[pathlib.Path]) -> pathlib.Path:
+
+		"""A folder on a share, holding one sample before the watcher lists it."""
+
+		folder = tmp_path / "share"
+		folder.mkdir()
+		(folder / "kick.wav").write_bytes(b"RIFF")
+		shares.add(folder)
+
+		return folder
+
+	def test_a_new_file_is_reported (self, tmp_path: pathlib.Path, shares: set[pathlib.Path]) -> None:
+
+		"""What a poll is for."""
+
+		folder = self._share_with_a_kick(tmp_path, shares)
+		emitter, events = self._emitter(folder)
+
+		(folder / "snare.wav").write_bytes(b"RIFF")
+
+		assert self._poll(emitter, events) == [("created", "snare.wav")]
+
+	def test_a_listing_that_fails_is_tried_again (
+		self, tmp_path: pathlib.Path, shares: set[pathlib.Path], caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""The folder is listed again at the next poll, and only what changed meanwhile is reported."""
+
+		folder = self._share_with_a_kick(tmp_path, shares)
+		emitter, events = self._emitter(folder)
+		take_listing = emitter._take_listing
+
+		def host_is_down () -> typing.Any:
+			raise OSError(112, "Host is down")
+
+		emitter._take_listing = host_is_down
+
+		with caplog.at_level(logging.INFO, logger="subsample.watcher"):
+			assert self._poll(emitter, events) == []
+			assert self._poll(emitter, events) == []
+
+			(folder / "snare.wav").write_bytes(b"RIFF")
+			emitter._take_listing = take_listing
+
+			assert self._poll(emitter, events) == [("created", "snare.wav")]
+
+		messages = [record.getMessage() for record in caplog.records]
+		assert len([message for message in messages if "Host is down" in message]) == 1, "said once, not at every poll"
+		assert any("can be read again" in message for message in messages)
+
+	def test_a_folder_that_has_gone_keeps_its_samples (
+		self, tmp_path: pathlib.Path, shares: set[pathlib.Path], caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A folder that is not there is not read as empty."""
+
+		folder = self._share_with_a_kick(tmp_path, shares)
+		emitter, events = self._emitter(folder)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.watcher"):
+			folder.rename(tmp_path / "elsewhere")
+			assert self._poll(emitter, events) == [], "no sample reported deleted"
+
+		(tmp_path / "elsewhere").rename(folder)
+
+		assert self._poll(emitter, events) == []
+		assert any("Cannot read" in record.getMessage() for record in caplog.records)
+
+	def test_an_unmounted_share_keeps_its_samples (
+		self, tmp_path: pathlib.Path, shares: set[pathlib.Path], caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""A library set to the share's own mount point reads as an empty local folder once unmounted."""
+
+		folder = self._share_with_a_kick(tmp_path, shares)
+		emitter, events = self._emitter(folder)
+
+		# Unmounted: the same path is now an empty folder on this machine.
+		shares.clear()
+		(folder / "kick.wav").rename(tmp_path / "kick.wav")
+
+		with caplog.at_level(logging.WARNING, logger="subsample.watcher"):
+			assert self._poll(emitter, events) == [], "no sample reported deleted"
+
+		# Mounted again, with its files as they were.
+		(tmp_path / "kick.wav").rename(folder / "kick.wav")
+		shares.add(folder)
+
+		assert self._poll(emitter, events) == []
+		assert any("not mounted" in record.getMessage() for record in caplog.records)

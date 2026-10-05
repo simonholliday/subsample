@@ -21,6 +21,10 @@ Two detection paths run in parallel:
    loads the sample.
 
 Both paths invoke the same on_sample_loaded callback.
+
+A folder on a network drive is listed on a timer instead of waiting for the
+operating system's notice of a change, which a network drive never gives for
+a file another machine writes (#3972, see _NetworkDriveObserver).
 """
 
 import logging
@@ -31,12 +35,21 @@ import typing
 
 import watchdog.events
 import watchdog.observers
+import watchdog.observers.api
+import watchdog.observers.polling
+import watchdog.utils.dirsnapshot
 
 import subsample.cache
 import subsample.library
+import subsample.mounts
 
 
 _log = logging.getLogger(__name__)
+
+_POLL_SECONDS: float = 2.0
+"""How often a folder on a network drive is listed for changes.  A listing
+reads the folder's top level and nothing below it, so it stays cheap on a
+share even with a large library."""
 
 _DEBOUNCE_SECONDS: float = 1.0
 _MAX_RETRIES: int = 3
@@ -138,10 +151,10 @@ class InstrumentWatcher:
 			deleted_callback=self._on_audio_file_deleted,
 		)
 
-		# Type annotated as Any because watchdog has no type stubs;
-		# ignore_missing_imports silences import errors but leaves the
-		# resolved type as Any, which cannot be used as a type annotation.
-		self._observer: typing.Any = watchdog.observers.Observer()
+		# Any, because watchdog.observers.Observer is a different class on each
+		# platform, chosen at import.
+		self._network_drive = subsample.mounts.network_filesystem(directory)
+		self._observer: typing.Any = _observer_for(self._network_drive)
 		self._observer.schedule(handler, str(directory), recursive=False)
 
 	def start (self) -> None:
@@ -149,7 +162,14 @@ class InstrumentWatcher:
 		"""Start the background observer thread."""
 
 		self._observer.start()
-		_log.info("Instrument watcher started on %s", self._directory)
+
+		if self._network_drive is None:
+			_log.info("Instrument watcher started on %s", self._directory)
+		else:
+			_log.info(
+				"Instrument watcher started on %s, a network drive (%s), so it is "
+				"checked every %g seconds", self._directory, self._network_drive, _POLL_SECONDS,
+			)
 
 	def stop (self) -> None:
 
@@ -829,22 +849,26 @@ class MidiMapWatcher:
 		self._in_flight = 0
 		self._idle = threading.Condition(self._lock)
 
-		# The files watched, and the observer's watch on each of their
-		# directories.  The handler reads _files on the observer thread; it is
-		# only ever replaced whole, under _lock.
+		# The files watched, and for each of their directories the observer
+		# watching it and its watch there.  The handler reads _files on the
+		# observer thread; it is only ever replaced whole, under _lock.
 		self._files: frozenset[pathlib.Path] = frozenset()
-		self._directories: dict[pathlib.Path, typing.Any] = {}
+		self._directories: dict[pathlib.Path, tuple[typing.Any, typing.Any]] = {}
 
+		# A directory on a network drive goes to the second observer, which
+		# lists it on a timer (#3972); every other goes to the first.
 		self._handler = _MidiMapFileHandler(self._is_watched, self._on_file_event)
 		self._observer: typing.Any = watchdog.observers.Observer()
+		self._network_observer = _NetworkDriveObserver()
 
 		self.watch(paths)
 
 	def start (self) -> None:
 
-		"""Start the background observer thread."""
+		"""Start the background observer threads."""
 
 		self._observer.start()
+		self._network_observer.start()
 
 		with self._lock:
 			files = sorted(self._files)
@@ -877,20 +901,32 @@ class MidiMapWatcher:
 			current = set(self._directories)
 
 			for directory in current - wanted:
+				observer, handle = self._directories.pop(directory)
+
 				try:
-					self._observer.unschedule(self._directories.pop(directory))
+					observer.unschedule(handle)
 				except (KeyError, OSError) as exc:
 					_log.debug("MIDI map watcher: could not let go of %s: %s", directory, exc)
 
 			for directory in sorted(wanted - current):
+				network_drive = subsample.mounts.network_filesystem(directory)
+				observer = self._observer if network_drive is None else self._network_observer
+
 				try:
-					self._directories[directory] = self._observer.schedule(
-						self._handler, str(directory), recursive=False,
-					)
+					handle = observer.schedule(self._handler, str(directory), recursive=False)
 				except OSError as exc:
 					_log.warning(
 						"MIDI map watcher: cannot watch %s, so an edit there needs a "
 						"restart: %s", directory, exc,
+					)
+					continue
+
+				self._directories[directory] = (observer, handle)
+
+				if network_drive is not None:
+					_log.info(
+						"MIDI map watcher: %s is on a network drive (%s), so it is "
+						"checked every %g seconds", directory, network_drive, _POLL_SECONDS,
 					)
 
 			self._files = files
@@ -900,10 +936,11 @@ class MidiMapWatcher:
 
 	def stop (self) -> None:
 
-		"""Stop the observer thread and cancel any pending debounce timer."""
+		"""Stop the observer threads and cancel any pending debounce timer."""
 
-		self._observer.stop()
-		self._observer.join()
+		for observer in (self._observer, self._network_observer):
+			observer.stop()
+			observer.join()
 
 		with self._lock:
 			self._stopped = True
@@ -1030,3 +1067,97 @@ class _MidiMapFileHandler (watchdog.events.FileSystemEventHandler):
 
 		if self._is_watched(path):
 			self._callback(path)
+
+
+# ---------------------------------------------------------------------------
+# Network drives
+# ---------------------------------------------------------------------------
+
+def _observer_for (network_drive: typing.Optional[str]) -> typing.Any:
+
+	"""An observer for a folder: one that lists it on a timer if it is on a network drive."""
+
+	if network_drive is None:
+		return watchdog.observers.Observer()
+
+	return _NetworkDriveObserver()
+
+
+class _NetworkDriveObserver (watchdog.observers.api.BaseObserver):
+
+	"""An observer that lists each folder it watches every _POLL_SECONDS (#3972).
+
+	A network drive gives no notice of a file another machine writes, so the
+	operating system's observer never hears of one; a listing sees it whoever
+	wrote it.
+	"""
+
+	def __init__ (self) -> None:
+
+		"""List every _POLL_SECONDS, through _NetworkDriveEmitter."""
+
+		super().__init__(_NetworkDriveEmitter, timeout=_POLL_SECONDS)
+
+
+class _NetworkDriveEmitter (watchdog.observers.polling.PollingEmitter):
+
+	"""watchdog's polling emitter, made to wait out a network drive that drops.
+
+	watchdog's own stops for good at the first listing that fails, and lists a
+	folder that has gone as empty, so it reports every file in it deleted.  A
+	network drive does one or the other whenever its connection drops or it is
+	unmounted, which would leave the folder unwatched until a restart, or take
+	every sample in it out of the library mid-set.  So while the folder cannot
+	be read on the drive it was on, this keeps the last listing it had, and
+	once it can, reports only what changed meanwhile.
+	"""
+
+	def __init__ (self, *args: typing.Any, **kwargs: typing.Any) -> None:
+
+		"""Set up as watchdog's emitter is, then list the folder through _take_snapshot_or_keep."""
+
+		super().__init__(*args, **kwargs)
+
+		self._folder = pathlib.Path(os.fsdecode(self.watch.path))
+		self._network_drive = subsample.mounts.network_filesystem(self._folder)
+		self._reachable = True
+
+		# PollingEmitter lists the folder through this attribute, at start and
+		# at every poll, and diffs each listing against the one before.
+		self._take_listing = self._take_snapshot
+		self._take_snapshot = self._take_snapshot_or_keep
+
+	def _take_snapshot_or_keep (self) -> watchdog.utils.dirsnapshot.DirectorySnapshot:
+
+		"""A fresh listing of the folder, or the last one while it cannot be read."""
+
+		try:
+			listing = self._take_listing()
+		except OSError as exc:
+			return self._keep_listing(str(exc))
+
+		# Checked after listing, so a drive that went during the listing counts.
+		if not self._folder.is_dir():
+			return self._keep_listing("it is not there")
+
+		if subsample.mounts.network_filesystem(self._folder) != self._network_drive:
+			return self._keep_listing("its network drive is not mounted")
+
+		if not self._reachable:
+			_log.info("%s can be read again, so changes there are seen again", self._folder)
+			self._reachable = True
+
+		return listing
+
+	def _keep_listing (self, reason: str) -> watchdog.utils.dirsnapshot.DirectorySnapshot:
+
+		"""The last listing, saying so the first time the folder cannot be read."""
+
+		if self._reachable:
+			_log.warning(
+				"Cannot read %s (%s), so nothing changes there until it can be read again",
+				self._folder, reason,
+			)
+			self._reachable = False
+
+		return self._snapshot

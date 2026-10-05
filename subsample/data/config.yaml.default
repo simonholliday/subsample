@@ -610,8 +610,8 @@ analysis:
 #   # application that writes WAV/FLAC/AIFF/OGG/MP3 files. Files without
 #   # sidecars are auto-analysed after a brief grace period and file-size
 #   # stability check (to handle files still being written).
-#   # A network drive gives no notice of files another machine writes; share
-#   # the folder with a sync tool such as Syncthing instead.
+#   # A directory on a network drive is checked for new files every two
+#   # seconds, so files another machine writes there load too.
 #   # Requires player.enabled, and library.directory unless the map declares
 #   # programs:.
 

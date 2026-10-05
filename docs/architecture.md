@@ -312,9 +312,23 @@ arrival means both are complete. A new audio file waits a 2 s debounce, then a
 5 s grace for a sidecar from another Subsample, then a 2 s check that its size
 has stopped changing, and only then is analysed, its sidecar written and the
 sample loaded, so a bare file plays about ten seconds after it lands. Both
-paths retry a file still being written. Both watchers use the operating
-system's notice of a change, which does not cross machines (#3887; polling is
-#3972).
+paths retry a file still being written.
+
+**A folder on a network drive is polled.** Both watchers otherwise hear of a
+change through the operating system's notice of it, and a network drive gives
+none for a file another machine writes (#3887). `mounts.network_filesystem`
+tells a network drive by its file system type, from `/proc/self/mounts` on
+Linux (cifs, smb3, nfs, nfs4, fuse.sshfs, and WSL's 9p and drvfs) and `statfs`
+on macOS (smbfs, nfs, afpfs, webdav), and a folder on one is listed every 2 s
+by `watcher._NetworkDriveObserver` instead, with no setting (#3972). A folder
+whose type cannot be told counts as local. watchdog's own polling emitter
+stops for good at the first listing that fails, and reads a folder that has
+gone as empty, reporting every file in it deleted; `_NetworkDriveEmitter`
+keeps the last listing while the folder cannot be read on the drive it was
+on, so a dropped connection or an unmounted share leaves the library as it
+was, and the next good listing reports only what changed meanwhile. The map
+watcher keeps one observer of each kind and puts each directory on the one it
+needs.
 
 **The map watcher** (`MidiMapWatcher`) fires half a second after the last save
 of any file the map is read from. The loader records those files as
@@ -344,10 +358,10 @@ An ensemble file's `maps:` block and `player.midi_maps` reach the same loader,
 `player.load_ensemble`. Includes are flat, one level, so there are no cycles to
 detect.
 
-A set shared between projects, or kept on a network drive, carries two costs
-worth knowing before designing around it. The map watcher sees only writes this
-machine makes (see Watchers), so a set edited from another machine is reloaded
-only at the next start. And an `ANALYSIS_VERSION` bump makes every project that
+A set shared between projects, or kept on a network drive, carries a cost
+worth knowing before designing around it. Editing it is not the cost: a set on a
+network drive is polled (see Watchers), so an edit from another machine reloads
+it. But an `ANALYSIS_VERSION` bump makes every project that
 loads the set analyse its samples again, perhaps over the network, perhaps
 several at once, and onto a share that may be read-only, so the new sidecars
 cannot be written and the work repeats at every start. Publishing sidecars with

@@ -488,12 +488,11 @@ def json_schema () -> dict[str, typing.Any]:
 						playing.  A change to `programs:`, `program_channel:` or
 						`default_program:` needs a restart, and so does an edit to a
 						`map:` preset's own file, which is not watched, or to
-						`midi_maps` itself, since `config.yaml` is not watched.
-						Watching relies on the file system's notice of a change, which
-						does not cross machines, so a map on a network drive edited
-						from another machine is not reloaded.  A reload also warns of
-						any `map:` preset a restart would stop on.  Requires
-						`midi_map` or `midi_maps`.
+						`midi_maps` itself, since `config.yaml` is not watched.  A file
+						on a network drive is checked for changes every two seconds, so
+						an edit made there from another machine reloads too.  A reload
+						also warns of any `map:` preset a restart would stop on.
+						Requires `midi_map` or `midi_maps`.
 						""",
 						default=False,
 					),
@@ -885,11 +884,10 @@ def json_schema () -> dict[str, typing.Any]:
 						within about ten seconds.  A file
 						deleted or renamed away leaves the library too.  Only the top
 						level of the directory is watched, and the files read are WAV,
-						FLAC, AIFF, OGG and MP3.  Watching relies on the file system's
-						notice of a change, which does not cross machines, so a file
-						another machine writes to a network drive loads only at the
-						next start.  A folder sync tool writes each file on this
-						machine, so what it brings loads as it arrives.  Requires
+						FLAC, AIFF, OGG and MP3.  A directory on a network drive is
+						checked for new files every two seconds, so a file another
+						machine writes there loads too.  If the drive drops, the
+						library stays as it was until it is back.  Requires
 						`player.enabled`, and `library.directory` unless the map
 						declares `programs:`.
 						""",

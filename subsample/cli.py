@@ -2100,9 +2100,9 @@ def _start_midi_map_watcher (
 	Every file the map is read from is watched: the map, each set an ensemble
 	includes or player.midi_maps names, and every definitions file they mount
 	(MidiMapResult.source_files, #389).  config.yaml itself is not, so a set
-	added to or removed from player.midi_maps still takes a restart.  On a
-	shared drive a write made by another machine is never seen at all
-	(inotify only sees writes made through the local mount by this machine).
+	added to or removed from player.midi_maps still takes a restart.  A
+	file on a network drive is polled, since a write another machine makes
+	there gives no notice (watcher._NetworkDriveObserver, #3972).
 	"""
 
 	if cfg.player.midi_maps is not None:
