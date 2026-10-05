@@ -321,7 +321,7 @@ class TestChokeHandleMessage:
 		v = _voice(note=46, one_shot=True)
 		p = _player([v], {(9, 42): frozenset({(9, 46)})})
 		p._note_map = {}
-		p._choke_voices = lambda ch, note: subsample.player.MidiPlayer._choke_voices(p, ch, note)
+		p._choke_voices = lambda ch, note, at=None: subsample.player.MidiPlayer._choke_voices(p, ch, note, at)
 
 		msg = mido.Message("note_on", channel=9, note=42, velocity=100)
 		subsample.player.MidiPlayer._handle_message(p, msg)
@@ -334,8 +334,8 @@ class TestChokeHandleMessage:
 		v = _voice(note=46, one_shot=True)
 		p = _player([v], {(9, 42): frozenset({(9, 46)})})
 		p._note_map = {}
-		p._choke_voices = lambda ch, note: subsample.player.MidiPlayer._choke_voices(p, ch, note)
-		p._release_held = lambda note, ch: subsample.player.MidiPlayer._release_held(p, note, ch)
+		p._choke_voices = lambda ch, note, at=None: subsample.player.MidiPlayer._choke_voices(p, ch, note, at)
+		p._release_held = lambda note, ch, at=None: subsample.player.MidiPlayer._release_held(p, note, ch, at)
 
 		msg = mido.Message("note_on", channel=9, note=42, velocity=0)
 		subsample.player.MidiPlayer._handle_message(p, msg)

@@ -138,10 +138,13 @@ MIDI note_on
     → transform_manager.get_base()     → base variant (all samples)
     → _render()                        → on-the-fly fallback (first trigger only)
     → _render_float(): apply gain · velocity² · anti-clip ceiling
-    → append _Voice (float32 stereo, pre-rendered)
+    → append _Voice (float32 stereo, pre-rendered, stamped with the
+        note-on's arrival time)
     ↓
 PyAudio callback (PortAudio high-priority thread)
-    → sum all active voices (float32 addition)
+    → _advance_span: the arrival times this buffer plays, one buffer back
+    → sum all active voices (float32 addition), each from the frame its
+        note-on's arrival falls on, each release from its own frame
     → clip to [-1, 1]
     → float32_to_pcm_bytes(mixed, output_bit_depth)  → int16/24/32 bytes to hardware
 ```
@@ -186,6 +189,36 @@ The OSC receiver takes `/sample/import` messages on one thread and imports them
 on another, one at a time and in order, with at most 64 waiting. At stop it drops
 those still waiting and gives the one being analysed ten seconds to finish; one
 that finishes later is not added, since shutdown has begun.
+
+### Note timing
+
+Every note plays one buffer after it arrived, at the frame within that buffer
+its arrival falls on (#600), as a DAW places MIDI, so notes keep the spacing
+they were played with. Before, each began at the next buffer boundary, re-timed
+onto a grid one buffer coarse: 21 ms at 1024 frames. The cost is half a buffer
+of latency on average, and one at most.
+
+`_safe_handle_message` stamps each message with the player's clock
+(`time.perf_counter`) before any work, so a slow handler does not make its note
+late. Each voice a message starts records the time as `_Voice.starts_at`; a
+note-off, a same-note steal, a choke and CC 120 and 123 record theirs as
+`releases_at` (`_release`, which keeps the first). The audio callback moves a
+span of arrival times on by exactly one buffer per call (`_advance_span`), so
+a callback early or late by scheduling jitter moves no note, and pulls it 5% of
+the way towards its own clock each call so the audio device's clock and the
+player's never drift apart; a callback more than a buffer away, the first or one
+after a stall, starts the span afresh. `_frame_of` places a time in the span: one
+from before it plays at frame 0, late rather than lost, and one after it waits
+for the next buffer. A voice with no time, as a test passing a message straight
+to `_handle_message` gives, starts at frame 0 as before.
+
+A callback that runs early, before a message in its span has arrived, plays that
+message at the start of the next buffer: one buffer of delay cannot absorb
+jitter beyond the span. Simulated with callbacks jittering by 1 ms either way at
+256 frames, hits 7 ms apart played 7 ms apart within 0.05 ms on average and
+0.8 ms at worst, against 2.3 ms and 3.7 ms before. A looping voice released
+mid-buffer stops looping at that buffer's start, not at its release frame, so it
+may reach its tail up to a buffer early, under the fade.
 
 ### Native dependencies
 

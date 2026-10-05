@@ -45,6 +45,15 @@ voices into one output buffer, clips, converts to PCM bytes at the output
 bit depth, and returns them. The MIDI handler adds voices under a lock;
 the callback reads them.
 
+Note timing (#600): every voice plays one buffer after the message that
+started it arrived, at the frame within that buffer its arrival falls on, and
+its release fades from the frame the note-off's arrival falls on, so notes keep
+the spacing they were played with instead of each starting at the next buffer
+boundary.  _safe_handle_message stamps each message with the player's clock;
+the callback moves a span of arrival times on by one buffer per call
+(_advance_span) and places each voice in it (_frame_of).  That costs half a
+buffer of latency on average, and one at most.
+
 Per-voice gain is controlled by cfg.player.max_polyphony: each voice's RMS
 target is 1.0 / max_polyphony, so N voices at max velocity sum to
 approximately full scale. Clipping is detected in the callback and logged at
@@ -4050,6 +4059,44 @@ class _Voice:
 	loop_start) that the wrap fades in against, so the callback does no slicing
 	arithmetic beyond an index.  None when not looping or crossfade is 0."""
 
+	starts_at:      typing.Optional[float] = None
+	"""When the note-on that started this voice arrived, on the player's clock,
+	so the callback starts it one buffer later at the frame that falls on
+	(#600).  None starts it at the beginning of the next buffer.  Cleared once
+	the voice has started."""
+
+	releases_at:    typing.Optional[float] = None
+	"""When the message that released this voice arrived, so its fade begins
+	one buffer later at the frame that falls on, and the voice plays on unfaded
+	until then.  Set with ``releasing``; None begins the fade at the start of
+	the next buffer.  Cleared once the fade has begun.  Stopping a loop is not
+	delayed: a looping voice released mid-buffer plays straight on from that
+	buffer's start, so it may reach its tail up to one buffer early, under the
+	fade that follows."""
+
+
+def _release (voice: _Voice, at: typing.Optional[float]) -> None:
+
+	"""Mark a voice released by a message that arrived at ``at`` (#600).
+
+	A voice already released keeps its first release's time, so a later
+	message never puts off a fade that is due or under way.  Called under
+	_voices_lock.
+	"""
+
+	if not voice.releasing:
+		voice.releases_at = at
+
+	voice.releasing = True
+
+
+# How strongly each audio callback draws the span of arrival times it plays
+# towards its own clock (_advance_span).  The span moves on by exactly one
+# buffer per callback, so a callback that is early or late by scheduling jitter
+# moves no note; this small pull only stops the audio device's clock and the
+# player's from drifting apart over a long set.
+_SPAN_PULL: typing.Final[float] = 0.05
+
 
 # The ALSA sequencer, the part of the Linux kernel that carries MIDI between
 # programs.  rtmidi opens it before it can list or open a single port.
@@ -4537,6 +4584,13 @@ class MidiPlayer:
 		# callback reads and removes finished ones. Protected by _voices_lock.
 		self._voices:      list[_Voice]  = []
 		self._voices_lock: threading.Lock = threading.Lock()
+
+		# Note timing (#600): the clock each MIDI message is stamped with on
+		# arrival, and the span of arrival times the buffer being filled plays,
+		# as (start, end) on that clock.  Only the audio callback touches the
+		# span; None until its first call.
+		self._clock: typing.Callable[[], float] = time.perf_counter
+		self._span:  typing.Optional[tuple[float, float]] = None
 
 		# Assignment ids already warned that their sample has no usable loop
 		# (mode: loop fail-musical) — so the note-on path warns once, not per hit.
@@ -5233,11 +5287,49 @@ class MidiPlayer:
 
 		output = numpy.zeros((frame_count, self._output_channels), dtype=numpy.float32)
 
+		self._advance_span(frame_count)
+
 		with self._voices_lock:
 			active: list[_Voice] = []
 
 			for voice in self._voices:
+				# A voice plays one buffer after its note-on arrived, from the
+				# frame that arrival falls on (#600); one that arrived after this
+				# buffer's span waits for the next.  ``out`` is the part of the
+				# buffer it plays in, so the branches below fill ``out`` from 0.
+				# Once started, a voice has no arrival time left to place.
+				start = 0
+
+				if voice.starts_at is not None:
+					start = self._frame_of(voice.starts_at, frame_count)
+
+					if start >= frame_count:
+						active.append(voice)
+						continue
+
+					voice.starts_at = None
+
+				out       = output[start:]
 				remaining = len(voice.audio) - voice.position
+
+				if voice.releasing and voice.fade_pos == 0 and voice.releases_at is not None:
+					# The fade begins one buffer after the release arrived, too,
+					# and the voice plays on unfaded until then.
+					turn = max(0, self._frame_of(voice.releases_at, frame_count) - start)
+					lead = min(turn, len(out), remaining)
+
+					if lead > 0:
+						out[:lead] += voice.audio[voice.position : voice.position + lead]
+						voice.position += lead
+						remaining      -= lead
+
+					if turn >= len(out):
+						if remaining > 0:
+							active.append(voice)
+						continue
+
+					voice.releases_at = None
+					out = out[turn:]
 
 				if voice.releasing:
 					# Note-off fade, spread across however many callbacks it takes
@@ -5261,7 +5353,7 @@ class MidiPlayer:
 						voice.release_total = max(1, min(base_frames, remaining))
 
 					fade_total = voice.release_total
-					n = min(frame_count, remaining, fade_total - voice.fade_pos)
+					n = min(len(out), remaining, fade_total - voice.fade_pos)
 
 					if n > 0:
 						idx = numpy.arange(voice.fade_pos, voice.fade_pos + n, dtype=numpy.float32)
@@ -5278,7 +5370,7 @@ class MidiPlayer:
 							# 441 frames, far below audibility.  Not an off-by-one.
 							ramp = ((1.0 + numpy.cos(numpy.pi * idx / fade_total)) / 2.0).astype(numpy.float32)
 
-						output[:n] += voice.audio[voice.position : voice.position + n] * ramp[:, numpy.newaxis]
+						out[:n] += voice.audio[voice.position : voice.position + n] * ramp[:, numpy.newaxis]
 						voice.position += n
 						voice.fade_pos += n
 
@@ -5302,13 +5394,13 @@ class MidiPlayer:
 					xf_start = voice.loop_end - xf     # first frame of the wrap crossfade
 					filled   = 0
 
-					while filled < frame_count:
+					while filled < len(out):
 						# n >= 1 every pass, so this cannot spin: a voice only
 						# loops when _append_voice found loop_end - loop_start at
 						# least _MIN_LOOP_SECONDS, and the foot of this loop wraps
 						# position back to loop_start.  Cleared in review; noted so
 						# it is not traced again (#1481).
-						n     = min(frame_count - filled, voice.loop_end - voice.position)
+						n     = min(len(out) - filled, voice.loop_end - voice.position)
 						chunk = voice.audio[voice.position : voice.position + n]
 
 						if xf > 0 and voice.loop_xfade_in is not None and voice.position + n > xf_start:
@@ -5317,18 +5409,18 @@ class MidiPlayer:
 							# approach-to-loop_end fading into the pre-loop_start lead-in).
 							head = max(0, xf_start - voice.position)
 							if head > 0:
-								output[filled : filled + head] += chunk[:head]
+								out[filled : filled + head] += chunk[:head]
 							k    = (voice.position + head) - xf_start
 							m    = n - head
 							# k + m <= xf always (n <= loop_end - position bounds it), so
 							# loop_xfade_in[k : k + m] never overruns — not an off-by-one.
 							ramp = (numpy.arange(k, k + m, dtype=numpy.float32) / numpy.float32(xf))[:, numpy.newaxis]
-							output[filled + head : filled + n] += (
+							out[filled + head : filled + n] += (
 								chunk[head:] * (1.0 - ramp)
 								+ voice.loop_xfade_in[k : k + m] * ramp
 							)
 						else:
-							output[filled : filled + n] += chunk
+							out[filled : filled + n] += chunk
 
 						voice.position += n
 						filled         += n
@@ -5339,8 +5431,8 @@ class MidiPlayer:
 					active.append(voice)   # a held loop is never retired here
 
 				else:
-					n = min(frame_count, remaining)
-					output[:n] += voice.audio[voice.position : voice.position + n]
+					n = min(len(out), remaining)
+					out[:n] += voice.audio[voice.position : voice.position + n]
 					voice.position += n
 
 					if voice.position < len(voice.audio):
@@ -5392,6 +5484,49 @@ class MidiPlayer:
 		# Previously hard-coded to int16 regardless of the stream format,
 		# which caused data/format mismatch for 24-bit and 32-bit streams.
 		return (subsample.audio.float32_to_pcm_bytes(mixed, self._output_bit_depth), pyaudio.paContinue)
+
+	def _advance_span (self, frame_count: int) -> None:
+
+		"""Move the span of arrival times this buffer plays on by one buffer (#600).
+
+		A message takes effect one buffer after it arrived: the buffer being
+		filled now plays what arrived during the span just ended, each at the
+		frame its arrival falls on.  The span moves on by exactly one buffer's
+		length per call, so a callback a little early or late moves no note, and
+		is drawn gently towards the callbacks' own times (_SPAN_PULL) so the two
+		clocks never drift apart.  A callback further than a buffer from where
+		the span expects it, the first or one after a stall, starts the span
+		afresh, ending now.
+		"""
+
+		now    = self._clock()
+		length = frame_count / self._output_sample_rate
+
+		if self._span is None or abs(now - (self._span[1] + length)) > length:
+			start = now - length
+		else:
+			start = self._span[1] + _SPAN_PULL * (now - (self._span[1] + length))
+
+		self._span = (start, start + length)
+
+	def _frame_of (self, at: float, frame_count: int) -> int:
+
+		"""The frame of this buffer at which something that arrived at ``at`` takes effect.
+
+		Something that arrived before this buffer's span takes effect at its
+		first frame, a little late rather than never.  One that arrived after
+		the span gives frame_count: a later buffer plays it.
+		"""
+
+		if self._span is None:
+			return 0
+
+		start, end = self._span
+
+		if at >= end:
+			return frame_count
+
+		return max(0, min(frame_count - 1, int((at - start) * self._output_sample_rate)))
 
 	def _snapshot_cc_state (
 		self,
@@ -5560,10 +5695,15 @@ class MidiPlayer:
 		the bug never surfaces.  Catch every exception here and log at ERROR
 		so handler bugs are visible in the log instead of presenting as
 		mysteriously-dropped notes.
+
+		The message is stamped with the player's clock first, so a note plays
+		one buffer after it arrived however long the handler takes (#600).
 		"""
 
+		at = self._clock()
+
 		try:
-			self._handle_message(msg)
+			self._handle_message(msg, at)
 		except Exception as exc:
 			_log.error(
 				"MIDI handler failed for %r: %s", msg, exc, exc_info=True,
@@ -5618,13 +5758,18 @@ class MidiPlayer:
 
 		return covering
 
-	def _handle_message (self, msg: mido.Message) -> None:
+	def _handle_message (self, msg: mido.Message, at: typing.Optional[float] = None) -> None:
 
 		"""Dispatch a single MIDI message via the select/process pipeline.
 
 		Runs on rtmidi's dedicated callback thread (see ``run()``).  Must stay
 		fast — any slow operation here stalls MIDI dispatch for the lifetime
 		of the port.
+
+		``at`` is when the message arrived on the player's clock: each voice it
+		starts or releases takes effect one buffer later, at the frame that
+		falls on (#600).  None, as a test passing a message straight in gives,
+		takes effect at the start of the next buffer.
 
 		note_off (and note_on with velocity=0) marks matching active voices as
 		releasing so the audio callback fades them out over the assignment's
@@ -5651,7 +5796,7 @@ class MidiPlayer:
 		# ends every matching non-one_shot voice — see _release_held for the
 		# retirement semantics (stop looping, then fade unless release: full).
 		if msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-			self._release_held(msg.note, msg.channel)
+			self._release_held(msg.note, msg.channel, at)
 			return
 
 		# Program Change: switch the active instrument bank when a BankManager
@@ -5706,7 +5851,7 @@ class MidiPlayer:
 						if voice.fade_pos == 0:
 							voice.release_frames = self._release_fade_frames
 							voice.release_curve  = 0
-						voice.releasing = True
+						_release(voice, at)
 
 			elif msg.control == 123:
 				# All Notes Off: like a note-off for every held note on this
@@ -5721,7 +5866,7 @@ class MidiPlayer:
 						if not voice.one_shot:
 							voice.looping = False
 							if not voice.release_to_end:
-								voice.releasing = True
+								_release(voice, at)
 
 			if msg.control in self._mapped_ccs:
 				_log.debug(
@@ -5765,7 +5910,7 @@ class MidiPlayer:
 		# forces the ~10 ms declick, overriding release, so it must run ahead of
 		# the steal (which would otherwise flag a self-choking voice for its own
 		# slower release first).
-		self._choke_voices(msg.channel, msg.note)
+		self._choke_voices(msg.channel, msg.note, at)
 
 		entries = self._note_map.get((msg.channel, msg.note))
 
@@ -5794,13 +5939,13 @@ class MidiPlayer:
 		# earlier presses, never the (possibly stacked) voices about to be created.
 		# Tied to the note-on gesture, not to sample-selection success; one_shot
 		# voices are excluded (see _release_held), so overlapping one-shots stack.
-		self._release_held(msg.note, msg.channel)
+		self._release_held(msg.note, msg.channel, at)
 
 		# Fire every covering layer.  A normal (non-stacked) note loops exactly
 		# once; stacked members sound together as one composite hit.  Each call
 		# is independent, so one layer finding no sample never silences another.
 		for assignment, pick_spec, effective_velocity in layers:
-			self._trigger_one(msg, assignment, pick_spec, effective_velocity)
+			self._trigger_one(msg, assignment, pick_spec, effective_velocity, at)
 
 	def _build_trigger_spec (
 		self,
@@ -6013,6 +6158,7 @@ class MidiPlayer:
 		release_curve:  int,
 		release_to_end: bool,
 		loop_cfg:       typing.Optional[tuple[int, int, int]],
+		starts_at:      typing.Optional[float] = None,
 	) -> None:
 
 		"""Build a _Voice for a trigger and enqueue it (under _voices_lock).
@@ -6070,15 +6216,16 @@ class MidiPlayer:
 			release_curve=release_curve, release_to_end=release_to_end,
 			looping=looping, loop_start=loop_start, loop_end=loop_end,
 			loop_crossfade=loop_crossfade, loop_xfade_in=loop_xfade_in,
+			starts_at=starts_at,
 		)
 
 		with self._voices_lock:
 			self._voices.append(voice)
 
-	def _release_held (self, note: int, channel: int) -> None:
+	def _release_held (self, note: int, channel: int, at: typing.Optional[float] = None) -> None:
 
 		"""Imply a note-off for every currently-sounding non-one_shot voice on
-		(note, channel).
+		(note, channel), as of ``at``, when the message arrived (see _release).
 
 		Shared by the real note-off handler and the same-note steal on note-on.
 		A looping voice stops looping (its cursor turns monotonic and plays past
@@ -6098,12 +6245,13 @@ class MidiPlayer:
 				if voice.note == note and voice.channel == channel and not voice.one_shot:
 					voice.looping = False
 					if not voice.release_to_end:
-						voice.releasing = True
+						_release(voice, at)
 
-	def _choke_voices (self, channel: int, note: int) -> None:
+	def _choke_voices (self, channel: int, note: int, at: typing.Optional[float] = None) -> None:
 
 		"""Fast-damp every sounding voice choked by a note-on of ``note`` on
-		``channel`` (its ``silenced_by`` declarations).
+		``channel`` (its ``silenced_by`` declarations), as of ``at``, when the
+		note-on arrived, so the damp lands where the choking hit starts.
 
 		Unlike _release_held (same-note steal / note-off), this:
 		  - cuts one_shot voices too — the whole point (a ringing open hi-hat is
@@ -6138,7 +6286,7 @@ class MidiPlayer:
 					# hits still-sounding voices, fade_pos == 0).
 					voice.release_frames = self._release_fade_frames
 					voice.release_curve  = 0
-				voice.releasing = True
+				_release(voice, at)
 
 	def _trigger_one (
 		self,
@@ -6146,6 +6294,7 @@ class MidiPlayer:
 		assignment:         subsample.query.Assignment,
 		pick_spec:          subsample.query.PickSpec,
 		effective_velocity: int,
+		at:                 typing.Optional[float] = None,
 	) -> None:
 
 		"""Render one assignment for a note-on and enqueue its voice.
@@ -6159,7 +6308,8 @@ class MidiPlayer:
 		int-PCM fallback chain, appending a ``_Voice`` on the first that yields
 		audio.  All per-assignment settings (gain, pan, output routing, mode,
 		process) come off ``assignment``, so stacked members keep independent
-		voices.
+		voices.  ``at`` is when the note-on arrived, which the voice starts
+		from (see _Voice.starts_at).
 		"""
 
 		pan_weights      = assignment.pan_weights
@@ -6258,7 +6408,7 @@ class MidiPlayer:
 						if bar_loop:
 							rendered, loop_cfg = self._looped_on_its_bars(rendered, variant)
 
-						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
+						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, at)
 						with self._state_lock:
 							self._last_played[state_key] = variant
 						_log.debug(
@@ -6287,7 +6437,7 @@ class MidiPlayer:
 						if bar_loop:
 							rendered, loop_cfg = self._looped_on_its_bars(rendered, prev)
 
-						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
+						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, at)
 						_log.debug(
 							"note %d (vel %d → %d) → %r → %r (previous variant)  (%.2fs)",
 							msg.note, msg.velocity, effective_velocity, assignment.name, record.name, prev.duration,
@@ -6307,7 +6457,7 @@ class MidiPlayer:
 				)
 				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
 				rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
-				self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
+				self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, at)
 				_log.debug(
 					"note %d (vel %d → %d) → %r → %r (base variant)  (%.2fs)",
 					msg.note, msg.velocity, effective_velocity, assignment.name, record.name, base.duration,
@@ -6321,7 +6471,7 @@ class MidiPlayer:
 		if original is None:
 			return
 
-		self._append_voice(original, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg)
+		self._append_voice(original, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, at)
 
 		_log.debug(
 			"note %d (vel %d → %d) → %r → %r  (%.2fs)",

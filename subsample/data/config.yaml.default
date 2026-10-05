@@ -383,6 +383,8 @@ player:
     # PortAudio output buffer size in frames.  null (default) lets the OS pick
     # the device-preferred size - a safe value for most setups.  Set explicitly
     # to trade stability for tighter latency.
+    # Each note plays one buffer after it arrives, from the frame it arrived
+    # on, so notes keep their timing at any size.
     #   128 → ~2.9 ms at 44.1 kHz   (lowest latency; underrun risk under load)
     #   256 → ~5.8 ms
     #   512 → ~11.6 ms

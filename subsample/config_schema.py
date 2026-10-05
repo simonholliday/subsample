@@ -590,8 +590,10 @@ def json_schema () -> dict[str, typing.Any]:
 								"""
 								Output buffer size in frames, as a power of two.  Smaller
 								buffers lower latency, and larger ones are safer under load.
-								`null` lets the operating system choose.  When the device
-								refuses the size, Subsample logs an error and uses the
+								Each note plays one buffer after it arrives, from the frame it
+								arrived on, so notes keep the timing they were played with at
+								any size.  `null` lets the operating system choose.  When the
+								device refuses the size, Subsample logs an error and uses the
 								device's own.
 								""",
 								default=None,

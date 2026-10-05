@@ -962,7 +962,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
-		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
+		player._release_held = lambda note, channel, at=None: subsample.player.MidiPlayer._release_held(player, note, channel, at)
 
 		# Call the real _handle_message on the mock's behalf
 		msg = mido.Message("note_off", channel=9, note=36)
@@ -981,7 +981,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice_36, voice_38]
 		player._voices_lock = threading.Lock()
-		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
+		player._release_held = lambda note, channel, at=None: subsample.player.MidiPlayer._release_held(player, note, channel, at)
 
 		msg = mido.Message("note_off", channel=9, note=36)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -999,7 +999,7 @@ class TestNoteOff:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
-		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
+		player._release_held = lambda note, channel, at=None: subsample.player.MidiPlayer._release_held(player, note, channel, at)
 
 		msg = mido.Message("note_on", channel=9, note=42, velocity=0)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -1163,7 +1163,7 @@ class TestOneShot:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
-		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
+		player._release_held = lambda note, channel, at=None: subsample.player.MidiPlayer._release_held(player, note, channel, at)
 
 		msg = mido.Message("note_off", channel=9, note=36)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -1179,7 +1179,7 @@ class TestOneShot:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [voice]
 		player._voices_lock = threading.Lock()
-		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
+		player._release_held = lambda note, channel, at=None: subsample.player.MidiPlayer._release_held(player, note, channel, at)
 
 		msg = mido.Message("note_off", channel=9, note=42)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -1196,7 +1196,7 @@ class TestOneShot:
 		player = unittest.mock.MagicMock(spec=subsample.player.MidiPlayer)
 		player._voices = [one_shot_voice, normal_voice]
 		player._voices_lock = threading.Lock()
-		player._release_held = lambda note, channel: subsample.player.MidiPlayer._release_held(player, note, channel)
+		player._release_held = lambda note, channel, at=None: subsample.player.MidiPlayer._release_held(player, note, channel, at)
 
 		msg = mido.Message("note_off", channel=9, note=36)
 		subsample.player.MidiPlayer._handle_message(player, msg)
@@ -1894,7 +1894,9 @@ class TestSameNoteSteal:
 		pick = subsample.query.PickSpec(1, 1)
 		player._note_map = {(9, 36): [(body, pick), (sub, pick)]}
 
-		def _fake_trigger (msg: typing.Any, assignment: typing.Any, pick_spec: typing.Any, effective_velocity: typing.Any) -> None:
+		def _fake_trigger (
+			msg: typing.Any, assignment: typing.Any, pick_spec: typing.Any, effective_velocity: typing.Any, at: typing.Any = None,
+		) -> None:
 			with player._voices_lock:
 				player._voices.append(self._make_voice(note=msg.note, channel=msg.channel, looping=True, loop_end=4410))
 
@@ -1936,11 +1938,16 @@ class TestReleaseThreadingThroughTrigger:
 	The base-variant path (no process pipeline — the common case) once silently
 	dropped it; this guards each path."""
 
-	def _run_trigger (self, process_steps: tuple[subsample.query.ProcessorStep, ...], which: str) -> subsample.player._Voice:
+	def _run_trigger (
+		self,
+		process_steps: tuple[subsample.query.ProcessorStep, ...],
+		which:         str,
+		at:            typing.Optional[float] = None,
+	) -> subsample.player._Voice:
 		"""Drive _trigger_one so a voice is served from the named path; return it.
 
 		which: "base" (empty process → get_base) or "int_pcm" (transform manager
-		absent → int-PCM fallback render)."""
+		absent → int-PCM fallback render).  at: when the note-on arrived."""
 		import mido
 
 		rendered = numpy.zeros((100, 2), dtype=numpy.float32)
@@ -1979,7 +1986,7 @@ class TestReleaseThreadingThroughTrigger:
 		msg  = mido.Message("note_on", channel=0, note=48, velocity=100)
 		pick = subsample.query.PickSpec(1, 1)
 
-		subsample.player.MidiPlayer._trigger_one(player, msg, assignment, pick, 100)
+		subsample.player.MidiPlayer._trigger_one(player, msg, assignment, pick, 100, at)
 
 		assert len(player._voices) == 1
 		voice: subsample.player._Voice = player._voices[0]
@@ -1995,6 +2002,12 @@ class TestReleaseThreadingThroughTrigger:
 		voice = self._run_trigger(process_steps=(), which="int_pcm")
 		assert voice.release_frames == 1234
 		assert voice.release_curve == 1
+
+	@pytest.mark.parametrize("which", ["base", "int_pcm"])
+	def test_each_path_carries_when_the_note_on_arrived (self, which: str) -> None:
+		"""#600: the voice starts one buffer after its note-on, so it needs the arrival time."""
+		voice = self._run_trigger(process_steps=(), which=which, at=12.5)
+		assert voice.starts_at == 12.5
 
 
 class TestAQuantisedSoundLoopsOverItsBars:
