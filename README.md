@@ -88,7 +88,7 @@ All four are the same workflow.
 | **Segment playback** | Per-hit round-robin, random, or indexed - for sliced loops |
 | **MIDI input** | Hardware port, named virtual port, or both |
 | **MIDI control** | Note on/off, Program Change for programs, CC binding for any processor's numeric parameter |
-| **OSC** | Sender + receiver (optional dependency) |
+| **OSC** | Sample events out; file imports and timed notes in, each sound's hit landed on its note's time (optional dependency) |
 | **Audio formats in** | WAV, BWF, FLAC, AIFF, OGG, MP3/MPEG (libsndfile) |
 | **Audio channels** | Mono through 7.1, ITU-R BS.775 downmix, conservative upmix, per-instrument output routing |
 | **Audio precision** | End-to-end 32-bit float pipeline, 64-bit DSP for IIR filters and envelope followers |
