@@ -31,12 +31,15 @@ TransformCache
     triggered automatically when the instrument library evicts a parent.
 
 TransformProcessor
-    ThreadPoolExecutor worker pool.  Mirrors the SampleProcessor pattern:
-    enqueue() submits a job and returns immediately; workers convert the
-    source PCM to float32, apply the registered transform chain in
-    declaration order, compute a LevelResult, and call on_complete.  New
-    transform types are registered in TransformProcessor._HANDLERS — no
-    other code changes are needed.
+    A render queue.  Mirrors the SampleProcessor pattern: enqueue() queues a
+    job and returns immediately; workers convert the source PCM to float32,
+    apply the registered transform chain in declaration order, compute a
+    LevelResult, and on_complete receives the render.  The workers are
+    processes of their own, shared by every program, so a render never makes
+    the audio or a note wait for Python's lock (#4667); the processor's
+    bookkeeping stays in the player, on a results thread.  New transform types
+    are registered in TransformProcessor._HANDLERS — no other code changes are
+    needed.
 
 TransformManager
     Single coordination point for the player and cli.py.  Handles:
@@ -51,9 +54,9 @@ Data flow
   SampleRecord added to InstrumentLibrary
       → TransformManager.on_sample_added()
           → TransformProcessor.enqueue(record, spec)   [base variant]
-              → worker: pcm_to_float32 → handler chain → compute_level
-                  → TransformCache.put(result)
-                      → on_complete callback
+              → worker process: pcm_to_float32 → handler chain → compute_level
+                  → back in the player, on the results thread:
+                      on_complete callback (TransformCache.put(result))
 
   MIDI note trigger
       → player builds spec via spec_from_process(assignment.process, ...)
@@ -121,6 +124,7 @@ import logging
 import math
 import os
 import pathlib
+import queue
 import struct
 import tempfile
 import threading
@@ -139,6 +143,7 @@ import pymididefs.notes
 import subsample.analysis
 import subsample.config
 import subsample.library
+import subsample.parallelism
 import subsample.processors
 import subsample.query
 import subsample.radio
@@ -1132,6 +1137,12 @@ class VariantDiskCache:
 	Thread-safe: writes use atomic temp-file + rename; eviction scans are
 	independent of reads.  Reads that encounter corrupt files delete them
 	and return None.
+
+	A render worker process reads and writes through a copy of its own made
+	with ``evicts=False`` (#4667): workers in separate processes share no lock,
+	so the player keeps the running size estimate for all of them
+	(``add_written``) and has one worker at a time trim the folder
+	(``_trim_variant_folder``).
 	"""
 
 	def __init__ (
@@ -1139,13 +1150,20 @@ class VariantDiskCache:
 		directory:      pathlib.Path,
 		max_bytes:      int,
 		sample_rate:    int,
+		*,
+		evicts:         bool = True,
 	) -> None:
 
-		"""A cache in directory, created if needed, for variants at sample_rate; max_bytes 0 disables it."""
+		"""A cache in directory, created if needed, for variants at sample_rate; max_bytes 0 disables it.
+
+		``evicts`` False leaves trimming the folder to whoever counts what this
+		copy writes (put returns the bytes).
+		"""
 
 		self._directory   = directory
 		self._max_bytes   = max_bytes
 		self._sample_rate = sample_rate
+		self._evicts      = evicts
 
 		# Serialises eviction across the transform worker pool — without it two
 		# concurrent evictions scandir/sort/unlink the same files and a losing
@@ -1170,6 +1188,34 @@ class VariantDiskCache:
 		"""Whether the cache reads and writes at all: a budget of 0 turns it off."""
 
 		return self._max_bytes > 0
+
+	@property
+	def directory (self) -> pathlib.Path:
+
+		"""The folder the variants are kept in."""
+
+		return self._directory
+
+	@property
+	def max_bytes (self) -> int:
+
+		"""The budget the folder is trimmed to."""
+
+		return self._max_bytes
+
+	@property
+	def sample_rate (self) -> int:
+
+		"""The sample rate every variant here is kept at."""
+
+		return self._sample_rate
+
+	@property
+	def evicts (self) -> bool:
+
+		"""Whether this copy trims the folder itself after a write, rather than leaving that to its owner."""
+
+		return self._evicts
 
 	def get (
 		self,
@@ -1302,18 +1348,22 @@ class VariantDiskCache:
 		audio_md5: str,
 		spec:      "TransformSpec",
 		result:    "TransformResult",
-	) -> None:
+	) -> int:
 
-		"""Write a variant to disk.  Runs LRU (by mtime) eviction if over budget."""
+		"""Write a variant to disk, and return the bytes written (0 when nothing was).
+
+		Runs LRU (by mtime) eviction if over budget, unless this copy leaves that
+		to its owner (``evicts=False``).
+		"""
 
 		if not self.enabled:
-			return
+			return 0
 
 		hex_digest = variant_cache_key(audio_md5, spec, self._sample_rate)
 		path = self._directory / f"{hex_digest}.variant"
 
 		if path.exists():
-			return
+			return 0
 
 		audio = result.audio
 		n_frames, channels = audio.shape
@@ -1371,14 +1421,41 @@ class VariantDiskCache:
 
 		except OSError as exc:
 			_log.warning("Variant cache: write error for %s: %s", path.name, exc)
-			return
+			return 0
 
 		try:
 			written = path.stat().st_size
 		except OSError:
 			written = 0
 
-		self._evict_if_needed(written)
+		if self._evicts:
+			self._evict_if_needed(written)
+
+		return written
+
+	def add_written (self, written: int) -> bool:
+
+		"""Count bytes another copy of this cache wrote; True when the folder is due a trim.
+
+		Due on the first count, which has nothing measured yet, and whenever the
+		running estimate passes the budget.  The trim's own total then replaces
+		the estimate (``set_estimate``).
+		"""
+
+		with self._lock:
+			if self._bytes_estimate is None:
+				return True
+
+			self._bytes_estimate += written
+
+			return self._bytes_estimate > self._max_bytes
+
+	def set_estimate (self, total: int) -> None:
+
+		"""Take a trim's measured total as the folder's size."""
+
+		with self._lock:
+			self._bytes_estimate = total
 
 	def _evict_if_needed (self, written: int) -> None:
 
@@ -1397,46 +1474,63 @@ class VariantDiskCache:
 				if self._bytes_estimate <= self._max_bytes:
 					return
 
+			total = _trim_variant_folder(self._directory, self._max_bytes)
+
+			if total is not None:
+				self._bytes_estimate = total
+
+
+def _trim_variant_folder (directory: pathlib.Path, max_bytes: int) -> typing.Optional[int]:
+
+	"""Delete the least recently used variant files until the folder is within budget.
+
+	Returns the folder's size afterwards, or None when it could not be read.
+	A function of its own so a render worker can run it (#4667): a scan of a
+	full cache lists and stats every file, which in the player's process would
+	hold its lock between each.
+	"""
+
+	try:
+		entries = []
+
+		for entry in os.scandir(directory):
+			if entry.name.endswith(".variant") and entry.is_file():
+				stat = entry.stat()
+				entries.append((stat.st_mtime, stat.st_size, entry.path))
+
+		total = sum(size for _, size, _ in entries)
+
+		if total <= max_bytes:
+			return total
+
+		# Sort oldest first.
+		entries.sort()
+
+		evicted = 0
+
+		for _mtime, size, filepath in entries:
+			if total <= max_bytes:
+				break
+
 			try:
-				entries = []
+				os.unlink(filepath)
+				total -= size
+				evicted += 1
+			except OSError:
+				pass
 
-				for entry in os.scandir(self._directory):
-					if entry.name.endswith(".variant") and entry.is_file():
-						stat = entry.stat()
-						entries.append((stat.st_mtime, stat.st_size, entry.path))
+		if evicted > 0:
+			_log.info(
+				"Variant disk cache: evicted %d file(s), %.1f MB remaining",
+				evicted, total / (1024 * 1024),
+			)
 
-				total = sum(size for _, size, _ in entries)
-				self._bytes_estimate = total
+		return total
 
-				if total <= self._max_bytes:
-					return
+	except OSError as exc:
+		_log.warning("Variant disk cache eviction error: %s", exc)
 
-				# Sort oldest first.
-				entries.sort()
-
-				evicted = 0
-
-				for _mtime, size, filepath in entries:
-					if total <= self._max_bytes:
-						break
-
-					try:
-						os.unlink(filepath)
-						total -= size
-						evicted += 1
-					except OSError:
-						pass
-
-				self._bytes_estimate = total
-
-				if evicted > 0:
-					_log.info(
-						"Variant disk cache: evicted %d file(s), %.1f MB remaining",
-						evicted, total / (1024 * 1024),
-					)
-
-			except OSError as exc:
-				_log.warning("Variant disk cache eviction error: %s", exc)
+		return None
 
 
 # ---------------------------------------------------------------------------
@@ -1455,8 +1549,9 @@ _ApplyFn = typing.Callable[
 	numpy.ndarray,
 ]
 
-# Callback invoked on the worker thread when a transform completes.  What it
-# returns is ignored, so a cache's put, which reports what it evicted, will do.
+# Callback invoked on the processor's results thread when a transform
+# completes.  What it returns is ignored, so a cache's put, which reports what
+# it evicted, will do.
 _OnTransformComplete = typing.Callable[["TransformResult"], object]
 
 # Cap on the remembered failures (see TransformProcessor._failures).  Well
@@ -1471,6 +1566,11 @@ _MAX_FAILED_KEYS: int = 4096
 _RETRY_PAUSE_SECONDS:     float = 30.0
 _RETRY_PAUSE_MAX_SECONDS: float = 600.0
 
+# How many renders a processor hands its workers beyond one each: a worker that
+# finishes finds the next waiting, while the rest wait in the player, where
+# nothing has been written out for them yet.
+_DISPATCH_AHEAD: int = 1
+
 
 @dataclasses.dataclass(frozen=True)
 class _Failure:
@@ -1482,14 +1582,369 @@ class _Failure:
 	attempts: int
 
 
+@dataclasses.dataclass(frozen=True)
+class _DiskCacheSettings:
+
+	"""What a worker process needs to reach the variant disk cache: the cache's lock does not pickle."""
+
+	directory:   pathlib.Path
+	max_bytes:   int
+	sample_rate: int
+
+
+@dataclasses.dataclass(frozen=True)
+class _RenderJob:
+
+	"""One render, as its worker receives it.
+
+	In a worker process the record travels without its audio, which comes as a
+	file (``source``), and the render goes back as one, written to
+	``hand_back``.  On a thread the record keeps its audio, the render stays in
+	memory, and ``disk_cache`` is the processor's own cache rather than its
+	settings.
+	"""
+
+	record:             "subsample.library.SampleRecord"
+	source:             typing.Optional[subsample.parallelism.AudioFile]
+	spec:               TransformSpec
+	key:                TransformKey
+	audio_md5:          typing.Optional[str]
+	sample_rate:        int
+	output_sample_rate: int
+	disk_cache:         typing.Union[VariantDiskCache, _DiskCacheSettings, None]
+	hand_back:          typing.Optional[pathlib.Path]
+
+
+@dataclasses.dataclass(frozen=True)
+class _RenderOutcome:
+
+	"""What a render's worker hands back: the render, or why there is none, and what it logged.
+
+	A render handed back as a file comes with its audio empty and the file in
+	``audio``.  ``written`` is what it added to the disk cache, for the player
+	to count, since a worker process's copy of the cache does not trim it.
+	"""
+
+	result:    typing.Optional["TransformResult"]           = None
+	audio:     typing.Optional[subsample.parallelism.AudioFile] = None
+	fell_back: bool                                          = False
+	written:   int                                           = 0
+	failure:   typing.Optional[subsample.parallelism.Failure] = None
+	records:   tuple[logging.LogRecord, ...]                 = ()
+
+
+# A worker process's own copies of the disk caches its jobs name, by their
+# settings, made with evicts=False: the player counts what they write.
+_worker_disk_caches: dict[_DiskCacheSettings, VariantDiskCache] = {}
+
+
+def _job_disk_cache (job: _RenderJob) -> typing.Optional[VariantDiskCache]:
+
+	"""The disk cache a job reads and writes: the processor's own on a thread, a worker's copy in a process."""
+
+	if not isinstance(job.disk_cache, _DiskCacheSettings):
+		return job.disk_cache
+
+	cache = _worker_disk_caches.get(job.disk_cache)
+
+	if cache is None:
+		cache = VariantDiskCache(
+			directory=job.disk_cache.directory,
+			max_bytes=job.disk_cache.max_bytes,
+			sample_rate=job.disk_cache.sample_rate,
+			evicts=False,
+		)
+		_worker_disk_caches[job.disk_cache] = cache
+
+	return cache
+
+
+def _render (job: _RenderJob) -> _RenderOutcome:
+
+	"""Render one variant: what a worker runs, in a process of its own or on a thread (#4667).
+
+	Reads the source from its file when it came as one, and hands the render
+	back as a file when asked.  A failure comes back as an outcome rather than
+	raised, so the lines a failing job logged still reach the player.
+	"""
+
+	with subsample.parallelism.relaying_logs() as records:
+		try:
+			record = job.record
+
+			if job.source is not None:
+				record = dataclasses.replace(record, audio=subsample.parallelism.read_audio(job.source, remove=False))
+
+			result, fell_back, written = _render_variant(record, job)
+			audio: typing.Optional[subsample.parallelism.AudioFile] = None
+
+			if result is not None and job.hand_back is not None:
+				audio  = subsample.parallelism.write_audio(result.audio, job.hand_back)
+				result = dataclasses.replace(result, audio=numpy.empty((0,) + result.audio.shape[1:], dtype=numpy.float32))
+
+		except Exception as exc:
+			return _RenderOutcome(failure=subsample.parallelism.Failure.caught(exc), records=tuple(records))
+
+	return _RenderOutcome(result=result, audio=audio, fell_back=fell_back, written=written, records=tuple(records))
+
+
+def _render_variant (
+	record: "subsample.library.SampleRecord",
+	job:    _RenderJob,
+) -> tuple[typing.Optional["TransformResult"], bool, int]:
+
+	"""Convert a sample's audio, apply the job's transform chain, and measure the render.
+
+	Returns the render (None when the record has no audio), whether it is a
+	fallback not to keep, and the bytes it added to the disk cache.  Reads the
+	disk cache first, and a hit there is the render.
+	"""
+
+	spec = job.spec
+	key  = job.key
+
+	try:
+		# Reset the thread-local segment bounds at the start of every job:
+		# if a previous job's chain raised *after* a quantize handler set
+		# them, the success-path clear below was skipped and the stale bounds
+		# would otherwise attach to this (reused worker's) result.
+		_segment_bounds_local.bounds = None
+		# Tracks whether an earlier reverse in this chain has mirrored the
+		# buffer's timeline, so a following quantize mirrors the original-
+		# timeline attack positions instead of slicing silence.
+		_segment_bounds_local.reversed = False
+		# Set by a handler that could not do the job it was asked to do and
+		# passed the audio through instead.  Such a render is a fallback, not
+		# the variant the map describes, so it is not kept: see the caching
+		# below and _apply_vocoder's missing-carrier paths.
+		_segment_bounds_local.fell_back = False
+
+		# enqueue() guards against None audio, but the type system can't see that.
+		if record.audio is None:
+			return None, False, 0
+
+		disk_cache = _job_disk_cache(job)
+
+		# Check disk cache before doing expensive DSP.  This covers the
+		# startup pre-computation path (update_assignments → get_variant)
+		# which bypasses TransformManager.get_variant().  Base variants (empty
+		# spec) never touch the disk cache, so the processor hashes the source
+		# only for a job that does.
+		if disk_cache is not None and spec.steps and job.audio_md5 is not None:
+			disk_hit = disk_cache.get(job.audio_md5, spec, key)
+
+			if disk_hit is not None:
+				return disk_hit, False, 0
+
+		# The audio's true sample rate: disk-loaded PCM was resampled to the
+		# player output rate on load, while freshly-captured audio is still at
+		# the recorder rate.  Run DSP and the final resample from THIS rate,
+		# not the processor's configured sample rate — otherwise a
+		# player.audio.sample_rate that differs from recorder.audio.sample_rate
+		# mis-pitches and mis-times every disk-loaded variant.  None (older
+		# records / no audio-rate recorded) falls back to the old assumption.
+		source_rate = (
+			record.audio_sample_rate
+			if record.audio_sample_rate is not None
+			else job.sample_rate
+		)
+
+		# Convert integer PCM to float32 preserving all channels.
+		audio = pcm_to_float32(record.audio)
+
+		# Peak-normalise to 0.9 full-scale before the processing chain.
+		# In float32 this is lossless, and brings quiet samples up to a
+		# consistent level so subsequent DSP stages have good headroom.
+		# We measure the actual peak of the float32 audio here rather than
+		# using record.level.peak (which was computed on the mono downmix).
+		# For stereo sources the true per-channel peak can exceed the mono
+		# peak, so using the live measurement is more accurate.
+		# TransformResult.level is recomputed after all steps, so
+		# the player's _note_gain() always applies the correct inverse gain.
+		# Guard the reduction on a non-empty buffer: numpy.max raises
+		# "zero-size array to reduction operation" on a zero-frame sample,
+		# which fired BEFORE the empty-buffer skip below could pass it
+		# through, failing the job so the note played unprocessed.
+		actual_peak = float(numpy.max(numpy.abs(audio))) if audio.shape[0] > 0 else 0.0
+
+		if actual_peak > 0.0:
+			audio = audio * (0.9 / actual_peak)
+
+		# Apply each step in declaration order, dispatching via _HANDLERS.
+		# Handlers receive the audio's true sample rate so all DSP operates at
+		# full resolution before the final downsample.
+		#
+		# A zero-length buffer has nothing to transform, and several handlers
+		# (gate, distort, transient, reshape, vocoder, hpss) would raise or
+		# produce NaN on an empty reduction where filter/compress already
+		# guard — skip the chain and let the empty buffer pass through.
+		for step in spec.steps if audio.shape[0] > 0 else ():
+			handler = TransformProcessor._HANDLERS.get(type(step))
+
+			if handler is None:
+				raise NotImplementedError(
+					f"No handler registered for {type(step).__name__}. "
+					"Add an entry to TransformProcessor._HANDLERS - see the "
+					"'How to add a new transform type' guide in transform.py."
+				)
+
+			audio = handler(audio, source_rate, record, step)
+
+		# Capture segment bounds set by quantize handlers (thread-local).
+		segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = getattr(
+			_segment_bounds_local, "bounds", None,
+		)
+		_segment_bounds_local.bounds = None
+
+		# Resample to the output device rate AFTER all DSP steps.
+		# Placing the resample here means librosa's anti-alias filter
+		# catches any above-Nyquist content generated by DSP (distortion
+		# harmonics, pitch-shift artifacts, etc.) rather than letting it
+		# alias back into the audible range.
+		# librosa.resample expects time as the last axis: transpose to
+		# (channels, n_frames), resample, transpose back.
+		if job.output_sample_rate != source_rate:
+			audio = librosa.resample(
+				audio.T,
+				orig_sr=source_rate,
+				target_sr=job.output_sample_rate,
+				res_type="soxr_vhq",
+			).T.astype(numpy.float32)
+
+			# Scale segment bounds to match the resampled frame count.
+			if segment_bounds is not None:
+				ratio = job.output_sample_rate / source_rate
+				segment_bounds = tuple(
+					(int(s * ratio), int(e * ratio)) for s, e in segment_bounds
+				)
+
+		# Compute level from the mono mix, consistent with how SampleRecord.level
+		# was originally computed (analysis.compute_level operates on mono float32).
+		level    = subsample.analysis.compute_level(_mix_to_mono(audio))
+		duration = audio.shape[0] / job.output_sample_rate
+
+		# Compute grid energy profile if a quantize step was applied.
+		# First matching step wins — mirrors _quantize_params reading the
+		# first step's tempo/grid.  (Cross-type quantize pairs are rejected
+		# at parse; only duplicate same-name steps could match twice.)
+		energy_profile: typing.Optional[GridEnergyProfile] = None
+
+		# Only describe a grid the render actually landed on.  Two things have
+		# to hold, and each catches a different way of being wrong:
+		#
+		#   - Segment bounds exist.  Every quantize handler publishes them
+		#     once it has snapped onsets, and the bail-outs that render
+		#     nothing (source_bpm <= 0, no beat map, too few onsets) return
+		#     before that.  Attaching a profile merely because the SPEC named
+		#     a quantize step gave `order: beat_match` a grid-alignment score
+		#     for an unquantized sample.
+		#   - The step actually snapped.  At strength 0 a stretch fills the
+		#     target tempo and deliberately leaves every hit where it fell
+		#     (#1474), so it publishes bounds for a buffer that is NOT grid
+		#     aligned.  Scoring that on grid alignment is the same
+		#     misattribution by another route.
+		for step in spec.steps if segment_bounds is not None else ():
+			if isinstance(step, (TimeStretch, PadQuantize)) and step.amount > 0.0:
+				energy_profile = _compute_grid_energy_profile(
+					audio, job.output_sample_rate,
+					step.target_bpm, step.resolution,
+				)
+
+				# DEBUG: the raw per-slot energy vector is diagnostic internals,
+				# not something a musician wants on the console at INFO.
+				_log.debug(
+					"Grid energy: sample %d  bpm=%.1f  res=%d  slots=%d  %s",
+					key.sample_id, step.target_bpm, step.resolution,
+					len(energy_profile.energy),
+					"[" + ", ".join(f"{e:.2f}" for e in energy_profile.energy) + "]",
+				)
+
+				break
+
+		measures = _measure(audio, job.output_sample_rate, segment_bounds)
+
+		result = TransformResult(
+			key=key, audio=audio, duration=duration, level=level,
+			segment_bounds=segment_bounds,
+			energy_profile=energy_profile,
+			**measures._asdict(),
+		)
+
+		# A handler that passed the audio through because it could not reach
+		# something — a vocoder carrier that is missing right now — produced a
+		# fallback, not this variant.  Keeping it means the carrier can appear
+		# and the dry render goes on playing until the parent is evicted, and
+		# the memory cache does not key on the carrier at all, so nothing else
+		# would notice.  Play it for this note; do not remember it.
+		fell_back = bool(getattr(_segment_bounds_local, "fell_back", False))
+
+		# Write to disk cache (skip base variants — they're cheap to recompute).
+		written = 0
+
+		if (
+			disk_cache is not None
+			and spec.steps
+			and job.audio_md5 is not None
+			and not fell_back
+		):
+			written = disk_cache.put(job.audio_md5, spec, result)
+
+		# A cache that trims itself (the processor's own, on a thread) has
+		# counted what it wrote; only a worker process's copy leaves that to
+		# the player.
+		return result, fell_back, (0 if disk_cache is None or disk_cache.evicts else written)
+
+	finally:
+		# Leave the thread as the render found it.  A reverse leaves
+		# `reversed` set, and a quantise handler later called directly on
+		# this thread, as a test does, would read it and mirror its attacks
+		# (#4643).  The resets at the top still guard against a handler
+		# called outside a render.
+		_segment_bounds_local.bounds    = None
+		_segment_bounds_local.reversed  = False
+		_segment_bounds_local.fell_back = False
+
+
+def _trim_in_worker (settings: _DiskCacheSettings) -> tuple[typing.Optional[int], tuple[logging.LogRecord, ...]]:
+
+	"""Trim the variant folder to its budget on a render worker, and hand back its size and what it logged."""
+
+	with subsample.parallelism.relaying_logs() as records:
+		total = _trim_variant_folder(settings.directory, settings.max_bytes)
+
+	return total, tuple(records)
+
+
+# What the player says when a trim of the disk cache could not start or did not
+# finish: the estimate stays past the budget, so the next render's write asks again.
+_TRIM_FAILED: str = "Variant disk cache: could not trim it to transform.max_disk_mb this time - tried again after the next render"
+
+# Wakes a processor's results thread to hand its workers more renders, or stops it.
+_WAKE: object = object()
+_STOP: object = object()
+
+
 class TransformProcessor:
 
 	"""Background worker pool that applies audio transforms.
 
-	Mirrors the SampleProcessor pattern: enqueue() submits a job and returns
+	Mirrors the SampleProcessor pattern: enqueue() queues a job and returns
 	immediately.  Workers convert the source PCM to float32, apply the
-	registered transform chain in declaration order, compute a LevelResult, and
-	call on_complete.
+	registered transform chain in declaration order, and compute a
+	LevelResult, and on_complete receives the render.
+
+	The workers are processes of their own (#4667): a render on one of the
+	player's threads makes the audio callback and the note handlers wait for
+	Python's lock, which at 1024-frame buffers cost hundreds of dropouts a
+	minute (#4666).  The session's render processes are shared by every
+	processor (one per program), and each processor keeps its own queue, its
+	failures and its callbacks, all handled on a results thread of its own: it
+	hands its workers renders a few at a time, writing each source sound out
+	for them (subsample.parallelism.write_audio), reads each render back, and
+	calls on_complete.  Where worker processes cannot start, the shared pool
+	is threads instead (subsample.parallelism.processes_refused).
+	``processes=False`` gives a processor threads of its own, as the tests
+	that patch a handler or share memory with a worker need.
 
 	Adding a new transform type
 	----------------------------
@@ -1497,7 +1952,7 @@ class TransformProcessor:
 	2. Write an apply function matching _ApplyFn.
 	3. Register it in TransformProcessor._HANDLERS:
 	       TransformProcessor._HANDLERS[MyTransform] = _apply_my_transform
-	   The _execute() loop picks it up automatically — no other changes needed.
+	   _render_variant() picks it up automatically — no other changes needed.
 	4. Add the type to the TransformStep union and to spec_from_process().
 	"""
 
@@ -1512,13 +1967,18 @@ class TransformProcessor:
 		on_complete:        typing.Optional[_OnTransformComplete] = None,
 		on_idle:            typing.Optional[typing.Callable[[int], None]] = None,
 		disk_cache:         typing.Optional[VariantDiskCache] = None,
+		*,
+		processes:          bool = True,
 	) -> None:
 
-		"""Start the render worker pool; finished renders go to on_complete."""
+		"""Start the render queue; finished renders go to on_complete.
+
+		``processes`` False keeps the work on this processor's own threads.
+		"""
 
 		self._sample_rate        = sample_rate
 		# Output sample rate for the playback device.  If different from the
-		# capture rate, _execute() resamples AFTER all DSP steps so the
+		# capture rate, the render resamples AFTER all DSP steps so the
 		# anti-alias filter catches any artifacts from the processing chain.
 		self._output_sample_rate = output_sample_rate if output_sample_rate is not None else sample_rate
 		self._on_complete        = on_complete
@@ -1533,16 +1993,44 @@ class TransformProcessor:
 		self._audio_md5s: dict[int, tuple[weakref.ref[numpy.ndarray], str]] = {}
 
 		n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
-		_log.debug("rendering: %d background worker(s)", n_workers)
 
-		self._executor = concurrent.futures.ThreadPoolExecutor(
-			max_workers=n_workers,
-			thread_name_prefix="transform-worker",
+		self._pool: subsample.parallelism.BackgroundPool
+
+		if processes:
+			self._pool      = subsample.parallelism.shared_pool("render", n_workers)
+			self._owns_pool = False
+		else:
+			self._pool      = subsample.parallelism.BackgroundPool("transform-worker", n_workers, processes=False)
+			self._owns_pool = True
+
+		_log.debug(
+			"rendering: %d background worker %s",
+			self._pool.workers, "process(es)" if self._pool.in_processes else "thread(s)",
 		)
 
-		# Set of in-flight TransformKeys — prevents duplicate jobs.
+		# Set of in-flight TransformKeys — queued or rendering — prevents
+		# duplicate jobs.
 		self._in_flight:      set[TransformKey]  = set()
 		self._in_flight_lock: threading.Lock     = threading.Lock()
+
+		# Renders asked for and not yet handed to a worker, in order, and how
+		# many the workers hold now.  Guarded by _in_flight_lock; _settled is
+		# told when both run out, which is what shutdown() waits for.
+		self._pending:    collections.deque[tuple["subsample.library.SampleRecord", TransformSpec, TransformKey]] = collections.deque()
+		self._dispatched: int                    = 0
+		self._settled:    threading.Condition    = threading.Condition(self._in_flight_lock)
+
+		# The source sounds written out for worker processes, by the identity
+		# of the buffer, each with the buffer (so its identity stays its own)
+		# and the number of handed-out renders reading it.  Only the results
+		# thread touches it.
+		self._sources: dict[int, tuple[numpy.ndarray, subsample.parallelism.AudioFile, int]] = {}
+
+		# Whether a worker is trimming the disk cache now (one at a time), and
+		# what workers have added to it since that trim began, which its
+		# measured total may not include.  Guarded by _in_flight_lock.
+		self._trimming:  bool = False
+		self._unscanned: int  = 0
 
 		# Failed renders, remembered so the same job is not re-enqueued and its
 		# traceback re-logged on every trigger, but only for a pause: a failure
@@ -1560,13 +2048,24 @@ class TransformProcessor:
 		self._batch_enqueued:  int = 0   # jobs submitted since last idle
 		self._batch_completed: int = 0   # jobs finished since last idle
 
+		# Everything the results thread is told: a finished render or trim,
+		# _WAKE when a render is asked for, _STOP at shutdown.  The thread
+		# starts with the first render asked for, so a processor that renders
+		# nothing, or only on its caller's thread (_execute), starts none.
+		self._inbox: "queue.SimpleQueue[typing.Any]" = queue.SimpleQueue()
+		self._results_thread: typing.Optional[threading.Thread] = None
+
 	def enqueue (
 		self,
 		record: "subsample.library.SampleRecord",
 		spec:   TransformSpec,
 	) -> None:
 
-		"""Submit a transform job.  Returns immediately.
+		"""Ask for a render.  Returns immediately.
+
+		Writes nothing and starts nothing on the caller's thread, which may be
+		the MIDI thread on a note's cache miss: the results thread hands the
+		render to a worker.
 
 		Silently skips if:
 		  - the record has no audio (nothing to transform)
@@ -1602,23 +2101,31 @@ class TransformProcessor:
 				self._batch_enqueued  = 0
 				self._batch_completed = 0
 			self._batch_enqueued += 1
+			self._pending.append((record, spec, key))
+
+			if self._results_thread is None:
+				self._results_thread = threading.Thread(target=self._handle_results, name="transform-results", daemon=True)
+				self._results_thread.start()
 
 		if was_idle:
 			_log.info("Transform queue active")
 
-		self._executor.submit(self._execute, record, spec, key)
+		self._inbox.put(_WAKE)
 
 	def audio_md5 (self, record: "subsample.library.SampleRecord") -> str:
 
 		"""The MD5 of a record's source PCM, hashed once per buffer.
 
-		Keys the disk cache, and every worker job and every trigger's disk
-		look-up needs it, so it was hashed again each time: an 88-note repitch
-		fan-out hashed one buffer 88 times.  An entry is used only while it
-		still describes this record's buffer, by identity through a weak
-		reference, so a sample re-added under its own id with new audio is
-		hashed afresh, and a job still holding the old record cannot be given
-		the new hash for the old audio.
+		Keys the disk cache, and every job and every trigger's disk look-up
+		needs it, so it was hashed again each time: an 88-note repitch fan-out
+		hashed one buffer 88 times.  An entry is used only while it still
+		describes this record's buffer, by identity through a weak reference,
+		so a sample re-added under its own id with new audio is hashed afresh,
+		and a job still holding the old record cannot be given the new hash for
+		the old audio.
+
+		The buffer is hashed in place, not through ``tobytes()``, whose copy
+		holds the interpreter lock (#4667): the digest is the same.
 		"""
 
 		if record.audio is None:
@@ -1629,7 +2136,13 @@ class TransformProcessor:
 		if entry is not None and entry[0]() is record.audio:
 			return entry[1]
 
-		digest = hashlib.md5(record.audio.tobytes()).hexdigest()
+		source: typing.Union[memoryview, bytes] = (
+			memoryview(record.audio).cast("B")
+			if record.audio.flags.c_contiguous and record.audio.nbytes
+			else record.audio.tobytes()
+		)
+
+		digest = hashlib.md5(source).hexdigest()
 		self._audio_md5s[record.sample_id] = (weakref.ref(record.audio), digest)
 
 		return digest
@@ -1642,9 +2155,22 @@ class TransformProcessor:
 
 	def shutdown (self) -> None:
 
-		"""Wait for all in-flight transforms and stop the worker pool."""
+		"""Wait for every render asked for, then stop this processor.
 
-		self._executor.shutdown(wait=True)
+		A shared pool of worker processes stays for the session's other
+		processors (subsample.parallelism.shutdown_shared_pools stops it).
+		"""
+
+		with self._settled:
+			while self._pending or self._dispatched or self._trimming:
+				self._settled.wait()
+
+		if self._results_thread is not None:
+			self._inbox.put(_STOP)
+			self._results_thread.join()
+
+		if self._owns_pool:
+			self._pool.shutdown(wait=True)
 
 	def _remember_failure (self, key: TransformKey) -> _Failure:
 
@@ -1671,6 +2197,153 @@ class TransformProcessor:
 
 		return failure
 
+	def _job (
+		self,
+		record: "subsample.library.SampleRecord",
+		spec:   TransformSpec,
+		key:    TransformKey,
+		*,
+		in_processes: bool,
+	) -> _RenderJob:
+
+		"""The job for one render: for a worker process, its source written out and the record without it.
+
+		Base variants (empty spec) never touch the disk cache, so the source
+		is hashed only for a job that does.
+		"""
+
+		audio_md5: typing.Optional[str] = None
+
+		if self._disk_cache is not None and spec.steps:
+			audio_md5 = self.audio_md5(record)
+
+		if not in_processes:
+			return _RenderJob(
+				record=record, source=None, spec=spec, key=key, audio_md5=audio_md5,
+				sample_rate=self._sample_rate, output_sample_rate=self._output_sample_rate,
+				disk_cache=self._disk_cache, hand_back=None,
+			)
+
+		disk_cache: typing.Optional[_DiskCacheSettings] = None
+
+		if self._disk_cache is not None:
+			disk_cache = _DiskCacheSettings(
+				directory=self._disk_cache.directory,
+				max_bytes=self._disk_cache.max_bytes,
+				sample_rate=self._disk_cache.sample_rate,
+			)
+
+		return _RenderJob(
+			record=dataclasses.replace(record, audio=None),
+			source=self._hold_source(record),
+			spec=spec, key=key, audio_md5=audio_md5,
+			sample_rate=self._sample_rate, output_sample_rate=self._output_sample_rate,
+			disk_cache=disk_cache, hand_back=subsample.parallelism.hand_off_folder(),
+		)
+
+	def _hold_source (self, record: "subsample.library.SampleRecord") -> subsample.parallelism.AudioFile:
+
+		"""The file a worker reads this record's audio from, written on the first render that needs it."""
+
+		assert record.audio is not None
+
+		entry = self._sources.get(id(record.audio))
+
+		if entry is not None:
+			self._sources[id(record.audio)] = (entry[0], entry[1], entry[2] + 1)
+
+			return entry[1]
+
+		handle = subsample.parallelism.write_audio(record.audio, subsample.parallelism.hand_off_folder())
+		self._sources[id(record.audio)] = (record.audio, handle, 1)
+
+		return handle
+
+	def _release_source (self, job: _RenderJob) -> None:
+
+		"""A render is done with its source file: remove the file once no handed-out render reads it."""
+
+		if job.source is None:
+			return
+
+		for identity, (audio, handle, readers) in list(self._sources.items()):
+			if handle != job.source:
+				continue
+
+			if readers > 1:
+				self._sources[identity] = (audio, handle, readers - 1)
+			else:
+				del self._sources[identity]
+				subsample.parallelism.remove_audio(handle)
+
+			return
+
+	def _handle_results (self) -> None:
+
+		"""The results thread: finish each render a worker hands back, and hand the workers more.
+
+		Everything the processor does with a render beyond rendering it runs
+		here: writing sources out, reading renders back, on_complete, failures
+		and the idle line.  So a note's thread only ever queues a render.
+		"""
+
+		while True:
+			item = self._inbox.get()
+
+			if item is _STOP:
+				return
+
+			if isinstance(item, tuple) and item[0] == "render":
+				_kind, job, future = item
+
+				try:
+					outcome: _RenderOutcome = future.result()
+				except BaseException as exc:
+					# The pool lost the job: a worker process died (BrokenProcessPool),
+					# or the pool was stopped under it.
+					outcome = _RenderOutcome(failure=subsample.parallelism.Failure.caught(exc))
+
+				self._finish(job, outcome, dispatched=True)
+
+			elif isinstance(item, tuple) and item[0] == "trim":
+				self._trimmed(item[1])
+
+			self._dispatch()
+
+	def _dispatch (self) -> None:
+
+		"""Hand the workers the next renders asked for, up to one more than they can work on at once."""
+
+		while True:
+			with self._in_flight_lock:
+				if not self._pending or self._dispatched >= self._pool.workers + _DISPATCH_AHEAD:
+					return
+
+				record, spec, key = self._pending.popleft()
+				self._dispatched += 1
+
+			job: typing.Optional[_RenderJob] = None
+
+			try:
+				job    = self._job(record, spec, key, in_processes=self._pool.in_processes)
+				future = self._pool.submit(_render, job)
+
+			except Exception as exc:
+				self._finish(
+					job if job is not None else self._job(record, spec, key, in_processes=False),
+					_RenderOutcome(failure=subsample.parallelism.Failure.caught(exc)),
+					dispatched=True,
+				)
+				continue
+
+			future.add_done_callback(functools.partial(self._returned, job))
+
+	def _returned (self, job: _RenderJob, future: "concurrent.futures.Future[typing.Any]") -> None:
+
+		"""Pass a render a worker has finished, or lost, to the results thread."""
+
+		self._inbox.put(("render", job, future))
+
 	def _execute (
 		self,
 		record: "subsample.library.SampleRecord",
@@ -1678,237 +2351,45 @@ class TransformProcessor:
 		key:    TransformKey,
 	) -> None:
 
-		"""Worker method: convert audio, apply transform chain, call on_complete.
+		"""Render one variant now, on this thread, and finish it as a worker's render is finished.
 
-		Any exception is caught and logged so a failed transform never kills the
-		worker thread.
+		Any exception is caught and logged so a failed transform never kills
+		the caller.  What the tests call to render without a pool.
 		"""
 
+		job = self._job(record, spec, key, in_processes=False)
+
+		self._finish(job, _render(job), dispatched=False)
+
+	def _finish (self, job: _RenderJob, outcome: _RenderOutcome, *, dispatched: bool) -> None:
+
+		"""Take a render a worker handed back: log what it logged, keep it, or remember its failure."""
+
+		key = job.key
+
 		try:
-			# Reset the thread-local segment bounds at the start of every job:
-			# if a previous job's chain raised *after* a quantize handler set
-			# them, the success-path clear below was skipped and the stale bounds
-			# would otherwise attach to this (reused worker's) result.
-			_segment_bounds_local.bounds = None
-			# Tracks whether an earlier reverse in this chain has mirrored the
-			# buffer's timeline, so a following quantize mirrors the original-
-			# timeline attack positions instead of slicing silence.
-			_segment_bounds_local.reversed = False
-			# Set by a handler that could not do the job it was asked to do and
-			# passed the audio through instead.  Such a render is a fallback, not
-			# the variant the map describes, so it is not kept: see the caching
-			# below and _apply_vocoder's missing-carrier paths.
-			_segment_bounds_local.fell_back = False
+			subsample.parallelism.log_relayed(outcome.records, once=_warn_once)
 
-			# enqueue() guards against None audio, but the type system can't see that.
-			if record.audio is None:
-				return
+			failure = outcome.failure
 
-			# Compute the source audio hash once — used for both the disk cache
-			# read check and the write after DSP.  Base variants (empty spec)
-			# never touch the disk cache, so skip the full-buffer hash for them.
-			audio_md5: typing.Optional[str] = None
+			if failure is None:
+				try:
+					self._keep(outcome)
+				except Exception as exc:
+					failure = subsample.parallelism.Failure.caught(exc)
 
-			if self._disk_cache is not None and spec.steps:
-				audio_md5 = self.audio_md5(record)
-
-			# Check disk cache before doing expensive DSP.  This covers the
-			# startup pre-computation path (update_assignments → get_variant)
-			# which bypasses TransformManager.get_variant().
-			if self._disk_cache is not None and spec.steps and audio_md5 is not None:
-				disk_hit = self._disk_cache.get(audio_md5, spec, key)
-
-				if disk_hit is not None:
-					if self._on_complete is not None:
-						self._on_complete(disk_hit)
-					return
-
-			# The audio's true sample rate: disk-loaded PCM was resampled to the
-			# player output rate on load, while freshly-captured audio is still at
-			# the recorder rate.  Run DSP and the final resample from THIS rate,
-			# not the processor's configured self._sample_rate — otherwise a
-			# player.audio.sample_rate that differs from recorder.audio.sample_rate
-			# mis-pitches and mis-times every disk-loaded variant.  None (older
-			# records / no audio-rate recorded) falls back to the old assumption.
-			source_rate = (
-				record.audio_sample_rate
-				if record.audio_sample_rate is not None
-				else self._sample_rate
-			)
-
-			# Convert integer PCM to float32 preserving all channels.
-			audio = pcm_to_float32(record.audio)
-
-			# Peak-normalise to 0.9 full-scale before the processing chain.
-			# In float32 this is lossless, and brings quiet samples up to a
-			# consistent level so subsequent DSP stages have good headroom.
-			# We measure the actual peak of the float32 audio here rather than
-			# using record.level.peak (which was computed on the mono downmix).
-			# For stereo sources the true per-channel peak can exceed the mono
-			# peak, so using the live measurement is more accurate.
-			# TransformResult.level is recomputed after all steps, so
-			# the player's _note_gain() always applies the correct inverse gain.
-			# Guard the reduction on a non-empty buffer: numpy.max raises
-			# "zero-size array to reduction operation" on a zero-frame sample,
-			# which fired BEFORE the empty-buffer skip below could pass it
-			# through, failing the job so the note played unprocessed.
-			actual_peak = float(numpy.max(numpy.abs(audio))) if audio.shape[0] > 0 else 0.0
-
-			if actual_peak > 0.0:
-				audio = audio * (0.9 / actual_peak)
-
-			# Apply each step in declaration order, dispatching via _HANDLERS.
-			# Handlers receive the audio's true sample rate so all DSP operates at
-			# full resolution before the final downsample.
-			#
-			# A zero-length buffer has nothing to transform, and several handlers
-			# (gate, distort, transient, reshape, vocoder, hpss) would raise or
-			# produce NaN on an empty reduction where filter/compress already
-			# guard — skip the chain and let the empty buffer pass through.
-			for step in spec.steps if audio.shape[0] > 0 else ():
-				handler = self._HANDLERS.get(type(step))
-
-				if handler is None:
-					raise NotImplementedError(
-						f"No handler registered for {type(step).__name__}. "
-						"Add an entry to TransformProcessor._HANDLERS - see the "
-						"'How to add a new transform type' guide in transform.py."
-					)
-
-				audio = handler(audio, source_rate, record, step)
-
-			# Capture segment bounds set by quantize handlers (thread-local).
-			segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = getattr(
-				_segment_bounds_local, "bounds", None,
-			)
-			_segment_bounds_local.bounds = None
-
-			# Resample to the output device rate AFTER all DSP steps.
-			# Placing the resample here means librosa's anti-alias filter
-			# catches any above-Nyquist content generated by DSP (distortion
-			# harmonics, pitch-shift artifacts, etc.) rather than letting it
-			# alias back into the audible range.
-			# librosa.resample expects time as the last axis: transpose to
-			# (channels, n_frames), resample, transpose back.
-			if self._output_sample_rate != source_rate:
-				audio = librosa.resample(
-					audio.T,
-					orig_sr=source_rate,
-					target_sr=self._output_sample_rate,
-					res_type="soxr_vhq",
-				).T.astype(numpy.float32)
-
-				# Scale segment bounds to match the resampled frame count.
-				if segment_bounds is not None:
-					ratio = self._output_sample_rate / source_rate
-					segment_bounds = tuple(
-						(int(s * ratio), int(e * ratio)) for s, e in segment_bounds
-					)
-
-			# Compute level from the mono mix, consistent with how SampleRecord.level
-			# was originally computed (analysis.compute_level operates on mono float32).
-			level    = subsample.analysis.compute_level(_mix_to_mono(audio))
-			duration = audio.shape[0] / self._output_sample_rate
-
-			# Compute grid energy profile if a quantize step was applied.
-			# First matching step wins — mirrors _quantize_params reading the
-			# first step's tempo/grid.  (Cross-type quantize pairs are rejected
-			# at parse; only duplicate same-name steps could match twice.)
-			energy_profile: typing.Optional[GridEnergyProfile] = None
-
-			# Only describe a grid the render actually landed on.  Two things have
-			# to hold, and each catches a different way of being wrong:
-			#
-			#   - Segment bounds exist.  Every quantize handler publishes them
-			#     once it has snapped onsets, and the bail-outs that render
-			#     nothing (source_bpm <= 0, no beat map, too few onsets) return
-			#     before that.  Attaching a profile merely because the SPEC named
-			#     a quantize step gave `order: beat_match` a grid-alignment score
-			#     for an unquantized sample.
-			#   - The step actually snapped.  At strength 0 a stretch fills the
-			#     target tempo and deliberately leaves every hit where it fell
-			#     (#1474), so it publishes bounds for a buffer that is NOT grid
-			#     aligned.  Scoring that on grid alignment is the same
-			#     misattribution by another route.
-			for step in spec.steps if segment_bounds is not None else ():
-				if isinstance(step, (TimeStretch, PadQuantize)) and step.amount > 0.0:
-					energy_profile = _compute_grid_energy_profile(
-						audio, self._output_sample_rate,
-						step.target_bpm, step.resolution,
-					)
-
-					# DEBUG: the raw per-slot energy vector is diagnostic internals,
-					# not something a musician wants on the console at INFO.
-					_log.debug(
-						"Grid energy: sample %d  bpm=%.1f  res=%d  slots=%d  %s",
-						key.sample_id, step.target_bpm, step.resolution,
-						len(energy_profile.energy),
-						"[" + ", ".join(f"{e:.2f}" for e in energy_profile.energy) + "]",
-					)
-
-					break
-
-			measures = _measure(audio, self._output_sample_rate, segment_bounds)
-
-			result = TransformResult(
-				key=key, audio=audio, duration=duration, level=level,
-				segment_bounds=segment_bounds,
-				energy_profile=energy_profile,
-				**measures._asdict(),
-			)
-
-			# A handler that passed the audio through because it could not reach
-			# something — a vocoder carrier that is missing right now — produced a
-			# fallback, not this variant.  Keeping it means the carrier can appear
-			# and the dry render goes on playing until the parent is evicted, and
-			# the memory cache does not key on the carrier at all, so nothing else
-			# would notice.  Play it for this note; do not remember it.
-			fell_back = bool(getattr(_segment_bounds_local, "fell_back", False))
-
-			# Write to disk cache (skip base variants — they're cheap to recompute).
-			if (
-				self._disk_cache is not None
-				and spec.steps
-				and audio_md5 is not None
-				and not fell_back
-			):
-				self._disk_cache.put(audio_md5, spec, result)
-
-			if self._on_complete is not None and not fell_back:
-				self._on_complete(result)
-
-			# A render that works after failing starts any later failure afresh.
-			with self._in_flight_lock:
-				self._failures.pop(key, None)
-
-		except Exception:
-			with self._in_flight_lock:
-				failure = self._remember_failure(key)
-
-			# The traceback says why once; a repeat is one line, since the same
-			# failure can recur every few minutes for as long as its note plays.
-			if failure.attempts == 1:
-				_log.exception(
-					"Transform failed for sample %d  spec=%s - it plays unprocessed, "
-					"and is tried again in %.0f s",
-					key.sample_id, key.spec, failure.pause,
-				)
+			if failure is None:
+				# A render that works after failing starts any later failure afresh.
+				with self._in_flight_lock:
+					self._failures.pop(key, None)
 			else:
-				_log.warning(
-					"Transform failed again for sample %d  spec=%s (%d attempts) - "
-					"tried again in %.0f s",
-					key.sample_id, key.spec, failure.attempts, failure.pause,
-				)
+				self._log_failure(key, failure)
 
 		finally:
-			# Leave the thread as the render found it.  A reverse leaves
-			# `reversed` set, and a quantise handler later called directly on
-			# this thread, as a test does, would read it and mirror its attacks
-			# (#4643).  The resets at the top still guard against a handler
-			# called outside a render.
-			_segment_bounds_local.bounds    = None
-			_segment_bounds_local.reversed  = False
-			_segment_bounds_local.fell_back = False
+			if outcome.audio is not None:
+				subsample.parallelism.remove_audio(outcome.audio)
+
+			self._release_source(job)
 
 			with self._in_flight_lock:
 				self._in_flight.discard(key)
@@ -1916,11 +2397,130 @@ class TransformProcessor:
 				now_idle  = len(self._in_flight) == 0
 				completed = self._batch_completed
 
+				if dispatched:
+					self._dispatched -= 1
+
+				if not self._pending and not self._dispatched:
+					self._settled.notify_all()
+
 			if now_idle:
 				if self._on_idle is not None:
 					self._on_idle(completed)
 				else:
 					_log.info("Transform queue idle - %d variant(s) processed", completed)
+
+	def _keep (self, outcome: _RenderOutcome) -> None:
+
+		"""Read a handed-back render's audio back, count its disk-cache bytes, and pass it to on_complete."""
+
+		result = outcome.result
+
+		if result is not None and outcome.audio is not None:
+			result = dataclasses.replace(result, audio=subsample.parallelism.read_audio(outcome.audio, remove=True))
+
+		if outcome.written:
+			self._count_disk_written(outcome.written)
+
+		if self._on_complete is not None and result is not None and not outcome.fell_back:
+			self._on_complete(result)
+
+	def _log_failure (self, key: TransformKey, failure: subsample.parallelism.Failure) -> None:
+
+		"""Remember a failed render's pause, and say why it failed: in full once, in one line after."""
+
+		with self._in_flight_lock:
+			remembered = self._remember_failure(key)
+
+		# The traceback says why once; a repeat is one line, since the same
+		# failure can recur every few minutes for as long as its note plays.
+		if remembered.attempts == 1:
+			_log.error(
+				"Transform failed for sample %d  spec=%s - it plays unprocessed, "
+				"and is tried again in %.0f s",
+				key.sample_id, key.spec, remembered.pause,
+				exc_info=failure.rebuilt(),
+			)
+		else:
+			_log.warning(
+				"Transform failed again for sample %d  spec=%s (%d attempts) - "
+				"tried again in %.0f s",
+				key.sample_id, key.spec, remembered.attempts, remembered.pause,
+			)
+
+	def _count_disk_written (self, written: int) -> None:
+
+		"""Count what a worker process added to the disk cache, and have one worker trim it when due.
+
+		Runs on the results thread.
+		"""
+
+		if self._disk_cache is None:
+			return
+
+		due = self._disk_cache.add_written(written)
+
+		with self._in_flight_lock:
+			if self._trimming:
+				self._unscanned += written
+				return
+
+			if not due:
+				return
+
+			self._trimming  = True
+			self._unscanned = 0
+
+		settings = _DiskCacheSettings(
+			directory=self._disk_cache.directory,
+			max_bytes=self._disk_cache.max_bytes,
+			sample_rate=self._disk_cache.sample_rate,
+		)
+
+		try:
+			future = self._pool.submit(_trim_in_worker, settings)
+
+		except Exception:
+			_log.warning(_TRIM_FAILED, exc_info=True)
+
+			with self._settled:
+				self._trimming = False
+				self._settled.notify_all()
+
+			return
+
+		future.add_done_callback(lambda done: self._inbox.put(("trim", done)))
+
+	def _trimmed (self, future: "concurrent.futures.Future[typing.Any]") -> None:
+
+		"""Take a finished trim's total as the disk cache's size, and trim again if writes since put it past budget.
+
+		Runs on the results thread.  What workers wrote while the trim ran is
+		added to its total, though the trim may have counted some of it: an
+		overcount only trims again, where an undercount would leave the
+		folder over its budget.
+		"""
+
+		total: typing.Optional[int] = None
+
+		try:
+			total, records = future.result()
+
+			subsample.parallelism.log_relayed(records)
+
+		except Exception:
+			_log.warning(_TRIM_FAILED, exc_info=True)
+
+		with self._settled:
+			unscanned       = self._unscanned
+			self._unscanned = 0
+			self._trimming  = False
+			self._settled.notify_all()
+
+		if self._disk_cache is not None and total is not None:
+			self._disk_cache.set_estimate(total + unscanned)
+
+			if unscanned:
+				self._count_disk_written(0)
 
 # ---------------------------------------------------------------------------
 # TransformManager
@@ -4421,7 +5021,10 @@ def _warn_once (key: str, message: str) -> None:
 		return
 
 	_WARN_ONCE_SEEN.add(key)
-	_log.warning(message)
+
+	# Tagged with its key, so a worker process's warning, relayed to the
+	# player, is logged once in the session, not once per worker (#4667).
+	_log.warning(message, extra={subsample.parallelism.ONCE_KEY: key})
 
 
 def _resolve_cc (

@@ -1968,6 +1968,10 @@ def _shut_down (
 	elif transform_manager is not None:
 		transform_manager.shutdown()
 
+	# Every program's renders are done, so the worker processes they shared
+	# can stop (#4667).
+	subsample.parallelism.shutdown_shared_pools()
+
 	if not startup_failed:
 		print("Done.")
 

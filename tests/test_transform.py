@@ -2,6 +2,7 @@
 
 import dataclasses
 import hashlib
+import logging
 import math
 import os
 import pathlib
@@ -18,10 +19,12 @@ import soundfile
 import subsample.analysis
 import subsample.config
 import subsample.library
+import subsample.parallelism
 import subsample.query
 import subsample.transform
 
 import tests.helpers
+import tests.render_steps
 
 
 @pytest.fixture(autouse=True)
@@ -566,9 +569,11 @@ class TestTransformProcessor:
 				subsample.transform.PitchShift
 			] = _dummy_handler
 
+			# Threads: the patched handler has to be the one the worker runs.
 			processor = subsample.transform.TransformProcessor(
 				sample_rate=44100,
 				on_complete=completed.append,
+				processes=False,
 			)
 
 			record = _make_record(sample_id=1)
@@ -625,9 +630,11 @@ class TestAFailedRenderIsTriedAgain:
 			_handler,
 		)
 
+		# Threads: the patched handler, the clock and `calls` have to be the
+		# ones the worker sees.
 		idle = threading.Event()
 		processor = subsample.transform.TransformProcessor(
-			sample_rate=44100, on_idle=lambda _count: idle.set(),
+			sample_rate=44100, on_idle=lambda _count: idle.set(), processes=False,
 		)
 
 		now = [0.0]
@@ -862,7 +869,8 @@ class TestTransformManagerGetVariant:
 
 	def _make_stack (
 		self,
-		tmp_path: pathlib.Path,
+		tmp_path:  pathlib.Path,
+		processes: bool = True,
 	) -> tuple[
 		subsample.transform.TransformManager,
 		subsample.transform.TransformCache,
@@ -876,7 +884,7 @@ class TestTransformManagerGetVariant:
 			directory=tmp_path, max_bytes=100_000_000, sample_rate=44100,
 		)
 		processor = subsample.transform.TransformProcessor(
-			sample_rate=44100, on_complete=cache.put, disk_cache=disk,
+			sample_rate=44100, on_complete=cache.put, disk_cache=disk, processes=processes,
 		)
 		manager = subsample.transform.TransformManager(
 			cache=cache, processor=processor, instrument_library=lib,
@@ -941,7 +949,8 @@ class TestTransformManagerGetVariant:
 		"""A note-on looks up without reading the disk: the miss is queued, and the
 		render worker finds the file and keeps it in memory for the next note (#4488)."""
 
-		manager, cache, lib, disk, _processor = self._make_stack(tmp_path)
+		# Threads: the spied reads have to be the worker's.
+		manager, cache, lib, disk, _processor = self._make_stack(tmp_path, processes=False)
 		record = _make_record(sample_id=1)
 		lib.add(record)
 		spec = self._spec()
@@ -5697,3 +5706,172 @@ class TestPadQuantizeKeepsWhatTheCropKept:
 		remainder = (loudest / self.SR) % interval
 
 		assert min(remainder, interval - remainder) == pytest.approx(0.0, abs=0.005)
+
+
+def _noise_record (sample_id: int = 1, n_frames: int = 22050, channels: int = 2) -> subsample.library.SampleRecord:
+
+	"""A record of seeded noise, so a render of it is not silence."""
+
+	rng   = numpy.random.default_rng(sample_id)
+	audio = (rng.standard_normal((n_frames, channels)) * 3000.0).astype(numpy.int16)
+
+	return _make_record(sample_id=sample_id, audio=audio)
+
+
+def _spec_of (*steps: object) -> subsample.transform.TransformSpec:
+
+	"""A spec of any steps, test-only ones among them, which the step union does not name."""
+
+	return subsample.transform.TransformSpec(steps=typing.cast(tuple[subsample.transform.TransformStep, ...], steps))
+
+
+class TestRendersRunInWorkerProcesses:
+
+	"""#4667: a render runs in a worker process, and comes back as one on a thread would.
+
+	A render on one of the player's threads makes the audio and the note
+	handlers wait for Python's lock: at 1024-frame buffers, hundreds of
+	dropouts a minute (#4666).
+	"""
+
+	@pytest.fixture(autouse=True)
+	def _processes (self) -> None:
+
+		"""Skip where worker processes cannot start: the session would render on threads there."""
+
+		reason = subsample.parallelism.processes_refused()
+
+		if reason is not None:
+			pytest.skip(f"worker processes cannot start here: {reason}")
+
+	def _render_all (
+		self,
+		record:    subsample.library.SampleRecord,
+		specs:     typing.Sequence[subsample.transform.TransformSpec],
+		processes: bool = True,
+	) -> list[subsample.transform.TransformResult]:
+
+		"""Render every spec of the record, and return what reached on_complete."""
+
+		completed: list[subsample.transform.TransformResult] = []
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100, on_complete=completed.append, processes=processes,
+		)
+
+		assert processor._pool.in_processes is processes
+
+		for spec in specs:
+			processor.enqueue(record, spec)
+
+		processor.shutdown()
+
+		return completed
+
+	def test_a_render_in_a_worker_process_matches_one_on_a_thread (self) -> None:
+
+		record = _noise_record()
+		spec   = subsample.transform.TransformSpec(steps=(
+			subsample.transform.HighPassFilter(freq=200.0),
+			subsample.transform.Compress(threshold_db=-20.0),
+			subsample.transform.Reverse(),
+		))
+
+		in_process = self._render_all(record, [spec])
+		on_thread  = self._render_all(record, [spec], processes=False)
+
+		assert len(in_process) == 1 and len(on_thread) == 1
+		numpy.testing.assert_array_equal(in_process[0].audio, on_thread[0].audio)
+		assert in_process[0].audio.flags.writeable
+		assert in_process[0].level == on_thread[0].level
+		assert in_process[0].true_peak == on_thread[0].true_peak
+		assert in_process[0].hit_time == on_thread[0].hit_time
+
+	def test_a_failure_in_a_worker_is_logged_once_with_where_it_was_raised (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		record    = _noise_record()
+		spec      = _spec_of(tests.render_steps.Explode("in a worker"))
+		processor = subsample.transform.TransformProcessor(sample_rate=44100)
+
+		with caplog.at_level(logging.WARNING, logger="subsample"):
+			processor.enqueue(record, spec)
+			processor.shutdown()
+
+		failed = [r for r in caplog.records if r.getMessage().startswith("Transform failed for sample 1")]
+
+		assert len(failed) == 1
+		assert failed[0].levelno == logging.ERROR
+
+		text = logging.Formatter().format(failed[0])
+
+		assert "RuntimeError: exploded in a worker" in text
+		assert "render_steps.py" in text, "the worker's traceback was lost"
+		assert subsample.transform.TransformKey(sample_id=1, spec=spec) in processor._failures
+
+	def test_a_warning_several_workers_meet_is_logged_once (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		key   = f"test-once-{time.monotonic_ns()}"
+		specs = [_spec_of(tests.render_steps.WarnOnce(key=key, n=n)) for n in range(12)]
+
+		with caplog.at_level(logging.WARNING, logger="subsample"):
+			completed = self._render_all(_noise_record(), specs)
+
+		assert len(completed) == 12
+		assert [r.getMessage() for r in caplog.records].count(f"warned about {key}") == 1
+
+	def test_a_worker_that_dies_is_replaced (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		record = _noise_record()
+
+		with caplog.at_level(logging.WARNING, logger="subsample"):
+			self._render_all(record, [_spec_of(tests.render_steps.Die())])
+			completed = self._render_all(record, [subsample.transform.TransformSpec(steps=(subsample.transform.Reverse(),))])
+
+		assert any(r.getMessage().startswith("Transform failed for sample 1") for r in caplog.records)
+		assert len(completed) == 1, "the pool was not replaced after its worker died"
+
+	def test_an_empty_sound_renders_in_a_worker_process (self, tmp_path: pathlib.Path) -> None:
+
+		"""An empty buffer passes through the chain, and an empty sound crosses
+		between processes and is hashed for the disk cache like any other."""
+
+		record    = _make_record(sample_id=1, audio=numpy.zeros((0, 2), dtype=numpy.int16))
+		completed: list[subsample.transform.TransformResult] = []
+		disk      = subsample.transform.VariantDiskCache(directory=tmp_path, max_bytes=1_000_000, sample_rate=44100)
+		processor = subsample.transform.TransformProcessor(sample_rate=44100, on_complete=completed.append, disk_cache=disk)
+
+		processor.enqueue(record, subsample.transform.TransformSpec(steps=(subsample.transform.Reverse(),)))
+		processor.shutdown()
+
+		assert len(completed) == 1
+		assert completed[0].audio.shape == (0, 2)
+
+	def test_renders_leave_no_files_behind (self) -> None:
+
+		folder = subsample.parallelism.hand_off_folder()
+		before = set(folder.iterdir())
+		specs  = [subsample.transform.TransformSpec(steps=(subsample.transform.HighPassFilter(freq=100.0 + n),)) for n in range(8)]
+
+		completed = self._render_all(_noise_record(), specs)
+
+		assert len(completed) == 8
+		assert set(folder.iterdir()) == before
+
+	def test_a_worker_process_trims_the_disk_cache_to_its_budget (self, tmp_path: pathlib.Path) -> None:
+
+		"""A worker process's copy of the cache does not trim it: the player counts
+		what every worker writes, and has one worker at a time trim the folder."""
+
+		budget    = 500_000
+		disk      = subsample.transform.VariantDiskCache(directory=tmp_path, max_bytes=budget, sample_rate=44100)
+		processor = subsample.transform.TransformProcessor(sample_rate=44100, disk_cache=disk)
+
+		for n in range(8):
+			processor.enqueue(_noise_record(), subsample.transform.TransformSpec(steps=(subsample.transform.HighPassFilter(freq=100.0 + n),)))
+
+		processor.shutdown()
+
+		sizes = [path.stat().st_size for path in tmp_path.glob("*.variant")]
+
+		assert len(sizes) >= 2, "nothing much was written, so nothing was tested"
+		assert sum(sizes) <= budget
+

@@ -99,7 +99,8 @@ the same however the two arrived.
 SampleRecord added to library
     → TransformManager.on_sample_added()
         → enqueue base variant ONLY                 ← float32 peak-normalised copy
-            → TransformProcessor worker pool
+            → TransformProcessor: queued in the player, handed out a few at a time
+                → render worker processes (one set, shared by every program)
                 → TransformCache (parent-priority FIFO eviction, memory-capped)
 
 MIDI map loaded / reloaded
@@ -117,6 +118,30 @@ cache entries, derived from the same PCM source.
 When a variant set for a parent sample would exceed the memory budget, the entire
 oldest parent's variant family is evicted together, keeping the remaining
 families intact and playable.
+
+Renders run in worker processes of their own, not on the player's threads
+(#4667). Python runs one thread's code at a time, so a render on one of the
+player's threads made the audio callback and the note handlers wait their turn
+however many cores were free. At 1024-frame buffers, compressing or gating
+sounds cost the audio over 200 dropouts in 30 seconds, and the same renders in
+another process cost none (#4666).
+
+- **Who does what.** Each program's `TransformProcessor` keeps its queue, its
+  failures and its callbacks in the player, on a results thread of its own. It
+  hands the session's render processes, (cores − 2) / 2 of them shared by every
+  program, a few renders at a time.
+- **How a sound crosses.** It goes through a file in a private scratch folder
+  (`parallelism.write_audio` and `read_audio`), which copies it with Python's
+  lock released. Pickling would hold the lock for the whole copy: a 35 MB
+  sound pickled cost 157 dropouts in 20 seconds, and the same through a file
+  none.
+- **Logs.** What a worker logs comes back with its render and is logged by the
+  player. A once-only warning is logged once in the session.
+- **The disk cache.** Workers write to it, the player counts what they write,
+  and one worker at a time trims the folder to its budget.
+- **Where worker processes cannot start,** renders run on threads as before,
+  and the player warns once that they may make it drop out. A temporary folder
+  whose path is too long for the forkserver's socket is one such case.
 
 A render that fails leaves its note playing a previous or the base variant, and
 is not tried again until a pause has passed: 30 seconds, doubling with each
@@ -317,6 +342,10 @@ them, so the system stays usable while a large library rebuild or `import` runs.
 It pulls back further while the player is live. The share is taken from the
 cores this process may actually use, so inside a container or under a CPU
 allowance it sizes itself to that allowance rather than to the whole host.
+
+Free cores are not enough on their own: work on the player's own threads waits
+for Python's lock with the audio, however many cores are idle. That is why
+renders run in worker processes (see [Transform pipeline](#transform-pipeline)).
 
 Fewer workers does not mean a cooler machine: a modern CPU draws to its power
 limit whether the work is spread across four cores or forty, so the package

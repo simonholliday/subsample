@@ -15,6 +15,14 @@ pip install -e ".[dev]"
 pytest
 ```
 
+Renders run in worker processes (see `docs/architecture.md`).
+- **A test that patches what a render runs, or reads what one writes,** builds its
+  `TransformProcessor` with `processes=False`, which keeps the work on threads.
+- **A test that needs a worker process to run a step of its own** takes it from
+  `tests/render_steps.py`. That module registers its steps wherever it is
+  imported, the worker included.
+- **`tests/conftest.py` stops the shared worker pools after each test.**
+
 ## Type checking
 
 Same setup as [Tests](#tests):

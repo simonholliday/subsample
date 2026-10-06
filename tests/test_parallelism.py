@@ -1,10 +1,15 @@
 """Tests for subsample.parallelism — the shared analysis-pool CPU policy."""
 
+import concurrent.futures
 import logging
 import os
+import pathlib
+import pickle
 import threading
+import traceback
 import typing
 
+import numpy
 import pytest
 import threadpoolctl
 
@@ -375,3 +380,183 @@ def test_an_item_that_fails_in_the_retry_is_skipped_not_fatal (caplog: pytest.Lo
 
 	assert results == [0, 10, 20, 30, 40, None, 60, 70]
 	assert any("Analysis failed for item 5 - skipping it" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Background pools (#4667)
+# ---------------------------------------------------------------------------
+
+def _skip_without_processes () -> None:
+
+	"""Skip where worker processes cannot start: every pool runs on threads there."""
+
+	reason = subsample.parallelism.processes_refused()
+
+	if reason is not None:
+		pytest.skip(f"worker processes cannot start here: {reason}")
+
+
+@pytest.mark.parametrize("audio", [
+	numpy.arange(48_000, dtype=numpy.int32).reshape(12_000, 4),
+	numpy.linspace(-1.0, 1.0, 9_000, dtype=numpy.float32).reshape(4_500, 2),
+	numpy.zeros((0, 2), dtype=numpy.float32),
+	numpy.arange(1_000, dtype=numpy.int16),
+], ids=["int32 four channels", "float32 stereo", "empty", "int16 mono"])
+def test_a_sound_handed_over_in_a_file_comes_back_as_it_went (tmp_path: pathlib.Path, audio: numpy.ndarray) -> None:
+
+	handle = subsample.parallelism.write_audio(audio, tmp_path)
+	back   = subsample.parallelism.read_audio(handle, remove=True)
+
+	assert back.dtype == audio.dtype
+	numpy.testing.assert_array_equal(back, audio)
+	assert back.flags.writeable
+	assert not pathlib.Path(handle.path).exists()
+
+
+def test_a_sound_not_laid_out_in_order_is_handed_over_all_the_same (tmp_path: pathlib.Path) -> None:
+
+	audio = numpy.arange(40, dtype=numpy.int32).reshape(10, 4)[:, ::2]
+
+	assert not audio.flags.c_contiguous
+
+	back = subsample.parallelism.read_audio(subsample.parallelism.write_audio(audio, tmp_path), remove=True)
+
+	numpy.testing.assert_array_equal(back, audio)
+
+
+def test_a_file_cut_short_is_an_error (tmp_path: pathlib.Path) -> None:
+
+	handle = subsample.parallelism.write_audio(numpy.ones((1_000, 2), dtype=numpy.float32), tmp_path)
+
+	with open(handle.path, "r+b") as stream:
+		stream.truncate(100)
+
+	with pytest.raises(OSError, match="shorter than the sound it should hold"):
+		subsample.parallelism.read_audio(handle, remove=False)
+
+
+def _log_and_return (value: int) -> tuple[int, list[logging.LogRecord]]:
+
+	"""Module-level (picklable) job that logs, as a worker's job would."""
+
+	with subsample.parallelism.relaying_logs() as records:
+		logging.getLogger("subsample.test").warning("worker says %d", value)
+
+	return value, records
+
+
+def test_what_a_worker_process_logs_is_logged_by_the_player (caplog: pytest.LogCaptureFixture) -> None:
+
+	"""In a process started by the forkserver, nothing a job logs reaches the player's log unless handed back."""
+
+	_skip_without_processes()
+
+	pool = subsample.parallelism.BackgroundPool("test", 1, processes=True)
+
+	try:
+		value, records = pool.submit(_log_and_return, 7).result()
+	finally:
+		pool.shutdown()
+
+	assert value == 7
+	assert [record.getMessage() for record in records] == ["worker says 7"]
+
+	with caplog.at_level(logging.WARNING, logger="subsample"):
+		subsample.parallelism.log_relayed(records)
+
+	assert "worker says 7" in caplog.messages
+
+
+def test_outside_a_worker_process_a_record_is_logged_where_it_is_made (caplog: pytest.LogCaptureFixture) -> None:
+
+	with caplog.at_level(logging.WARNING, logger="subsample"):
+		value, records = _log_and_return(3)
+
+	assert records == []
+	assert "worker says 3" in caplog.messages
+
+
+def test_a_once_only_record_goes_to_the_once_callback (caplog: pytest.LogCaptureFixture) -> None:
+
+	record = logging.makeLogRecord({
+		"name": "subsample.test", "levelno": logging.WARNING, "levelname": "WARNING",
+		"msg": "said once", subsample.parallelism.ONCE_KEY: "the key",
+	})
+	seen: list[tuple[str, str]] = []
+
+	with caplog.at_level(logging.WARNING, logger="subsample"):
+		subsample.parallelism.log_relayed([record], once=lambda key, message: seen.append((key, message)))
+
+	assert seen == [("the key", "said once")]
+	assert "said once" not in caplog.messages
+
+
+def _raise_here () -> None:
+
+	"""Fail, so a test can find this function in the traceback."""
+
+	raise ValueError("raised in a worker")
+
+
+def test_a_failure_keeps_where_it_was_raised_across_a_process () -> None:
+
+	try:
+		_raise_here()
+	except ValueError as exc:
+		failure = subsample.parallelism.Failure.caught(exc)
+
+	arrived = pickle.loads(pickle.dumps(failure))
+	text    = "".join(traceback.format_exception(arrived.rebuilt()))
+
+	assert "_raise_here" in text
+	assert "ValueError: raised in a worker" in text
+
+
+def test_where_worker_processes_cannot_start_the_pools_use_threads_and_say_so_once (
+	monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+
+	"""Simon's call 11b on #4513: the player still works, and says what that costs, once."""
+
+	monkeypatch.setattr(subsample.parallelism, "_processes_checked", False)
+	monkeypatch.setattr(subsample.parallelism, "_processes_refused_reason", None)
+	monkeypatch.setattr(subsample.parallelism, "_BACKGROUND_START_METHOD", "no-such-start-method")
+
+	with caplog.at_level(logging.WARNING, logger="subsample"):
+		first  = subsample.parallelism.BackgroundPool("test", 1, processes=True)
+		second = subsample.parallelism.BackgroundPool("test", 1, processes=True)
+
+	try:
+		assert not first.in_processes and not second.in_processes
+		assert first.submit(int, "3").result() == 3
+		assert sum("could not start here" in message for message in caplog.messages) == 1
+	finally:
+		first.shutdown()
+		second.shutdown()
+
+
+def test_a_shared_pool_is_one_pool_for_every_owner () -> None:
+
+	first  = subsample.parallelism.shared_pool("test-shared", 1)
+	second = subsample.parallelism.shared_pool("test-shared", 3)
+
+	assert first is second
+	assert second.workers == 1
+
+
+def test_a_pool_whose_worker_died_is_replaced (caplog: pytest.LogCaptureFixture) -> None:
+
+	_skip_without_processes()
+
+	pool = subsample.parallelism.BackgroundPool("test", 1, processes=True)
+
+	try:
+		with pytest.raises(concurrent.futures.process.BrokenProcessPool):
+			pool.submit(os._exit, 1).result()
+
+		with caplog.at_level(logging.WARNING, logger="subsample"):
+			assert pool.submit(int, "4").result() == 4
+
+		assert any("One of the test workers stopped unexpectedly" in message for message in caplog.messages)
+	finally:
+		pool.shutdown()

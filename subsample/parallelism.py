@@ -1,18 +1,29 @@
-"""Shared CPU policy for Subsample's background sample-analysis worker pools.
+"""Shared CPU policy for Subsample's background worker pools.
 
-Fingerprinting a sample — the 58-dimension analysis behind every match — is
-heavy, CPU-bound work, and Subsample runs it in a pool of background workers in
-two places: the one-off library scan at startup (``subsample.library``) and the
-live analyser that fingerprints sounds as they are captured
-(``subsample.recorder``).  This module holds the two policy decisions those
-pools share, so they behave consistently:
+Fingerprinting a sample — the 58-dimension analysis behind every match — and
+rendering a variant are heavy, CPU-bound work, and Subsample runs them in pools
+of background workers: the one-off library scan at startup
+(``subsample.library``), the live analyser that fingerprints sounds as they are
+captured (``subsample.recorder``), and the render pool (``subsample.transform``).
+This module holds the policy decisions those pools share, so they behave
+consistently:
 
   * **How many workers.**  Before anything is playing — at startup, or an
     offline rebuild from the command-line tools — analysis takes the whole
     machine so the library is ready as fast as possible.  While the player is
     live, it pulls back to a small share of the cores, leaving the rest for the
-    real-time audio thread so playback never stutters while new sounds are
-    still being fingerprinted in the background.
+    real-time audio thread.
+
+  * **Out of the player's process while it plays** (#4667).  Python runs one
+    thread's code at a time, so a worker thread in the player's process makes
+    the audio callback and the note handlers wait their turn however many cores
+    are free: measured at 1024-frame buffers, renders on the player's threads
+    cost hundreds of dropouts a minute, and the same renders in a process of
+    their own cost none (#4666).  So background work runs in worker processes
+    (``BackgroundPool``), and a sound crosses to and from them in a file
+    (``write_audio`` / ``read_audio``), which copies without holding the lock
+    where pickling would not.  Where worker processes cannot start, the pools
+    fall back to threads and say so once.
 
   * **One math thread per worker.**  Subsample already spreads work across whole
     samples, so letting NumPy's linear-algebra backend open its own thread pool
@@ -21,16 +32,24 @@ pools share, so they behave consistently:
     Each worker is pinned to a single BLAS thread.
 """
 
+import atexit
 import concurrent.futures
 import contextlib
+import dataclasses
 import logging
 import math
 import multiprocessing
+import multiprocessing.forkserver
 import os
+import pathlib
+import shutil
+import tempfile
 import threading
+import traceback
 import typing
 import warnings
 
+import numpy
 import threadpoolctl
 
 import subsample.audio
@@ -351,3 +370,446 @@ def _drain (
 				results[index] = None
 
 	return results
+
+
+# ---------------------------------------------------------------------------
+# Background pools: work the player must not wait on (#4667)
+# ---------------------------------------------------------------------------
+
+# How a background pool starts its worker processes.  Not `fork`: once
+# PortAudio or a MIDI port is open the player holds threads created in C, and a
+# forked child inherits their locks in whatever state they were (can_fork_safely).
+# A forkserver is a fresh interpreter, started once, that imports the heavy
+# modules below and then forks each worker from itself, so a worker starts in
+# milliseconds with them loaded and shares their pages with its siblings.
+_BACKGROUND_START_METHOD: str = "forkserver"
+
+# What the forkserver imports before it forks a worker: everything a render or
+# an analysis reaches, librosa, scipy and Rubber Band's wrapper among it.
+_FORKSERVER_PRELOAD: list[str] = ["subsample.transform", "subsample.cache", "subsample.recorder"]
+
+# A log record's attribute naming the once-only key it was logged under, so the
+# player logs what workers relay once in the session, not once per worker.
+ONCE_KEY: str = "subsample_once_key"
+
+# Why worker processes cannot start here: None when they can, or until asked.
+_processes_refused_reason: typing.Optional[str] = None
+_processes_checked: bool = False
+_processes_lock: threading.Lock = threading.Lock()
+
+# The background pools the whole session shares, by name, made on first use,
+# and whether they are stopped at exit yet.
+_shared_pools: dict[str, "BackgroundPool"] = {}
+_shared_pools_lock: threading.Lock = threading.Lock()
+_shared_pools_stopped_at_exit: bool = False
+
+# The folder sounds cross between processes in, made on first use and removed
+# at exit.
+_hand_off_folder: typing.Optional[pathlib.Path] = None
+_hand_off_lock: threading.Lock = threading.Lock()
+
+# True in a background worker process, where what a job logs is collected and
+# handed back to the player (relaying_logs), since nothing logged in a process
+# started by the forkserver reaches the player's log otherwise.
+_in_background_worker: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class AudioFile:
+
+	"""A sound handed between processes in a file: where it is, and how to read it back."""
+
+	path:  str
+	shape: tuple[int, ...]
+	dtype: str
+
+
+def hand_off_folder () -> pathlib.Path:
+
+	"""The folder sounds cross between the player and its workers in, made on first use.
+
+	Private to this run and removed when it ends.  It lives in the system's
+	temporary folder (TMPDIR), where a worker can write as easily as the player.
+	"""
+
+	global _hand_off_folder
+
+	with _hand_off_lock:
+		if _hand_off_folder is None:
+			_hand_off_folder = pathlib.Path(tempfile.mkdtemp(prefix="subsample-work-"))
+			atexit.register(shutil.rmtree, _hand_off_folder, ignore_errors=True)
+
+		return _hand_off_folder
+
+
+def write_audio (audio: numpy.ndarray, folder: pathlib.Path) -> AudioFile:
+
+	"""Write a sound to a new file in ``folder`` for another process to read.
+
+	Written unbuffered from the array's own memory, so the copy happens in the
+	kernel with the interpreter lock released.  Pickling a sound copies it while
+	holding the lock: a 35 MB sound handed over that way cost the audio 157
+	dropouts in 20 s, where a file cost none (#4667).
+	"""
+
+	audio = numpy.ascontiguousarray(audio)
+	fd, path = tempfile.mkstemp(dir=folder, suffix=".pcm")
+
+	try:
+		with os.fdopen(fd, "wb", buffering=0) as stream:
+			# An empty sound writes an empty file: a view of no bytes cannot be cast.
+			view = memoryview(audio).cast("B") if audio.nbytes else memoryview(b"")
+
+			while view:
+				written = stream.write(view)
+				view    = view[written:]
+
+	except BaseException:
+		with contextlib.suppress(OSError):
+			os.unlink(path)
+
+		raise
+
+	return AudioFile(path=path, shape=tuple(audio.shape), dtype=audio.dtype.str)
+
+
+def read_audio (handle: AudioFile, *, remove: bool) -> numpy.ndarray:
+
+	"""Read a handed-over sound into a new array, and remove its file if asked.
+
+	Read straight into the array's memory, so, as in write_audio, the copy
+	happens with the interpreter lock released.
+	"""
+
+	audio = numpy.empty(handle.shape, dtype=numpy.dtype(handle.dtype))
+
+	with open(handle.path, "rb", buffering=0) as stream:
+		view = memoryview(audio).cast("B") if audio.nbytes else memoryview(bytearray())
+
+		while view:
+			read = stream.readinto(view)
+
+			if not read:
+				raise OSError(f"{handle.path} is shorter than the sound it should hold")
+
+			view = view[read:]
+
+	if remove:
+		os.unlink(handle.path)
+
+	return audio
+
+
+def remove_audio (handle: AudioFile) -> None:
+
+	"""Remove a handed-over sound's file, if it is still there."""
+
+	with contextlib.suppress(OSError):
+		os.unlink(handle.path)
+
+
+class _Collector (logging.Handler):
+
+	"""Keeps what a worker's job logs, formatted, to hand back to the player."""
+
+	def __init__ (self, records: list[logging.LogRecord]) -> None:
+
+		"""A collector that appends to ``records``."""
+
+		super().__init__()
+		self._records = records
+
+	def emit (self, record: logging.LogRecord) -> None:
+
+		"""Keep a record in a form that pickles: its message formatted, its traceback as text."""
+
+		record.msg  = record.getMessage()
+		record.args = None
+
+		if record.exc_info:
+			record.exc_text = logging.Formatter().formatException(record.exc_info)
+			record.exc_info = None
+
+		self._records.append(record)
+
+
+@contextlib.contextmanager
+def relaying_logs () -> typing.Iterator[list[logging.LogRecord]]:
+
+	"""Collect what this worker's job logs while the block runs, for the player to log.
+
+	Only in a background worker process.  Elsewhere (a thread, the tests) a
+	record is logged where it is made, and the list stays empty.
+	"""
+
+	records: list[logging.LogRecord] = []
+
+	if not _in_background_worker:
+		yield records
+		return
+
+	collector = _Collector(records)
+	logger    = logging.getLogger("subsample")
+	logger.addHandler(collector)
+
+	try:
+		yield records
+	finally:
+		logger.removeHandler(collector)
+
+
+def log_relayed (
+	records: typing.Sequence[logging.LogRecord],
+	once:    typing.Optional[typing.Callable[[str, str], None]] = None,
+) -> None:
+
+	"""Log, in the player, what a worker's job logged.
+
+	A record logged under a once-only key goes to ``once`` with its key and
+	message instead, so the player logs it once in the session, not once per
+	worker that met it.
+	"""
+
+	for record in records:
+		key = getattr(record, ONCE_KEY, None)
+
+		if key is not None and once is not None:
+			once(key, record.getMessage())
+			continue
+
+		logger = logging.getLogger(record.name)
+
+		if logger.isEnabledFor(record.levelno):
+			logger.handle(record)
+
+
+class RemoteTraceback (Exception):
+
+	"""Where a worker's failure was raised, attached as the cause of the error the player logs."""
+
+	def __init__ (self, text: str) -> None:
+
+		"""Hold the worker's formatted traceback."""
+
+		super().__init__(text)
+		self.text = text
+
+	def __str__ (self) -> str:
+
+		"""The traceback, as the worker formatted it."""
+
+		return self.text
+
+
+@dataclasses.dataclass(frozen=True)
+class Failure:
+
+	"""A worker's job that raised: the error, and where, for the player to log."""
+
+	error:     BaseException
+	traceback: str
+
+	@classmethod
+	def caught (cls, error: BaseException) -> "Failure":
+
+		"""The error being handled now, with its traceback as text, since a traceback does not pickle."""
+
+		return cls(error=error, traceback="".join(traceback.format_exception(error)))
+
+	def rebuilt (self) -> BaseException:
+
+		"""The error, its worker's traceback attached as its cause, ready to log with exc_info."""
+
+		if self.error.__traceback__ is None:
+			self.error.__cause__ = RemoteTraceback(self.traceback)
+
+		return self.error
+
+
+def init_background_worker (
+	analysis_config:    subsample.config.AnalysisConfig,
+	float_ceiling_dbfs: typing.Optional[float],
+	log_level:          int,
+) -> None:
+
+	"""Set up one background worker process: the parent's settings, and its log level.
+
+	What a job logs is collected and handed back (relaying_logs), so the
+	worker's own ``subsample`` logger does not pass records on to a root logger
+	that, in a process started by the forkserver, would print them to stderr
+	unformatted, or not at all.
+	"""
+
+	global _in_background_worker
+
+	init_analysis_worker(analysis_config, float_ceiling_dbfs)
+
+	_in_background_worker = True
+
+	logger = logging.getLogger("subsample")
+	logger.setLevel(log_level)
+	logger.propagate = False
+
+
+def processes_refused () -> typing.Optional[str]:
+
+	"""Why worker processes cannot start here, or None when they can.
+
+	Asked once, by starting the forkserver.  A refusal is logged once, and from
+	then on every background pool runs in threads instead (Simon's call 11b on
+	#4513): the player works, and says background work may make it drop out.
+	A long TMPDIR is a real cause, for one: the forkserver's socket lives
+	there, and Linux refuses a socket path past 107 characters.
+	"""
+
+	global _processes_checked, _processes_refused_reason
+
+	with _processes_lock:
+		if _processes_checked:
+			return _processes_refused_reason
+
+		_processes_checked = True
+
+		try:
+			context = multiprocessing.get_context(_BACKGROUND_START_METHOD)
+			context.set_forkserver_preload(_FORKSERVER_PRELOAD)
+			multiprocessing.forkserver.ensure_running()
+
+		except (OSError, ValueError, RuntimeError) as exc:
+			_processes_refused_reason = str(exc) or type(exc).__name__
+
+			_log.warning(
+				"Rendering and analysis run inside the player, because worker processes "
+				"could not start here (%s).  While Subsample renders or analyses sounds, "
+				"the audio may drop out and notes may sound late.",
+				_processes_refused_reason,
+			)
+
+		return _processes_refused_reason
+
+
+class BackgroundPool:
+
+	"""Workers for one kind of background work: processes of their own, or threads.
+
+	Processes when asked for and the machine allows (processes_refused);
+	threads otherwise, and for tests that patch what a job runs or share memory
+	with it.  A pool whose worker process died (``BrokenProcessPool``) is
+	replaced on the next submit; the jobs it held fail, and their owners deal
+	with that as with any failed job.
+	"""
+
+	def __init__ (self, name: str, workers: int, *, processes: bool) -> None:
+
+		"""A pool of ``workers`` named ``name``, in processes if ``processes`` and they can start."""
+
+		self.name     = name
+		self.workers  = max(1, workers)
+		self._lock    = threading.Lock()
+		self._processes = processes and processes_refused() is None
+		self._executor  = self._make()
+
+	@property
+	def in_processes (self) -> bool:
+
+		"""Whether this pool's workers are processes of their own."""
+
+		return self._processes
+
+	def _make (self) -> concurrent.futures.Executor:
+
+		"""A new executor of this pool's kind and size."""
+
+		if not self._processes:
+			return concurrent.futures.ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix=self.name)
+
+		# The settings are read now, at the pool's first use, after the CLI has
+		# wired them, as map_analysis reads them for the library scan.
+		return concurrent.futures.ProcessPoolExecutor(
+			max_workers=self.workers,
+			mp_context=multiprocessing.get_context(_BACKGROUND_START_METHOD),
+			initializer=init_background_worker,
+			initargs=(
+				subsample.cache.analysis_config(),
+				subsample.audio.float_import_ceiling(),
+				logging.getLogger("subsample").getEffectiveLevel(),
+			),
+		)
+
+	def submit (self, fn: typing.Callable[..., typing.Any], /, *args: typing.Any) -> concurrent.futures.Future[typing.Any]:
+
+		"""Run ``fn(*args)`` on a worker, replacing the pool first if a worker of it died."""
+
+		with self._lock:
+			try:
+				return self._executor.submit(fn, *args)
+
+			except concurrent.futures.process.BrokenProcessPool:
+				_log.warning(
+					"One of the %s workers stopped unexpectedly, most often because the "
+					"machine ran short of memory, and a new one has started.",
+					self.name,
+				)
+
+				# A broken pool's manager has already stopped, so this is quick.
+				self._executor.shutdown(wait=True, cancel_futures=True)
+				self._executor = self._make()
+
+				return self._executor.submit(fn, *args)
+
+	def shutdown (self, wait: bool = True) -> None:
+
+		"""Stop the workers once what they were given is done (or at once, if not ``wait``)."""
+
+		with self._lock:
+			self._executor.shutdown(wait=wait, cancel_futures=not wait)
+
+
+def shared_pool (name: str, workers: int) -> BackgroundPool:
+
+	"""The session's pool of worker processes for one kind of work, made on first use.
+
+	Shared by every owner of that work, so eight programs with a render queue
+	each share one set of render workers, not eight.  ``workers`` sizes the
+	pool when this call makes it; a later call gets the pool as it was made.
+	"""
+
+	global _shared_pools_stopped_at_exit
+
+	with _shared_pools_lock:
+		pool = _shared_pools.get(name)
+
+		if pool is None:
+			# Stopped at exit, before Python takes its modules apart: a pool
+			# collected after that fails in its own clean-up and says so.
+			if not _shared_pools_stopped_at_exit:
+				atexit.register(shutdown_shared_pools)
+				_shared_pools_stopped_at_exit = True
+
+			pool = BackgroundPool(name, workers, processes=True)
+			_shared_pools[name] = pool
+
+		return pool
+
+
+def shutdown_shared_pools () -> None:
+
+	"""Stop every shared pool, waiting for what its workers are doing, then remove the hand-off folder.
+
+	The player calls this on its way out, as a backstop to the exit handler: a
+	player that has to end with os._exit runs no exit handlers.
+	"""
+
+	global _hand_off_folder
+
+	with _shared_pools_lock:
+		pools = list(_shared_pools.values())
+		_shared_pools.clear()
+
+	for pool in pools:
+		pool.shutdown(wait=True)
+
+	with _hand_off_lock:
+		if _hand_off_folder is not None:
+			shutil.rmtree(_hand_off_folder, ignore_errors=True)
+			_hand_off_folder = None
