@@ -3491,6 +3491,57 @@ class TestReverseRemapsSegmentBounds:
 		assert getattr(subsample.transform._segment_bounds_local, "bounds", None) is None
 
 
+class TestARenderLeavesItsThreadAsItFoundIt:
+
+	"""A render resets the chain's per-thread flags as it ends, as well as as it starts (#4643).
+
+	A reverse left `reversed` set on its thread until the next render began,
+	so a quantise handler called directly on that thread afterwards, as a test
+	does, mirrored its attack times.
+	"""
+
+	def _render (self, spec: subsample.transform.TransformSpec) -> list[subsample.transform.TransformResult]:
+
+		"""Render one spec on this thread, as the worker does, and return what it completed."""
+
+		record = _make_record(audio=_make_pcm_audio(n_frames=4410))
+		made: list[subsample.transform.TransformResult] = []
+
+		processor = subsample.transform.TransformProcessor(sample_rate=44100)
+		processor._on_complete = made.append
+		processor._disk_cache  = None
+		processor._execute(record, spec, key=subsample.transform.TransformKey(record.sample_id, spec))
+
+		return made
+
+	def _flags (self) -> tuple[typing.Any, typing.Any, typing.Any]:
+
+		local = subsample.transform._segment_bounds_local
+
+		return (local.bounds, local.reversed, local.fell_back)
+
+	def test_after_a_reverse (self) -> None:
+
+		made = self._render(subsample.transform.TransformSpec(steps=(subsample.transform.Reverse(),)))
+
+		assert len(made) == 1
+		assert self._flags() == (None, False, False)
+
+	def test_after_a_render_that_fails_part_way (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		def _reverse_then_fail (*_args: typing.Any) -> numpy.ndarray:
+			subsample.transform._segment_bounds_local.reversed = True
+			subsample.transform._segment_bounds_local.fell_back = True
+			raise RuntimeError("a step that fails")
+
+		monkeypatch.setitem(subsample.transform.TransformProcessor._HANDLERS, subsample.transform.Reverse, _reverse_then_fail)
+
+		made = self._render(subsample.transform.TransformSpec(steps=(subsample.transform.Reverse(),)))
+
+		assert made == []
+		assert self._flags() == (None, False, False)
+
+
 # ---------------------------------------------------------------------------
 # Radio / FreqShift / Wobble (spec_from_process build + handler dispatch)
 # ---------------------------------------------------------------------------

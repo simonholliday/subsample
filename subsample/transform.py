@@ -1886,6 +1886,15 @@ class TransformProcessor:
 				)
 
 		finally:
+			# Leave the thread as the render found it.  A reverse leaves
+			# `reversed` set, and a quantise handler later called directly on
+			# this thread, as a test does, would read it and mirror its attacks
+			# (#4643).  The resets at the top still guard against a handler
+			# called outside a render.
+			_segment_bounds_local.bounds    = None
+			_segment_bounds_local.reversed  = False
+			_segment_bounds_local.fell_back = False
+
 			with self._in_flight_lock:
 				self._in_flight.discard(key)
 				self._batch_completed += 1
@@ -2748,8 +2757,8 @@ def _apply_reverse (
 	# original-timeline attack positions onto the now-reversed buffer.
 	#
 	# TOGGLED, not set, so two reverses in one chain cancel as they should —
-	# and cleared per job by _execute, which is what stops the flag leaking
-	# from one render into the next on the same worker thread.  Without both
+	# and cleared by _execute as each job starts and ends, which is what stops
+	# the flag leaking from one render into the next on the same thread.  Without both
 	# halves written down, a chain run twice in one process reads as broken;
 	# it made a reviewer's own first repro wrong (#1481).
 	_segment_bounds_local.reversed = not getattr(_segment_bounds_local, "reversed", False)

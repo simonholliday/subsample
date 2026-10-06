@@ -150,17 +150,11 @@ class TestARenderKnowsWhereItsHitComes:
 		assert hit == pytest.approx(0.020, abs=0.001)
 		assert segments is None
 
-	def test_a_render_measures_the_sound_it_made (self, monkeypatch: pytest.MonkeyPatch) -> None:
+	def test_a_render_measures_the_sound_it_made (self) -> None:
 
 		"""Measured after the steps: reversed, the hit is the top of the swell, most of the way in."""
 
 		import tests.test_transform as transform_tests
-
-		# A render runs here, on the test's thread, and a reverse leaves the
-		# transform's per-thread flags set until the next render clears them.
-		# A test calling a handler directly would read them, so put them back.
-		for flag in ("bounds", "reversed", "fell_back"):
-			monkeypatch.setattr(subsample.transform._segment_bounds_local, flag, None, raising=False)
 
 		pcm    = (_struck(0.05) * 32767).astype(numpy.int16)[:, numpy.newaxis]
 		record = transform_tests._make_record(audio=pcm)
