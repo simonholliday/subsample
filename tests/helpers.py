@@ -14,6 +14,7 @@ import numpy
 import subsample.analysis
 import subsample.cache
 import subsample.library
+import subsample.player
 import subsample.transform
 
 
@@ -213,6 +214,54 @@ def _hit_starts (rendered: numpy.ndarray, sample_rate: int) -> list[float]:
 		last = int(index)
 
 	return starts
+
+
+def _render_of (
+	audio:          numpy.ndarray,
+	level:          subsample.analysis.LevelResult,
+	segment_bounds: typing.Optional[tuple[tuple[int, int], ...]] = None,
+) -> subsample.transform.TransformResult:
+
+	"""A render built by hand around ``audio``, a test's stand-in for one the transform made.
+
+	It carries none of the render worker's measures, so the player measures
+	its true peak and a segment's level itself, as a note-on once always did.
+	"""
+
+	return subsample.transform.TransformResult(
+		key=subsample.transform.TransformKey(sample_id=1, spec=subsample.transform.TransformSpec(steps=())),
+		audio=audio,
+		duration=len(audio) / 44100,
+		level=level,
+		segment_bounds=segment_bounds,
+	)
+
+
+def _played (
+	player:   subsample.player.MidiPlayer,
+	audio:    numpy.ndarray,
+	level:    subsample.analysis.LevelResult,
+	velocity: float,
+	matrix:   numpy.ndarray,
+	gain_db:  float = 0.0,
+) -> numpy.ndarray:
+
+	"""The whole of ``audio`` as a voice plays it for a note: its gain set as a note-on sets it, then gained and mixed (#4654)."""
+
+	gain  = player._note_gain(level, subsample.analysis.true_peak(audio), velocity, matrix, gain_db)
+	voice = subsample.player._Voice(audio=audio, note=60, channel=0, gain=gain, mix=matrix)
+
+	return voice.frames(0, voice.length)
+
+
+def _laid_out (audio: numpy.ndarray, period: int) -> tuple[numpy.ndarray, int, int]:
+
+	"""``audio`` laid out whole to loop every ``period`` frames, and its loop: what a voice plays a buffer at a time (#3877, #4654)."""
+
+	voice = subsample.player._Voice(audio=audio, note=60, channel=0, ring_period=period)
+	_length, start, end, _passes = subsample.player._ring_layout(len(audio), period)
+
+	return voice.frames(0, voice.length), start, end
 
 
 def _audio (record: subsample.library.SampleRecord) -> numpy.ndarray:

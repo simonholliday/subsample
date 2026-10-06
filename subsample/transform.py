@@ -767,10 +767,11 @@ class TransformResult:
 	    LevelResult computed from the mono mix of the derivative audio.
 	    Stored here so the player can loudness-normalise this derivative the same
 	    way it does an original SampleRecord (RMS toward the polyphony target,
-	    scaled by note velocity).  At trigger time the player applies that gain,
-	    then maps channels to the output layout via a mix matrix and clamps
-	    against a per-render anti-clip ceiling (see player._render_float) — no
-	    int→float conversion needed here.
+	    scaled by note velocity).  At trigger time the player sets that gain,
+	    clamped against an anti-clip ceiling from ``true_peak`` (see
+	    player.MidiPlayer._note_gain), and the audio callback applies it and
+	    maps channels to the output layout via a mix matrix, buffer by buffer as
+	    the voice plays (#4654) — no int→float conversion needed here.
 
 	duration:
 	    Length of the derivative in seconds (may differ from the original if
@@ -802,6 +803,22 @@ class TransformResult:
 	"""hit_time for each segment in segment_bounds, measured on the segment
 	alone, which is what a voice playing one segment starts from.  None when
 	there are no segments."""
+
+	true_peak: typing.Optional[float] = None
+	"""The loudest sample in any channel of ``audio`` (analysis.true_peak),
+	which a note's anti-clip ceiling is set from.  Measured with hit_time, so
+	a note-on reads it rather than scanning a sound that may last a minute
+	(#4654).  None only on a render built by hand, whose note measures it."""
+
+	segment_true_peaks: typing.Optional[tuple[float, ...]] = None
+	"""true_peak for each segment in segment_bounds.  None when there are no
+	segments, or on a render built by hand."""
+
+	segment_levels: typing.Optional[tuple[subsample.analysis.LevelResult, ...]] = None
+	"""The level of each segment in segment_bounds, measured on the segment's
+	mono mix as ``level`` is on the whole, which a voice playing one segment
+	is loudness-normalised by.  None when there are no segments, or on a
+	render built by hand."""
 
 # ---------------------------------------------------------------------------
 # TransformCache
@@ -1267,14 +1284,13 @@ class VariantDiskCache:
 
 			level    = subsample.analysis.LevelResult(peak=peak, rms=rms)
 			duration = n_frames / sample_rate
-			hit, segment_hits = _hit_times(audio, sample_rate, segment_bounds)
+			measures = _measure(audio, sample_rate, segment_bounds)
 
 			return TransformResult(
 				key=key, audio=audio, duration=duration, level=level,
 				segment_bounds=segment_bounds,
 				energy_profile=energy_profile,
-				hit_time=hit,
-				segment_hit_times=segment_hits,
+				**measures._asdict(),
 			)
 
 		except OSError as exc:
@@ -1731,7 +1747,7 @@ class TransformProcessor:
 			# For stereo sources the true per-channel peak can exceed the mono
 			# peak, so using the live measurement is more accurate.
 			# TransformResult.level is recomputed after all steps, so
-			# _render_float() always applies the correct inverse gain.
+			# the player's _note_gain() always applies the correct inverse gain.
 			# Guard the reduction on a non-empty buffer: numpy.max raises
 			# "zero-size array to reduction operation" on a zero-frame sample,
 			# which fired BEFORE the empty-buffer skip below could pass it
@@ -1832,14 +1848,13 @@ class TransformProcessor:
 
 					break
 
-			hit, segment_hits = _hit_times(audio, self._output_sample_rate, segment_bounds)
+			measures = _measure(audio, self._output_sample_rate, segment_bounds)
 
 			result = TransformResult(
 				key=key, audio=audio, duration=duration, level=level,
 				segment_bounds=segment_bounds,
 				energy_profile=energy_profile,
-				hit_time=hit,
-				segment_hit_times=segment_hits,
+				**measures._asdict(),
 			)
 
 			# A handler that passed the audio through because it could not reach
@@ -1931,12 +1946,12 @@ class TransformManager:
 
 	Player look-up pattern
 	-----------------------
-	    result = manager.get_variant(sample_id, spec)   # or get_base(sample_id)
+	    result = manager.get_variant(sample_id, spec, from_disk=False)   # or get_base(sample_id)
 	    if result is not None:
-	        audio = _render_float(result.audio, result.level, velocity)
-	        voices.append(Voice(audio=audio))
+	        gain = _note_gain(result.level, result.true_peak, velocity, mix)
+	        voices.append(Voice(audio=result.audio, gain=gain, mix=mix))
 	    else:
-	        # fall back to original via existing _render()
+	        # fall back to the original via _float_audio()
 	"""
 
 	def __init__ (
@@ -2020,8 +2035,9 @@ class TransformManager:
 		path never needs to call pcm_to_float32() at trigger time.
 
 		On a miss, enqueues the base variant for background production and
-		returns None.  The caller should fall back to _render() for this
-		trigger; the variant will be ready on the next.
+		returns None.  The caller should fall back to the original audio
+		(the player's _float_audio()) for this trigger; the variant will be
+		ready on the next.
 		"""
 
 		result = self._cache.get_base(sample_id)
@@ -2152,27 +2168,45 @@ def _mix_to_mono (audio: numpy.ndarray) -> numpy.ndarray:
 	return numpy.asarray(numpy.mean(audio, axis=1, dtype=numpy.float32))
 
 
-def _hit_times (
+class _Measures (typing.NamedTuple):
+
+	"""What a note-on reads off a render, for the whole and for each segment: the TransformResult fields of the same names."""
+
+	hit_time:           float
+	segment_hit_times:  typing.Optional[tuple[float, ...]]
+	true_peak:          float
+	segment_true_peaks: typing.Optional[tuple[float, ...]]
+	segment_levels:     typing.Optional[tuple[subsample.analysis.LevelResult, ...]]
+
+
+def _measure (
 	audio:          numpy.ndarray,
 	sample_rate:    int,
 	segment_bounds: typing.Optional[tuple[tuple[int, int], ...]],
-) -> tuple[float, typing.Optional[tuple[float, ...]]]:
+) -> _Measures:
 
-	"""Where the hit comes in a render, and in each of its segments (#604).
+	"""Where the hit comes in a render and how loud it peaks, and the same for each of its segments.
 
-	Measured here, on the render worker, so a note-on only reads the result.
-	The cost is one pass over the audio, small beside any step that made it.
+	Measured here, on the render worker, so a note-on only reads the results
+	and does no work that grows with the sound's length (#604, #4654).  The
+	cost is a few passes over the audio, small beside any step that made it.
+	A segment's level is measured on its slice of the mono mix, exactly as
+	the player once measured it at note-on, so a segment plays as loud.
 	"""
 
 	mono = _mix_to_mono(audio)
 	hit  = subsample.analysis.measure_hit_time(mono, sample_rate)
+	peak = subsample.analysis.true_peak(audio)
 
 	if segment_bounds is None:
-		return hit, None
+		return _Measures(hit, None, peak, None, None)
 
-	return hit, tuple(
-		subsample.analysis.measure_hit_time(mono[start:end], sample_rate)
-		for start, end in segment_bounds
+	return _Measures(
+		hit_time           = hit,
+		segment_hit_times  = tuple(subsample.analysis.measure_hit_time(mono[start:end], sample_rate) for start, end in segment_bounds),
+		true_peak          = peak,
+		segment_true_peaks = tuple(subsample.analysis.true_peak(audio[start:end]) for start, end in segment_bounds),
+		segment_levels     = tuple(subsample.analysis.compute_level(mono[start:end]) for start, end in segment_bounds),
 	)
 
 

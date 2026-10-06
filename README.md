@@ -92,7 +92,7 @@ All four are the same workflow.
 | **Audio formats in** | WAV, BWF, FLAC, AIFF, OGG, MP3/MPEG (libsndfile) |
 | **Audio channels** | Mono through 7.1, ITU-R BS.775 downmix, conservative upmix, per-instrument output routing |
 | **Audio precision** | End-to-end 32-bit float pipeline, 64-bit DSP for IIR filters and envelope followers |
-| **Latency** | Pre-rendered variants - playback is a memory copy into the mix buffer |
+| **Latency** | Pre-rendered variants - each note's sound is only scaled and mixed as it plays |
 | **Library mgmt** | Memory-bounded with FIFO eviction, persistent disk cache for variants, hot-loading from watched directories |
 | **Live-coding** | Edit the MIDI map YAML and assignments reload on save |
 | **Program switching** | Multiple instrument directories swappable via MIDI Program Change |

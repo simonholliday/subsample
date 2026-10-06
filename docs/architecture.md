@@ -138,16 +138,18 @@ MIDI note_on, or an OSC /note/on (play_osc_note, at its bundle's time)
         (memory cache, else enqueue: the render worker loads it from the disk
          cache or renders it, and this note falls back to a previous/base variant)
     → transform_manager.get_base()     → base variant (all samples)
-    → _render()                        → on-the-fly fallback (first trigger only)
-    → _render_float(): apply gain · velocity² · anti-clip ceiling
-    → append _Voice (float32 stereo, pre-rendered, stamped with the
-        note-on's arrival time, or for an OSC note in a bundle, that time
-        less where the sound's hit comes: _hit_start)
+    → _float_audio()                   → on-the-fly fallback (first trigger only)
+    → _note_gain(): gain · velocity² · anti-clip ceiling, from the render's
+        measured level and true peak, never from its audio
+    → append _Voice (the render itself, its gain and mix matrix, stamped
+        with the note-on's arrival time, or for an OSC note in a bundle,
+        that time less where the sound's hit comes: _hit_start)
     ↓
 PyAudio callback (PortAudio high-priority thread)
     → _advance_span: the arrival times this buffer plays, one buffer back
     → sum all active voices (float32 addition), each from the frame its
-        note-on's arrival falls on, each release from its own frame
+        note-on's arrival falls on, each release from its own frame; a
+        voice gains and mixes only the frames it plays (_Voice.frames)
     → clip to [-1, 1]
     → float32_to_pcm_bytes(mixed, output_bit_depth)  → int16/24/32 bytes to hardware
 ```
@@ -157,15 +159,29 @@ followers) promotes to float64 internally. The only integer conversion is the
 final output packing. Multiple simultaneous voices are summed correctly regardless of the
 output device's bit depth.
 
+A note-on does no work that grows with its sound's length (#4654). A voice holds
+the cached render as it is, never a copy, with its gain and mix matrix, and the
+callback gains and mixes each buffer's frames as it plays them: at most one
+buffer per voice, the same arithmetic the whole render once got at note-on, a
+slice at a time. Everything the gain needs is measured on the render worker
+(`transform._measure`): the render's true peak, its loudest sample in any
+channel, for the anti-clip ceiling, and each segment's peak and level. Gaining
+and mixing a 23-second open hi-hat whole for 8 outputs took about 30 ms on the
+MIDI thread, so every note that arrived behind it was late. A quantised sound
+held in `mode: loop` is laid out over its bars the same way, a buffer at a time
+(`_ring_layout`). Only the last-resort fallback still converts a whole sample on
+the note-on, for a fresh capture whose base variant is not ready.
+
 ## Performance
 
 ### Pre-rendered playback
 
 When a sample enters the library, a background worker produces a pre-rendered
 copy at the output device's sample rate and format. Tonal samples also receive
-a set of pitch-shifted variants. When a MIDI note arrives, playback copies the
-prepared audio into the mix buffer rather than calculating it on the spot. If a
-variant is not ready yet, the player falls back in this order:
+a set of pitch-shifted variants. When a MIDI note arrives, its voice plays the
+prepared audio as it is, gaining and mixing each buffer's frames as they play,
+rather than calculating anything on the spot. If a variant is not ready yet, the
+player falls back in this order:
 
 1. **Process variant** - pre-computed with the full declared chain (pitch, filter, saturate, reverse, time-stretch, etc.)
 2. **Base variant** - pre-normalised, no DSP (all samples)
@@ -180,8 +196,9 @@ PortAudio's ALSA backend keeps several periods of `buffer_frames` in flight, so
 the delay a note meets is a few buffers, not one.
 
 Every message waits for the one before it, so the handler does nothing that can
-block (#4488). A note-on looks variants up in memory only: one that is still on
-disk is loaded by a render worker, and that note plays its fallback. A Program
+block (#4488), and nothing that grows with a sound's length (#4654). A note-on
+looks variants up in memory only: one that is still on disk is loaded by a
+render worker, and that note plays its fallback. A Program
 Change switches the program and installs its rules at once, under a lock held
 only for those swaps. Ranking the new program's samples and preparing its
 variants happen on the re-evaluation worker that CC changes use, and until it
@@ -242,7 +259,7 @@ hit lands on the note's time (#604, `_hit_start`). The sequencer cannot do this
 itself, since Subsample picks the sample. Where the hit comes is measured on the
 audio a voice will play, after the process chain: each render records
 `TransformResult.hit_time`, and `segment_hit_times` for a quantised one's
-segments, measured on the render worker (`transform._hit_times`) as it renders or
+segments, measured on the render worker (`transform._measure`) as it renders or
 reads a render from disk, so a note-on only reads it. The raw-sample fallback
 reads the sample's own analysis. `analysis.hit_time` turns an impact into a hit
 only after a lead-in at least 10 dB quieter (`HIT_LEAD_IN_DB`): the impact marks

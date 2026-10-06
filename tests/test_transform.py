@@ -3491,6 +3491,79 @@ class TestReverseRemapsSegmentBounds:
 		assert getattr(subsample.transform._segment_bounds_local, "bounds", None) is None
 
 
+class TestARenderKnowsHowLoudItPeaks:
+
+	"""A render carries its true peak, and each segment's peak and level, measured as it is made or read back (#4654).
+
+	A note-on reads them, so it never scans a sound that may last a minute on
+	the MIDI thread.
+	"""
+
+	_BOUNDS = ((0, 3000), (3000, 6000))
+
+	def _audio (self) -> numpy.ndarray:
+
+		"""Stereo noise with one frame where the channels peak in opposition, which the mono mix cancels."""
+
+		audio = (numpy.random.default_rng(7).standard_normal((6000, 2)) * 0.1).astype(numpy.float32)
+		audio[4500] = (0.8, -0.8)
+
+		return audio
+
+	def test_it_measures_its_true_peak_and_each_segments (self) -> None:
+
+		audio    = self._audio()
+		measures = subsample.transform._measure(audio, 44100, self._BOUNDS)
+
+		assert measures.true_peak == pytest.approx(0.8)
+		assert measures.segment_true_peaks is not None
+		assert measures.segment_true_peaks[0] == float(numpy.max(numpy.abs(audio[:3000])))
+		assert measures.segment_true_peaks[1] == pytest.approx(0.8)
+
+	def test_a_segments_level_is_the_one_a_note_on_measured (self) -> None:
+
+		"""Exactly what the player measured on the segment at note-on before, so a segment plays as loud."""
+
+		audio    = self._audio()
+		measures = subsample.transform._measure(audio, 44100, self._BOUNDS)
+
+		assert measures.segment_levels == tuple(
+			subsample.analysis.compute_level(numpy.asarray(numpy.mean(audio[start:end], axis=1, dtype=numpy.float32)))
+			for start, end in self._BOUNDS
+		)
+
+	def test_a_render_without_segments_has_no_segment_measures (self) -> None:
+
+		measures = subsample.transform._measure(self._audio(), 44100, None)
+
+		assert (measures.segment_true_peaks, measures.segment_levels) == (None, None)
+
+	def test_a_render_made_and_one_read_back_carry_them (self, tmp_path: pathlib.Path) -> None:
+
+		pcm    = (numpy.random.default_rng(3).standard_normal((4410, 2)) * 3000).astype(numpy.int16)
+		record = _make_record(audio=pcm)
+		spec   = subsample.transform.TransformSpec(steps=())
+		made: list[subsample.transform.TransformResult] = []
+
+		processor = subsample.transform.TransformProcessor(sample_rate=44100)
+		processor._on_complete = made.append
+		processor._disk_cache  = None
+		processor._execute(record, spec, key=subsample.transform.TransformKey(record.sample_id, spec))
+
+		(render,) = made
+
+		assert render.true_peak is not None
+		assert render.true_peak > 0.0
+		assert render.true_peak == subsample.analysis.true_peak(render.audio)
+
+		cache = subsample.transform.VariantDiskCache(directory=tmp_path, max_bytes=100_000_000, sample_rate=44100)
+		cache.put("md5", spec, render)
+		loaded = cache.get("md5", spec, render.key)
+
+		assert loaded is not None
+		assert loaded.true_peak == render.true_peak
+
+
 class TestARenderLeavesItsThreadAsItFoundIt:
 
 	"""A render resets the chain's per-thread flags as it ends, as well as as it starts (#4643).

@@ -1648,41 +1648,39 @@ def _bar_loop_frames (
 	return max(1, round(bars * bar_frames))
 
 
-def _ring_on (
-	audio:  numpy.ndarray,
+def _ring_layout (
+	frames: int,
 	period: int,
-) -> tuple[numpy.ndarray, int, int]:
+) -> tuple[int, int, int, int]:
 
 	"""Lay a sound out to loop every ``period`` frames, with what rings past the end ringing on.
 
 	What sounds past the loop's end carries on under the next pass, as when a
 	pattern is played again, so each pass overlaps the ones before it.  The
-	buffer holds the first pass as it is, then passes with the earlier ones'
+	layout holds the first pass as it is, then passes with the earlier ones'
 	tails added, until every tail that reaches that far has joined in, then
 	what the last of them leaves ringing.  From that last pass on the sound
 	repeats exactly, so it loops with no crossfade and no click, and a voice
 	released from it plays on into the tails (#3877).
 
+	Nothing is built here: a voice reads the layout a buffer at a time
+	(_Voice.frames), so a note-on lays out no audio (#4654).
+
 	Args:
-		audio:  The rendered sound, shape (n_frames, channels).
+		frames: The rendered sound's length in frames.
 		period: The loop's length in frames.  Positive.
 
 	Returns:
-		(buffer, loop_start, loop_end), the loop counted in the buffer's frames.
+		(length, loop_start, loop_end, passes): the layout's length, its loop
+		in the layout's frames, and how many passes it adds up.  A sound
+		shorter than its bars is padded with silence to the bar line.
 	"""
 
-	frames     = audio.shape[0]
 	passes     = max(1, math.ceil(frames / period))
 	loop_start = (passes - 1) * period
 	loop_end   = passes * period
 
-	# A sound shorter than its bars is padded with silence to the bar line.
-	buffer = numpy.zeros((max(loop_start + frames, loop_end), audio.shape[1]), dtype=audio.dtype)
-
-	for index in range(passes):
-		buffer[index * period : index * period + frames] += audio
-
-	return buffer, loop_start, loop_end
+	return max(loop_start + frames, loop_end), loop_start, loop_end, passes
 
 
 def _parse_silenced_by (
@@ -4040,15 +4038,25 @@ class _Voice:
 
 	"""A single triggered sample being played back by the mix callback.
 
-	audio:     Pre-rendered float32 array, shape (n_frames, output_channels).
-	           Gain has already been applied, so a voice can exceed [-1.0, 1.0];
-	           the callback clips only the summed mix.  The callback reads
-	           from this array; it is never modified after creation.
+	audio:     The render this voice plays, float32, shape (n_frames,
+	           channels): the cached render itself, or a slice of it, never a
+	           copy and never modified.  The callback reads it through
+	           frames(), which applies ``gain`` and ``mix`` to just the frames
+	           each buffer plays, so a note-on does no work that grows with the
+	           sound's length (#4654).  A voice can exceed [-1.0, 1.0]; the
+	           callback clips only the summed mix.
 	note:      MIDI note number that triggered this voice — used to match
 	           note_off events in _handle_message().
 	channel:   MIDI channel (mido 0-indexed) that triggered this voice.
+	gain:      The note's linear gain (MidiPlayer._note_gain).
+	mix:       Mix matrix, shape (output_channels, channels), mapping the
+	           render's channels to the output's (MidiPlayer._get_mix_matrix).
+	           None plays ``audio`` as it is, already in the output's channels.
+	ring_period: When positive, the voice plays ``audio`` laid out to loop
+	           every ring_period frames, each pass's tail ringing on under the
+	           next (_ring_layout, #3877).  0 plays it once.
 	position:  Current read cursor in frames. Advances each callback call.
-	           Voice is removed when position >= len(audio).
+	           Voice is removed when position >= length.
 	releasing: Set to True when a note_off arrives for this note+channel
 	           (only for non-one-shot voices).  The callback then fades the voice
 	           out over release_frames with release_curve (the assignment's
@@ -4062,6 +4070,9 @@ class _Voice:
 	audio:     numpy.ndarray
 	note:      int
 	channel:   int
+	gain:      float = 1.0
+	mix:       typing.Optional[numpy.ndarray] = None
+	ring_period: int = 0
 	position:  int  = 0
 	releasing: bool = False
 	one_shot:  bool = False
@@ -4107,8 +4118,9 @@ class _Voice:
 
 	loop_xfade_in:  typing.Optional[numpy.ndarray] = None
 	"""Pre-computed lead-in segment (the ``loop_crossfade`` frames just before
-	loop_start) that the wrap fades in against, so the callback does no slicing
-	arithmetic beyond an index.  None when not looping or crossfade is 0."""
+	loop_start, gained and mixed as frames() plays them) that the wrap fades in
+	against, so the callback does no slicing arithmetic beyond an index.  None
+	when not looping or crossfade is 0."""
 
 	starts_at:      typing.Optional[float] = None
 	"""When the note-on that started this voice arrived, on the player's clock,
@@ -4124,6 +4136,61 @@ class _Voice:
 	delayed: a looping voice released mid-buffer plays straight on from that
 	buffer's start, so it may reach its tail up to one buffer early, under the
 	fade that follows."""
+
+	@property
+	def length (self) -> int:
+
+		"""How many frames this voice plays: its render's, or its laid-out loop's when it has a ring_period."""
+
+		if self.ring_period > 0:
+			return _ring_layout(len(self.audio), self.ring_period)[0]
+
+		return len(self.audio)
+
+	def frames (self, start: int, stop: int) -> numpy.ndarray:
+
+		"""What this voice plays from frame ``start`` to ``stop``, gained and mixed to the output's channels.
+
+		Only these frames are worked on, so a buffer's cost is the same however
+		long the sound is (#4654).  The arithmetic is the whole-render gain and
+		mix it replaced, applied a slice at a time.  ``stop`` is at most
+		``length``.  The result may be a view of ``audio`` when there is nothing
+		to apply: add it into the mix, never write to it.
+		"""
+
+		chunk = self._laid_out(start, stop) if self.ring_period > 0 else self.audio[start:stop]
+
+		if self.mix is not None:
+			mixed: numpy.ndarray = ((chunk * self.gain) @ self.mix.T).astype(numpy.float32, copy=False)
+			return mixed
+
+		if self.gain != 1.0:
+			return chunk * self.gain
+
+		return chunk
+
+	def _laid_out (self, start: int, stop: int) -> numpy.ndarray:
+
+		"""Frames ``start`` to ``stop`` of ``audio`` laid out to loop every ring_period frames (_ring_layout).
+
+		Pass N starts N periods in, and the passes are added in order onto
+		silence, so each frame sums the same samples in the same order as the
+		whole layout would, built at once.
+		"""
+
+		frames = len(self.audio)
+		passes = _ring_layout(frames, self.ring_period)[3]
+		out    = numpy.zeros((stop - start, self.audio.shape[1]), dtype=self.audio.dtype)
+
+		for index in range(passes):
+			offset = index * self.ring_period
+			lo     = max(start, offset)
+			hi     = min(stop, offset + frames)
+
+			if lo < hi:
+				out[lo - start : hi - start] += self.audio[lo - offset : hi - offset]
+
+		return out
 
 
 def _release (voice: _Voice, at: typing.Optional[float]) -> None:
@@ -4149,6 +4216,13 @@ def _hit_of (result: subsample.transform.TransformResult, segment: typing.Option
 		return result.segment_hit_times[segment]
 
 	return result.hit_time
+
+
+def _true_peak_of (measured: typing.Optional[float], audio: numpy.ndarray) -> float:
+
+	"""A render's true peak as the render worker measured it, or measured now from ``audio`` on a render built by hand without it (#4654)."""
+
+	return measured if measured is not None else subsample.analysis.true_peak(audio)
 
 
 # How strongly each audio callback draws the span of arrival times it plays
@@ -4589,7 +4663,7 @@ class MidiPlayer:
 		# Per-voice RMS target derived from max_polyphony.
 		# 1.0 / max_polyphony gives each voice an equal share of headroom:
 		# 8 voices → 0.125 RMS per voice ≈ -18 dBFS.  The anti-clip ceiling
-		# in _render_float() (1.0 / level.peak) is a separate per-voice guard.
+		# in _note_gain() (1.0 / the true peak) is a separate per-voice guard.
 		self._target_rms       = 1.0 / max_polyphony
 		self._max_polyphony    = max_polyphony
 
@@ -4632,7 +4706,7 @@ class MidiPlayer:
 		self._last_callback_error_warn: float = 0.0
 
 		# Optional transform pipeline. When provided, _handle_message() checks
-		# for a pre-computed pitched variant before falling back to _render().
+		# for a pre-computed pitched variant before falling back to _float_audio().
 		# Pass a TransformManager instance to enable pitched playback;
 		# None keeps the existing behaviour (originals only).
 		self._transform_manager  = transform_manager
@@ -5394,8 +5468,11 @@ class MidiPlayer:
 
 					voice.starts_at = None
 
+				# A voice's frames are gained and mixed as they are read, a buffer's
+				# worth at a time (_Voice.frames, #4654).
 				out       = output[start:]
-				remaining = len(voice.audio) - voice.position
+				length    = voice.length
+				remaining = length - voice.position
 
 				if voice.releasing and voice.fade_pos == 0 and voice.releases_at is not None:
 					# The fade begins one buffer after the release arrived, too,
@@ -5404,7 +5481,7 @@ class MidiPlayer:
 					lead = min(turn, len(out), remaining)
 
 					if lead > 0:
-						out[:lead] += voice.audio[voice.position : voice.position + lead]
+						out[:lead] += voice.frames(voice.position, voice.position + lead)
 						voice.position += lead
 						remaining      -= lead
 
@@ -5455,13 +5532,13 @@ class MidiPlayer:
 							# 441 frames, far below audibility.  Not an off-by-one.
 							ramp = ((1.0 + numpy.cos(numpy.pi * idx / fade_total)) / 2.0).astype(numpy.float32)
 
-						out[:n] += voice.audio[voice.position : voice.position + n] * ramp[:, numpy.newaxis]
+						out[:n] += voice.frames(voice.position, voice.position + n) * ramp[:, numpy.newaxis]
 						voice.position += n
 						voice.fade_pos += n
 
 					# Keep fading on subsequent callbacks until the ramp completes
 					# (or the audio runs out); otherwise the voice is retired.
-					if voice.fade_pos < fade_total and voice.position < len(voice.audio):
+					if voice.fade_pos < fade_total and voice.position < length:
 						active.append(voice)
 
 				elif voice.looping:
@@ -5486,7 +5563,7 @@ class MidiPlayer:
 						# position back to loop_start.  Cleared in review; noted so
 						# it is not traced again (#1481).
 						n     = min(len(out) - filled, voice.loop_end - voice.position)
-						chunk = voice.audio[voice.position : voice.position + n]
+						chunk = voice.frames(voice.position, voice.position + n)
 
 						if xf > 0 and voice.loop_xfade_in is not None and voice.position + n > xf_start:
 							# Split the chunk at the crossfade window: copy the part
@@ -5517,10 +5594,10 @@ class MidiPlayer:
 
 				else:
 					n = min(len(out), remaining)
-					out[:n] += voice.audio[voice.position : voice.position + n]
+					out[:n] += voice.frames(voice.position, voice.position + n)
 					voice.position += n
 
-					if voice.position < len(voice.audio):
+					if voice.position < length:
 						active.append(voice)
 					# Voice whose position has reached the end is simply not kept.
 
@@ -5945,7 +6022,7 @@ class MidiPlayer:
 		``velocity_rescale_to``; otherwise it is the linear remap from the
 		trigger range to the rescale range, rounded to int and clamped to
 		[0, 127].  The handler uses this value for gain calculation in
-		_render_float; the raw msg.velocity stays in DEBUG logs so both are
+		_note_gain; the raw msg.velocity stays in DEBUG logs so both are
 		visible when they differ.
 		"""
 
@@ -6364,27 +6441,27 @@ class MidiPlayer:
 
 	def _looped_on_its_bars (
 		self,
-		rendered: numpy.ndarray,
-		result:   "subsample.transform.TransformResult",
-	) -> tuple[numpy.ndarray, typing.Optional[tuple[int, int, int]]]:
+		audio:  numpy.ndarray,
+		result: "subsample.transform.TransformResult",
+	) -> tuple[int, typing.Optional[tuple[int, int, int]]]:
 
 		"""Lay a quantised sound out to loop over its whole bars (#3877).
 
-		Returns the voice's buffer and its loop as _append_voice takes it, or the
-		render as it is and no loop, so the note plays gated, when no quantiser
-		made the render.  The passes a held note overlaps may peak above the
-		render's own anti-clip ceiling, as a pattern played again does, and the
-		mix bus's limiter takes that.
+		``audio`` is what the voice plays of ``result``.  Returns the voice's
+		ring_period and its loop as _append_voice takes them, or 0 and no loop,
+		so the note plays gated, when no quantiser made the render.  The passes
+		a held note overlaps may peak above the render's own anti-clip ceiling,
+		as a pattern played again does, and the mix bus's limiter takes that.
 		"""
 
 		period = _bar_loop_frames(result, self._output_sample_rate)
 
 		if period is None:
-			return rendered, None
+			return 0, None
 
-		buffer, start, end = _ring_on(rendered, period)
+		_length, start, end, _passes = _ring_layout(len(audio), period)
 
-		return buffer, (start, end, 0)
+		return period, (start, end, 0)
 
 	def _append_voice (
 		self,
@@ -6397,26 +6474,35 @@ class MidiPlayer:
 		release_to_end: bool,
 		loop_cfg:       typing.Optional[tuple[int, int, int]],
 		starts_at:      typing.Optional[float] = None,
+		gain:           float = 1.0,
+		mix:            typing.Optional[numpy.ndarray] = None,
+		ring_period:    int = 0,
 	) -> None:
 
 		"""Build a _Voice for a trigger and enqueue it (under _voices_lock).
 
 		Central voice-construction point so the loop/release fields are threaded
-		once, not re-typed at every trigger branch.  loop_cfg is (start, end,
-		crossfade) in this buffer's own frames or None; bounds are clamped to the
-		rendered length and the crossfade to the available lead-in, and if that
-		leaves nothing loopable the voice falls back to a plain one.
+		once, not re-typed at every trigger branch.  ``audio`` is the render as
+		it is, which the voice plays with ``gain`` and ``mix`` and, for a sound
+		looping over its bars, laid out every ``ring_period`` frames (see
+		_Voice).  loop_cfg is (start, end, crossfade) in the voice's own frames
+		or None; bounds are clamped to the voice's length and the crossfade to
+		the available lead-in, and if that leaves nothing loopable the voice
+		falls back to a plain one.  Only the crossfade's lead-in is gained and
+		mixed here, a few milliseconds of it.
 		"""
 
-		looping        = False
-		loop_start     = 0
-		loop_end       = 0
-		loop_crossfade = 0
-		loop_xfade_in: typing.Optional[numpy.ndarray] = None
+		voice = _Voice(
+			audio=audio, note=note, channel=channel,
+			gain=gain, mix=mix, ring_period=ring_period,
+			one_shot=one_shot, release_frames=release_frames,
+			release_curve=release_curve, release_to_end=release_to_end,
+			starts_at=starts_at,
+		)
 
 		if loop_cfg is not None:
 			ls, le, xf = loop_cfg
-			n  = len(audio)
+			n  = voice.length
 			le = min(le, n)
 			ls = max(0, min(ls, le - 1))
 			xf = max(0, min(xf, ls, le - ls))
@@ -6429,12 +6515,12 @@ class MidiPlayer:
 			min_loop_frames = max(1, round(_MIN_LOOP_SECONDS * self._output_sample_rate))
 
 			if le - ls >= min_loop_frames:
-				looping        = True
-				loop_start     = ls
-				loop_end       = le
-				loop_crossfade = xf
+				voice.looping        = True
+				voice.loop_start     = ls
+				voice.loop_end       = le
+				voice.loop_crossfade = xf
 				if xf > 0:
-					loop_xfade_in = audio[ls - xf : ls]
+					voice.loop_xfade_in = voice.frames(ls - xf, ls)
 			elif (note, channel) not in self._loop_collapsed_warned:
 				# The picked sample rendered shorter than its resolved loop start,
 				# so clamping collapsed the loop below the minimum length.  Play
@@ -6447,15 +6533,6 @@ class MidiPlayer:
 					"its loop start; playing gated instead.",
 					note, channel + 1,
 				)
-
-		voice = _Voice(
-			audio=audio, note=note, channel=channel,
-			one_shot=one_shot, release_frames=release_frames,
-			release_curve=release_curve, release_to_end=release_to_end,
-			looping=looping, loop_start=loop_start, loop_end=loop_end,
-			loop_crossfade=loop_crossfade, loop_xfade_in=loop_xfade_in,
-			starts_at=starts_at,
-		)
 
 		with self._voices_lock:
 			self._voices.append(voice)
@@ -6650,19 +6727,19 @@ class MidiPlayer:
 					variant = eff_transform.get_variant(sample_id, spec, from_disk=False)
 
 					if variant is not None:
-						seg_audio, seg_level, segment = self._select_segment(
-							variant.audio, variant.level, variant.segment_bounds,
-							assignment.segment_mode, msg.channel, msg.note,
+						seg_audio, seg_level, seg_peak, segment = self._select_segment(
+							variant, assignment.segment_mode, msg.channel, msg.note,
 							id(assignment),
 						)
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
-						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
+						gain    = self._note_gain(seg_level, seg_peak, effective_velocity, mix_mat, assignment.gain_db)
+						ring    = 0
 
 						if bar_loop:
-							rendered, loop_cfg = self._looped_on_its_bars(rendered, variant)
+							ring, loop_cfg = self._looped_on_its_bars(seg_audio, variant)
 
 						starts_at = self._hit_start(at, timed, _hit_of(variant, segment), assignment)
-						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at)
+						self._append_voice(seg_audio, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at, gain, mix_mat, ring)
 						with self._state_lock:
 							self._last_played[state_key] = variant
 						_log.debug(
@@ -6680,19 +6757,19 @@ class MidiPlayer:
 						prev = self._last_played.get(state_key)
 
 					if prev is not None and prev.key.sample_id == sample_id:
-						seg_audio, seg_level, segment = self._select_segment(
-							prev.audio, prev.level, prev.segment_bounds,
-							assignment.segment_mode, msg.channel, msg.note,
+						seg_audio, seg_level, seg_peak, segment = self._select_segment(
+							prev, assignment.segment_mode, msg.channel, msg.note,
 							id(assignment),
 						)
 						mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
-						rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
+						gain    = self._note_gain(seg_level, seg_peak, effective_velocity, mix_mat, assignment.gain_db)
+						ring    = 0
 
 						if bar_loop:
-							rendered, loop_cfg = self._looped_on_its_bars(rendered, prev)
+							ring, loop_cfg = self._looped_on_its_bars(seg_audio, prev)
 
 						starts_at = self._hit_start(at, timed, _hit_of(prev, segment), assignment)
-						self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at)
+						self._append_voice(seg_audio, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at, gain, mix_mat, ring)
 						_log.debug(
 							"note %d (vel %d → %d) → %r → %r (previous variant)  (%.2fs)",
 							msg.note, msg.velocity, effective_velocity, assignment.name, record.name, prev.duration,
@@ -6705,50 +6782,50 @@ class MidiPlayer:
 			base = eff_transform.get_base(sample_id)
 
 			if base is not None:
-				seg_audio, seg_level, segment = self._select_segment(
-					base.audio, base.level, base.segment_bounds,
-					assignment.segment_mode, msg.channel, msg.note,
+				seg_audio, seg_level, seg_peak, segment = self._select_segment(
+					base, assignment.segment_mode, msg.channel, msg.note,
 					id(assignment),
 				)
 				mix_mat = self._get_mix_matrix(seg_audio.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
-				rendered = self._render_float(seg_audio, seg_level, effective_velocity, mix_mat, assignment.gain_db)
+				gain    = self._note_gain(seg_level, seg_peak, effective_velocity, mix_mat, assignment.gain_db)
 				starts_at = self._hit_start(at, timed, _hit_of(base, segment), assignment)
-				self._append_voice(rendered, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at)
+				self._append_voice(seg_audio, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at, gain, mix_mat)
 				_log.debug(
 					"note %d (vel %d → %d) → %r → %r (base variant)  (%.2fs)",
 					msg.note, msg.velocity, effective_velocity, assignment.name, record.name, base.duration,
 				)
 				return
 
-		# 4. Last resort: convert from int PCM on this trigger.
-		mix_mat = self._get_mix_matrix(record.audio.shape[1] if record.audio is not None else 1, pan_weights, output_routing, record.channel_format, assignment.extract)
-		original: typing.Optional[numpy.ndarray] = self._render(record, effective_velocity, mix_mat, assignment.gain_db)
+		# 4. Last resort: convert from int PCM on this trigger.  The one path
+		# whose work still grows with the sound's length (see _float_audio).
+		original = self._float_audio(record)
 
 		if original is None:
 			return
 
+		mix_mat = self._get_mix_matrix(original.shape[1], pan_weights, output_routing, record.channel_format, assignment.extract)
+		gain    = self._note_gain(record.level, subsample.analysis.true_peak(original), effective_velocity, mix_mat, assignment.gain_db)
+
 		# The sample as analysed, so its own measurement holds.
 		hit = subsample.analysis.hit_time(record.rhythm.impact_time, record.rhythm.impact_pre_level_db) if timed else 0.0
 		starts_at = self._hit_start(at, timed, hit, assignment)
-		self._append_voice(original, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at)
+		self._append_voice(original, msg.note, msg.channel, one_shot, release_frames, release_curve, release_to_end, loop_cfg, starts_at, gain, mix_mat)
 
 		_log.debug(
 			"note %d (vel %d → %d) → %r → %r  (%.2fs)",
 			msg.note, msg.velocity, effective_velocity, assignment.name, record.name, record.duration,
 		)
 
-	def _render (
+	def _float_audio (
 		self,
 		record: subsample.library.SampleRecord,
-		velocity: float,
-		mix_matrix: numpy.ndarray,
-		gain_db: float = 0.0,
 	) -> typing.Optional[numpy.ndarray]:
 
-		"""Convert a SampleRecord to a gain-adjusted, channel-mapped output array.
+		"""Convert a SampleRecord's int PCM to float32 at the output rate, every channel kept.
 
-		Converts int PCM → float32 preserving all channels → applies gain and
-		channel mapping via mix_matrix → returns output-channel-count float32.
+		The note-on's last resort, for a fresh capture whose base variant is not
+		ready yet, so the conversion runs on the MIDI thread; the voice applies
+		the gain and channel mapping as it plays, as for any other sound.
 		Returns None if the record has no audio.
 		"""
 
@@ -6778,7 +6855,7 @@ class MidiPlayer:
 				res_type="soxr_hq",
 			).T.astype(numpy.float32)
 
-		return self._render_float(float_audio, record.level, velocity, mix_matrix, gain_db)
+		return float_audio
 
 	def _enqueue_quantize_variants (
 		self,
@@ -8016,22 +8093,23 @@ class MidiPlayer:
 
 	def _select_segment (
 		self,
-		audio: numpy.ndarray,
-		level: subsample.analysis.LevelResult,
-		segment_bounds: typing.Optional[tuple[tuple[int, int], ...]],
+		render: subsample.transform.TransformResult,
 		segment_mode: typing.Union[str, int],
 		channel: int,
 		note: int,
 		assignment_id: int,
-	) -> tuple[numpy.ndarray, subsample.analysis.LevelResult, typing.Optional[int]]:
+	) -> tuple[numpy.ndarray, subsample.analysis.LevelResult, float, typing.Optional[int]]:
 
-		"""Select a segment from quantized audio, or return the full audio.
+		"""Select a segment from a quantized render, or return the whole render.
 
-		When segment_mode is active and bounds are available, slices the audio
-		to a single segment and recomputes the level.  Otherwise returns the
-		original audio and level unchanged.  The third value is the index of
-		the segment chosen, or None for the full audio, so the caller can read
-		that segment's own hit time (_hit_of).
+		Returns (audio, level, true peak, index).  When segment_mode is active
+		and bounds are available, the audio is a slice of one segment, with
+		that segment's level and true peak.  Otherwise it is the render's audio,
+		level and true peak.  All three were measured on the render worker
+		(transform._measure), so nothing here grows with the sound's length
+		(#4654); a render built by hand without them is measured here instead.
+		The index is the segment chosen, or None for the whole render, so the
+		caller can read that segment's own hit time (_hit_of).
 
 		``assignment_id`` is ``id()`` of the layer's Assignment; it extends the
 		round_robin counter key so each layer on the same (channel, note) —
@@ -8045,8 +8123,11 @@ class MidiPlayer:
 		noted so it is not traced a third time (#1481).
 		"""
 
+		audio          = render.audio
+		segment_bounds = render.segment_bounds
+
 		if not segment_mode or segment_bounds is None or not segment_bounds:
-			return audio, level, None
+			return audio, render.level, _true_peak_of(render.true_peak, audio), None
 
 		if isinstance(segment_mode, int):
 			idx = max(0, min(segment_mode - 1, len(segment_bounds) - 1))
@@ -8062,17 +8143,26 @@ class MidiPlayer:
 		elif segment_mode == "random":
 			idx = random.randint(0, len(segment_bounds) - 1)
 		else:
-			return audio, level, None
+			return audio, render.level, _true_peak_of(render.true_peak, audio), None
 
 		start, end = segment_bounds[idx]
 		segment_audio = audio[start:end]
-		mono = numpy.asarray(
-			numpy.mean(segment_audio, axis=1, dtype=numpy.float32)
-			if segment_audio.shape[1] > 1 else segment_audio[:, 0]
-		)
-		seg_level = subsample.analysis.compute_level(mono)
 
-		return segment_audio, seg_level, idx
+		if render.segment_levels is not None:
+			seg_level = render.segment_levels[idx]
+		else:
+			mono = numpy.asarray(
+				numpy.mean(segment_audio, axis=1, dtype=numpy.float32)
+				if segment_audio.shape[1] > 1 else segment_audio[:, 0]
+			)
+			seg_level = subsample.analysis.compute_level(mono)
+
+		seg_peak = _true_peak_of(
+			render.segment_true_peaks[idx] if render.segment_true_peaks is not None else None,
+			segment_audio,
+		)
+
+		return segment_audio, seg_level, seg_peak, idx
 
 	def _get_mix_matrix (
 		self,
@@ -8200,25 +8290,28 @@ class MidiPlayer:
 			self._mix_matrix_cache[key] = mat
 			return mat
 
-	def _render_float (
+	def _note_gain (
 		self,
-		audio: numpy.ndarray,
 		level: subsample.analysis.LevelResult,
+		peak: float,
 		velocity: float,
 		mix_matrix: numpy.ndarray,
 		gain_db: float = 0.0,
-	) -> numpy.ndarray:
+	) -> float:
 
-		"""Apply gain normalisation and channel mapping via mixing matrix.
+		"""The linear gain a voice plays its sound at: normalised, scaled by velocity, and offset by gain_db.
 
-		Maps input channels to output channels in a single matrix multiply,
-		preserving the original spatial content (stereo image, surround
-		positioning). ITU downmix or conservative upmix is baked into the
-		matrix by channel.build_mix_matrix().
+		The voice applies it, and maps the sound's channels to the output's
+		through mix_matrix, buffer by buffer as it plays (_Voice.frames), so
+		this reads only measurements and never the sound itself (#4654).  The
+		mix matrix carries the original spatial content (stereo image, surround
+		positioning); ITU downmix or conservative upmix is baked into it by
+		channel.build_mix_matrix().
 
 		Args:
-			audio:      float32, shape (n_frames, in_channels).
-			level:      LevelResult for this audio (peak + rms), used for gain calc.
+			level:      LevelResult for the sound (peak + rms), used for gain calc.
+			peak:       The sound's true peak, its loudest sample in any channel
+			            (analysis.true_peak), for the anti-clip ceiling.
 			velocity:   The note's velocity (0-127) after the assignment's
 			            `velocity: rescale`, when it has one, so not always the
 			            raw value of the triggering note_on message, and
@@ -8228,7 +8321,7 @@ class MidiPlayer:
 			gain_db:    Per-assignment level offset in dB (from Assignment.gain_db).
 
 		Returns:
-			float32 array, shape (n_frames, output_channels).
+			The gain, a linear factor.
 		"""
 
 		# --- Gain calculation ---
@@ -8241,12 +8334,14 @@ class MidiPlayer:
 
 		gain_linear = 10.0 ** (gain_db / 20.0) if gain_db != 0.0 else 1.0
 
-		# Anti-clip ceiling from the TRUE peak of the buffer being rendered, not
+		# Anti-clip ceiling from the TRUE peak of the sound being played, not
 		# the mono-mean level.peak: an anti-phase mic pair or a heavily widened
 		# stereo stem can peak well above its mono downmix, so level.peak would
 		# under-protect and let the voice render far past full scale into the
-		# limiter (audible distortion).
-		buffer_peak = float(numpy.max(numpy.abs(audio))) if audio.size else 0.0
+		# limiter (audible distortion).  Measured on the render worker, never
+		# here: a scan of a long sound on the MIDI thread made every note
+		# behind it late (#4654).
+		buffer_peak = peak
 		max_row_sum = float(numpy.max(numpy.sum(numpy.abs(mix_matrix), axis=1)))
 
 		# Floor the row-sum term at 1.0.  A constant-power pan's worst row sum
@@ -8277,8 +8372,4 @@ class MidiPlayer:
 			level.rms, buffer_peak, row_bound,
 		)
 
-		gained = audio * final_gain
-
-		# Channel mapping: (n_frames, in_ch) @ (in_ch, out_ch) = (n_frames, out_ch)
-		result: numpy.ndarray = (gained @ mix_matrix.T).astype(numpy.float32)
-		return result
+		return float(final_gain)

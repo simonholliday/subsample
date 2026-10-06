@@ -137,7 +137,7 @@ class TestARenderKnowsWhereItsHitComes:
 		audio  = numpy.concatenate([opens_on_its_hit, pre_struck])[:, numpy.newaxis]
 		bounds = ((0, len(opens_on_its_hit)), (len(opens_on_its_hit), len(audio)))
 
-		_whole, segments = subsample.transform._hit_times(audio, _RATE, bounds)
+		segments = subsample.transform._measure(audio, _RATE, bounds).segment_hit_times
 
 		assert segments is not None
 		assert segments[0] == 0.0
@@ -145,10 +145,10 @@ class TestARenderKnowsWhereItsHitComes:
 
 	def test_a_render_without_segments_has_none (self) -> None:
 
-		hit, segments = subsample.transform._hit_times(_struck(0.05)[:, numpy.newaxis], _RATE, None)
+		measures = subsample.transform._measure(_struck(0.05)[:, numpy.newaxis], _RATE, None)
 
-		assert hit == pytest.approx(0.020, abs=0.001)
-		assert segments is None
+		assert measures.hit_time == pytest.approx(0.020, abs=0.001)
+		assert measures.segment_hit_times is None
 
 	def test_a_render_measures_the_sound_it_made (self) -> None:
 
@@ -205,15 +205,6 @@ class TestARenderKnowsWhereItsHitComes:
 # The player starts a timed note's sound early
 # ---------------------------------------------------------------------------
 
-def _render_as_is (*args: typing.Any, **_kwargs: typing.Any) -> numpy.ndarray:
-
-	"""Stands in for _render_float and _render: the sound as given, so the test can find its hit."""
-
-	audio: numpy.ndarray = args[0] if isinstance(args[0], numpy.ndarray) else args[0].audio
-
-	return audio
-
-
 def _player_of (
 	clock:   timing._Clock,
 	hit:     float = _HIT / _RATE,
@@ -249,9 +240,11 @@ def _player_of (
 	player._resolve_sample_id  = lambda *_args, **_kwargs: 1  # type: ignore[method-assign]
 	player._resolve_release    = lambda *_args: (None, 0, False)  # type: ignore[method-assign]
 	player._resolve_loop       = lambda *_args: None  # type: ignore[method-assign]
-	player._get_mix_matrix     = lambda *_args: numpy.eye(1, dtype=numpy.float32)  # type: ignore[method-assign]
-	player._render_float       = _render_as_is  # type: ignore[method-assign]
-	player._render             = _render_as_is  # type: ignore[method-assign]
+	# The sound as given, at unity gain and through every channel unchanged,
+	# so the test can find its hit in what plays.
+	player._get_mix_matrix     = lambda channels, *_args: numpy.eye(channels, dtype=numpy.float32)  # type: ignore[method-assign]
+	player._note_gain          = lambda *_args: 1.0  # type: ignore[method-assign]
+	player._float_audio        = lambda record: record.audio  # type: ignore[method-assign]
 	player._note_map = {(9, 36): [(
 		subsample.query.Assignment(name="Pedal", select=(), align=align),
 		subsample.query.PickSpec(1, 1),

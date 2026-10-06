@@ -1768,6 +1768,21 @@ def compute_level (
 	)
 
 
+def true_peak (audio: numpy.ndarray) -> float:
+
+	"""The loudest sample in any channel of ``audio``, 0.0 when it is empty.
+
+	Unlike LevelResult.peak, which is measured on the mono mix, this sees a
+	channel that peaks where the others cancel it: an anti-phase mic pair or a
+	widened stereo stem.  The player sets a note's anti-clip ceiling from it.
+	"""
+
+	if audio.size == 0:
+		return 0.0
+
+	return float(numpy.max(numpy.abs(audio)))
+
+
 def format_level_result (result: LevelResult) -> str:
 
 	"""Return a single-line human-readable summary of the level analysis.

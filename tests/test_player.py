@@ -929,7 +929,7 @@ class TestStateLock:
 		level = subsample.analysis.LevelResult(peak=0.0, rms=0.0)
 
 		player._select_segment(
-			audio, level, bounds, "round_robin",
+			tests.helpers._render_of(audio, level, bounds), "round_robin",
 			channel=9, note=36, assignment_id=777,
 		)
 
@@ -1967,10 +1967,10 @@ class TestReleaseThreadingThroughTrigger:
 		player._resolve_loop.return_value    = None               # gated → not a loop voice
 		player._append_voice = lambda *a, **k: subsample.player.MidiPlayer._append_voice(player, *a, **k)
 		player._hit_start    = lambda *a, **k: subsample.player.MidiPlayer._hit_start(player, *a, **k)
-		player._select_segment.return_value = (rendered, 0.5, None)
+		player._select_segment.return_value = (rendered, 0.5, 0.5, None)
 		player._get_mix_matrix.return_value = numpy.eye(2, dtype=numpy.float32)
-		player._render_float.return_value = rendered
-		player._render.return_value       = rendered
+		player._note_gain.return_value      = 1.0
+		player._float_audio.return_value    = rendered
 
 		if which == "base":
 			base = unittest.mock.MagicMock()
@@ -2097,7 +2097,7 @@ class TestAQuantisedSoundLoopsOverItsBars:
 	def test_the_first_pass_plays_as_rendered (self) -> None:
 		audio = numpy.random.default_rng(1).standard_normal((1500, 2)).astype(numpy.float32)
 
-		buffer, start, end = subsample.player._ring_on(audio, 1000)
+		buffer, start, end = tests.helpers._laid_out(audio, 1000)
 
 		assert (start, end) == (1000, 2000)
 		assert numpy.array_equal(buffer[:1000], audio[:1000])
@@ -2105,7 +2105,7 @@ class TestAQuantisedSoundLoopsOverItsBars:
 	def test_a_sound_shorter_than_its_bars_is_padded_to_the_bar_line (self) -> None:
 		audio = numpy.ones((600, 2), dtype=numpy.float32)
 
-		buffer, start, end = subsample.player._ring_on(audio, 1000)
+		buffer, start, end = tests.helpers._laid_out(audio, 1000)
 
 		assert (start, end) == (0, 1000)
 		assert numpy.array_equal(buffer[:600], audio)
@@ -2126,7 +2126,7 @@ class TestAQuantisedSoundLoopsOverItsBars:
 		for index in range(passes):
 			expected[index * period : index * period + frames] += pattern
 
-		buffer, start, end = subsample.player._ring_on(pattern, period)
+		_length, start, end, _passes = subsample.player._ring_layout(frames, period)
 		player = subsample.player.MidiPlayer(
 			"Test Device", threading.Event(),
 			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
@@ -2134,7 +2134,7 @@ class TestAQuantisedSoundLoopsOverItsBars:
 			midi_map={}, sample_rate=44100, bit_depth=16,
 		)
 		player._voices.append(subsample.player._Voice(
-			audio=buffer, note=36, channel=9,
+			audio=pattern, note=36, channel=9, ring_period=period,
 			looping=True, loop_start=start, loop_end=end,
 		))
 
@@ -2179,7 +2179,7 @@ class TestAQuantisedSoundLoopsOverItsBars:
 
 		# Three passes as a held voice plays them: the buffer to the loop's end,
 		# then the loop again and again.
-		buffer, start, end = subsample.player._ring_on(rendered, period)
+		buffer, start, end = tests.helpers._laid_out(rendered, period)
 		held = buffer[:end]
 
 		while held.shape[0] < 3 * period:
@@ -2219,9 +2219,9 @@ class TestAQuantisedSoundLoopsOverItsBars:
 			steps=(subsample.transform.TimeStretch(target_bpm=120.0),),
 		)
 		player._effective_transform_manager.get_variant.return_value = variant
-		player._select_segment.return_value = (rendered, 0.5, None)
+		player._select_segment.return_value = (rendered, 0.5, 0.5, None)
 		player._get_mix_matrix.return_value = numpy.eye(2, dtype=numpy.float32)
-		player._render_float.return_value = rendered
+		player._note_gain.return_value      = 1.0
 
 		base = unittest.mock.MagicMock()
 		base.audio = rendered; base.level = 0.5; base.segment_bounds = None; base.duration = 1.0
@@ -2262,7 +2262,11 @@ class TestAQuantisedSoundLoopsOverItsBars:
 		assert voice.looping
 		assert (voice.loop_start, voice.loop_end) == (4 * self._BEAT, 8 * self._BEAT)
 		assert voice.loop_crossfade == 0
-		assert len(voice.audio) == 4 * self._BEAT + 110000
+		assert voice.length == 4 * self._BEAT + 110000
+
+		# The render is laid out as the voice plays it, never at the note-on (#4654).
+		assert voice.ring_period == 4 * self._BEAT
+		assert len(voice.audio) == 110000
 
 	def test_a_note_before_the_render_is_ready_plays_gated (self) -> None:
 		voice = self._trigger(None)
@@ -4288,16 +4292,18 @@ class TestPerLayerSegmentCounter:
 		audio  = numpy.zeros((200, 1), dtype=numpy.float32)
 		level  = subsample.analysis.LevelResult(peak=0.0, rms=0.0)
 
+		render = tests.helpers._render_of(audio, level, bounds)
+
 		# Layer A: two triggers advance its counter to 2.
 		for _ in range(2):
 			player._select_segment(
-				audio, level, bounds, "round_robin",
+				render, "round_robin",
 				channel=9, note=36, assignment_id=111,
 			)
 
 		# Layer B: one trigger advances its counter to 1.
 		player._select_segment(
-			audio, level, bounds, "round_robin",
+			render, "round_robin",
 			channel=9, note=36, assignment_id=222,
 		)
 
@@ -6275,9 +6281,11 @@ class TestFallbackResolution:
 			assert len(player._voices) == 1
 			voice = player._voices[0]
 
-		# Rendered to the output channel count, full length, audibly non-zero.
-		assert voice.audio.shape == (4410, 2)
-		assert float(numpy.max(numpy.abs(voice.audio))) > 0.0
+		# Played in the output's channels, full length, audibly non-zero.
+		played = voice.frames(0, voice.length)
+
+		assert played.shape == (4410, 2)
+		assert float(numpy.max(numpy.abs(played))) > 0.0
 		assert voice.note == 36
 		assert voice.channel == 9
 
@@ -6769,7 +6777,7 @@ class TestProgramPresetSwitch:
 
 
 # ---------------------------------------------------------------------------
-# MidiPlayer._render_float — gain_db
+# MidiPlayer._note_gain — gain_db
 # ---------------------------------------------------------------------------
 
 class TestProgramChangeOffTheRulesLock:
@@ -7023,7 +7031,7 @@ class TestRulesLockSerialisation:
 
 class TestRenderBitDepth:
 
-	"""_render must convert record.audio by the ARRAY's dtype, not the
+	"""_float_audio must convert record.audio by the ARRAY's dtype, not the
 	configured capture bit depth — imported files keep their native dtype,
 	so a 24/32-bit import under a 16-bit config previously rendered
 	~65536x too hot on the int-PCM fallback path."""
@@ -7047,10 +7055,7 @@ class TestRenderBitDepth:
 		record.audio = numpy.full((100, 1), 2 ** 30, dtype=numpy.int32)
 		record.level = subsample.analysis.LevelResult(peak=0.5, rms=0.3)
 
-		s = float(numpy.sqrt(0.5))
-		mat = numpy.array([[s], [s]], dtype=numpy.float32)
-
-		out = player._render(record, 127, mat)
+		out = player._float_audio(record)
 
 		assert out is not None
 		# Correct conversion lands well under full scale; the bug produced
@@ -7075,10 +7080,7 @@ class TestRenderBitDepth:
 		record.audio = numpy.full((100, 1), 2 ** 14, dtype=numpy.int16)
 		record.level = subsample.analysis.LevelResult(peak=0.5, rms=0.3)
 
-		s = float(numpy.sqrt(0.5))
-		mat = numpy.array([[s], [s]], dtype=numpy.float32)
-
-		out = player._render(record, 127, mat)
+		out = player._float_audio(record)
 
 		assert out is not None
 		# int16 divisor: 2^14/32768 = 0.5 pre-gain — NOT the near-silence
@@ -7108,21 +7110,18 @@ class TestRenderBitDepth:
 		record.audio_sample_rate = 22050
 		record.level = subsample.analysis.LevelResult(peak=0.5, rms=0.3)
 
-		s = float(numpy.sqrt(0.5))
-		mat = numpy.array([[s], [s]], dtype=numpy.float32)
-
-		out = player._render(record, 127, mat)
+		out = player._float_audio(record)
 
 		assert out is not None
 		# 22050 → 44100 roughly doubles the frame count (±resampler edge frames).
 		assert out.shape[0] == pytest.approx(200, abs=6)
 
 
-class TestRenderFloatGainDb:
+class TestNoteGainDb:
 
 	def _make_player (self) -> subsample.player.MidiPlayer:
 
-		"""Return a MidiPlayer for testing _render_float()."""
+		"""Return a MidiPlayer for testing _note_gain()."""
 
 		instrument_library = unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary)
 		similarity_matrix  = unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix)
@@ -7164,8 +7163,8 @@ class TestRenderFloatGainDb:
 		level = self._make_level()
 		mat = self._centre_pan_matrix()
 
-		result_default = player._render_float(audio, level, 100, mat)
-		result_zero    = player._render_float(audio, level, 100, mat, gain_db=0.0)
+		result_default = tests.helpers._played(player, audio, level, 100, mat)
+		result_zero    = tests.helpers._played(player, audio, level, 100, mat, gain_db=0.0)
 
 		numpy.testing.assert_array_equal(result_default, result_zero)
 
@@ -7178,8 +7177,8 @@ class TestRenderFloatGainDb:
 		level = self._make_level()
 		mat = self._centre_pan_matrix()
 
-		result_normal = player._render_float(audio, level, 100, mat, gain_db=0.0)
-		result_quiet  = player._render_float(audio, level, 100, mat, gain_db=-6.0)
+		result_normal = tests.helpers._played(player, audio, level, 100, mat, gain_db=0.0)
+		result_quiet  = tests.helpers._played(player, audio, level, 100, mat, gain_db=-6.0)
 
 		assert numpy.max(numpy.abs(result_quiet)) < numpy.max(numpy.abs(result_normal))
 
@@ -7192,8 +7191,8 @@ class TestRenderFloatGainDb:
 		level = self._make_level(peak=0.1, rms=0.05)
 		mat = self._centre_pan_matrix()
 
-		result_normal = player._render_float(audio, level, 100, mat, gain_db=0.0)
-		result_loud   = player._render_float(audio, level, 100, mat, gain_db=6.0)
+		result_normal = tests.helpers._played(player, audio, level, 100, mat, gain_db=0.0)
+		result_loud   = tests.helpers._played(player, audio, level, 100, mat, gain_db=6.0)
 
 		assert numpy.max(numpy.abs(result_loud)) > numpy.max(numpy.abs(result_normal))
 
@@ -7652,7 +7651,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, result_level, _segment = player._select_segment(audio, level, bounds, "", 0, 60, assignment_id=42)
+		result_audio, result_level, _peak, _segment = player._select_segment(tests.helpers._render_of(audio, level, bounds), "", 0, 60, assignment_id=42)
 
 		assert result_audio is audio
 		assert result_level is level
@@ -7663,7 +7662,7 @@ class TestSelectSegment:
 		audio = numpy.random.randn(1000, 1).astype(numpy.float32)
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, result_level, _segment = player._select_segment(audio, level, None, "round_robin", 0, 60, assignment_id=42)
+		result_audio, result_level, _peak, _segment = player._select_segment(tests.helpers._render_of(audio, level, None), "round_robin", 0, 60, assignment_id=42)
 
 		assert result_audio is audio
 		assert result_level is level
@@ -7674,7 +7673,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, _, _segment = player._select_segment(audio, level, bounds, 3, 0, 60, assignment_id=42)
+		result_audio, _, _peak, _segment = player._select_segment(tests.helpers._render_of(audio, level, bounds), 3, 0, 60, assignment_id=42)
 
 		assert result_audio.shape[0] == 1000
 		numpy.testing.assert_array_equal(result_audio, audio[2000:3000])
@@ -7685,7 +7684,7 @@ class TestSelectSegment:
 		audio, bounds = self._make_audio_and_bounds()
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
-		result_audio, _, _segment = player._select_segment(audio, level, bounds, 99, 0, 60, assignment_id=42)
+		result_audio, _, _peak, _segment = player._select_segment(tests.helpers._render_of(audio, level, bounds), 99, 0, 60, assignment_id=42)
 
 		numpy.testing.assert_array_equal(result_audio, audio[3000:4000])
 
@@ -7704,7 +7703,7 @@ class TestSelectSegment:
 
 		played = []
 		for _ in range(6):
-			seg, _, _segment = player._select_segment(audio, level, bounds, "round_robin", 0, 60, assignment_id=42)
+			seg, _, _peak, _segment = player._select_segment(tests.helpers._render_of(audio, level, bounds), "round_robin", 0, 60, assignment_id=42)
 			played.append(int(seg[0, 0]))
 
 		# 4 segments, 6 triggers: cycle 1,2,3,4 then wrap to 1,2.
@@ -7719,7 +7718,7 @@ class TestSelectSegment:
 		level = subsample.analysis.LevelResult(peak=0.5, rms=0.2)
 
 		for _ in range(20):
-			seg, _, _segment = player._select_segment(audio, level, bounds, "random", 0, 60, assignment_id=42)
+			seg, _, _peak, _segment = player._select_segment(tests.helpers._render_of(audio, level, bounds), "random", 0, 60, assignment_id=42)
 			assert seg.shape[0] == 1000
 
 	def test_segment_mode_parsed_from_yaml_string (self) -> None:
@@ -9050,9 +9049,9 @@ class TestRandomPanThroughTrigger:
 		player._resolve_release.return_value = (0, 0, False)
 		player._resolve_loop.return_value    = None
 		player._append_voice = lambda *a, **k: None
-		player._select_segment.return_value  = (rendered, 0.5, None)
+		player._select_segment.return_value  = (rendered, 0.5, 0.5, None)
 		player._get_mix_matrix.return_value  = numpy.eye(2, dtype=numpy.float32)
-		player._render_float.return_value    = rendered
+		player._note_gain.return_value       = 1.0
 
 		base = unittest.mock.MagicMock()
 		base.audio = rendered; base.level = 0.5; base.segment_bounds = None; base.duration = 1.0
@@ -9153,7 +9152,7 @@ class TestRandomPanLoad:
 
 class TestGainStaging:
 
-	"""Regression tests for _render_float's gain staging.
+	"""Regression tests for _note_gain's gain staging, heard as a voice plays it.
 
 	The anti-clip ceiling used to be applied to the FINAL gain, after velocity
 	and gain_db had been folded in.  Because base variants are peak-normalised,
@@ -9183,7 +9182,7 @@ class TestGainStaging:
 		level  = subsample.analysis.LevelResult(peak=0.9, rms=rms)
 		pan    = numpy.array(subsample.player._pan_position_pair(position), dtype=numpy.float32)
 		matrix = player._get_mix_matrix(1, pan, None, "pcm", None)
-		return float(numpy.max(numpy.abs(player._render_float(audio, level, velocity, matrix, gain_db))))
+		return float(numpy.max(numpy.abs(tests.helpers._played(player, audio, level, velocity, matrix, gain_db))))
 
 	def test_velocity_stays_responsive_at_the_top_of_its_range (self) -> None:
 		"""Every velocity step changes the level — none collapse onto the ceiling."""
@@ -9226,7 +9225,7 @@ class TestGainStaging:
 		for position in (-100.0, -50.0, -25.0, 0.0, 25.0, 50.0, 100.0):
 			pan    = numpy.array(subsample.player._pan_position_pair(position), dtype=numpy.float32)
 			matrix = player._get_mix_matrix(1, pan, None, "pcm", None)
-			out    = player._render_float(audio, level, 127, matrix, 0.0)
+			out    = tests.helpers._played(player, audio, level, 127, matrix, 0.0)
 			powers.append(float(numpy.sum(out.astype(numpy.float64) ** 2)))
 
 		assert max(powers) / min(powers) < 1.01, "level tracked pan position"
@@ -9252,6 +9251,150 @@ class TestGainStaging:
 
 			for position in (0.0, -100.0, 100.0):
 				assert self._rendered_peak(player, audio, position, 127) <= 1.0 + 1e-6
+
+
+class TestAVoiceGainsAndMixesAsItPlays:
+
+	"""A voice gains and mixes its sound a buffer at a time as it plays, not all of it at the note-on (#4654).
+
+	A note-on once gained and mixed the whole render on the MIDI thread, so a
+	23-second open hi-hat took about 30 ms at eight outputs, and every note
+	behind it was late.  The voice now holds the render as it is.  What it
+	plays must be what the voice made from the whole render played.
+	"""
+
+	_OUTPUTS = 8
+
+	def _sound (self, frames: int) -> numpy.ndarray:
+		return (numpy.random.default_rng(frames).standard_normal((frames, 2)) * 0.2).astype(numpy.float32)
+
+	def _voices (
+		self,
+		audio:          numpy.ndarray,
+		loop_cfg:       typing.Optional[tuple[int, int, int]] = None,
+		ring:           int = 0,
+		release_frames: typing.Optional[int] = None,
+	) -> tuple[subsample.player._Voice, subsample.player._Voice]:
+
+		"""The voice a note-on makes now, and the one it made before #4654 from the whole render, gained and mixed at once."""
+
+		player = _make_player_for_mix_matrix(output_channels=self._OUTPUTS)
+		level  = subsample.analysis.LevelResult(peak=0.5, rms=0.1)
+		mix    = player._get_mix_matrix(2, None, (2, 3), "pcm", None)    # to outputs 3 and 4
+		gain   = player._note_gain(level, subsample.analysis.true_peak(audio), 100, mix, -3.0)
+
+		player._append_voice(audio, 36, 9, False, release_frames, 0, False, loop_cfg, None, gain, mix, ring)
+
+		whole = ((audio * gain) @ mix.T).astype(numpy.float32)
+
+		if ring:
+			whole, _start, _end = tests.helpers._laid_out(whole, ring)
+
+		player._append_voice(whole, 36, 9, False, release_frames, 0, False, loop_cfg)
+
+		now, before = player._voices
+
+		return now, before
+
+	def _heard (self, voice: subsample.player._Voice, buffers: int, release_after: typing.Optional[int]) -> numpy.ndarray:
+
+		"""What the audio callback plays of ``voice``, 64 frames a buffer, released as buffer ``release_after`` begins."""
+
+		player = _make_player_for_mix_matrix(output_channels=self._OUTPUTS)
+		player._voices = [voice]
+		heard: list[bytes] = []
+
+		for index in range(buffers):
+
+			if index == release_after:
+				player._release_held(voice.note, voice.channel)
+
+			heard.append(player._audio_callback(None, 64, None, 0)[0])
+
+		return numpy.frombuffer(b"".join(heard), dtype=numpy.int16).reshape(-1, self._OUTPUTS).astype(numpy.int32)
+
+	@pytest.mark.parametrize("case", ["to-its-end", "released", "looped-with-a-crossfade", "looped-over-its-bars"])
+	def test_it_plays_what_the_whole_render_played (self, case: str) -> None:
+
+		"""Through every branch of the callback: playing out, a release fade, a loop's crossfaded wrap, and a loop laid out over its bars."""
+
+		audio = self._sound(20000)
+
+		if case == "to-its-end":
+			now, before = self._voices(audio)
+			release_after: typing.Optional[int] = None
+		elif case == "released":
+			now, before = self._voices(audio, release_frames=1000)
+			release_after = 40
+		elif case == "looped-with-a-crossfade":
+			now, before = self._voices(audio, loop_cfg=(5000, 15000, 441), release_frames=500)
+			release_after = 600
+		else:
+			_length, start, end, _passes = subsample.player._ring_layout(len(audio), 6000)
+			now, before = self._voices(audio, loop_cfg=(start, end, 0), ring=6000, release_frames=500)
+			release_after = 600
+
+		assert now.looping == before.looping
+		assert now.length == before.length
+
+		heard_now    = self._heard(now, 700, release_after)
+		heard_before = self._heard(before, 700, release_after)
+
+		assert numpy.abs(heard_before).max() > 1000
+		assert numpy.abs(heard_now - heard_before).max() <= 1
+
+	def test_a_note_on_neither_copies_nor_scans_its_sound (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		"""However long the sound, the voice holds the render itself, and its gain comes from the peak the render worker measured."""
+
+		player = _make_player_for_mix_matrix(output_channels=self._OUTPUTS)
+		audio  = self._sound(30 * 44100)
+		render = dataclasses.replace(
+			tests.helpers._render_of(audio, subsample.analysis.LevelResult(peak=0.5, rms=0.1)),
+			true_peak=0.75,
+		)
+
+		record = unittest.mock.MagicMock()
+		record.audio          = numpy.zeros((10, 2), dtype=numpy.int16)
+		record.channel_format = "pcm"
+		record.name           = "Open hat"
+
+		library = unittest.mock.MagicMock()
+		library.get.return_value = record
+		manager = unittest.mock.MagicMock(spec=subsample.transform.TransformManager)
+		manager.get_base.return_value = render
+
+		player._effective_pool    = lambda: (library, manager)  # type: ignore[method-assign]
+		player._resolve_sample_id = lambda *_args, **_kwargs: 1  # type: ignore[method-assign]
+		player._resolve_release   = lambda *_args: (None, 0, False)  # type: ignore[method-assign]
+		player._resolve_loop      = lambda *_args: None  # type: ignore[method-assign]
+
+		def _scanned (*_args: typing.Any) -> float:
+			raise AssertionError("a note-on scanned the sound for its peak")
+
+		monkeypatch.setattr(subsample.analysis, "true_peak", _scanned)
+
+		player._trigger_one(
+			mido.Message("note_on", channel=9, note=46, velocity=100),
+			subsample.query.Assignment(name="Open hat", select=()),
+			subsample.query.PickSpec(1, 1), 100,
+		)
+
+		(voice,) = player._voices
+		mix = player._get_mix_matrix(2, None, None, "pcm", None)
+
+		assert voice.audio is audio
+		assert voice.gain == player._note_gain(render.level, 0.75, 100, mix)
+
+	def test_a_voice_with_no_mix_plays_its_audio_as_it_is (self) -> None:
+
+		"""What a test, or the old whole-render voice, hands it: frames already in the output's channels."""
+
+		audio = self._sound(100)
+		voice = subsample.player._Voice(audio=audio, note=36, channel=9)
+
+		assert numpy.shares_memory(voice.frames(10, 20), audio)
+		numpy.testing.assert_array_equal(voice.frames(10, 20), audio[10:20])
 
 
 class TestExtractBlendCacheKey:
