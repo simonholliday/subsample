@@ -17,6 +17,7 @@ import unittest.mock
 
 import mido
 import numpy
+import pyaudio
 import pytest
 import rtmidi
 import yaml
@@ -29,6 +30,7 @@ import subsample.config
 import subsample.ensemble
 import subsample.library
 import subsample.loopfind
+import subsample.performance
 import subsample.player
 import subsample.query
 import subsample.similarity
@@ -2329,6 +2331,7 @@ class TestMaxPolyphony:
 		player._last_clip_warn      = 0.0
 		player._xrun_count          = 0
 		player._last_xrun_warn      = 0.0
+		player._xrun_hint.return_value = ""
 		player._buffer_frames       = 256
 		player._max_polyphony       = 8
 		player._limiter_enabled     = limiter_threshold_db < 0.0
@@ -9395,6 +9398,160 @@ class TestAVoiceGainsAndMixesAsItPlays:
 
 		assert numpy.shares_memory(voice.frames(10, 20), audio)
 		numpy.testing.assert_array_equal(voice.frames(10, 20), audio[10:20])
+
+
+class TestTheTimingThreadsAskForRealTimePriority:
+
+	"""The audio callback, the MIDI input thread and the OSC note receiver each ask for real-time priority on their first call (#4659).
+
+	Linux is stood in for, so the tests run everywhere, and each call runs on a
+	thread of its own, as the real ones do: the main thread never asks.
+	"""
+
+	_GRANTED = "Audio runs at real-time priority (70), so other programs cannot delay it."
+	_REFUSED = (
+		"Audio runs at ordinary priority, so other programs on this machine can delay it and make it "
+		"drop out.  To allow real-time priority, add the line '@audio - rtprio 95' to "
+		"/etc/security/limits.d/audio.conf, make sure you are in the audio group, and log in again."
+	)
+
+	def _asking (self, monkeypatch: pytest.MonkeyPatch, granted: bool, on_linux: bool = True) -> list[int]:
+
+		"""Stand in for Linux, granting or refusing each ask; the priorities asked for."""
+
+		asked: list[int] = []
+
+		def _promote (priority: int) -> typing.Optional[int]:
+			asked.append(priority)
+			return priority if granted else None
+
+		monkeypatch.setattr(subsample.performance, "promote_this_thread", _promote)
+		monkeypatch.setattr(subsample.performance, "REALTIME_APPLIES", on_linux)
+
+		return asked
+
+	def _on_a_thread (self, call: typing.Callable[[], typing.Any]) -> None:
+
+		thread = threading.Thread(target=call)
+		thread.start()
+		thread.join()
+
+	def _told (self, caplog: pytest.LogCaptureFixture) -> list[str]:
+		return [r.getMessage() for r in caplog.records if r.getMessage().startswith("Audio runs at")]
+
+	def test_the_audio_thread_asks_once_and_says_what_it_got (self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+
+		asked  = self._asking(monkeypatch, granted=True)
+		player = _make_player_for_mix_matrix()
+
+		def _two_buffers () -> None:
+			player._audio_callback(None, 64, None, 0)
+			player._audio_callback(None, 64, None, 0)
+
+		with caplog.at_level(logging.INFO, logger="subsample.player"):
+			self._on_a_thread(_two_buffers)
+
+		assert asked == [70]
+		assert self._told(caplog) == [self._GRANTED]
+		assert not player._audio_at_ordinary_priority
+
+	def test_refused_it_says_how_to_allow_it (self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+
+		self._asking(monkeypatch, granted=False)
+		player = _make_player_for_mix_matrix()
+
+		with caplog.at_level(logging.INFO, logger="subsample.player"):
+			self._on_a_thread(lambda: player._audio_callback(None, 64, None, 0))
+
+		assert self._told(caplog) == [self._REFUSED]
+		assert player._audio_at_ordinary_priority
+
+	def test_a_new_audio_thread_asks_again_but_it_is_said_once (self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+
+		asked  = self._asking(monkeypatch, granted=True)
+		player = _make_player_for_mix_matrix()
+
+		with caplog.at_level(logging.INFO, logger="subsample.player"):
+			self._on_a_thread(lambda: player._audio_callback(None, 64, None, 0))
+			self._on_a_thread(lambda: player._audio_callback(None, 64, None, 0))
+
+		assert asked == [70, 70]
+		assert self._told(caplog) == [self._GRANTED]
+
+	def test_the_threads_a_note_is_handled_on_ask_just_below_the_audio (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		asked  = self._asking(monkeypatch, granted=True)
+		player = _make_player_for_mix_matrix()
+
+		self._on_a_thread(lambda: player._safe_handle_message(mido.Message("note_on", channel=9, note=36, velocity=100)))
+		self._on_a_thread(lambda: player.play_osc_note(True, 9, 36, 0.8, time.time()))
+
+		assert asked == [69, 69]
+
+	def test_the_main_thread_never_asks (self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+
+		asked  = self._asking(monkeypatch, granted=True)
+		player = _make_player_for_mix_matrix()
+
+		with caplog.at_level(logging.INFO, logger="subsample.player"):
+			player._audio_callback(None, 64, None, 0)
+			player._safe_handle_message(mido.Message("note_on", channel=9, note=36, velocity=100))
+
+		assert asked == []
+		assert self._told(caplog) == []
+
+	def test_nothing_is_asked_or_said_off_linux (self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+
+		asked  = self._asking(monkeypatch, granted=False, on_linux=False)
+		player = _make_player_for_mix_matrix()
+
+		with caplog.at_level(logging.INFO, logger="subsample.player"):
+			self._on_a_thread(lambda: player._audio_callback(None, 64, None, 0))
+
+		assert asked == []
+		assert self._told(caplog) == []
+		assert not player._audio_at_ordinary_priority
+
+
+class TestTheXrunWarningNamesWhatCostsHeadroom:
+
+	"""The dropout warning adds what else costs this machine time: a CPU set to save power, audio at ordinary priority (#4659)."""
+
+	def _warned (self, caplog: pytest.LogCaptureFixture, saving: bool, ordinary: bool) -> str:
+
+		player = subsample.player.MidiPlayer(
+			"Test Device", threading.Event(),
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map={}, sample_rate=44100, bit_depth=16, buffer_frames=256,
+			cpu_saving_power=saving,
+		)
+		player._audio_at_ordinary_priority = ordinary
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			player._audio_callback_impl(None, 256, {}, pyaudio.paOutputUnderflow)
+
+		(warning,) = [r.getMessage() for r in caplog.records if "xrun" in r.getMessage()]
+
+		return warning
+
+	def test_both (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		assert self._warned(caplog, saving=True, ordinary=True) == (
+			"Audio xrun: 1 output underflow(s) - buffer_frames=256 is too low for this machine to "
+			"sustain; raise it if you hear clicks.  Also costing time on this machine: the CPU is "
+			"set to save power, and audio runs at ordinary priority."
+		)
+
+	def test_one (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		assert self._warned(caplog, saving=False, ordinary=True).endswith(
+			"raise it if you hear clicks.  Also costing time on this machine: audio runs at ordinary priority."
+		)
+
+	def test_neither (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		assert self._warned(caplog, saving=False, ordinary=False).endswith("raise it if you hear clicks.")
 
 
 class TestExtractBlendCacheKey:

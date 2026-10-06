@@ -630,7 +630,10 @@ def json_schema () -> dict[str, typing.Any]:
 								arrived on, so notes keep the timing they were played with at
 								any size.  `null` lets the operating system choose.  When the
 								device refuses the size, Subsample logs an error and uses the
-								device's own.
+								device's own.  At small sizes the audio drops out more easily
+								on a CPU set to save power, or on Linux without real-time
+								priority, which Subsample asks for and says at startup whether
+								it got.
 								""",
 								default=None,
 								nullable=True,
@@ -975,7 +978,8 @@ def json_schema () -> dict[str, typing.Any]:
 						"""
 						Directory for the disk cache of derived variants, so they
 						survive a restart.  An empty value or `null` turns the disk
-						cache off.
+						cache off.  Keep it on a disk: a folder held in memory, as
+						`/tmp` is on some systems, takes its space from memory.
 						""",
 						default="samples/variant-cache",
 						nullable=True,

@@ -323,6 +323,39 @@ limit whether the work is spread across four cores or forty, so the package
 temperature lands in much the same place either way. What you gain is a machine
 that stays usable while it works.
 
+### Start-up checks and real-time priority
+
+When the player starts, `subsample.performance` looks once at what on the
+machine can cost it its timing, and logs what to change (#4659). Nothing is read
+from the system inside the audio callback.
+
+- **Power saving.** On Linux, under the `intel_pstate` and `amd-pstate-epp`
+  drivers the governor reads `powersave` in the ordinary balanced mode, so the
+  energy-performance preference decides: `power` or `balance_power` warns. Under
+  any other driver the `powersave` governor holds the lowest clock, and warns. On
+  macOS, Low Power Mode warns, read from `pmset -g`.
+- **Memory budgets.** `library.max_memory_mb` and `transform.max_memory_mb`,
+  counted once for each program, since each has its own library and render
+  cache, warn past three quarters of the machine's memory (`MEMORY_SHARE`).
+- **The variant cache.** It warns on a file system held in memory (tmpfs or
+  ramfs: Fedora's `/tmp`, and Debian's from 13), and on a disk whose free space
+  and the cache's own files together fall short of `max_disk_mb`. A full `/tmp`
+  also breaks Rubber Band, which writes its temporary files there.
+- **Real-time priority, on Linux.** PortAudio's ALSA backend asks for real-time
+  scheduling only when the application does, and PyAudio never does, so the
+  audio callback ran at ordinary priority. Its thread now asks for `SCHED_FIFO`
+  at 70 on its first callback, and the MIDI input thread and the OSC note
+  receiver ask for 69 on their first call, since a note is timed from when its
+  handler starts. Each is capped at the user's `RLIMIT_RTPRIO`
+  (`MidiPlayer._promote_thread`, `performance.promote_this_thread`), and only the
+  calling thread changes. The main thread never asks, since the tests drive the
+  handlers from it. The audio thread logs once what it got, and when refused,
+  how to allow it. On macOS, CoreAudio and CoreMIDI already run their threads at
+  real-time priority.
+
+The xrun warning then names what costs the machine headroom: a CPU found saving
+power at startup, and audio left at ordinary priority.
+
 ### Gain staging
 
 Every voice is RMS-normalised so a quiet recording and a loud one play at

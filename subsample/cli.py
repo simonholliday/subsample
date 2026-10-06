@@ -53,6 +53,7 @@ import subsample.library
 import subsample.loopfind
 import subsample.osc
 import subsample.parallelism
+import subsample.performance
 import subsample.player
 import subsample.recorder
 import subsample.similarity
@@ -1324,6 +1325,21 @@ def _start_player (
 			print(f"Error opening MIDI device: {exc}", file=sys.stderr)
 			return
 
+	# What on this machine can cost the player its timing, said once here
+	# (#4659).  A CPU set to save power is named again if the audio drops out.
+	power_saving = subsample.performance.power_saving()
+
+	if power_saving is not None:
+		_log.warning("%s", power_saving)
+
+	programs = len(bank_manager.all_banks()) if bank_manager is not None else 1
+
+	for warning in subsample.performance.budget_warnings(
+		cfg.library.max_memory_mb, cfg.transform.max_memory_mb, programs,
+		cfg.transform.variant_cache_dir, cfg.transform.max_disk_mb,
+	):
+		_log.warning("%s", warning)
+
 	player = subsample.player.MidiPlayer(
 		device_name,
 		shutdown_event,
@@ -1347,6 +1363,7 @@ def _start_player (
 		ambisonic_config=cfg.ambisonic,
 		buffer_frames=cfg.player.audio.buffer_frames,
 		zone_templates=midi_map_result.zone_templates,
+		cpu_saving_power=power_saving is not None,
 	)
 	player_cell[0] = player
 

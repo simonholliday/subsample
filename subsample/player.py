@@ -106,6 +106,7 @@ import subsample.definitions
 import subsample.devices
 import subsample.events
 import subsample.library
+import subsample.performance
 import subsample.query
 import subsample.similarity
 import subsample.transform
@@ -4233,6 +4234,14 @@ def _true_peak_of (measured: typing.Optional[float], audio: numpy.ndarray) -> fl
 _SPAN_PULL: typing.Final[float] = 0.05
 
 
+# The real-time priorities the player's threads ask Linux for (#4659): the
+# audio callback's, and just below it the threads a note is handled on, since a
+# note is timed from when its handler starts (#600).  Each is capped at the
+# user's own limit (performance.promote_this_thread).
+_AUDIO_PRIORITY: typing.Final[int] = 70
+_NOTE_PRIORITY:  typing.Final[int] = 69
+
+
 # The ALSA sequencer, the part of the Linux kernel that carries MIDI between
 # programs.  rtmidi opens it before it can list or open a single port.
 _ALSA_SEQUENCER: typing.Final[pathlib.Path] = pathlib.Path("/dev/snd/seq")
@@ -4629,12 +4638,16 @@ class MidiPlayer:
 		ambisonic_config: typing.Optional[subsample.config.AmbisonicConfig] = None,
 		buffer_frames: typing.Optional[int] = None,
 		zone_templates: tuple[ZoneTemplate, ...] = (),
+		cpu_saving_power: bool = False,
 	) -> None:
 
 		"""Hold the player's libraries, rules and output settings; nothing opens until run().
 
 		sample_rate and bit_depth are the capture format, which the output
 		follows wherever output_sample_rate or output_bit_depth is unset.
+		cpu_saving_power is whether the machine's CPU was found set to save
+		power when the player started (performance.power_saving), which the
+		xrun warning names (#4659).
 		"""
 
 		self._device_name        = device_name
@@ -4700,6 +4713,18 @@ class MidiPlayer:
 		# tuned too low for the machine to sustain.
 		self._xrun_count:     int   = 0
 		self._last_xrun_warn: float = 0.0
+
+		# What else costs this machine headroom, which the xrun warning names
+		# (#4659): a CPU set to save power, found at startup, and audio left at
+		# ordinary priority, found by the audio thread's first callback.
+		self._cpu_saving_power           = cpu_saving_power
+		self._audio_at_ordinary_priority = False
+		self._audio_priority_told        = False
+
+		# Each thread the player's timing runs on (audio, MIDI input, OSC notes)
+		# asks for real-time priority on its first call, once: the priority it
+		# was granted is kept here, per thread (_promote_thread).
+		self._thread_priority = threading.local()
 
 		# Audio-callback failure guard: timestamp of the last ERROR so a
 		# persistent fault logs once per 5 s instead of per buffer.
@@ -5381,10 +5406,13 @@ class MidiPlayer:
 		the player would sit MIDI-alive but audio-dead with nothing in our
 		own log.  Mirror of ``_safe_handle_message`` on the MIDI side —
 		log the failure (throttled; we are on the audio thread) and return
-		one buffer of silence so the stream survives.
+		one buffer of silence so the stream survives.  The first call asks
+		for real-time priority (_promote_audio_thread).
 		"""
 
 		try:
+			self._promote_audio_thread()
+
 			return self._audio_callback_impl(in_data, frame_count, time_info, status_flags)
 		except Exception:
 			now = time.monotonic()
@@ -5400,6 +5428,75 @@ class MidiPlayer:
 
 			return (silence, pyaudio.paContinue)
 
+	def _promote_thread (self, priority: int) -> bool:
+
+		"""Ask Linux, on this thread's first call, to run it at real-time ``priority`` (#4659).
+
+		True when this call asked, so the caller can say what it got
+		(``self._thread_priority.granted``, None when refused).  Nothing is asked
+		where real-time priority is not Linux's to give, nor on the main thread,
+		which none of the player's timing runs on and a test drives the
+		handlers from.
+		"""
+
+		state = self._thread_priority
+
+		if hasattr(state, "granted"):
+			return False
+
+		state.granted = None
+
+		if not subsample.performance.REALTIME_APPLIES or threading.current_thread() is threading.main_thread():
+			return False
+
+		state.granted = subsample.performance.promote_this_thread(priority)
+
+		return True
+
+	def _promote_audio_thread (self) -> None:
+
+		"""Ask for real-time priority on the audio thread's first callback, and say once what it got (#4659).
+
+		Audio left at ordinary priority is also named by the xrun warning.
+		"""
+
+		if not self._promote_thread(_AUDIO_PRIORITY):
+			return
+
+		granted = self._thread_priority.granted
+		self._audio_at_ordinary_priority = granted is None
+
+		if self._audio_priority_told:
+			return
+
+		self._audio_priority_told = True
+
+		if granted is not None:
+			_log.info("Audio runs at real-time priority (%d), so other programs cannot delay it.", granted)
+		else:
+			_log.info(
+				"Audio runs at ordinary priority, so other programs on this machine can delay it and "
+				"make it drop out.  To allow real-time priority, add the line '@audio - rtprio 95' to "
+				"/etc/security/limits.d/audio.conf, make sure you are in the audio group, and log in again."
+			)
+
+	def _xrun_hint (self) -> str:
+
+		"""What else costs this machine headroom, to follow the xrun warning, or nothing (#4659)."""
+
+		costs: list[str] = []
+
+		if self._cpu_saving_power:
+			costs.append("the CPU is set to save power")
+
+		if self._audio_at_ordinary_priority:
+			costs.append("audio runs at ordinary priority")
+
+		if not costs:
+			return ""
+
+		return "  Also costing time on this machine: " + ", and ".join(costs) + "."
+
 	def _audio_callback_impl (
 		self,
 		in_data: typing.Optional[bytes],
@@ -5410,9 +5507,11 @@ class MidiPlayer:
 
 		"""PyAudio output callback — mixes all active voices into one buffer.
 
-		Called by PortAudio on its high-priority audio thread at regular
-		intervals. Must return quickly and avoid blocking. Clipping detection
-		is logged at WARNING with per-second throttling.
+		Called by PortAudio on its audio thread at regular intervals: a
+		real-time thread on macOS, and on Linux an ordinary one until its first
+		call asks for real-time priority (#4659). Must return quickly and avoid
+		blocking. Clipping detection is logged at WARNING with per-second
+		throttling.
 
 		Sums all active _Voice arrays into a float32 mix, clips to [-1, 1],
 		converts to PCM bytes at the output bit depth, and returns the bytes.
@@ -5439,9 +5538,10 @@ class MidiPlayer:
 				self._last_xrun_warn = now
 				_log.warning(
 					"Audio xrun: %d output underflow(s) - buffer_frames=%s is too low for "
-					"this machine to sustain; raise it if you hear clicks.",
+					"this machine to sustain; raise it if you hear clicks.%s",
 					self._xrun_count,
 					self._buffer_frames if self._buffer_frames is not None else "device-default",
+					self._xrun_hint(),
 				)
 
 		output = numpy.zeros((frame_count, self._output_channels), dtype=numpy.float32)
@@ -5926,9 +6026,13 @@ class MidiPlayer:
 		The message is stamped with the player's clock first, so a note plays
 		one buffer after it arrived however long the handler takes (#600), and
 		however long it waits for an OSC note being handled (_handler_lock).
+		The first message asks for real-time priority for the MIDI thread, so
+		a busy machine does not hold a note's handling back (#4659).
 		"""
 
 		at = self._clock()
+
+		self._promote_thread(_NOTE_PRIORITY)
 
 		try:
 			with self._handler_lock:
@@ -5965,11 +6069,15 @@ class MidiPlayer:
 		A velocity layer is chosen from the velocity scaled to 0-127, as a MIDI
 		note's is; gain and a velocity pick read it in full, which is what a
 		decimal velocity is for (#603).  Any velocity above 0 is at least 1,
-		so a quiet note is never read as a note-off.
+		so a quiet note is never read as a note-off.  The first note asks for
+		real-time priority for the receiver's thread, as the MIDI thread's
+		first message does (#4659).
 		"""
 
 		ahead = when - time.time()
 		at    = self._clock() + ahead
+
+		self._promote_thread(_NOTE_PRIORITY)
 
 		if ahead > _OSC_FAR_AHEAD_SECONDS:
 			now = time.monotonic()

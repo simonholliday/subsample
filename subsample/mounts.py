@@ -6,7 +6,8 @@ of a file another machine writes.  A folder on one is listed on a timer
 instead (#3972), so this module tells a network drive from a local disk: on
 Linux from the mount table, ``/proc/self/mounts``, and on macOS from
 ``statfs``.  Anywhere else, or wherever the answer cannot be had, a folder
-counts as local and is watched as before.
+counts as local and is watched as before.  The player's start-up checks also
+ask it whether the variant cache is held in memory (subsample.performance).
 """
 
 import ctypes
@@ -51,6 +52,15 @@ def network_filesystem (path: pathlib.Path) -> typing.Optional[str]:
 		return None
 
 	return mount[1]
+
+
+def filesystem (path: pathlib.Path) -> typing.Optional[str]:
+
+	"""The type of the file system path is on, such as ext4, tmpfs or apfs, or None where it cannot be told."""
+
+	mount = _mount(path)
+
+	return mount[1] if mount is not None else None
 
 
 def _mount (path: pathlib.Path) -> typing.Optional[tuple[pathlib.Path, str]]:

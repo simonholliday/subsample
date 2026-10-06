@@ -402,6 +402,9 @@ player:
     # Must be a power of two in [32, 4096].  If the device can't honour the
     # requested size at stream open, subsample logs an ERROR and falls back
     # to the device default automatically.
+    # At small sizes the audio drops out more easily on a CPU set to save
+    # power, or on Linux without real-time priority, which Subsample asks for
+    # and says at startup whether it got.
 
 # ---------------------------------------------------------------------------
 # detection - level-based trigger for recording segments
@@ -665,6 +668,8 @@ analysis:
 #   # Variants are stored as binary files keyed by SHA-256 hash of the parent
 #   # audio, transform spec, output sample rate, and analysis version.
 #   # Empty string or null disables disk caching.
+#   # Keep it on a disk: a folder held in memory, as /tmp is on some systems,
+#   # takes its space from memory.
 #
 #   max_disk_mb: 3000.0
 #   # Maximum disk space (MB) for cached variant files.  0 = disabled.
