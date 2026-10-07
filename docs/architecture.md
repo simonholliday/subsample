@@ -16,15 +16,33 @@ PortAudio callback → raw PCM bytes → unpack_audio() → CircularBuffer
                                                                ↓
                                               trim_silence() → segment PCM
                                                                ↓
-                                              SampleProcessor worker pool
+                                              SampleProcessor: a thread per capture
                                               (auto-scaled: a share of the usable cores)
                                                                ↓
-                           to_mono_float() → analyze_all() → WAV + sidecar + SampleRecord
+                                              analysis worker process (#4667)
+                           to_mono_float() → analyze_all() → WAV + sidecar + preview
+                                                               ↓
+                                              back on the thread: SampleRecord (on_complete)
 ```
 
 The input thread is never blocked waiting for analysis. Back-to-back sounds are
-captured reliably even when analysis is slow - worker threads handle each
-recording concurrently and independently.
+captured reliably even when analysis is slow - each recording is handled
+concurrently and independently.
+
+Converting, analysing and writing a capture run on the session's analysis worker
+processes, not on the player's threads (#4667). Analysing captures on those
+threads cost the audio 85 dropouts in 30 seconds at 1024-frame buffers, by making
+it wait for Python's lock (#4666).
+
+- **The thread's part.** A thread of the `SampleProcessor`'s own takes each
+  capture in turn and works out its file's path. It tells the watchers the
+  sidecar is the player's own, hands the capture's sound over in a file, and
+  waits.
+- **The worker's part.** It runs the whole pipeline and hands back the analysis,
+  with the sound only when an ambisonic capture was converted. The thread then
+  calls `on_complete`.
+- **Where worker processes cannot start,** the whole pipeline stays on the
+  thread, as before.
 
 Details a change here has to keep:
 
@@ -327,7 +345,7 @@ the way.
 ### Non-blocking capture
 
 The audio input thread does minimal work and returns immediately. Analysis runs
-in a separate worker pool, so capture keeps reading the device while a slow
+in separate worker processes, so capture keeps reading the device while a slow
 spectral analysis finishes. This matters most for USB audio devices, which use
 isochronous transfers and are sensitive to timing jitter. The pool sizes itself
 to what is happening: while the player is live it keeps to a small share of the
@@ -345,7 +363,9 @@ allowance it sizes itself to that allowance rather than to the whole host.
 
 Free cores are not enough on their own: work on the player's own threads waits
 for Python's lock with the audio, however many cores are idle. That is why
-renders run in worker processes (see [Transform pipeline](#transform-pipeline)).
+renders and the analysis of captures run in worker processes (see
+[Transform pipeline](#transform-pipeline) and
+[Live capture pipeline](#live-capture-pipeline)).
 
 Fewer workers does not mean a cooler machine: a modern CPU draws to its power
 limit whether the work is spread across four cores or forty, so the package

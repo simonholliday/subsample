@@ -1,10 +1,15 @@
 """Sample processing pipeline for Subsample.
 
 Decouples audio capture from analysis and disk I/O by running per-sample
-work on a thread-pool executor. The recorder thread hands off completed
-recordings via enqueue() (submit() is the internal executor call); each
-worker independently runs the full pipeline:
+work in the background. The recorder thread hands off completed recordings
+via enqueue() (submit() is the internal executor call); each one runs the
+full pipeline:
   convert → analyze → write audio file (WAV or FLAC per audio_format) → save sidecar → invoke on_complete callback
+
+All but the hand-off run on the session's analysis worker processes
+(_capture_in_worker), out of the player's process, so analysing a capture
+never makes the audio or a note wait for Python's lock (#4667).  A thread of
+the processor's own hands each capture over and waits, and calls on_complete.
 
 Worker count comes from subsample.parallelism.analysis_worker_count(), which
 is the one place that decides it for every analysis pool in the app: a quarter
@@ -227,6 +232,7 @@ class SampleProcessor:
 		warn_backlog: bool = True,
 		reserve_for_player: bool = False,
 		before_sidecar_write: typing.Optional[typing.Callable[[pathlib.Path], None]] = None,
+		processes: bool = True,
 	) -> None:
 
 		"""Start the worker pool and ensure the output directory exists.
@@ -252,6 +258,11 @@ class SampleProcessor:
 			                 recognise the file as ours, so a capture written
 			                 into a watched directory — the default layout — is
 			                 integrated once rather than twice.
+			processes:       When True (default), each capture is converted,
+			                 analysed and written on the session's analysis
+			                 worker processes, and these threads only hand it
+			                 over and wait (#4667).  False keeps it all on these
+			                 threads, as the tests that patch the analysis need.
 		"""
 
 		# Before, not after: the watcher checks suppression when the event
@@ -286,6 +297,19 @@ class SampleProcessor:
 			max_workers=self._n_workers,
 			thread_name_prefix="sample-worker",
 		)
+
+		# The work itself runs on worker processes (#4667): on these threads,
+		# analysing captures made the audio and the notes wait for Python's
+		# lock, 85 dropouts in 30 s at 1024-frame buffers (#4666).  The
+		# threads above still take each capture in turn, so flush(), the
+		# backlog count and the order are as they were.  Where worker
+		# processes cannot start, the shared pool is threads, and running
+		# through it would add nothing: the work stays on these threads.
+		self._pool: typing.Optional[subsample.parallelism.BackgroundPool] = None
+
+		if processes:
+			pool = subsample.parallelism.shared_pool("analysis", self._n_workers)
+			self._pool = pool if pool.in_processes else None
 
 		# Track pending futures for flush() and queue_depth.
 		# Protected by _futures_lock since workers complete on arbitrary threads.
@@ -402,325 +426,514 @@ class SampleProcessor:
 		"""Full processing pipeline for a single recording. Runs on a worker thread.
 
 		Sequence: convert → analyze → write audio file (WAV/FLAC) → save sidecar → on_complete callback.
-		Exceptions are caught and logged so one failed recording never kills the worker.
+		All but the last run on an analysis worker process when there is one
+		(_process_in_worker, #4667), and on this thread otherwise.  Exceptions
+		are caught and logged so one failed recording never kills the worker.
 		"""
 
 		try:
-			# Use per-request overrides when provided (file-input mode); otherwise
-			# fall back to the config values set for the live capture stream.
-			effective_bit_depth = (
-				req.bit_depth if req.bit_depth is not None
-				else self._cfg.recorder.audio.bit_depth
-			)
-			effective_sample_rate = (
-				req.sample_rate if req.sample_rate is not None
-				else self._cfg.recorder.audio.sample_rate
-			)
-
-			# Ambisonic capture: convert the 4-channel PCM to canonical AmbiX
-			# B-format before storage and analysis.  Downstream the WAV file on
-			# disk is B-format (channel order W, Y, Z, X; SN3D) and analysis
-			# feeds on the W channel (index 0) so the spectral/rhythm/pitch
-			# fingerprint reflects the omnidirectional sum of the sound field
-			# rather than a directionally biased mix of the velocity channels.
-			ambisonic_format = self._cfg.recorder.audio.ambisonic_format
-			analysis_channel_index: typing.Optional[int]
-			channel_format_tag: str
-
-			if ambisonic_format is not None:
-				audio_float = req.audio.astype(numpy.float32) / (
-					32768.0 if effective_bit_depth == 16 else 2147483648.0
+			if self._pool is None:
+				captured = _process_capture(
+					req, self._cfg, self._analysis_params, self._output_dir, self._before_sidecar_write,
 				)
-				b_format_float = subsample.ambisonic.process_capture(
-					audio_float, ambisonic_format, sample_rate=effective_sample_rate,
-				)
-
-				# The format conversion can push past full scale even when the
-				# raw capture had headroom (FuMa→AmbiX scales W by √2; the
-				# A-format HF shelf adds gain), and _pcm_float_to_int hard-clips
-				# without a trace — warn here, where the cause is attributable
-				# to conversion gain rather than input gain.
-				b_peak = float(numpy.max(numpy.abs(b_format_float))) if b_format_float.size else 0.0
-
-				if b_peak > 1.0:
-					_log.warning(
-						"ambisonic conversion clipped (peak %+.1f dBFS after %s "
-						"processing) - reduce input gain to leave conversion headroom",
-						20.0 * math.log10(b_peak), ambisonic_format,
-					)
-
-				req = dataclasses.replace(
-					req, audio=_pcm_float_to_int(b_format_float, effective_bit_depth),
-				)
-				analysis_channel_index = 0
-				channel_format_tag      = "b_format_ambix"
 			else:
-				analysis_channel_index = None
-				channel_format_tag      = "pcm"
-
-			# Convert once; all analyses operate on the same mono float array.
-			# analyze_all() shares the pyin computation between spectral and pitch
-			# analysis, avoiding running it twice (~200-300 ms saving per recording).
-			mono = subsample.analysis.to_mono_float(
-				req.audio, effective_bit_depth, channel_index=analysis_channel_index,
-			)
-
-			result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
-				mono,
-				self._analysis_params,
-				self._cfg.analysis,
-			)
-
-			# Warn on clipped live recordings so the user knows to reduce gain.
-			# Skipped for file imports (filename_base set) — clipping already occurred.
-			# Threshold sits just below full scale because integer PCM cannot
-			# represent +1.0 exactly (int16 positive rail is 32767/32768 ≈
-			# 0.99997) — a `>= 1.0` test only ever fired on the negative rail.
-			if req.filename_base is None and level.peak >= 0.999:
-				_log.warning(
-					"input clipped (peak %.1f dBFS) - reduce input gain to avoid distortion",
-					20.0 * math.log10(level.peak),
-				)
-
-			# Compute preview data from the same mono float signal analyze_all()
-			# consumed, so the envelope/onset alignment is exact.  Skipped when
-			# the master previews toggle is off — saves both the STFT cost here
-			# and the PNG / JSON bytes downstream.
-			preview_data: typing.Optional[subsample.preview.PreviewData] = None
-			if self._cfg.recorder.previews:
-				preview_duration = len(mono) / effective_sample_rate
-				preview_data = subsample.preview.compute_preview_data(
-					mono, effective_sample_rate,
-					rhythm, pitch, result, level, band_energy,
-					duration=preview_duration,
-				)
-
-			# Find the seamless loop on the same mono float the analysis and
-			# preview used (frame-aligned with the audio about to be written), so a
-			# freshly captured loopable sample carries its loop immediately — a
-			# sidecar saved with loop=None would match on version + MD5 forever and
-			# never re-analyse, leaving it permanently unloopable.
-			loop = subsample.cache.compute_loop(
-				mono, effective_sample_rate, result, pitch, level,
-				len(mono) / effective_sample_rate,
-			)
-
-			write_result = self._write_audio_file(
-				req.audio, req.timestamp, rhythm, result, pitch, timbre, level, band_energy,
-				filename_base=req.filename_base,
-				sample_rate=req.sample_rate,
-				bit_depth=req.bit_depth,
-				channel_format=channel_format_tag,
-				preview_data=preview_data,
-				loop=loop,
-			)
-
-			if self._on_complete is not None and write_result is not None:
-				filepath, duration = write_result
-
-				# The handoff gets its own except so a downstream integration
-				# failure (or a callback arity mismatch) is reported distinctly
-				# — not swallowed under the analysis/write "WAV may be intact"
-				# message, which would hide a sample that never reached the
-				# library / similarity index / transform pipeline.
-				try:
-					self._on_complete(
-						filepath, result, rhythm, pitch, timbre, level, band_energy, duration, req.audio,
-						channel_format=channel_format_tag, loop=loop,
-					)
-				except Exception as exc:
-					_log.error(
-						"Sample handoff (on_complete) failed for %s: %s - the audio and "
-						"analysis were written, but the sample was NOT integrated into the "
-						"live library",
-						filepath, exc, exc_info=True,
-					)
+				captured = self._process_in_worker(req)
 
 		except Exception as exc:
 			_log.error("Failed to process recording: %s - WAV may be intact", exc, exc_info=True)
+			return
 
-	def _write_audio_file (
-		self,
-		audio: numpy.ndarray,
-		timestamp: datetime.datetime,
-		rhythm: subsample.analysis.RhythmResult,
-		result: subsample.analysis.AnalysisResult,
-		pitch: subsample.analysis.PitchResult,
-		timbre: subsample.analysis.TimbreResult,
-		level: subsample.analysis.LevelResult,
-		band_energy: subsample.analysis.BandEnergyResult,
-		filename_base: typing.Optional[str] = None,
-		sample_rate: typing.Optional[int] = None,
-		bit_depth: typing.Optional[int] = None,
-		channel_format: str = "pcm",
-		preview_data: typing.Optional[subsample.preview.PreviewData] = None,
-		loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
-	) -> typing.Optional[tuple[pathlib.Path, float]]:
+		if self._on_complete is not None and captured.written is not None:
+			filepath, duration = captured.written
 
-		"""Write a single audio segment to disk and save its analysis sidecar.
+			# The handoff gets its own except so a downstream integration
+			# failure (or a callback arity mismatch) is reported distinctly
+			# — not swallowed under the analysis/write "WAV may be intact"
+			# message, which would hide a sample that never reached the
+			# library / similarity index / transform pipeline.
+			try:
+				self._on_complete(
+					filepath, captured.spectral, captured.rhythm, captured.pitch, captured.timbre,
+					captured.level, captured.band_energy, duration, captured.audio,
+					channel_format=captured.channel_format, loop=captured.loop,
+				)
+			except Exception as exc:
+				_log.error(
+					"Sample handoff (on_complete) failed for %s: %s - the audio and "
+					"analysis were written, but the sample was NOT integrated into the "
+					"live library",
+					filepath, exc, exc_info=True,
+				)
 
-		Extension and encoder are chosen from the configured audio_format
-		(``wav`` or ``flac``) and the effective bit depth:
+	def _process_in_worker (self, req: _ProcessRequest) -> "_Captured":
 
-		- ``audio_format=wav``  → always ``.wav`` (16/24/32-bit PCM).
-		- ``audio_format=flac`` → ``.flac`` for 16/24-bit; ``.wav`` for
-		  32-bit inputs (libsndfile's stable FLAC subtypes don't cover
-		  PCM_32).  The fallback is per-file: live capture is already
-		  validated at config-load time, so this only triggers for file
-		  imports whose source is 32-bit.  An INFO log explains the
-		  fallback so the user isn't surprised by a mixed library.
+		"""Have an analysis worker process convert, analyse and write one capture, and wait for it.
 
-		If the target file already exists, it is overwritten (with INFO-
-		level logging).  On filesystem error, logs ERROR and returns None.
-
-		Returns (filepath, duration_seconds), or None on write failure.
-
-		Args:
-			audio:         PCM samples, shape (n_frames, channels).
-			               16-bit: int16. 24-bit: int32 (left-shifted by 8). 32-bit: int32.
-			timestamp:     Used to construct the filename when filename_base is None.
-			rhythm:        Rhythm analysis computed before this call.
-			result:        Spectral analysis metrics computed before this call.
-			pitch:         Pitch analysis computed before this call.
-			timbre:        Timbral fingerprint computed before this call.
-			level:         Peak and RMS amplitude of the recording.
-			band_energy:   Per-band energy fractions / decay rates — part of the
-			               58-dim fingerprint, written into the sidecar.
-			filename_base: If provided, used as the filename stem instead of the
-			               timestamp format.  A file already at that name is
-			               replaced, as when a file is cut into samples again.
-			sample_rate:   Sample rate for writing. Defaults to config value.
-			bit_depth:     Bit depth for writing. Defaults to config value.
-			channel_format: "pcm" or "b_format_ambix"; passed through to the
-			                sidecar so the player knows whether to apply the
-			                ambisonic decoder on playback.
-			preview_data:  Pre-computed preview block; when set, gates writing
-			               the .preview.png and the sidecar preview JSON.
+		This thread tells the watchers about the sidecar first, since the
+		worker cannot reach them.  That is one-shot and checked when the
+		sidecar arrives, so before the analysis is as good as just before the
+		write.  A worker's failure is raised here, with where it was raised.
 		"""
 
-		# Resolve effective format values; per-request overrides take precedence.
-		effective_sample_rate = (
-			sample_rate if sample_rate is not None
-			else self._cfg.recorder.audio.sample_rate
-		)
-		effective_bit_depth = (
-			bit_depth if bit_depth is not None
-			else self._cfg.recorder.audio.bit_depth
-		)
-		configured_format = self._cfg.recorder.audio.audio_format
+		assert self._pool is not None
 
-		# Per-file format decision.  FLAC's stable subtypes only cover
-		# 16/24-bit, so 32-bit inputs fall back to WAV — a silent truncate
-		# would lose precision and a hard reject would make mixed-source
-		# libraries unusable.
-		if configured_format == "flac" and effective_bit_depth == 32:
-			effective_format = "wav"
-			fallback_message: typing.Optional[str] = (
-				"audio_format=flac cannot hold 32-bit; wrote .wav instead "
-				"to preserve full precision"
-			)
-		else:
-			effective_format = configured_format
-			fallback_message = None
-
-		extension = ".flac" if effective_format == "flac" else ".wav"
-
-		fname_base = (
-			filename_base if filename_base is not None
-			else _format_filename(timestamp, self._cfg.recorder.filename_format)
-		)
-		filepath = self._output_dir / (fname_base + extension)
-
-		# Ensure the array is 2-D (n_frames, channels) before writing
-		if audio.ndim == 1:
-			audio = audio.reshape(-1, 1)
-
-		n_channels = audio.shape[1]
-
-		# Map our internal dtype conventions to libsndfile subtypes:
-		#  - 16-bit int16              → PCM_16
-		#  - 24-bit int32 (<< 8)       → PCM_24 (soundfile keeps the upper
-		#                                3 bytes; our LSB padding is zero)
-		#  - 32-bit int32              → PCM_32
-		_SUBTYPE_BY_BIT_DEPTH: dict[int, str] = {16: "PCM_16", 24: "PCM_24", 32: "PCM_32"}
-		subtype = _SUBTYPE_BY_BIT_DEPTH[effective_bit_depth]
-
-		# Build the complete file in memory so we can MD5 the exact bytes
-		# that hit disk, then do a single atomic write.  soundfile accepts
-		# any file-like object for the `file` argument.
-		buf = io.BytesIO()
-		write_kwargs: dict[str, typing.Any] = {
-			"samplerate": effective_sample_rate,
-			"subtype":    subtype,
-			"format":     "FLAC" if effective_format == "flac" else "WAV",
-		}
-
-		if effective_format == "flac":
-			write_kwargs["compression_level"] = _FLAC_COMPRESSION_LEVEL
-
-		soundfile.write(buf, audio, **write_kwargs)
-
-		file_bytes = buf.getvalue()
-		audio_md5  = hashlib.md5(file_bytes).hexdigest()
-
-		try:
-			if filepath.exists():
-				_log.info("Overwriting: %s", filepath.name)
-
-			_write_atomically(filepath, file_bytes)
-
-		except OSError as exc:
-			_log.error("Failed to write %s: %s", filepath.name, exc)
-			return None
-
-		if fallback_message is not None:
-			_log.info("%s: %s", filepath.name, fallback_message)
-
-		n_frames = audio.shape[0]
-		duration = n_frames / effective_sample_rate
-
-		_log.debug("Stored: %s  frames=%d", filepath.name, n_frames)
-
-		# Persist analysis alongside the audio file so future reads (e.g.
-		# reference file loading on startup) can skip re-analysis when
-		# nothing changes.  When preview data is supplied, it is embedded
-		# in the same sidecar so the PNG preview can be redrawn later
-		# without touching the audio.
 		if self._before_sidecar_write is not None:
+			bit_depth = req.bit_depth if req.bit_depth is not None else self._cfg.recorder.audio.bit_depth
+			filepath, _format, _fallback = _capture_target(
+				self._cfg, self._output_dir, req.timestamp, req.filename_base, bit_depth,
+			)
 			self._before_sidecar_write(subsample.cache.cache_path(filepath))
 
-		subsample.cache.save_cache(
-			audio_path     = filepath,
-			audio_md5      = audio_md5,
-			params         = self._analysis_params,
-			spectral       = result,
-			rhythm         = rhythm,
-			pitch          = pitch,
-			timbre         = timbre,
-			duration       = duration,
-			level          = level,
-			band_energy    = band_energy,
-			bit_depth      = effective_bit_depth,
-			channels       = n_channels,
-			captured_at    = timestamp.isoformat(),
-			channel_format = channel_format,
-			preview_data   = preview_data,
-			loop           = loop,
+		folder = subsample.parallelism.hand_off_folder()
+		source = subsample.parallelism.write_audio(req.audio, folder)
+
+		try:
+			job = _CaptureJob(
+				request=dataclasses.replace(req, audio=numpy.empty(0, dtype=req.audio.dtype)),
+				source=source, cfg=self._cfg, analysis_params=self._analysis_params,
+				output_dir=self._output_dir, hand_back=folder,
+			)
+			outcome: _CaptureOutcome = self._pool.submit(_capture_in_worker, job).result()
+
+		finally:
+			subsample.parallelism.remove_audio(source)
+
+		subsample.parallelism.log_relayed(outcome.records)
+
+		if outcome.failure is not None:
+			raise outcome.failure.rebuilt()
+
+		assert outcome.captured is not None
+
+		if outcome.converted is None:
+			return dataclasses.replace(outcome.captured, audio=req.audio)
+
+		return dataclasses.replace(outcome.captured, audio=subsample.parallelism.read_audio(outcome.converted, remove=True))
+
+
+@dataclasses.dataclass(frozen=True)
+class _Captured:
+
+	"""What processing one capture produced, for on_complete.
+
+	``written`` is (filepath, duration), or None when the audio could not be
+	written.  ``audio`` is the PCM that was written: B-format when an
+	ambisonic capture was converted.
+	"""
+
+	written:        typing.Optional[tuple[pathlib.Path, float]]
+	audio:          numpy.ndarray
+	spectral:       subsample.analysis.AnalysisResult
+	rhythm:         subsample.analysis.RhythmResult
+	pitch:          subsample.analysis.PitchResult
+	timbre:         subsample.analysis.TimbreResult
+	level:          subsample.analysis.LevelResult
+	band_energy:    subsample.analysis.BandEnergyResult
+	channel_format: str
+	loop:           typing.Optional[subsample.loopfind.LoopPoints]
+
+
+@dataclasses.dataclass(frozen=True)
+class _CaptureJob:
+
+	"""One capture, as an analysis worker process receives it (#4667).
+
+	The request travels without its PCM, which comes as a file, and with the
+	settings the processor holds, since the worker has no processor.
+	"""
+
+	request:         _ProcessRequest
+	source:          subsample.parallelism.AudioFile
+	cfg:             subsample.config.Config
+	analysis_params: subsample.analysis.AnalysisParams
+	output_dir:      pathlib.Path
+	hand_back:       pathlib.Path
+
+
+@dataclasses.dataclass(frozen=True)
+class _CaptureOutcome:
+
+	"""What an analysis worker hands back: the capture's results, or why there are none, and what it logged.
+
+	``captured`` comes with its audio empty: the player still holds the PCM it
+	sent, and PCM the worker converted to B-format comes back in ``converted``.
+	"""
+
+	captured:  typing.Optional[_Captured]                       = None
+	converted: typing.Optional[subsample.parallelism.AudioFile] = None
+	failure:   typing.Optional[subsample.parallelism.Failure]   = None
+	records:   tuple[logging.LogRecord, ...]                    = ()
+
+
+def _capture_in_worker (job: _CaptureJob) -> _CaptureOutcome:
+
+	"""Convert, analyse and write one capture on an analysis worker process.
+
+	What SampleProcessor._process_in_worker hands over.  The player told its
+	watchers about the sidecar before sending the job, so this tells nobody.
+	A failure comes back as an outcome rather than raised, so the lines the
+	job logged still reach the player.
+	"""
+
+	with subsample.parallelism.relaying_logs() as records:
+		try:
+			audio    = subsample.parallelism.read_audio(job.source, remove=False)
+			captured = _process_capture(
+				dataclasses.replace(job.request, audio=audio),
+				job.cfg, job.analysis_params, job.output_dir, None,
+			)
+			converted: typing.Optional[subsample.parallelism.AudioFile] = None
+
+			if captured.audio is not audio:
+				converted = subsample.parallelism.write_audio(captured.audio, job.hand_back)
+
+			captured = dataclasses.replace(
+				captured, audio=numpy.empty((0,) + captured.audio.shape[1:], dtype=captured.audio.dtype),
+			)
+
+		except Exception as exc:
+			return _CaptureOutcome(failure=subsample.parallelism.Failure.caught(exc), records=tuple(records))
+
+	return _CaptureOutcome(captured=captured, converted=converted, records=tuple(records))
+
+
+def _process_capture (
+	req:                  _ProcessRequest,
+	cfg:                  subsample.config.Config,
+	analysis_params:      subsample.analysis.AnalysisParams,
+	output_dir:           pathlib.Path,
+	before_sidecar_write: typing.Optional[typing.Callable[[pathlib.Path], None]],
+) -> _Captured:
+
+	"""Convert, analyse and write one capture: everything but handing it on.
+
+	Runs on an analysis worker process, or on a processor's own thread where
+	there is none.
+	"""
+
+	# Use per-request overrides when provided (file-input mode); otherwise
+	# fall back to the config values set for the live capture stream.
+	effective_bit_depth = (
+		req.bit_depth if req.bit_depth is not None
+		else cfg.recorder.audio.bit_depth
+	)
+	effective_sample_rate = (
+		req.sample_rate if req.sample_rate is not None
+		else cfg.recorder.audio.sample_rate
+	)
+
+	# Ambisonic capture: convert the 4-channel PCM to canonical AmbiX
+	# B-format before storage and analysis.  Downstream the WAV file on
+	# disk is B-format (channel order W, Y, Z, X; SN3D) and analysis
+	# feeds on the W channel (index 0) so the spectral/rhythm/pitch
+	# fingerprint reflects the omnidirectional sum of the sound field
+	# rather than a directionally biased mix of the velocity channels.
+	ambisonic_format = cfg.recorder.audio.ambisonic_format
+	analysis_channel_index: typing.Optional[int]
+	channel_format_tag: str
+
+	if ambisonic_format is not None:
+		audio_float = req.audio.astype(numpy.float32) / (
+			32768.0 if effective_bit_depth == 16 else 2147483648.0
+		)
+		b_format_float = subsample.ambisonic.process_capture(
+			audio_float, ambisonic_format, sample_rate=effective_sample_rate,
 		)
 
-		# Raster preview: written only when preview_data was computed.  The
-		# master `recorder.previews` toggle in _process gates both the data
-		# block and the PNG sidecar in a single decision.
-		if preview_data is not None:
-			png_path = filepath.with_name(filepath.name + subsample.cache.PREVIEW_PNG_SUFFIX)
-			try:
-				subsample.preview.render_png(preview_data, png_path)
-			except Exception as exc:
-				# Broader than OSError on purpose: a Pillow/numpy failure here
-				# must not bypass on_complete — the captured sample is already
-				# on disk and analysed; only the preview image is lost.
-				_log.warning("Failed to write preview %s: %s", png_path.name, exc)
+		# The format conversion can push past full scale even when the
+		# raw capture had headroom (FuMa→AmbiX scales W by √2; the
+		# A-format HF shelf adds gain), and _pcm_float_to_int hard-clips
+		# without a trace — warn here, where the cause is attributable
+		# to conversion gain rather than input gain.
+		b_peak = float(numpy.max(numpy.abs(b_format_float))) if b_format_float.size else 0.0
 
-		return filepath, duration
+		if b_peak > 1.0:
+			_log.warning(
+				"ambisonic conversion clipped (peak %+.1f dBFS after %s "
+				"processing) - reduce input gain to leave conversion headroom",
+				20.0 * math.log10(b_peak), ambisonic_format,
+			)
+
+		req = dataclasses.replace(
+			req, audio=_pcm_float_to_int(b_format_float, effective_bit_depth),
+		)
+		analysis_channel_index = 0
+		channel_format_tag      = "b_format_ambix"
+	else:
+		analysis_channel_index = None
+		channel_format_tag      = "pcm"
+
+	# Convert once; all analyses operate on the same mono float array.
+	# analyze_all() shares the pyin computation between spectral and pitch
+	# analysis, avoiding running it twice (~200-300 ms saving per recording).
+	mono = subsample.analysis.to_mono_float(
+		req.audio, effective_bit_depth, channel_index=analysis_channel_index,
+	)
+
+	result, rhythm, pitch, timbre, level, band_energy = subsample.analysis.analyze_all(
+		mono,
+		analysis_params,
+		cfg.analysis,
+	)
+
+	# Warn on clipped live recordings so the user knows to reduce gain.
+	# Skipped for file imports (filename_base set) — clipping already occurred.
+	# Threshold sits just below full scale because integer PCM cannot
+	# represent +1.0 exactly (int16 positive rail is 32767/32768 ≈
+	# 0.99997) — a `>= 1.0` test only ever fired on the negative rail.
+	if req.filename_base is None and level.peak >= 0.999:
+		_log.warning(
+			"input clipped (peak %.1f dBFS) - reduce input gain to avoid distortion",
+			20.0 * math.log10(level.peak),
+		)
+
+	# Compute preview data from the same mono float signal analyze_all()
+	# consumed, so the envelope/onset alignment is exact.  Skipped when
+	# the master previews toggle is off — saves both the STFT cost here
+	# and the PNG / JSON bytes downstream.
+	preview_data: typing.Optional[subsample.preview.PreviewData] = None
+	if cfg.recorder.previews:
+		preview_duration = len(mono) / effective_sample_rate
+		preview_data = subsample.preview.compute_preview_data(
+			mono, effective_sample_rate,
+			rhythm, pitch, result, level, band_energy,
+			duration=preview_duration,
+		)
+
+	# Find the seamless loop on the same mono float the analysis and
+	# preview used (frame-aligned with the audio about to be written), so a
+	# freshly captured loopable sample carries its loop immediately — a
+	# sidecar saved with loop=None would match on version + MD5 forever and
+	# never re-analyse, leaving it permanently unloopable.
+	loop = subsample.cache.compute_loop(
+		mono, effective_sample_rate, result, pitch, level,
+		len(mono) / effective_sample_rate,
+	)
+
+	write_result = _write_capture(
+		cfg, output_dir, analysis_params, before_sidecar_write,
+		req.audio, req.timestamp, rhythm, result, pitch, timbre, level, band_energy,
+		filename_base=req.filename_base,
+		sample_rate=req.sample_rate,
+		bit_depth=req.bit_depth,
+		channel_format=channel_format_tag,
+		preview_data=preview_data,
+		loop=loop,
+	)
+
+	return _Captured(
+		written=write_result, audio=req.audio,
+		spectral=result, rhythm=rhythm, pitch=pitch, timbre=timbre, level=level, band_energy=band_energy,
+		channel_format=channel_format_tag, loop=loop,
+	)
 
 
+def _capture_target (
+	cfg:           subsample.config.Config,
+	output_dir:    pathlib.Path,
+	timestamp:     datetime.datetime,
+	filename_base: typing.Optional[str],
+	effective_bit_depth: int,
+) -> tuple[pathlib.Path, str, typing.Optional[str]]:
+
+	"""Where a capture is written, in which format, and why, when that is not the configured one.
+
+	The player works this out before an analysis worker writes the capture,
+	to tell its watchers the sidecar is ours, so both must agree.
+	"""
+
+	configured_format = cfg.recorder.audio.audio_format
+
+	# Per-file format decision.  FLAC's stable subtypes only cover
+	# 16/24-bit, so 32-bit inputs fall back to WAV — a silent truncate
+	# would lose precision and a hard reject would make mixed-source
+	# libraries unusable.
+	if configured_format == "flac" and effective_bit_depth == 32:
+		effective_format = "wav"
+		fallback_message: typing.Optional[str] = (
+			"audio_format=flac cannot hold 32-bit; wrote .wav instead "
+			"to preserve full precision"
+		)
+	else:
+		effective_format = configured_format
+		fallback_message = None
+
+	extension = ".flac" if effective_format == "flac" else ".wav"
+
+	fname_base = (
+		filename_base if filename_base is not None
+		else _format_filename(timestamp, cfg.recorder.filename_format)
+	)
+	return output_dir / (fname_base + extension), effective_format, fallback_message
+
+
+def _write_capture (
+	cfg:                  subsample.config.Config,
+	output_dir:           pathlib.Path,
+	analysis_params:      subsample.analysis.AnalysisParams,
+	before_sidecar_write: typing.Optional[typing.Callable[[pathlib.Path], None]],
+	audio:                numpy.ndarray,
+	timestamp:            datetime.datetime,
+	rhythm:               subsample.analysis.RhythmResult,
+	result:               subsample.analysis.AnalysisResult,
+	pitch:                subsample.analysis.PitchResult,
+	timbre:               subsample.analysis.TimbreResult,
+	level:                subsample.analysis.LevelResult,
+	band_energy:          subsample.analysis.BandEnergyResult,
+	filename_base:        typing.Optional[str] = None,
+	sample_rate:          typing.Optional[int] = None,
+	bit_depth:            typing.Optional[int] = None,
+	channel_format:       str = "pcm",
+	preview_data:         typing.Optional[subsample.preview.PreviewData] = None,
+	loop:                 typing.Optional[subsample.loopfind.LoopPoints] = None,
+) -> typing.Optional[tuple[pathlib.Path, float]]:
+
+	"""Write a single audio segment to disk and save its analysis sidecar.
+
+	Extension and encoder are chosen from the configured audio_format
+	(``wav`` or ``flac``) and the effective bit depth:
+
+	- ``audio_format=wav``  → always ``.wav`` (16/24/32-bit PCM).
+	- ``audio_format=flac`` → ``.flac`` for 16/24-bit; ``.wav`` for
+	  32-bit inputs (libsndfile's stable FLAC subtypes don't cover
+	  PCM_32).  The fallback is per-file: live capture is already
+	  validated at config-load time, so this only triggers for file
+	  imports whose source is 32-bit.  An INFO log explains the
+	  fallback so the user isn't surprised by a mixed library.
+
+	If the target file already exists, it is overwritten (with INFO-
+	level logging).  On filesystem error, logs ERROR and returns None.
+
+	Returns (filepath, duration_seconds), or None on write failure.
+
+	Args:
+		cfg, output_dir, analysis_params: what the processor holds, passed in
+		               so an analysis worker process can write without one.
+		before_sidecar_write: told the sidecar path just before it is written,
+		               or None where the player told its watchers already.
+		audio:         PCM samples, shape (n_frames, channels).
+		               16-bit: int16. 24-bit: int32 (left-shifted by 8). 32-bit: int32.
+		timestamp:     Used to construct the filename when filename_base is None.
+		rhythm:        Rhythm analysis computed before this call.
+		result:        Spectral analysis metrics computed before this call.
+		pitch:         Pitch analysis computed before this call.
+		timbre:        Timbral fingerprint computed before this call.
+		level:         Peak and RMS amplitude of the recording.
+		band_energy:   Per-band energy fractions / decay rates — part of the
+		               58-dim fingerprint, written into the sidecar.
+		filename_base: If provided, used as the filename stem instead of the
+		               timestamp format.  A file already at that name is
+		               replaced, as when a file is cut into samples again.
+		sample_rate:   Sample rate for writing. Defaults to config value.
+		bit_depth:     Bit depth for writing. Defaults to config value.
+		channel_format: "pcm" or "b_format_ambix"; passed through to the
+		                sidecar so the player knows whether to apply the
+		                ambisonic decoder on playback.
+		preview_data:  Pre-computed preview block; when set, gates writing
+		               the .preview.png and the sidecar preview JSON.
+	"""
+
+	# Resolve effective format values; per-request overrides take precedence.
+	effective_sample_rate = (
+		sample_rate if sample_rate is not None
+		else cfg.recorder.audio.sample_rate
+	)
+	effective_bit_depth = (
+		bit_depth if bit_depth is not None
+		else cfg.recorder.audio.bit_depth
+	)
+	filepath, effective_format, fallback_message = _capture_target(
+		cfg, output_dir, timestamp, filename_base, effective_bit_depth,
+	)
+
+	# Ensure the array is 2-D (n_frames, channels) before writing
+	if audio.ndim == 1:
+		audio = audio.reshape(-1, 1)
+
+	n_channels = audio.shape[1]
+
+	# Map our internal dtype conventions to libsndfile subtypes:
+	#  - 16-bit int16              → PCM_16
+	#  - 24-bit int32 (<< 8)       → PCM_24 (soundfile keeps the upper
+	#                                3 bytes; our LSB padding is zero)
+	#  - 32-bit int32              → PCM_32
+	_SUBTYPE_BY_BIT_DEPTH: dict[int, str] = {16: "PCM_16", 24: "PCM_24", 32: "PCM_32"}
+	subtype = _SUBTYPE_BY_BIT_DEPTH[effective_bit_depth]
+
+	# Build the complete file in memory so we can MD5 the exact bytes
+	# that hit disk, then do a single atomic write.  soundfile accepts
+	# any file-like object for the `file` argument.
+	buf = io.BytesIO()
+	write_kwargs: dict[str, typing.Any] = {
+		"samplerate": effective_sample_rate,
+		"subtype":    subtype,
+		"format":     "FLAC" if effective_format == "flac" else "WAV",
+	}
+
+	if effective_format == "flac":
+		write_kwargs["compression_level"] = _FLAC_COMPRESSION_LEVEL
+
+	soundfile.write(buf, audio, **write_kwargs)
+
+	file_bytes = buf.getvalue()
+	audio_md5  = hashlib.md5(file_bytes).hexdigest()
+
+	try:
+		if filepath.exists():
+			_log.info("Overwriting: %s", filepath.name)
+
+		_write_atomically(filepath, file_bytes)
+
+	except OSError as exc:
+		_log.error("Failed to write %s: %s", filepath.name, exc)
+		return None
+
+	if fallback_message is not None:
+		_log.info("%s: %s", filepath.name, fallback_message)
+
+	n_frames = audio.shape[0]
+	duration = n_frames / effective_sample_rate
+
+	_log.debug("Stored: %s  frames=%d", filepath.name, n_frames)
+
+	# Persist analysis alongside the audio file so future reads (e.g.
+	# reference file loading on startup) can skip re-analysis when
+	# nothing changes.  When preview data is supplied, it is embedded
+	# in the same sidecar so the PNG preview can be redrawn later
+	# without touching the audio.
+	if before_sidecar_write is not None:
+		before_sidecar_write(subsample.cache.cache_path(filepath))
+
+	subsample.cache.save_cache(
+		audio_path     = filepath,
+		audio_md5      = audio_md5,
+		params         = analysis_params,
+		spectral       = result,
+		rhythm         = rhythm,
+		pitch          = pitch,
+		timbre         = timbre,
+		duration       = duration,
+		level          = level,
+		band_energy    = band_energy,
+		bit_depth      = effective_bit_depth,
+		channels       = n_channels,
+		captured_at    = timestamp.isoformat(),
+		channel_format = channel_format,
+		preview_data   = preview_data,
+		loop           = loop,
+	)
+
+	# Raster preview: written only when preview_data was computed.  The
+	# master `recorder.previews` toggle in _process gates both the data
+	# block and the PNG sidecar in a single decision.
+	if preview_data is not None:
+		png_path = filepath.with_name(filepath.name + subsample.cache.PREVIEW_PNG_SUFFIX)
+		try:
+			subsample.preview.render_png(preview_data, png_path)
+		except Exception as exc:
+			# Broader than OSError on purpose: a Pillow/numpy failure here
+			# must not bypass on_complete — the captured sample is already
+			# on disk and analysed; only the preview image is lost.
+			_log.warning("Failed to write preview %s: %s", png_path.name, exc)
+
+	return filepath, duration

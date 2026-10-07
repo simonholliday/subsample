@@ -629,15 +629,15 @@ class Failure:
 def init_background_worker (
 	analysis_config:    subsample.config.AnalysisConfig,
 	float_ceiling_dbfs: typing.Optional[float],
-	log_level:          int,
 ) -> None:
 
-	"""Set up one background worker process: the parent's settings, and its log level.
+	"""Set up one background worker process: the parent's settings, and its logging.
 
-	What a job logs is collected and handed back (relaying_logs), so the
-	worker's own ``subsample`` logger does not pass records on to a root logger
-	that, in a process started by the forkserver, would print them to stderr
-	unformatted, or not at all.
+	What a job logs is collected and handed back (relaying_logs), at every
+	level: the player's log_relayed keeps what its own level lets through, so
+	the player's level decides, as it is now, not as it was when the pool
+	started.  The worker's ``subsample`` logger does not pass records on to a
+	root logger that, in a process started by the forkserver, has no handler.
 	"""
 
 	global _in_background_worker
@@ -647,7 +647,7 @@ def init_background_worker (
 	_in_background_worker = True
 
 	logger = logging.getLogger("subsample")
-	logger.setLevel(log_level)
+	logger.setLevel(logging.DEBUG)
 	logger.propagate = False
 
 
@@ -732,7 +732,6 @@ class BackgroundPool:
 			initargs=(
 				subsample.cache.analysis_config(),
 				subsample.audio.float_import_ceiling(),
-				logging.getLogger("subsample").getEffectiveLevel(),
 			),
 		)
 

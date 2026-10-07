@@ -14,7 +14,9 @@ import soundfile
 
 import subsample.analysis
 import subsample.audio
+import subsample.cache
 import subsample.config
+import subsample.parallelism
 import subsample.recorder
 
 import tests.helpers
@@ -253,8 +255,11 @@ class TestSampleProcessorQueueDepth:
 				return original_analyze(*args, **kwargs)
 
 			# Pin to 1 worker so items 2-4 queue up while item 1 is gated.
+			# Threads: the patched analysis has to be the one the worker runs.
 			with unittest.mock.patch("subsample.recorder._compute_worker_count", return_value=1):
-				writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params(), on_complete=on_complete)
+				writer = subsample.recorder.SampleProcessor(
+					cfg, tests.helpers._make_params(), on_complete=on_complete, processes=False,
+				)
 
 			with caplog.at_level(logging.WARNING, logger="subsample.recorder"):
 				with unittest.mock.patch("subsample.analysis.analyze_all", side_effect=gated_analyze):
@@ -299,8 +304,9 @@ class TestSampleProcessorQueueDepth:
 				return original_analyze(*args, **kwargs)
 
 			# Pin to 1 worker so the backlog warning fires and the drain log follows.
+			# Threads: the patched analysis has to be the one the worker runs.
 			with unittest.mock.patch("subsample.recorder._compute_worker_count", return_value=1):
-				writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+				writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params(), processes=False)
 
 			with caplog.at_level(logging.INFO, logger="subsample.recorder"):
 				with unittest.mock.patch("subsample.analysis.analyze_all", side_effect=gated_analyze):
@@ -765,3 +771,126 @@ class TestTheAudioWriteIsAllOrNothing:
 
 		assert target.read_bytes() == b"audio"
 		assert list(tmp_path.iterdir()) == [target]
+
+
+class TestCapturesAreProcessedInWorkerProcesses:
+
+	"""#4667: a capture is converted, analysed and written on an analysis worker process.
+
+	Analysing captures on the player's threads made the audio and the notes
+	wait for Python's lock: 85 dropouts in 30 s at 1024-frame buffers (#4666).
+	"""
+
+	@pytest.fixture(autouse=True)
+	def _processes (self) -> None:
+
+		"""Skip where worker processes cannot start: the processor works on its threads there."""
+
+		reason = subsample.parallelism.processes_refused()
+
+		if reason is not None:
+			pytest.skip(f"worker processes cannot start here: {reason}")
+
+	def _capture (self) -> numpy.ndarray:
+
+		"""Half a second of seeded noise with a decaying hit, so the analysis has something to find."""
+
+		rng      = numpy.random.default_rng(4667)
+		envelope = numpy.exp(-numpy.linspace(0.0, 8.0, 22050))[:, None]
+		noise    = rng.standard_normal((22050, 1)) * envelope * 12000.0
+
+		return noise.astype(numpy.int16)
+
+	def _process (
+		self,
+		out_dir:   pathlib.Path,
+		processes: bool,
+		**kwargs:  typing.Any,
+	) -> tuple[subsample.recorder.SampleProcessor, list[tuple[typing.Any, ...]]]:
+
+		"""Process one capture, and return the processor and what reached on_complete."""
+
+		handed: list[tuple[typing.Any, ...]] = []
+		writer  = subsample.recorder.SampleProcessor(
+			_make_config(out_dir), tests.helpers._make_params(),
+			on_complete=lambda *args, **captured: handed.append(args + (captured,)),
+			processes=processes, **kwargs,
+		)
+
+		writer.enqueue(self._capture(), datetime.datetime(2026, 10, 6, 21, 0, 0), filename_base="take")
+		writer.shutdown()
+
+		return writer, handed
+
+	def test_a_capture_in_a_worker_process_matches_one_on_a_thread (self, tmp_path: pathlib.Path) -> None:
+
+		in_worker, in_process = tmp_path / "process", tmp_path / "thread"
+
+		writer, by_process = self._process(in_worker, processes=True)
+		_unused, by_thread = self._process(in_process, processes=False)
+
+		assert writer._pool is not None and writer._pool.in_processes
+		assert len(by_process) == 1 and len(by_thread) == 1
+		assert (in_worker / "take.wav").read_bytes() == (in_process / "take.wav").read_bytes()
+
+		# Everything but the path: the analysis, the duration, the audio and
+		# what was worked out about the capture.
+		for ours, theirs in zip(by_process[0][1:], by_thread[0][1:]):
+			if isinstance(ours, numpy.ndarray):
+				numpy.testing.assert_array_equal(ours, theirs)
+			else:
+				assert repr(ours) == repr(theirs)
+
+	def test_the_watchers_hear_of_the_sidecar_before_it_is_written (self, tmp_path: pathlib.Path) -> None:
+
+		told: list[tuple[pathlib.Path, bool]] = []
+
+		def before_sidecar_write (sidecar: pathlib.Path) -> None:
+			told.append((sidecar, sidecar.exists()))
+
+		self._process(tmp_path, processes=True, before_sidecar_write=before_sidecar_write)
+
+		sidecar = subsample.cache.cache_path(tmp_path / "take.wav")
+
+		assert told == [(sidecar, False)]
+		assert sidecar.exists()
+
+	def test_a_failure_in_a_worker_is_logged_with_where_it_was_raised (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		writer = subsample.recorder.SampleProcessor(_make_config(tmp_path), tests.helpers._make_params())
+
+		with caplog.at_level(logging.ERROR, logger="subsample"):
+			# No subtype holds 12-bit audio, so the write fails in the worker.
+			writer.enqueue(self._capture(), datetime.datetime.now(), filename_base="take", bit_depth=12)
+			writer.shutdown()
+
+		failed = [r for r in caplog.records if r.getMessage().startswith("Failed to process recording")]
+
+		assert len(failed) == 1
+		assert "_process_capture" in logging.Formatter().format(failed[0]), "the worker's traceback was lost"
+
+	def test_what_the_analysis_says_reaches_the_player_log (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		writer  = subsample.recorder.SampleProcessor(_make_config(tmp_path), tests.helpers._make_params())
+		clipped = numpy.full((22050, 1), 32767, dtype=numpy.int16)
+
+		with caplog.at_level(logging.WARNING, logger="subsample"):
+			writer.enqueue(clipped, datetime.datetime.now())
+			writer.shutdown()
+
+		assert any(message.startswith("input clipped") for message in caplog.messages)
+
+	def test_captures_leave_no_files_behind (self, tmp_path: pathlib.Path) -> None:
+
+		folder = subsample.parallelism.hand_off_folder()
+		before = set(folder.iterdir())
+
+		_writer, handed = self._process(tmp_path, processes=True)
+
+		assert len(handed) == 1
+		assert set(folder.iterdir()) == before
+
