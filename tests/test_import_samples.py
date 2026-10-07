@@ -109,6 +109,71 @@ class TestForceAcrossFormats:
 		assert sorted(path.name for path in out.iterdir()) == ["snare.wav", "snare.wav.analysis.json"]
 
 
+class TestAFileIsNeverImportedOverItself:
+
+	"""#4702 (H5 of the 2026-10-07 review): a file imported into its own folder.
+
+	With --force, an import into the folder a file is already in replaced the
+	original with its trimmed, faded and converted copy, or, with
+	audio_format: flac, wrote kick.flac and deleted kick.wav.  Without
+	--force it said "already exists", which pointed at --force.  Simon chose
+	to refuse it, whatever --force says.
+	"""
+
+	def _source (self, folder: pathlib.Path) -> tuple[pathlib.Path, bytes]:
+
+		"""A one-second kick in ``folder``, and its bytes as written."""
+
+		folder.mkdir(parents=True, exist_ok=True)
+		source = folder / "kick.wav"
+		t      = numpy.arange(44100) / 44100.0
+		audio  = (0.8 * numpy.exp(-t * 20.0) * numpy.sin(2 * numpy.pi * 60.0 * t)).astype(numpy.float32)
+		soundfile.write(str(source), audio, 44100, subtype="FLOAT")
+
+		return source, source.read_bytes()
+
+	@pytest.mark.parametrize("audio_format", ["wav", "flac"])
+	def test_forced_into_its_own_folder_the_original_is_left_as_it_was (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], audio_format: str,
+	) -> None:
+
+		monkeypatch.chdir(tmp_path)
+		config = tmp_path / "config.yaml"
+		config.write_text(f"recorder:\n  audio:\n    audio_format: {audio_format}\n")
+		source, original = self._source(tmp_path / "lib")
+
+		rc = import_samples.main([str(source), "--to", str(tmp_path / "lib"), "--force", "--config", str(config)])
+
+		assert sorted(path.name for path in (tmp_path / "lib").iterdir()) == ["kick.wav"]
+		assert source.read_bytes() == original
+		assert rc == 1
+		assert "(skipped, already in" in capsys.readouterr().err
+
+	def test_called_directly_it_is_refused_too (self, tmp_path: pathlib.Path) -> None:
+
+		source, original = self._source(tmp_path / "lib")
+
+		assert not import_samples._import_file(
+			source, tmp_path / "lib", force=True, float_ceiling_dbfs=-1.0,
+			rhythm_cfg=subsample.config.AnalysisConfig(), audio_format="flac",
+		)
+		assert source.read_bytes() == original
+
+	def test_a_file_from_elsewhere_still_replaces_an_earlier_import (self, tmp_path: pathlib.Path) -> None:
+
+		"""--force keeps its meaning for a file that is not its own target."""
+
+		source, _original = self._source(tmp_path / "pack")
+		out = tmp_path / "lib"
+		out.mkdir()
+		cfg = subsample.config.AnalysisConfig()
+
+		for _ in range(2):
+			assert import_samples._import_file(source, out, force=True, float_ceiling_dbfs=-1.0, rhythm_cfg=cfg)
+
+		assert (out / "kick.wav").exists()
+
+
 class TestALoopKeepsItsFirstTap:
 
 	"""Import trims a loop up to its first tap, and the analysis then missed that

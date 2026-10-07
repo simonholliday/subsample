@@ -20,6 +20,7 @@ import argparse
 import functools
 import logging
 import math
+import os
 import pathlib
 import sys
 import typing
@@ -141,6 +142,41 @@ def _resolve_subtype (info: soundfile._SoundFileInfo) -> str:
 	return "PCM_16"
 
 
+def _is_its_own_target (filepath: pathlib.Path, target_dir: pathlib.Path) -> bool:
+
+	"""Whether importing ``filepath`` into ``target_dir`` would write over it, or remove it (#4702).
+
+	An import writes ``<stem>.wav`` or ``<stem>.flac`` there and removes the
+	other, so a source that is either of those files would be replaced by its
+	own trimmed, faded and converted copy, or deleted.  That is refused
+	whatever --force says (Simon, #4702).  Compared as files, not names, so a
+	link to it counts too, as does a name that differs only in case where the
+	file system ignores case.
+	"""
+
+	for extension in (".wav", ".flac"):
+		candidate = target_dir / (filepath.stem + extension)
+
+		try:
+			if candidate.exists() and os.path.samefile(candidate, filepath):
+				return True
+		except OSError:
+			continue
+
+	return False
+
+
+def _say_it_is_its_own_target (filepath: pathlib.Path, target_dir: pathlib.Path) -> None:
+
+	"""Say why a file already in the target directory is not imported there."""
+
+	print(
+		f"  {filepath.name}  (skipped, already in {target_dir}: importing it there "
+		f"would replace it with its trimmed copy)",
+		file=sys.stderr,
+	)
+
+
 def _existing_target (target_dir: pathlib.Path, stem: str) -> typing.Optional[pathlib.Path]:
 
 	"""Return an already-imported file with this stem, in either container.
@@ -183,9 +219,13 @@ def _import_file (
 	Returns True if the file was imported, False if skipped or failed.
 	"""
 
-	# main() claims target names before fanning out, so this guard normally never
-	# fires under the pool — it stays for direct callers and as a belt-and-braces
-	# check on a single-file import.
+	# main() claims target names before fanning out, so these guards normally
+	# never fire under the pool — they stay for direct callers and as a
+	# belt-and-braces check on a single-file import.
+	if _is_its_own_target(filepath, target_dir):
+		_say_it_is_its_own_target(filepath, target_dir)
+		return False
+
 	if not force and _existing_target(target_dir, filepath.stem) is not None:
 		print(f"  {filepath.name}  (skipped, already exists)")
 		return False
@@ -382,7 +422,7 @@ def parser () -> argparse.ArgumentParser:
 	command.add_argument(
 		"--force",
 		action="store_true",
-		help="Overwrite existing files in target directory",
+		help="Replace earlier imports in the target directory.  A file already in it is never imported over itself.",
 	)
 	command.add_argument(
 		"--config",
@@ -466,6 +506,12 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 				f"claims the name {filepath.stem!r} in this batch)",
 				file=sys.stderr,
 			)
+			skipped += 1
+			continue
+
+		# Its own target: an import would replace the original, or delete it.
+		if _is_its_own_target(filepath, target_dir):
+			_say_it_is_its_own_target(filepath, target_dir)
 			skipped += 1
 			continue
 
