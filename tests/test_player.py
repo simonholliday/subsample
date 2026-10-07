@@ -8760,6 +8760,39 @@ class TestMidiClockTracker:
 		assert accepted == []
 		assert tracker.accepted_bpm is None
 
+	@pytest.mark.parametrize("bpm", [30.0, 60.0, 70.0, 79.0])
+	def test_a_slow_clock_is_accepted_from_cold (self, bpm: float) -> None:
+
+		"""#4702 (H3 of the 2026-10-07 review): a clock under 80 BPM locks.
+
+		Its pulses were measured against 120 BPM before any tempo was accepted,
+		so every one looked like a gap and reset the window, which never filled.
+		"""
+
+		tracker = subsample.player._MidiClockTracker()
+
+		_end, accepted = _clock_pulses(tracker, bpm, beats=20, jitter=0.001)
+
+		assert accepted == [bpm]
+
+	@pytest.mark.parametrize("slower", [75.0, 70.0, 60.0])
+	def test_a_slow_down_of_more_than_a_third_is_followed (self, slower: float) -> None:
+
+		"""#4702 (H3 of the 2026-10-07 review): from 120 to under 80 BPM.
+
+		Each slower pulse was measured against 120, looked like a gap, and the
+		tempo stayed at 120 for good.
+		"""
+
+		tracker = subsample.player._MidiClockTracker()
+
+		end, first = _clock_pulses(tracker, 120.0, beats=20, jitter=0.001)
+		_end, second = _clock_pulses(tracker, slower, beats=20, t0=end, jitter=0.001, seed=3)
+
+		assert first == [120.0]
+		assert second == [slower]
+		assert tracker.accepted_bpm == slower
+
 	def test_dropped_pulse_gap_resets_the_window (self) -> None:
 
 		"""A gap far larger than the pulse spacing (a dropped pulse or a brief

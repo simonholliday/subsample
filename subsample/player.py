@@ -621,8 +621,19 @@ class _MidiClockTracker:
 		# roughly constant across them, satisfy the dwell on a PHANTOM tempo (a
 		# spurious re-bake, then a re-bake back).  Discard the window and rebuild
 		# it; the accepted tempo stays sticky (transport stop keeps the last BPM).
+		#
+		# The spacing expected is the window's own, or, with too few pulses to
+		# have one, the slowest a clock may run (#4702).  Measured against the
+		# tempo in force, or 120 before one was, every pulse of a clock under
+		# 80 BPM looked like a gap, so the window never filled, and a slow-down
+		# to under two thirds of the tempo in force was never followed.  A real
+		# change of tempo still resets the window once, at its first pulse.
 		if self._pulses:
-			expected = 60.0 / (self._accepted or 120.0) / _CLOCK_PULSES_PER_BEAT
+			if len(self._pulses) >= 2:
+				expected = (self._pulses[-1] - self._pulses[0]) / (len(self._pulses) - 1)
+			else:
+				expected = 60.0 / _CLOCK_MIN_BPM / _CLOCK_PULSES_PER_BEAT
+
 			if now - self._pulses[-1] > _CLOCK_GAP_RESET_FACTOR * expected:
 				self._pulses.clear()
 				self._candidate = None
