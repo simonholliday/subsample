@@ -44,6 +44,7 @@ import multiprocessing.forkserver
 import os
 import pathlib
 import shutil
+import signal
 import tempfile
 import threading
 import traceback
@@ -215,7 +216,16 @@ def init_analysis_worker (
 	being passed them: the analysis config and the float import ceiling.  A
 	forked worker inherits both, but one started fresh would run on the
 	defaults and say nothing, analysing every sample differently (#390).
+
+	It also leaves the terminal's Ctrl+C and hang-up to the parent (#4702).  A
+	terminal sends both to the whole process group, workers included, and the
+	parent turns Ctrl+C into a drain that waits for its workers.  A worker that
+	took the signal died with it, and the capture or render it held was lost.
+	SIGTERM keeps its default, which is how a broken pool ends its workers.
 	"""
+
+	signal.signal(signal.SIGINT, signal.SIG_IGN)
+	signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
 	cap_blas_threads()
 
@@ -408,7 +418,9 @@ _shared_pools_lock: threading.Lock = threading.Lock()
 _shared_pools_stopped_at_exit: bool = False
 
 # The folder sounds cross between processes in, made on first use and removed
-# at exit.
+# at exit.  Its name is the prefix, its run's process ID, and mkdtemp's own
+# letters.
+_HAND_OFF_PREFIX = "subsample-work-"
 _hand_off_folder: typing.Optional[pathlib.Path] = None
 _hand_off_lock: threading.Lock = threading.Lock()
 
@@ -434,16 +446,59 @@ def hand_off_folder () -> pathlib.Path:
 
 	Private to this run and removed when it ends.  It lives in the system's
 	temporary folder (TMPDIR), where a worker can write as easily as the player.
+	Its name carries this run's process ID, so a later run can tell when it was
+	abandoned (_remove_abandoned_hand_off_folders).
 	"""
 
 	global _hand_off_folder
 
 	with _hand_off_lock:
 		if _hand_off_folder is None:
-			_hand_off_folder = pathlib.Path(tempfile.mkdtemp(prefix="subsample-work-"))
+			_remove_abandoned_hand_off_folders()
+
+			_hand_off_folder = pathlib.Path(tempfile.mkdtemp(prefix=f"{_HAND_OFF_PREFIX}{os.getpid()}-"))
 			atexit.register(shutil.rmtree, _hand_off_folder, ignore_errors=True)
 
 		return _hand_off_folder
+
+
+def _remove_abandoned_hand_off_folders () -> None:
+
+	"""Remove this user's hand-off folders whose run has gone (#4702).
+
+	A run removes its own folder at exit, but one killed outright, by SIGKILL
+	or the out-of-memory killer, cannot.  It left the raw sound of every
+	capture and render it was handing over, in memory where the temporary
+	folder is held there.  A folder whose process ID still runs is left alone,
+	even if another program now has that ID; one from v0.6.8, named without
+	its process ID, cannot be told apart from a live one, and is left too.
+	"""
+
+	for folder in pathlib.Path(tempfile.gettempdir()).glob(f"{_HAND_OFF_PREFIX}*-*"):
+		pid = folder.name[len(_HAND_OFF_PREFIX):].split("-", 1)[0]
+
+		try:
+			if not pid.isdigit() or folder.stat().st_uid != os.getuid() or _process_runs(int(pid)):
+				continue
+		except OSError:
+			continue
+
+		shutil.rmtree(folder, ignore_errors=True)
+
+
+def _process_runs (pid: int) -> bool:
+
+	"""Whether a process with this ID exists, as far as this user can tell."""
+
+	try:
+		os.kill(pid, 0)
+	except ProcessLookupError:
+		return False
+	except PermissionError:
+		# Another user's: it exists.
+		return True
+
+	return True
 
 
 def write_audio (audio: numpy.ndarray, folder: pathlib.Path) -> AudioFile:
@@ -677,7 +732,19 @@ def processes_refused () -> typing.Optional[str]:
 		try:
 			context = multiprocessing.get_context(_BACKGROUND_START_METHOD)
 			context.set_forkserver_preload(_FORKSERVER_PRELOAD)
-			multiprocessing.forkserver.ensure_running()
+
+			# Started with hang-up blocked, as the forkserver, its resource
+			# tracker and every worker then are (#4702).  A terminal sends its
+			# hang-up to the whole process group: a forkserver that took it
+			# died, and the pools took that for every worker dying, and ended
+			# them with the captures they held.  Blocked rather than ignored,
+			# since a thread other than the main one may be the first to ask.
+			blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})
+
+			try:
+				multiprocessing.forkserver.ensure_running()
+			finally:
+				signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
 		except (OSError, ValueError, RuntimeError) as exc:
 			_processes_refused_reason = str(exc) or type(exc).__name__

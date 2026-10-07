@@ -33,6 +33,7 @@ import math
 import os
 import pathlib
 import shutil
+import signal
 import sys
 import threading
 import time
@@ -1447,15 +1448,83 @@ def main () -> None:
 			print("\nInterrupted.", file=sys.stderr)
 			raise SystemExit(130)
 
+	previous_handlers = _stop_on_signals()
+
 	try:
 		_main_impl()
 
 	except KeyboardInterrupt:
 		# Startup was interrupted before the main loop's handler existed.  The
 		# loads it lands in are the long ones, so this is a normal thing to do.
-		print("\nInterrupted.", file=sys.stderr)
+		_say("\nInterrupted.", sys.stderr)
 		_run_teardowns()
 		raise SystemExit(130) from None
+
+	finally:
+		for number, handler in previous_handlers.items():
+			signal.signal(number, handler)
+
+
+def _stop_on_signals () -> dict[int, typing.Any]:
+
+	"""Make SIGTERM and SIGHUP stop Subsample as Ctrl+C does, and return the handlers they had.
+
+	Ctrl+C finishes the captures still being analysed before it exits.  SIGTERM
+	(kill, systemctl stop, docker stop) and SIGHUP (a closed terminal or SSH
+	session) ended the process at once, losing them (#4702).  Under nohup,
+	which ignores SIGHUP, it stays ignored and Subsample keeps running, as
+	nohup means.
+	"""
+
+	previous: dict[int, typing.Any] = {}
+
+	for number in (signal.SIGTERM, signal.SIGHUP):
+		handler = signal.getsignal(number)
+
+		if number == signal.SIGHUP and handler is signal.SIG_IGN:
+			continue
+
+		previous[number] = handler
+		signal.signal(number, _stop_like_ctrl_c)
+
+	return previous
+
+
+def _stop_like_ctrl_c (signal_number: int, frame: typing.Any) -> None:
+
+	"""Signal handler: stop as Ctrl+C stops, through the same KeyboardInterrupt."""
+
+	raise KeyboardInterrupt
+
+
+def _say (text: str, stream: typing.Optional[typing.TextIO] = None) -> None:
+
+	"""Print a line of the shutdown's progress, even where nothing can read it any more.
+
+	After a hang-up the terminal is gone, and writing to it fails.  An error
+	here cut the shutdown short and lost the captures it was finishing
+	(#4702), so from the first failed line on, output goes nowhere instead.
+	"""
+
+	try:
+		print(text, file=sys.stdout if stream is None else stream, flush=True)
+	except OSError:
+		_silence_output()
+
+
+def _silence_output () -> None:
+
+	"""Send standard output and error nowhere, so later writes to a terminal that has gone succeed."""
+
+	devnull = os.open(os.devnull, os.O_WRONLY)
+
+	for stream in (sys.stdout, sys.stderr):
+		try:
+			os.dup2(devnull, stream.fileno())
+		except (OSError, ValueError):
+			pass
+
+	os.close(devnull)
 
 
 def _main_impl () -> None:
@@ -1918,7 +1987,7 @@ def _wait_for_shutdown (shutdown_event: threading.Event, threads: list[threading
 				break
 
 	except KeyboardInterrupt:
-		print("\nStopping…")
+		_say("\nStopping…")
 		shutdown_event.set()
 
 	return startup_failed
@@ -1973,7 +2042,7 @@ def _shut_down (
 	subsample.parallelism.shutdown_shared_pools()
 
 	if not startup_failed:
-		print("Done.")
+		_say("Done.")
 
 	# A subsystem thread still alive here is wedged in an uninterruptible
 	# input() prompt (device selection) that Ctrl+C — delivered only to the
@@ -1982,8 +2051,12 @@ def _shut_down (
 	# fatal buffered-stdin error while finalizing the wedged daemon.  Flush
 	# and hard-exit cleanly instead (all other subsystems are already stopped).
 	if any(t.is_alive() for t in threads):
-		sys.stdout.flush()
-		sys.stderr.flush()
+		try:
+			sys.stdout.flush()
+			sys.stderr.flush()
+		except OSError:
+			pass
+
 		os._exit(0)
 
 	# A subsystem died at startup without anyone asking to stop — surface it
@@ -2466,7 +2539,7 @@ def _drain_captures (
 	if not remaining:
 		return
 
-	print(f"Finishing {remaining} capture(s) still being analysed…")
+	_say(f"Finishing {remaining} capture(s) still being analysed…")
 
 	while True:
 		processor.flush()
@@ -2477,7 +2550,7 @@ def _drain_captures (
 			break
 
 		# A capture that arrived while we were flushing: report and go round.
-		print(f"  {still_going} to go…")
+		_say(f"  {still_going} to go…")
 		time.sleep(poll)
 
 

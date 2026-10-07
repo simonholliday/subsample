@@ -5,7 +5,12 @@ import logging
 import os
 import pathlib
 import pickle
+import signal
+import subprocess
+import sys
+import tempfile
 import threading
+import time
 import traceback
 import typing
 
@@ -166,19 +171,26 @@ def _parent_settings () -> typing.Iterator[None]:
 
 def test_init_analysis_worker_sets_what_the_parent_set () -> None:
 
-	"""The process-pool initializer installs the settings it is handed."""
+	"""The process-pool initializer installs the settings it is handed, and leaves Ctrl+C and hang-up to the parent."""
 
 	previous = (subsample.cache.analysis_config(), subsample.audio.float_import_ceiling())
+	handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGHUP)}
 
 	try:
 		subsample.parallelism.init_analysis_worker(*_SETTINGS_UNDER_TEST)
 
 		assert subsample.cache.analysis_config() == _SETTINGS_UNDER_TEST[0]
 		assert subsample.audio.float_import_ceiling() == _SETTINGS_UNDER_TEST[1]
+		assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+		assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
 
 	finally:
 		subsample.cache.set_analysis_config(previous[0])
 		subsample.audio.set_float_import_ceiling(previous[1])
+
+		# This ran in the test process itself: give it its Ctrl+C back.
+		for number, handler in handlers.items():
+			signal.signal(number, handler)
 
 
 def _settings_of (value: int) -> tuple[subsample.config.AnalysisConfig, typing.Optional[float], int]:
@@ -443,6 +455,34 @@ def test_a_sound_not_laid_out_in_order_is_handed_over_all_the_same (tmp_path: pa
 	numpy.testing.assert_array_equal(back, audio)
 
 
+def test_a_run_removes_the_hand_off_folders_of_runs_that_were_killed (tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
+	"""#4702: a run killed outright cannot remove its hand-off folder, which held raw sound.
+
+	The next run removes it.  A folder whose process still runs is left, and
+	so is one named as v0.6.8 named them, without its process ID.
+	"""
+
+	monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+	gone = subprocess.Popen([sys.executable, "-c", "pass"])
+	gone.wait()
+
+	abandoned = tmp_path / f"subsample-work-{gone.pid}-abc123"
+	running   = tmp_path / f"subsample-work-{os.getpid()}-def456"
+	older     = tmp_path / "subsample-work-k2x9q_7m"
+
+	for folder in (abandoned, running, older):
+		folder.mkdir()
+		(folder / "tmp1.pcm").write_bytes(bytes(64))
+
+	made = subsample.parallelism.hand_off_folder()
+
+	assert not abandoned.exists()
+	assert running.exists() and older.exists()
+	assert made.parent == tmp_path and made.name.startswith(f"subsample-work-{os.getpid()}-")
+
+
 def test_a_file_cut_short_is_an_error (tmp_path: pathlib.Path) -> None:
 
 	handle = subsample.parallelism.write_audio(numpy.ones((1_000, 2), dtype=numpy.float32), tmp_path)
@@ -579,6 +619,98 @@ def test_a_pool_whose_worker_died_is_replaced (caplog: pytest.LogCaptureFixture)
 		assert any("One of the test workers stopped unexpectedly" in message for message in caplog.messages)
 	finally:
 		pool.shutdown()
+
+
+def _work_on_after_saying_where (marker: str) -> int:
+
+	"""Module-level (picklable) job: say which process holds it, then work on for a moment, as an analysis does."""
+
+	pathlib.Path(marker + ".tmp").write_text(str(os.getpid()))
+	os.replace(marker + ".tmp", marker)
+	time.sleep(1.0)
+
+	return 7
+
+
+@pytest.mark.parametrize("signal_number", [signal.SIGINT, signal.SIGHUP], ids=["ctrl-c", "hang-up"])
+def test_a_worker_works_on_through_the_terminals_ctrl_c_and_hang_up (tmp_path: pathlib.Path, signal_number: int) -> None:
+
+	"""#4702 (H1 of the 2026-10-07 review): a terminal sends Ctrl+C and hang-up to the whole process group.
+
+	The workers are in it.  The parent turns Ctrl+C into a drain that waits
+	for them, so a worker has to finish the capture or render it holds; one
+	that took the signal died with it, and the capture was lost.
+	"""
+
+	_skip_without_processes()
+
+	pool   = subsample.parallelism.BackgroundPool("test", 1, processes=True)
+	marker = tmp_path / "started"
+
+	try:
+		future   = pool.submit(_work_on_after_saying_where, str(marker))
+		deadline = time.monotonic() + 30.0
+
+		while not marker.exists() and time.monotonic() < deadline:
+			time.sleep(0.01)
+
+		os.kill(int(marker.read_text()), signal_number)
+
+		# A worker that took Ctrl+C hands back KeyboardInterrupt, which must
+		# fail this test, not end the test run.
+		try:
+			outcome: object = future.result(timeout=30.0)
+		except BaseException as exc:
+			outcome = exc
+
+		assert outcome == 7
+	finally:
+		pool.shutdown()
+
+
+_HANG_UP_THE_FORKSERVER = """
+import multiprocessing.forkserver
+import multiprocessing.resource_tracker
+import os
+import signal
+import time
+
+import subsample.parallelism
+
+pool = subsample.parallelism.BackgroundPool("test", 1, processes=True)
+assert pool.in_processes, subsample.parallelism.processes_refused()
+assert pool.submit(int, "1").result() == 1
+
+future = pool.submit(time.sleep, 0.5)
+
+os.kill(multiprocessing.forkserver._forkserver._forkserver_pid, signal.SIGHUP)
+os.kill(multiprocessing.resource_tracker._resource_tracker._pid, signal.SIGHUP)
+
+print(future.result(timeout=30.0), pool.submit(int, "2").result())
+pool.shutdown()
+"""
+
+
+def test_the_forkserver_and_its_resource_tracker_work_on_through_a_hang_up () -> None:
+
+	"""#4702: a terminal's hang-up reaches the forkserver and its resource tracker too.
+
+	Neither ignores it.  A forkserver that died took every worker's exit
+	notice with it, so the pool thought them all dead, ended them, and the
+	captures they held were lost.  Run in an interpreter of its own, whose
+	forkserver Subsample starts: a test here starts one of its own first.
+	"""
+
+	_skip_without_processes()
+
+	checkout = pathlib.Path(subsample.parallelism.__file__).resolve().parents[1]
+	env      = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, [str(checkout), os.environ.get("PYTHONPATH")])))
+
+	result = subprocess.run([sys.executable, "-c", _HANG_UP_THE_FORKSERVER], capture_output=True, text=True, env=env, timeout=120)
+
+	assert result.returncode == 0, result.stderr
+	assert result.stdout.split() == ["None", "2"]
+	assert "died unexpectedly" not in result.stderr
 
 
 def _pid_and_warning (value: int) -> tuple[int, int]:

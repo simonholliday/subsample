@@ -44,6 +44,24 @@ it wait for Python's lock (#4666).
 - **Where worker processes cannot start,** the whole pipeline stays on the
   thread, as before.
 
+**Stopping finishes the captures.** Ctrl+C, SIGTERM (`kill`, `systemctl stop`,
+`docker stop`) and SIGHUP (a closed terminal or SSH session) stop Subsample the
+same way: the captures still being analysed are written first, and it says how
+many (`cli._drain_captures`, #4702).
+- **The signals.** SIGTERM and SIGHUP raise the KeyboardInterrupt that Ctrl+C
+  does (`cli._stop_on_signals`). Under `nohup`, SIGHUP stays ignored.
+- **The workers keep going.** A terminal sends Ctrl+C and SIGHUP to the whole
+  process group. The workers ignore both, and the forkserver and its resource
+  tracker start with SIGHUP blocked. A forkserver that dies takes its workers'
+  exit notices with it, and the pool then ends them all.
+- **A gone terminal.** The shutdown's own lines go through `cli._say`, which
+  sends all output nowhere once the terminal has gone. Before, the first failed
+  print cut the shutdown short.
+- **systemd.** Its default `KillMode=control-group` sends SIGTERM to the workers
+  too. Workers keep SIGTERM, since a pool ends a broken worker with it, so a
+  capture being analysed is lost there. `KillMode=mixed` sends SIGTERM to
+  Subsample alone.
+
 Details a change here has to keep:
 
 - **Warm-up takes at least one chunk.** `LevelDetector` counts
@@ -155,6 +173,10 @@ another process cost none (#4666).
   none.
 - **Logs.** What a worker logs comes back with its render and is logged by the
   player. A once-only warning is logged once in the session.
+- **Ctrl+C and hang-up.** A terminal sends both to the whole process group,
+  workers included. The workers ignore them (`parallelism.init_analysis_worker`),
+  so the player's drain waits for what they hold; a worker that took Ctrl+C
+  died with the capture or render it held (#4702).
 - **The disk cache.** Workers write to it, the player counts what they write,
   and one worker at a time trims the folder to its budget.
 - **Where worker processes cannot start,** renders run on threads as before,

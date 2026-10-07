@@ -3,13 +3,16 @@
 import argparse
 import dataclasses
 import importlib
+import io
 import logging
 import math
 import os
 import pathlib
+import signal
 import sys
 import textwrap
 import threading
+import time
 import typing
 import unittest.mock
 import wave
@@ -2280,6 +2283,82 @@ class TestAnInterruptedStartupStopsWhatItStarted:
 		assert exit_info.value.code == 130
 		assert stopped == ["workers"], "the pool was stopped, not left to hang"
 		assert "Interrupted" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGHUP], ids=["terminate", "hang-up"])
+def test_a_stop_signal_stops_as_ctrl_c_does_and_its_handler_is_put_back (
+	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], number: int,
+) -> None:
+
+	"""#4702 (H2 of the 2026-10-07 review): kill, systemctl stop, docker stop or a closed terminal.
+
+	Each ended the process at once, so the captures Ctrl+C would have
+	finished were lost.  Now they take Ctrl+C's way out, and once main
+	returns the signal has the handler it had before.
+	"""
+
+	def _not_taken (signal_number: int, frame: typing.Any) -> None:
+		raise RuntimeError("main did not take the signal over")
+
+	# A stand-in, so a main that leaves the signal alone fails this test
+	# instead of ending the test run.
+	original = signal.signal(number, _not_taken)
+
+	def _signalled () -> None:
+		os.kill(os.getpid(), number)
+		time.sleep(5.0)
+
+	monkeypatch.setattr(subsample.cli, "_main_impl", _signalled)
+	monkeypatch.setattr(sys, "argv", ["subsample"])
+
+	try:
+		with pytest.raises(SystemExit) as exit_info:
+			subsample.cli.main()
+
+		assert exit_info.value.code == 130
+		assert "Interrupted" in capsys.readouterr().err
+		assert signal.getsignal(number) is _not_taken
+	finally:
+		signal.signal(number, original)
+
+
+def test_under_nohup_a_hang_up_is_left_ignored () -> None:
+
+	"""nohup ignores SIGHUP so a program outlives its terminal; Subsample leaves it that way."""
+
+	before = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+	try:
+		previous = subsample.cli._stop_on_signals()
+
+		try:
+			assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+			assert signal.getsignal(signal.SIGTERM) is subsample.cli._stop_like_ctrl_c
+			assert set(previous) == {signal.SIGTERM}
+		finally:
+			for number, handler in previous.items():
+				signal.signal(number, handler)
+	finally:
+		signal.signal(signal.SIGHUP, before)
+
+
+def test_a_line_the_terminal_cannot_take_does_not_cut_the_shutdown_short () -> None:
+
+	"""#4702: after a hang-up the terminal is gone, and a print to it fails.
+
+	The failure cut the shutdown short and lost the captures it was
+	finishing; now the output goes nowhere from then on.
+	"""
+
+	class _GoneTerminal (io.StringIO):
+
+		def write (self, text: str) -> int:
+			raise OSError(5, "Input/output error")
+
+	with unittest.mock.patch.object(subsample.cli, "_silence_output") as silence:
+		subsample.cli._say("Finishing 2 capture(s) still being analysed…", _GoneTerminal())
+
+	silence.assert_called_once_with()
 
 
 def _default_cfg () -> subsample.config.Config:
