@@ -135,7 +135,12 @@ class TestAThreadAsksForRealTimePriority:
 
 		def _set (pid: int, policy: int, param: typing.Any) -> None:
 
-			assert (pid, policy) == (0, os.SCHED_FIFO)
+			# SCHED_RESET_ON_FORK: a thread this one starts runs at ordinary
+			# priority, not at its real-time one (#4702).  The class skips
+			# elsewhere; the check tells the type checker so too.
+			if sys.platform == "linux":
+				assert (pid, policy) == (0, os.SCHED_FIFO | os.SCHED_RESET_ON_FORK)
+
 			asked.append(param.sched_priority)
 
 			if refuse:

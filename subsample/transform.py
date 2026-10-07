@@ -1992,7 +1992,9 @@ class TransformProcessor:
 		# get/set/pop are GIL-atomic, and the worst race is one hash done twice.
 		self._audio_md5s: dict[int, tuple[weakref.ref[numpy.ndarray], str]] = {}
 
-		n_workers = max(1, ((os.cpu_count() or 1) - 2) // 2)
+		# The CPUs this process may run on, not the machine's (#4702): a 2-CPU
+		# allowance on a 64-core host made 31 render processes beside the audio.
+		n_workers = max(1, (subsample.parallelism.usable_cpu_count() - 2) // 2)
 
 		self._pool: subsample.parallelism.BackgroundPool
 
@@ -4702,10 +4704,21 @@ _carrier_cache_lock = threading.Lock()
 
 def set_carrier_cache_budget (max_bytes: int) -> None:
 
-	"""Set the carrier cache memory budget.  Called from cli.py after config is loaded."""
+	"""Set the carrier cache memory budget.  Called from cli.py after config is loaded.
+
+	A render worker process keeps a carrier cache of its own, so the pool hands
+	each its share of this (parallelism.BackgroundPool, #4702).
+	"""
 
 	global _CARRIER_CACHE_MAX_BYTES
 	_CARRIER_CACHE_MAX_BYTES = max_bytes
+
+
+def carrier_cache_budget () -> int:
+
+	"""The carrier cache memory budget, in bytes, as set_carrier_cache_budget last set it."""
+
+	return _CARRIER_CACHE_MAX_BYTES
 
 
 def _load_carrier (path: str, target_sr: int) -> numpy.ndarray:

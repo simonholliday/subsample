@@ -164,8 +164,8 @@ another process cost none (#4666).
 
 - **Who does what.** Each program's `TransformProcessor` keeps its queue, its
   failures and its callbacks in the player, on a results thread of its own. It
-  hands the session's render processes, (cores − 2) / 2 of them shared by every
-  program, a few renders at a time.
+  hands the session's render processes, (cores − 2) / 2 of them, counting the
+  cores this process may use, shared by every program, a few renders at a time.
 - **How a sound crosses.** It goes through a file in a private scratch folder
   (`parallelism.write_audio` and `read_audio`), which copies it with Python's
   lock released. Pickling would hold the lock for the whole copy: a 35 MB
@@ -406,8 +406,12 @@ longer than a 1024-frame buffer, so the audio dropped out (#4679).
 So `MidiPlayer.run` collects once and calls `gc.freeze()` just before it opens
 the stream. Everything loaded by then is left out of later collections, and a
 full collection takes 0.2 ms, plus about a microsecond for each render cached
-since. The player unfreezes on the way out, since the tests run many players in
-one process.
+since. The main thread does the same before it starts the recorder and the
+player (`cli._start_threads`), so the player's collection walks only what the
+player loaded itself: walking everything held the lock for 30 to 110 ms while
+the recorder's input was already running (#4702). Both unfreeze on the way out,
+since the tests run many players in one process, and the player's teardown
+unfreezes even when a step of it fails.
 
 Frozen objects are still freed by reference counting. Only a cycle among them is
 never collected, and no sample, map or cached render sits in one, so what a
@@ -442,7 +446,9 @@ from the system inside the audio callback.
   receiver ask for 69 on their first call, since a note is timed from when its
   handler starts. Each is capped at the user's `RLIMIT_RTPRIO`
   (`MidiPlayer._promote_thread`, `performance.promote_this_thread`), and only the
-  calling thread changes. The main thread never asks, since the tests drive the
+  calling thread changes. It asks with `SCHED_RESET_ON_FORK`, so a thread it
+  starts later, such as the MIDI thread's re-evaluation timer, runs at ordinary
+  priority (#4702). The main thread never asks, since the tests drive the
   handlers from it. The audio thread logs once what it got, and when refused,
   how to allow it. On macOS, CoreAudio and CoreMIDI already run their threads at
   real-time priority.
@@ -542,6 +548,9 @@ paths retry a file still being written.
 - **Why:** on the caller's thread, analysis made the audio wait for Python's
   lock. A stream of dropped files cost 37 to 43 dropouts in 30 seconds at
   1024-frame buffers, and none on a worker.
+- **A worker that dies,** most often from a shortage of memory, comes back as
+  None, which every caller already treats as a file it could not analyse
+  (#4702). Raised, it escaped them, and at start stopped the player.
 - **Where worker processes cannot start,** it runs on the caller's thread, as
   before.
 

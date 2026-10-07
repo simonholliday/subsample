@@ -1,6 +1,7 @@
 """Tests for subsample.parallelism — the shared analysis-pool CPU policy."""
 
 import concurrent.futures
+import concurrent.futures.process
 import logging
 import os
 import pathlib
@@ -22,6 +23,7 @@ import subsample.audio
 import subsample.cache
 import subsample.config
 import subsample.parallelism
+import subsample.transform
 
 
 @pytest.fixture(autouse=True)
@@ -729,7 +731,10 @@ def test_an_analysis_runs_on_a_worker_process_and_says_what_it_logged (caplog: p
 	_skip_without_processes()
 
 	with caplog.at_level(logging.WARNING, logger="subsample"):
-		pid, value = subsample.parallelism.run_in_analysis_worker(_pid_and_warning, 5)
+		result = subsample.parallelism.run_in_analysis_worker(_pid_and_warning, 5)
+
+	assert result is not None
+	pid, value = result
 
 	assert pid != os.getpid()
 	assert value == 5
@@ -746,13 +751,83 @@ def test_an_analysis_that_fails_on_a_worker_raises_here_with_where_it_was_raised
 	assert "_raise_here" in "".join(traceback.format_exception(raised.value))
 
 
+def test_an_analysis_whose_worker_dies_gives_none_and_the_next_one_runs (caplog: pytest.LogCaptureFixture) -> None:
+
+	"""#4702 (L14 of the 2026-10-07 review): a dead worker is a file that could not be analysed.
+
+	Every caller treats None that way and skips the file.  Raised, the dead
+	pool escaped them: at start, a map's one such file stopped the player.
+	"""
+
+	_skip_without_processes()
+
+	assert subsample.parallelism.run_in_analysis_worker(os._exit, 1) is None
+
+	with caplog.at_level(logging.WARNING, logger="subsample"):
+		result = subsample.parallelism.run_in_analysis_worker(_pid_and_warning, 7)
+
+	assert result is not None and result[1] == 7
+	assert any("One of the analysis workers stopped unexpectedly" in message for message in caplog.messages)
+
+
+def test_a_failing_item_is_skipped_in_a_fresh_interpreter () -> None:
+
+	"""#4702 (M18 of the 2026-10-07 review): map_analysis names concurrent.futures.process.
+
+	Its except clause is read only when an item fails, and nothing had
+	imported that module: the failure became an AttributeError that ended the
+	whole scan.  The tests here passed only because an earlier one had
+	imported it, so this one runs in an interpreter of its own.
+	"""
+
+	checkout = pathlib.Path(subsample.parallelism.__file__).resolve().parents[1]
+	env      = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, [str(checkout), os.environ.get("PYTHONPATH")])))
+	code     = "import subsample.parallelism\nprint(subsample.parallelism.map_analysis(int, ['not a number'], player_active=False))"
+
+	result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
+
+	assert result.returncode == 0, result.stderr
+	assert result.stdout.strip() == "[None]"
+
+
 def test_where_worker_processes_cannot_start_an_analysis_runs_on_the_callers_thread (monkeypatch: pytest.MonkeyPatch) -> None:
 
 	monkeypatch.setattr(subsample.parallelism, "_processes_checked", True)
 	monkeypatch.setattr(subsample.parallelism, "_processes_refused_reason", "refused for the test")
 
-	pid, value = subsample.parallelism.run_in_analysis_worker(_pid_and_warning, 6)
+	result = subsample.parallelism.run_in_analysis_worker(_pid_and_warning, 6)
+
+	assert result is not None
+	pid, value = result
 
 	assert pid == os.getpid()
 	assert value == 6
 
+
+def _carrier_budget_here () -> int:
+
+	"""Module-level (picklable) job: the carrier cache budget this worker renders with."""
+
+	return subsample.transform.carrier_cache_budget()
+
+
+def test_each_worker_gets_its_share_of_the_carrier_cache_budget () -> None:
+
+	"""#4702 (L11 of the 2026-10-07 review): a worker keeps a carrier cache of its own.
+
+	Unset, each kept the 10 MB default whatever the budget.  Given the whole
+	of it, the workers together would keep several times it, so Simon chose
+	dividing it among them.
+	"""
+
+	_skip_without_processes()
+
+	previous = subsample.transform.carrier_cache_budget()
+	subsample.transform.set_carrier_cache_budget(200 * 1024 * 1024)
+	pool = subsample.parallelism.BackgroundPool("test", 2, processes=True)
+
+	try:
+		assert pool.submit(_carrier_budget_here).result() == 100 * 1024 * 1024
+	finally:
+		pool.shutdown()
+		subsample.transform.set_carrier_cache_budget(previous)

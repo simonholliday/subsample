@@ -35,6 +35,7 @@ consistently:
 
 import atexit
 import concurrent.futures
+import concurrent.futures.process
 import contextlib
 import dataclasses
 import logging
@@ -102,8 +103,10 @@ def usable_cpu_count () -> int:
 	"""Number of CPUs this process may actually run on.
 
 	``os.cpu_count()`` reports the machine, not the process's allowance, so it
-	overcounts wherever the process is confined: a container with ``--cpus=``, a
-	batch scheduler that pins, a ``taskset``ed CI job.  Sizing a pool from it
+	overcounts wherever the process is confined: a container with
+	``--cpuset-cpus=``, a batch scheduler that pins, a ``taskset``ed CI job.  A
+	CPU quota, such as docker's ``--cpus=``, is not an affinity, and this does
+	not see it.  Sizing a pool from it
 	produced 16 workers on a 2-CPU allowance — heavy oversubscription and thrash
 	on exactly the shared machines that can least afford it.  ``sched_getaffinity``
 	is Linux-only, hence the fallback.
@@ -686,8 +689,9 @@ class Failure:
 
 
 def init_background_worker (
-	analysis_config:    subsample.config.AnalysisConfig,
-	float_ceiling_dbfs: typing.Optional[float],
+	analysis_config:     subsample.config.AnalysisConfig,
+	float_ceiling_dbfs:  typing.Optional[float],
+	carrier_cache_bytes: int,
 ) -> None:
 
 	"""Set up one background worker process: the parent's settings, and its logging.
@@ -697,11 +701,17 @@ def init_background_worker (
 	the player's level decides, as it is now, not as it was when the pool
 	started.  The worker's ``subsample`` logger does not pass records on to a
 	root logger that, in a process started by the forkserver, has no handler.
+	A vocoder's carrier cache is the worker's own, so it gets its share of the
+	budget (#4702): unset, it kept the 10 MB default.
 	"""
+
+	# Imported here: subsample.transform imports this module.
+	import subsample.transform
 
 	global _in_background_worker
 
 	init_analysis_worker(analysis_config, float_ceiling_dbfs)
+	subsample.transform.set_carrier_cache_budget(carrier_cache_bytes)
 
 	_in_background_worker = True
 
@@ -794,8 +804,13 @@ class BackgroundPool:
 		if not self._processes:
 			return concurrent.futures.ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix=self.name)
 
+		# Imported here: subsample.transform imports this module.
+		import subsample.transform
+
 		# The settings are read now, at the pool's first use, after the CLI has
-		# wired them, as map_analysis reads them for the library scan.
+		# wired them, as map_analysis reads them for the library scan.  Each
+		# worker keeps a carrier cache of its own, so together they keep within
+		# the budget by dividing it (Simon, #4702).
 		return concurrent.futures.ProcessPoolExecutor(
 			max_workers=self.workers,
 			mp_context=multiprocessing.get_context(_BACKGROUND_START_METHOD),
@@ -803,6 +818,7 @@ class BackgroundPool:
 			initargs=(
 				subsample.cache.analysis_config(),
 				subsample.audio.float_import_ceiling(),
+				subsample.transform.carrier_cache_budget() // self.workers,
 			),
 		)
 
@@ -902,7 +918,9 @@ def _call_relaying (
 	return value, None, tuple(records)
 
 
-def run_in_analysis_worker (fn: typing.Callable[..., _Result], /, *args: typing.Any, **kwargs: typing.Any) -> _Result:
+def run_in_analysis_worker (
+	fn: typing.Callable[..., _Result], /, *args: typing.Any, **kwargs: typing.Any,
+) -> typing.Optional[_Result]:
 
 	"""Run ``fn`` on the session's analysis worker processes, and wait for it (#4667).
 
@@ -912,6 +930,12 @@ def run_in_analysis_worker (fn: typing.Callable[..., _Result], /, *args: typing.
 	What ``fn`` logs is logged here, and what it raises is raised here, with
 	where it was raised.  ``fn`` and its arguments must pickle.  Where worker
 	processes cannot start, ``fn`` runs on the caller's thread, as it did.
+
+	A worker that dies running ``fn``, most often because the machine ran short
+	of memory, gives None (#4702): every caller treats that as a file that
+	could not be analysed, and skips it.  Raised, it escaped the callers, and at
+	start a map's one such file stopped the player.  The pool says why, and
+	starts a new worker, when it is next used.
 	"""
 
 	pool = shared_pool("analysis", analysis_worker_count(player_active=True))
@@ -919,7 +943,10 @@ def run_in_analysis_worker (fn: typing.Callable[..., _Result], /, *args: typing.
 	if not pool.in_processes:
 		return fn(*args, **kwargs)
 
-	value, failure, records = pool.submit(_call_relaying, fn, args, kwargs).result()
+	try:
+		value, failure, records = pool.submit(_call_relaying, fn, args, kwargs).result()
+	except concurrent.futures.process.BrokenProcessPool:
+		return None
 
 	log_relayed(records)
 

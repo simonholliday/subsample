@@ -630,6 +630,31 @@ class TestListDevices:
 		assert "Audio inputs" in capsys.readouterr().out
 
 
+def test_start_up_is_frozen_before_the_recorder_and_the_player_start () -> None:
+
+	"""#4702 (claim (c) of the 2026-10-07 review): collect and freeze first, then start them.
+
+	The player's own collection, just before its audio opens, then walks only
+	what it loaded itself.  Walking everything held Python's lock for 30 to
+	110 ms while the recorder's input was already running.
+	"""
+
+	calls   = unittest.mock.Mock()
+	threads = [threading.Thread(target=calls.recorder), threading.Thread(target=calls.player)]
+
+	with unittest.mock.patch("gc.collect") as collect, unittest.mock.patch("gc.freeze") as freeze:
+		calls.attach_mock(collect, "collect")
+		calls.attach_mock(freeze, "freeze")
+
+		subsample.cli._start_threads(threads)
+
+		for thread in threads:
+			thread.join()
+
+	assert calls.mock_calls[:2] == [unittest.mock.call.collect(), unittest.mock.call.freeze()]
+	assert sorted(calls.mock_calls[2:], key=str) == [unittest.mock.call.player(), unittest.mock.call.recorder()]
+
+
 class TestConfigErrorsExitCleanly:
 
 	"""A broken config yields ONE clean error line and exit 1 — no traceback."""

@@ -149,7 +149,11 @@ def promote_this_thread (priority: int) -> typing.Optional[int]:
 	Asks for ``priority`` or, where the user's real-time limit (RLIMIT_RTPRIO,
 	the ``rtprio`` of limits.conf) is lower but not 0, for that limit.  At a
 	limit of 0 it asks anyway, since root or the CAP_SYS_NICE capability may
-	still grant it.  Only the calling thread changes, never the process.
+	still grant it.  Only the calling thread changes, never the process, and
+	never a thread it starts later (#4702): those start at ordinary priority.
+	A thread inherits the policy of the thread that starts it, so without that
+	the MIDI thread's timers ran the player's heaviest Python work, rebuilding
+	its assignments, at real-time priority above the recorder's input.
 
 	Returns the priority granted, or None where it is refused, or where it is
 	not Linux's to give (REALTIME_APPLIES).
@@ -164,7 +168,7 @@ def promote_this_thread (priority: int) -> typing.Optional[int]:
 		priority = soft
 
 	try:
-		os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(priority))
+		os.sched_setscheduler(0, os.SCHED_FIFO | os.SCHED_RESET_ON_FORK, os.sched_param(priority))
 	except OSError:
 		return None
 

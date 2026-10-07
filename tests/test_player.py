@@ -679,6 +679,31 @@ class TestMidiPlayer:
 			unittest.mock.call.unfreeze(),
 		]
 
+	def test_a_stream_that_fails_to_stop_still_closes_everything (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""#4702 (L5 of the 2026-10-07 review): each step of the teardown runs on its own.
+
+		An interface unplugged mid-set makes stop_stream raise.  The stream was
+		then never closed, PortAudio never terminated and the heap left frozen,
+		and the failure was reported as one to start the player.
+		"""
+
+		shutdown_event = threading.Event()
+		shutdown_event.set()
+		mock_pa = self._make_mock_pyaudio()
+		mock_pa.open.return_value.stop_stream.side_effect = OSError(-9999, "Unanticipated host error")
+
+		with self._patch_open_input(self._make_mock_port()):
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+				with unittest.mock.patch("gc.collect"), unittest.mock.patch("gc.freeze"), unittest.mock.patch("gc.unfreeze") as unfreeze:
+					with caplog.at_level(logging.ERROR, logger="subsample.player"):
+						self._make_player(shutdown_event).run()
+
+		mock_pa.open.return_value.close.assert_called_once()
+		mock_pa.terminate.assert_called_once()
+		unfreeze.assert_called_once()
+		assert "Player: the audio stream did not close cleanly at shutdown: [Errno -9999] Unanticipated host error" in caplog.messages
+
 	def test_run_on_thread_exits_cleanly (self) -> None:
 		shutdown_event = threading.Event()
 		port = self._make_mock_port()

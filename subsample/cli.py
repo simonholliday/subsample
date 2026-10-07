@@ -27,6 +27,7 @@ Press Ctrl+C to stop cleanly.
 import argparse
 import dataclasses
 import datetime
+import gc
 import importlib
 import logging
 import math
@@ -1943,8 +1944,7 @@ def _main_impl () -> None:
 	if cfg.osc.enabled and cfg.osc.notes_enabled:
 		osc_receivers.append(_start_osc_note_receiver(cfg, _player_cell))
 
-	for t in threads:
-		t.start()
+	_start_threads(threads)
 
 	startup_failed = _wait_for_shutdown(shutdown_event, threads)
 
@@ -1953,6 +1953,27 @@ def _main_impl () -> None:
 		[receiver for receiver in osc_receivers if receiver is not None],
 		bank_manager, transform_manager, startup_failed,
 	)
+
+	# For a process that outlives this run: the tests run many in one.
+	gc.unfreeze()
+
+
+def _start_threads (threads: list[threading.Thread]) -> None:
+
+	"""Freeze what start-up loaded out of the garbage collector's reach, then start the recorder and the player.
+
+	The player does the same just before its audio opens (MidiPlayer.run,
+	#4679), and its collection then walks only what it loaded itself (#4702).
+	Walking everything held Python's lock for 30 to 110 ms while the
+	recorder's input was already running.  _main_impl unfreezes once they
+	have stopped.
+	"""
+
+	gc.collect()
+	gc.freeze()
+
+	for thread in threads:
+		thread.start()
 
 
 def _wait_for_shutdown (shutdown_event: threading.Event, threads: list[threading.Thread]) -> bool:

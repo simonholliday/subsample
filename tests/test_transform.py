@@ -5725,6 +5725,25 @@ def _spec_of (*steps: object) -> subsample.transform.TransformSpec:
 	return subsample.transform.TransformSpec(steps=typing.cast(tuple[subsample.transform.TransformStep, ...], steps))
 
 
+def test_the_render_pool_is_sized_from_the_cpus_this_process_may_use (monkeypatch: pytest.MonkeyPatch) -> None:
+
+	"""#4702 (M19 of the 2026-10-07 review): not from the machine's count.
+
+	A 2-CPU allowance on a 64-core host made 31 render processes, each of
+	70 to 170 MB, beside the audio thread.
+	"""
+
+	monkeypatch.setattr(os, "cpu_count", lambda: 64)
+	monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1}, raising=False)
+
+	processor = subsample.transform.TransformProcessor(sample_rate=44100, processes=False)
+
+	try:
+		assert processor._pool.workers == 1
+	finally:
+		processor.shutdown()
+
+
 class TestRendersRunInWorkerProcesses:
 
 	"""#4667: a render runs in a worker process, and comes back as one on a thread would.

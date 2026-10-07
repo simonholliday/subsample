@@ -5398,28 +5398,42 @@ class MidiPlayer:
 			# pa.open failure leaves both None but ``pa`` itself still needs
 			# terminate.  port.close() internally clears the callback under
 			# rtmidi's lock (waits for any in-flight callback to return),
-			# then closes the port.
-			if port is not None:
-				port.close()
+			# then closes the port.  Each step is on its own (#4702): a
+			# stream that fails to stop once its USB device is unplugged
+			# must not leave PortAudio open or the heap frozen, nor report
+			# itself as a failure to start.
+			try:
+				if port is not None:
+					try:
+						port.close()
+					except Exception as exc:
+						_log.error("Player: the MIDI port did not close cleanly at shutdown: %s", exc)
 
-			# Cancel the CC debounce AFTER the port is closed: a CC arriving
-			# between a cancel and the close would re-arm a fresh timer that
-			# outlives shutdown (and runs update_assignments against a player
-			# that is tearing down).
-			with self._cc_debounce_lock:
-				if self._cc_debounce_timer is not None:
-					self._cc_debounce_timer.cancel()
+				# Cancel the CC debounce AFTER the port is closed: a CC arriving
+				# between a cancel and the close would re-arm a fresh timer that
+				# outlives shutdown (and runs update_assignments against a player
+				# that is tearing down).
+				with self._cc_debounce_lock:
+					if self._cc_debounce_timer is not None:
+						self._cc_debounce_timer.cancel()
 
-			if stream is not None:
-				stream.stop_stream()
-				stream.close()
+				if stream is not None:
+					for step in (stream.stop_stream, stream.close):
+						try:
+							step()
+						except Exception as exc:
+							_log.error("Player: the audio stream did not close cleanly at shutdown: %s", exc)
 
-			pa.terminate()
+				try:
+					pa.terminate()
+				except Exception as exc:
+					_log.error("Player: PortAudio did not close cleanly at shutdown: %s", exc)
 
-			# Let the collector reach them again, for a process that outlives
-			# the player: the tests run many players in one.
-			if heap_frozen:
-				gc.unfreeze()
+			finally:
+				# Let the collector reach them again, for a process that outlives
+				# the player: the tests run many players in one.
+				if heap_frozen:
+					gc.unfreeze()
 
 			if port_label:
 				_log.info("MIDI player closed port: %s", port_label)
