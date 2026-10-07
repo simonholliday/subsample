@@ -106,6 +106,7 @@ import subsample.definitions
 import subsample.devices
 import subsample.events
 import subsample.library
+import subsample.parallelism
 import subsample.performance
 import subsample.query
 import subsample.similarity
@@ -2386,7 +2387,9 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 	if not sidecar_path.exists() and path.exists():
 		_log.info("Generating analysis sidecar for reference %s", path.name)
 
-		if subsample.cache.ensure_sample_assets(path, with_preview=False) is None:
+		# On an analysis worker process: a map reload while playing would
+		# otherwise make the audio and the notes wait (#4667).
+		if subsample.parallelism.run_in_analysis_worker(subsample.cache.ensure_sample_assets, path, with_preview=False) is None:
 			_log.warning(
 				"Could not generate sidecar for %s - this reference will be skipped",
 				path.name,
@@ -2463,7 +2466,11 @@ def _load_instrument_from_path (
 		)
 		return None
 
-	result = subsample.cache.ensure_sample_assets(path, with_preview=with_preview)
+	# On an analysis worker process: a map reload while playing would
+	# otherwise make the audio and the notes wait (#4667).
+	result = subsample.parallelism.run_in_analysis_worker(
+		subsample.cache.ensure_sample_assets, path, with_preview=with_preview,
+	)
 	if result is None:
 		_log.warning(
 			"Failed to load or analyze %s - this sample will be skipped",

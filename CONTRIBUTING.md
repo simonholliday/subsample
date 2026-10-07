@@ -23,7 +23,9 @@ Renders and the analysis of captures run in worker processes (see
 - **A test that needs a worker process to run a step of its own** takes it from
   `tests/render_steps.py`. That module registers its steps wherever it is
   imported, the worker included.
-- **`tests/conftest.py` stops the shared worker pools after each test.**
+- **The shared worker pools stay up between tests,** so their workers start
+  once. `tests/test_parallelism.py` stops them around each of its tests, which
+  check that this process can still fork.
 
 ## Type checking
 

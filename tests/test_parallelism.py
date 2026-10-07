@@ -19,6 +19,25 @@ import subsample.config
 import subsample.parallelism
 
 
+@pytest.fixture(autouse=True)
+def _no_shared_pools () -> typing.Iterator[None]:
+
+	"""Stop the session's shared worker pools before and after each test here.
+
+	A pool's manager thread would make this process look unforkable
+	(can_fork_safely), and these tests check that, and run the fork pool; and a
+	test here that makes the pools fall back to threads must not leave a pool of
+	threads for the tests after it.  Elsewhere the pools stay up between tests,
+	so their workers are started and warmed once.
+	"""
+
+	subsample.parallelism.shutdown_shared_pools()
+
+	yield
+
+	subsample.parallelism.shutdown_shared_pools()
+
+
 def _pin_cpus (monkeypatch: pytest.MonkeyPatch, count: int) -> None:
 
 	"""Make usable_cpu_count() report exactly ``count`` CPUs.
@@ -560,3 +579,48 @@ def test_a_pool_whose_worker_died_is_replaced (caplog: pytest.LogCaptureFixture)
 		assert any("One of the test workers stopped unexpectedly" in message for message in caplog.messages)
 	finally:
 		pool.shutdown()
+
+
+def _pid_and_warning (value: int) -> tuple[int, int]:
+
+	"""Module-level (picklable) function that logs and reports where it ran."""
+
+	logging.getLogger("subsample.test").warning("analysed %d", value)
+
+	return os.getpid(), value
+
+
+def test_an_analysis_runs_on_a_worker_process_and_says_what_it_logged (caplog: pytest.LogCaptureFixture) -> None:
+
+	"""What the watcher, OSC import and a map's references use while the player plays."""
+
+	_skip_without_processes()
+
+	with caplog.at_level(logging.WARNING, logger="subsample"):
+		pid, value = subsample.parallelism.run_in_analysis_worker(_pid_and_warning, 5)
+
+	assert pid != os.getpid()
+	assert value == 5
+	assert "analysed 5" in caplog.messages
+
+
+def test_an_analysis_that_fails_on_a_worker_raises_here_with_where_it_was_raised () -> None:
+
+	_skip_without_processes()
+
+	with pytest.raises(ValueError, match="raised in a worker") as raised:
+		subsample.parallelism.run_in_analysis_worker(_raise_here)
+
+	assert "_raise_here" in "".join(traceback.format_exception(raised.value))
+
+
+def test_where_worker_processes_cannot_start_an_analysis_runs_on_the_callers_thread (monkeypatch: pytest.MonkeyPatch) -> None:
+
+	monkeypatch.setattr(subsample.parallelism, "_processes_checked", True)
+	monkeypatch.setattr(subsample.parallelism, "_processes_refused_reason", "refused for the test")
+
+	pid, value = subsample.parallelism.run_in_analysis_worker(_pid_and_warning, 6)
+
+	assert pid == os.getpid()
+	assert value == 6
+

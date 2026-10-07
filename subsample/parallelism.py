@@ -4,7 +4,8 @@ Fingerprinting a sample — the 58-dimension analysis behind every match — and
 rendering a variant are heavy, CPU-bound work, and Subsample runs them in pools
 of background workers: the one-off library scan at startup
 (``subsample.library``), the live analyser that fingerprints sounds as they are
-captured (``subsample.recorder``), and the render pool (``subsample.transform``).
+captured (``subsample.recorder``), the render pool (``subsample.transform``),
+and a file analysed while the player plays (``run_in_analysis_worker``).
 This module holds the policy decisions those pools share, so they behave
 consistently:
 
@@ -391,6 +392,9 @@ _FORKSERVER_PRELOAD: list[str] = ["subsample.transform", "subsample.cache", "sub
 # A log record's attribute naming the once-only key it was logged under, so the
 # player logs what workers relay once in the session, not once per worker.
 ONCE_KEY: str = "subsample_once_key"
+
+# What run_in_analysis_worker returns: whatever the function it runs returns.
+_Result = typing.TypeVar("_Result")
 
 # Why worker processes cannot start here: None when they can, or until asked.
 _processes_refused_reason: typing.Optional[str] = None
@@ -812,3 +816,47 @@ def shutdown_shared_pools () -> None:
 		if _hand_off_folder is not None:
 			shutil.rmtree(_hand_off_folder, ignore_errors=True)
 			_hand_off_folder = None
+
+
+def _call_relaying (
+	fn:     typing.Callable[..., typing.Any],
+	args:   tuple[typing.Any, ...],
+	kwargs: dict[str, typing.Any],
+) -> tuple[typing.Any, typing.Optional[Failure], tuple[logging.LogRecord, ...]]:
+
+	"""Run ``fn`` on a worker, and hand back what it returned or raised, and what it logged."""
+
+	with relaying_logs() as records:
+		try:
+			value = fn(*args, **kwargs)
+		except Exception as exc:
+			return None, Failure.caught(exc), tuple(records)
+
+	return value, None, tuple(records)
+
+
+def run_in_analysis_worker (fn: typing.Callable[..., _Result], /, *args: typing.Any, **kwargs: typing.Any) -> _Result:
+
+	"""Run ``fn`` on the session's analysis worker processes, and wait for it (#4667).
+
+	For analysing a file the player has to have while it plays: one dropped in
+	a watched folder, one sent by OSC, or a map's reference.  On the caller's
+	thread, analysis makes the audio and the notes wait for Python's lock.
+	What ``fn`` logs is logged here, and what it raises is raised here, with
+	where it was raised.  ``fn`` and its arguments must pickle.  Where worker
+	processes cannot start, ``fn`` runs on the caller's thread, as it did.
+	"""
+
+	pool = shared_pool("analysis", analysis_worker_count(player_active=True))
+
+	if not pool.in_processes:
+		return fn(*args, **kwargs)
+
+	value, failure, records = pool.submit(_call_relaying, fn, args, kwargs).result()
+
+	log_relayed(records)
+
+	if failure is not None:
+		raise failure.rebuilt()
+
+	return typing.cast(_Result, value)

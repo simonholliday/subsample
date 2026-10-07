@@ -42,6 +42,7 @@ import watchdog.utils.dirsnapshot
 import subsample.cache
 import subsample.library
 import subsample.mounts
+import subsample.parallelism
 
 
 _log = logging.getLogger(__name__)
@@ -96,9 +97,15 @@ class InstrumentWatcher:
 		target_sample_rate: typing.Optional[int] = None,
 		with_preview: bool = False,
 		on_sample_removed: typing.Optional[typing.Callable[[pathlib.Path], None]] = None,
+		processes: bool = True,
 	) -> None:
 
-		"""Set up a watcher on directory's top level; nothing is watched until start()."""
+		"""Set up a watcher on directory's top level; nothing is watched until start().
+
+		A file that arrives with no sidecar is analysed on the session's
+		analysis worker processes (#4667), unless ``processes`` is False, as
+		the tests that patch the analysis need.
+		"""
 
 		self._directory = directory
 		# Audio + sidecar paths already loaded, so a spurious create/modify event
@@ -117,6 +124,7 @@ class InstrumentWatcher:
 		# .preview.png — kept in step with the startup load so a sample dropped
 		# in later isn't missing the preview a startup-loaded one would have.
 		self._with_preview = with_preview
+		self._processes    = processes
 
 		# Active debounce timers keyed by resolved path.
 		# Protected by _lock — modified from the watchdog callback thread and
@@ -643,7 +651,14 @@ class InstrumentWatcher:
 		with self._lock:
 			self._self_written_sidecars.add(expected_sidecar)
 
-		result = subsample.cache.ensure_sample_assets(audio_path, with_preview=self._with_preview)
+		# On an analysis worker process: on this thread, in the player's
+		# process, analysis makes the audio and the notes wait (#4667).
+		if self._processes:
+			result = subsample.parallelism.run_in_analysis_worker(
+				subsample.cache.ensure_sample_assets, audio_path, with_preview=self._with_preview,
+			)
+		else:
+			result = subsample.cache.ensure_sample_assets(audio_path, with_preview=self._with_preview)
 
 		if result is None:
 			_log.warning(

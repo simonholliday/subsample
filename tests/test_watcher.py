@@ -262,6 +262,7 @@ class TestInstrumentWatcherAudioPath:
 		callback: typing.Callable[[subsample.library.SampleRecord], None],
 		with_preview: bool = False,
 		known_sidecars: typing.Optional[set[pathlib.Path]] = None,
+		processes: bool = True,
 	) -> subsample.watcher.InstrumentWatcher:
 
 		"""Construct a watcher with no samples loaded at startup by default."""
@@ -271,6 +272,7 @@ class TestInstrumentWatcherAudioPath:
 			known_sidecars=known_sidecars or set(),
 			on_sample_loaded=callback,
 			with_preview=with_preview,
+			processes=processes,
 		)
 
 	def test_wav_without_sidecar_triggers_callback (self, tmp_path: pathlib.Path) -> None:
@@ -421,7 +423,8 @@ class TestInstrumentWatcherAudioPath:
 
 		originals = _fast_audio_timings()
 
-		watcher = self._make_watcher(tmp_path, lambda record: delivered.append(record))
+		# Threads: the patched analysis has to be the one the watcher runs.
+		watcher = self._make_watcher(tmp_path, lambda record: delivered.append(record), processes=False)
 		watcher.start()
 
 		try:

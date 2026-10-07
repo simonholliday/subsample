@@ -251,7 +251,8 @@ rules fail there, the worker switches back to the previous program.
 The OSC receiver takes `/sample/import` messages on one thread and imports them
 on another, one at a time and in order, with at most 64 waiting. At stop it drops
 those still waiting and gives the one being analysed ten seconds to finish; one
-that finishes later is not added, since shutdown has begun.
+that finishes later is not added, since shutdown has begun. The analysis runs on
+an analysis worker process (see Watchers).
 
 A second OSC receiver, `OscNoteReceiver` on its own port, takes `/note/on` and
 `/note/off` (#3610, #603). It reads each packet itself, walking bundles with
@@ -487,6 +488,18 @@ arrival means both are complete. A new audio file waits a 2 s debounce, then a
 has stopped changing, and only then is analysed, its sidecar written and the
 sample loaded, so a bare file plays about ten seconds after it lands. Both
 paths retry a file still being written.
+
+**Analysing a file while playing happens on an analysis worker process**
+(`parallelism.run_in_analysis_worker`, #4667).
+- **Who uses it:** the watcher's bare files, OSC `/sample/import`, and a map's
+  reference sounds, at start or on a reload.
+- **How it works:** the caller's thread waits on `cache.ensure_sample_assets`
+  in the worker, and logs what it logged, then reads the file for playing.
+- **Why:** on the caller's thread, analysis made the audio wait for Python's
+  lock. A stream of dropped files cost 37 to 43 dropouts in 30 seconds at
+  1024-frame buffers, and none on a worker.
+- **Where worker processes cannot start,** it runs on the caller's thread, as
+  before.
 
 **A folder on a network drive is polled.** Both watchers otherwise hear of a
 change through the operating system's notice of it, and a network drive gives

@@ -2326,7 +2326,11 @@ def _start_osc_receiver (
 				_log.warning("OSC /sample/import: file not found: %s", file_path)
 				return
 
-			result = subsample.cache.ensure_sample_assets(file_path, with_preview=cfg.recorder.previews)
+			# On an analysis worker process: on this thread, in the player's
+			# process, analysis makes the audio and the notes wait (#4667).
+			result = subsample.parallelism.run_in_analysis_worker(
+				subsample.cache.ensure_sample_assets, file_path, with_preview=cfg.recorder.previews,
+			)
 
 			if result is None:
 				_log.warning("OSC /sample/import: analysis failed: %s", file_path)
