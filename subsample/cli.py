@@ -1065,6 +1065,7 @@ def _load_bank (
 			load_audio=True,
 			with_preview=cfg.recorder.previews,
 			target_sample_rate=output_sample_rate,
+			reference_directory=subsample.config.reference_directory(cfg),
 		)
 
 	# Similarity matrix (per-bank — rankings are relative to each bank's samples).
@@ -1783,6 +1784,7 @@ def _main_impl () -> None:
 				load_audio=True,
 				with_preview=cfg.recorder.previews,
 				target_sample_rate=output_sample_rate,
+				reference_directory=subsample.config.reference_directory(cfg),
 			)
 			print(
 				f"  Instruments  : {len(instrument_library)} sample(s) loaded"

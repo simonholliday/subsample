@@ -593,7 +593,7 @@ class _LoadedSample:
 	loop:        typing.Optional[subsample.loopfind.LoopPoints] = None
 
 
-def _sweep_orphans (directory: pathlib.Path) -> None:
+def _sweep_orphans (directory: pathlib.Path, reference_directory: typing.Optional[pathlib.Path] = None) -> None:
 
 	"""Recursively delete .analysis.json and .preview.png sidecars whose
 	audio counterpart is absent in the same directory — routine housekeeping
@@ -604,18 +604,23 @@ def _sweep_orphans (directory: pathlib.Path) -> None:
 	written by a third-party tool would still be deleted, but that's the
 	same name collision the user is responsible for avoiding.
 
-	ONE exception: a directory named ``reference`` is left untouched, because
-	its fingerprints are audio-less BY DESIGN — subsample ships them and
-	`subsample --init` scaffolds them into ``samples/reference/``, where the
-	similarity engine loads them by path with no WAV ever present.  The check
-	is scoped to the swept tree (a ``reference`` folder ABOVE the project can't
-	accidentally exempt everything), and covers both the case where the swept
-	root itself is the reference directory and where it is a subdirectory of a
-	broader ``library.directory``.
+	Reference fingerprints are the exception, because they are audio-less BY
+	DESIGN: the similarity engine loads them by path with no WAV ever present.
+	Everything under ``reference_directory`` (``library.reference_directory``,
+	as config.reference_directory gives it) is left alone, wherever it is and
+	whatever it is called (#4702): a custom one inside ``library.directory``
+	lost every fingerprint at the next start, and a fingerprint cannot be made
+	again without its audio.  A directory named ``reference`` is left alone
+	too, as before.  That check is scoped to the swept tree (a ``reference``
+	folder ABOVE the project can't accidentally exempt everything), and covers
+	both the case where the swept root itself is a reference directory and
+	where it is a subdirectory of a broader ``library.directory``.
 
 	Failures (e.g. permission denied) are logged at ERROR and skipped;
 	never aborts the wider library load.
 	"""
+
+	spared = reference_directory.resolve() if reference_directory is not None else None
 
 	for path in directory.rglob("*"):
 		if not path.is_file():
@@ -646,9 +651,12 @@ def _sweep_orphans (directory: pathlib.Path) -> None:
 		if audio_path.exists():
 			continue
 
-		# Leave the curated reference directory alone (audio-less by design).
+		# Leave the reference fingerprints alone (audio-less by design).
 		enclosing_dirs = path.relative_to(directory).parts[:-1]
 		if directory.name == "reference" or "reference" in enclosing_dirs:
+			continue
+
+		if spared is not None and path.resolve().is_relative_to(spared):
 			continue
 
 		try:
@@ -716,6 +724,7 @@ def load_instrument_library (
 	with_preview: bool,
 	load_audio: bool = True,
 	target_sample_rate: typing.Optional[int] = None,
+	reference_directory: typing.Optional[pathlib.Path] = None,
 ) -> InstrumentLibrary:
 
 	"""Discover and load instrument samples from ``directory`` (recursive).
@@ -748,6 +757,10 @@ def load_instrument_library (
 		                    record's audio field.  Set False to load metadata
 		                    only (e.g. for an analysis-only run).
 		target_sample_rate: When set, resample on load to this rate.
+		reference_directory: Where the reference fingerprints are
+		                    (config.reference_directory): the orphan sweep
+		                    leaves it alone.  Every caller that has a config
+		                    passes it (#4702).
 
 	Returns:
 		InstrumentLibrary containing all successfully loaded samples.  If the
@@ -763,7 +776,7 @@ def load_instrument_library (
 	# Tidy up before working.  Orphan sweep runs unconditionally so the
 	# directory state at the end of load reflects exactly the audio files
 	# present at the start — no stale sidecar/PNG ghosts.
-	_sweep_orphans(directory)
+	_sweep_orphans(directory, reference_directory)
 
 	audio_paths = sorted(
 		p for p in directory.rglob("*")

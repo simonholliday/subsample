@@ -45,6 +45,7 @@ import typing
 
 import mido
 
+import subsample.config
 import subsample.library
 import subsample.player
 import subsample.similarity
@@ -218,6 +219,7 @@ def main () -> int:
 		load_audio=True,
 		with_preview=cfg.recorder.previews,
 		target_sample_rate=output_sr,
+		reference_directory=subsample.config.reference_directory(cfg),
 	)
 	print(f"  {len(instrument_library)} sample(s) loaded")
 

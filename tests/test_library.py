@@ -704,8 +704,7 @@ class TestLoadInstrumentLibrary:
 	) -> None:
 		import logging
 		# An audio-less sidecar inside a `reference/` directory is a curated
-		# fingerprint (shipped, and scaffolded by `subsample --init`) and must
-		# survive the sweep; the same audio-less shape ANYWHERE ELSE is an orphan
+		# fingerprint and must survive the sweep; the same audio-less shape ANYWHERE ELSE is an orphan
 		# and is deleted — routine housekeeping after a sample is removed.
 		ref_dir = tmp_path / "reference"
 		ref_dir.mkdir()
@@ -731,6 +730,27 @@ class TestLoadInstrumentLibrary:
 			ref_root, 10 * 1024 * 1024, with_preview=False,
 		)
 		assert kept.exists()
+
+	def test_a_configured_reference_dir_is_kept_whatever_its_name (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4702 (H4 of the 2026-10-07 review): library.reference_directory inside the library.
+
+		Only a folder named `reference` was spared, so a custom one, such as
+		samples/my_refs, lost every fingerprint at the next start, and a
+		fingerprint cannot be made again without its audio.
+		"""
+
+		my_refs = tmp_path / "my_refs"
+		my_refs.mkdir()
+		kept   = _write_sidecar(my_refs, "kick")
+		orphan = _write_sidecar(tmp_path, "OLD_CAPTURE")
+
+		subsample.library.load_instrument_library(
+			tmp_path, 10 * 1024 * 1024, with_preview=False, reference_directory=my_refs,
+		)
+
+		assert kept.exists(), "the configured reference fingerprint must be kept"
+		assert not orphan.exists(), "an orphan elsewhere is still swept"
 
 	def test_same_stem_different_folders_coexist (
 		self, tmp_path: pathlib.Path,

@@ -229,6 +229,7 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		pathlib.Path(cfg.library.directory),
 		max_instrument_bytes,
 		with_preview=False,   # mandatory keyword-only; this report renders no previews
+		reference_directory=subsample.config.reference_directory(cfg),
 	)
 
 	if len(instrument_library) == 0:
