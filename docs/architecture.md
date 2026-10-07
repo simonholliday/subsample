@@ -373,6 +373,28 @@ limit whether the work is spread across four cores or forty, so the package
 temperature lands in much the same place either way. What you gain is a machine
 that stays usable while it works.
 
+### Garbage collection
+
+Python's garbage collector holds Python's lock too. A full collection checks
+every object the process holds, and most of those are the library, maps and
+analyses loaded at start. While Subsample rendered, one came every few minutes
+and took 18-59 ms on Python 3.12, and 28 ms with 3.14's incremental collector:
+longer than a 1024-frame buffer, so the audio dropped out (#4679).
+
+So `MidiPlayer.run` collects once and calls `gc.freeze()` just before it opens
+the stream. Everything loaded by then is left out of later collections, and a
+full collection takes 0.2 ms, plus about a microsecond for each render cached
+since. The player unfreezes on the way out, since the tests run many players in
+one process.
+
+Frozen objects are still freed by reference counting. Only a cycle among them is
+never collected, and no sample, map or cached render sits in one, so what a
+session drops (a library eviction, a map reload, a cache eviction) is still
+freed. Keep it that way: an object loaded at start that refers back to itself
+through others, such as a child holding its parent, would leak if a session
+dropped it. A thread whose target is a method of the object that holds it is
+such a cycle, harmless while that object lasts the whole session.
+
 ### Start-up checks and real-time priority
 
 When the player starts, `subsample.performance` looks once at what on the

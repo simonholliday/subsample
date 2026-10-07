@@ -73,6 +73,7 @@ midi-map.yaml by --init) for the format specification.
 
 import collections
 import dataclasses
+import gc
 import getpass
 import logging
 import math
@@ -5173,6 +5174,10 @@ class MidiPlayer:
 		Input port selection:
 		  - virtual_midi_port set → create a named virtual port (other apps connect to it)
 		  - otherwise → open the hardware device by device_name
+
+		Just before the stream opens, everything loaded so far is frozen out
+		of the garbage collector's passes, and let back in on the way out
+		(#4679).
 		"""
 
 		# Resources are initialised to None upfront so the finally block can
@@ -5185,6 +5190,7 @@ class MidiPlayer:
 		stream:     typing.Optional[typing.Any]       = None
 		port:       typing.Optional[mido.ports.BaseInput] = None
 		port_label:                          str      = ""
+		heap_frozen:                         bool     = False
 
 		try:
 			# Resolve output device — mirrors the input device selection pattern.
@@ -5270,6 +5276,21 @@ class MidiPlayer:
 				# Rebuild the working map and selection cache from the fixed sources.
 				self._materialize_zones()
 				self._rebuild_candidate_cache()
+
+			# Collect once, then freeze what is left out of the collector's
+			# reach (#4679).  A full collection holds Python's lock while it
+			# checks every object the process holds, most of them the
+			# libraries, maps and analyses loaded by now.  That took 18-59 ms
+			# while renders ran, longer than a 1024-frame buffer, so the
+			# audio dropped out.  With them frozen it took 0.2 ms, plus about
+			# a microsecond for each render cached since.  Frozen objects are
+			# still freed by reference counting, and only a cycle among them
+			# is never collected: no sample, map or cached render sits in
+			# one.  The collection also frees what the rebuild above dropped,
+			# before it can be frozen.
+			gc.collect()
+			gc.freeze()
+			heap_frozen = True
 
 			# Callback mode: PortAudio pulls audio from _audio_callback on its
 			# own high-priority thread.  The rtmidi callback thread runs
@@ -5394,6 +5415,11 @@ class MidiPlayer:
 				stream.close()
 
 			pa.terminate()
+
+			# Let the collector reach them again, for a process that outlives
+			# the player: the tests run many players in one.
+			if heap_frozen:
+				gc.unfreeze()
 
 			if port_label:
 				_log.info("MIDI player closed port: %s", port_label)

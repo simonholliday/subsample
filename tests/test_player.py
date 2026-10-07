@@ -616,6 +616,69 @@ class TestMidiPlayer:
 
 		port.close.assert_called_once()
 
+	def _run_with_gc_watched (self, *, open_fails: bool = False) -> unittest.mock.Mock:
+
+		"""Run a player with its shutdown already set, recording the collector's calls and the stream's opening, in order."""
+
+		calls   = unittest.mock.Mock()
+		mock_pa = self._make_mock_pyaudio()
+
+		def fake_open (**kwargs: typing.Any) -> typing.Any:
+			calls.open()
+
+			if open_fails:
+				raise OSError("Invalid number of channels")
+
+			return mock_pa.open.return_value
+
+		mock_pa.open.side_effect = fake_open
+		shutdown_event = threading.Event()
+		shutdown_event.set()
+
+		with self._patch_open_input(self._make_mock_port()):
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+				with unittest.mock.patch("gc.collect") as collect, unittest.mock.patch("gc.freeze") as freeze, unittest.mock.patch("gc.unfreeze") as unfreeze:
+					calls.attach_mock(collect, "collect")
+					calls.attach_mock(freeze, "freeze")
+					calls.attach_mock(unfreeze, "unfreeze")
+
+					player = self._make_player(shutdown_event)
+
+					if open_fails:
+						with pytest.raises(OSError):
+							player.run()
+					else:
+						player.run()
+
+		return calls
+
+	def test_freezes_what_is_loaded_while_the_stream_is_open (self) -> None:
+
+		"""What is loaded before the audio opens is collected once and frozen out of
+		the collector's passes, and let back in when the player stops (#4679)."""
+
+		calls = self._run_with_gc_watched()
+
+		assert calls.mock_calls == [
+			unittest.mock.call.collect(),
+			unittest.mock.call.freeze(),
+			unittest.mock.call.open(),
+			unittest.mock.call.unfreeze(),
+		]
+
+	def test_a_stream_that_fails_to_open_lets_the_collector_back_in (self) -> None:
+
+		"""A failed open still unfreezes on the way out."""
+
+		calls = self._run_with_gc_watched(open_fails=True)
+
+		assert calls.mock_calls == [
+			unittest.mock.call.collect(),
+			unittest.mock.call.freeze(),
+			unittest.mock.call.open(),
+			unittest.mock.call.unfreeze(),
+		]
+
 	def test_run_on_thread_exits_cleanly (self) -> None:
 		shutdown_event = threading.Event()
 		port = self._make_mock_port()
