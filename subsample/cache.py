@@ -260,6 +260,7 @@ def save_cache (
 	channel_format: str = "pcm",
 	preview_data: typing.Optional[subsample.preview.PreviewData] = None,
 	loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
+	cut_from: typing.Optional[str] = None,
 ) -> None:
 
 	"""Write analysis results to a JSON sidecar file.
@@ -297,6 +298,9 @@ def save_cache (
 		loop:        The seamless loop found by compute_loop, written as the
 		             top-level ``loop`` block, or None (JSON null) for a sound
 		             that is not loopable.
+		cut_from:    The file file mode cut this sample from, resolved, or None:
+		             a later cut of the same file replaces it, and one of another
+		             file of the same name does not (#4703, M7).
 	"""
 
 	effective_level = level if level is not None else subsample.analysis.LevelResult(peak=0.0, rms=0.0)
@@ -312,7 +316,7 @@ def save_cache (
 		audio_md5, params, spectral, rhythm, pitch, timbre, duration,
 		effective_level, effective_band_energy,
 		bit_depth=bit_depth, channels=channels, captured_at=captured_at,
-		channel_format=channel_format, preview_data=preview_data, loop=loop,
+		channel_format=channel_format, preview_data=preview_data, loop=loop, cut_from=cut_from,
 	)
 	json_str = json.dumps(payload, indent=2)
 
@@ -387,6 +391,7 @@ def load_cache (audio_path: pathlib.Path) -> SampleAssets | None:
 			audio_path,
 			cached_version=cached_version,
 			channel_format=prior_channel_format,
+			cut_from=_cut_from_in(payload),
 		)
 
 	# MD5 check — reads the audio file; done after version check to skip
@@ -419,6 +424,7 @@ def _reanalyze_and_save (
 	channel_format: str = "pcm",
 	with_preview: bool = False,
 	audio_changed: bool = False,
+	cut_from: typing.Optional[str] = None,
 ) -> SampleAssets | None:
 
 	"""Re-analyze an audio file, overwrite its sidecar, and return the result.
@@ -446,6 +452,8 @@ def _reanalyze_and_save (
 		                sidecar.  Default False preserves the legacy behaviour
 		                used by ``load_cache`` callers
 		                that don't manage PNGs.
+		cut_from:       The stale sidecar's note of the file the sample was cut
+		                from, kept when the audio is the same (see save_cache).
 
 	Returns:
 		The SampleAssets dataclass on success (spectral, rhythm, pitch, timbre,
@@ -531,7 +539,7 @@ def _reanalyze_and_save (
 			duration, level, band_energy,
 			bit_depth=file_info.bit_depth, channels=file_info.channels,
 			channel_format=channel_format,
-			preview_data=preview_data, loop=loop,
+			preview_data=preview_data, loop=loop, cut_from=cut_from,
 		)
 	except OSError as exc:
 		_log.warning("Could not save re-analyzed cache for %s: %s", audio_path.name, exc)
@@ -648,6 +656,7 @@ def ensure_sample_assets (
 			cached_version    = cached_version,
 			channel_format    = prior_channel_format,
 			with_preview      = with_preview,
+			cut_from          = _cut_from_in(payload),
 		)
 
 	cached_md5 = payload.get("audio_md5")
@@ -671,6 +680,7 @@ def ensure_sample_assets (
 			audio_path,
 			channel_format    = prior_channel_format,
 			with_preview      = with_preview,
+			cut_from          = _cut_from_in(payload),
 		)
 
 	# Sidecar is fresh and complete.  If a PNG is wanted but missing, re-
@@ -778,6 +788,7 @@ def load_sidecar (
 				# "pcm" for good — so every version bump quietly downgraded a
 				# whole ambisonic library through this path.
 				channel_format = str(payload.get("channel_format", "pcm")),
+				cut_from       = _cut_from_in(payload),
 			)
 
 		_log.warning(
@@ -825,6 +836,28 @@ def load_preview_data (
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def cut_from (audio_path: pathlib.Path) -> typing.Optional[str]:
+
+	"""The file a sample was cut from, as its sidecar notes it, or None where it notes none (#4703, M7).
+
+	None for a sample cut before the note existed, one recorded or imported, or
+	one with no sidecar: file mode never replaces those.
+	"""
+
+	payload = _load_payload(cache_path(audio_path), "sidecar") if cache_path(audio_path).exists() else None
+
+	return _cut_from_in(payload) if payload is not None else None
+
+
+def _cut_from_in (payload: dict[str, typing.Any]) -> typing.Optional[str]:
+
+	"""A sidecar payload's cut_from, when it is a path."""
+
+	value = payload.get("cut_from")
+
+	return value if isinstance(value, str) else None
+
 
 def _load_payload (
 	path: pathlib.Path,
@@ -926,6 +959,7 @@ def _serialize (
 	channel_format: str = "pcm",
 	preview_data: typing.Optional[subsample.preview.PreviewData] = None,
 	loop: typing.Optional[subsample.loopfind.LoopPoints] = None,
+	cut_from: typing.Optional[str] = None,
 ) -> dict[str, typing.Any]:
 
 	"""Build the JSON-serializable dict from analysis results."""
@@ -962,6 +996,7 @@ def _serialize (
 		"channel_format":   channel_format,
 		"duration":         duration,
 		"captured_at":      captured_at,
+		"cut_from":         cut_from,
 		"params":           params_dict,
 		"spectral":         spectral_dict,
 		"rhythm":           rhythm_dict,

@@ -8,6 +8,7 @@ mypy coverage.
 """
 
 import dataclasses
+import datetime
 import logging
 import math
 import os
@@ -961,6 +962,41 @@ def _require_bool (
 	return value
 
 
+def _checked_filename_format (fmt: str) -> str:
+
+	"""recorder.filename_format, refused where a capture could not be named, or would replace the last (#4703, M8).
+
+	An empty format named every capture `.wav`, each replacing the last, in a
+	file the library ignores, and one with no time in it gave every capture the
+	same name.  A `/` makes folders inside recorder.directory, so one that
+	starts with `/` or climbs out with `..` is refused too.
+	"""
+
+	def named_at (moment: datetime.datetime) -> str:
+		return moment.strftime(fmt.replace("%3f", f"{moment.microsecond // 1000:03d}"))
+
+	first  = named_at(datetime.datetime(2001, 2, 3, 4, 5, 6, 7000))
+	second = named_at(datetime.datetime(2009, 8, 7, 16, 15, 14, 3000))
+	folders, _slash, name = first.rpartition("/")
+
+	if not name.strip() or name in (".", ".."):
+		raise ValueError(
+			f"recorder.filename_format must give each recording a name (got {fmt!r}). "
+			"The default is %Y-%m-%d_%H-%M-%S-%3f."
+		)
+
+	if first.startswith("/") or ".." in folders.split("/"):
+		raise ValueError(f"recorder.filename_format must keep recordings inside recorder.directory (got {fmt!r}).")
+
+	if first == second:
+		raise ValueError(
+			f"recorder.filename_format must hold the time, such as %H-%M-%S, or every recording "
+			f"replaces the last (got {fmt!r})."
+		)
+
+	return fmt
+
+
 class _KeyTracker (dict[str, typing.Any]):
 
 	"""A dict that records every key the config builder consults.
@@ -1314,7 +1350,7 @@ def _build_config (
 		enabled=_require_bool(recorder_raw, "enabled", True, "recorder"),
 		previews=_require_bool(recorder_raw, "previews", True, "recorder"),
 		directory=_home_expanded(str(_require(recorder_raw, "directory", "recorder"))),
-		filename_format=str(_require(recorder_raw, "filename_format", "recorder")),
+		filename_format=_checked_filename_format(str(_require(recorder_raw, "filename_format", "recorder"))),
 	)
 
 	player_raw      = _section(raw, "player", trackers)

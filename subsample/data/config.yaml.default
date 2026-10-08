@@ -123,6 +123,9 @@ recorder:
   #   "%Y-%m-%d_%H-%M-%S"        → 2026-03-18_14-32-01.wav (no ms; may overwrite same-second files)
   #   "%H-%M-%S"                  → 14-32-01.wav (time only, overwrites same-second files)
   #   "%Y%m%d_%H%M%S"             → 20260318_143201.wav (compact, ISO 8601-ish)
+  #   "%Y-%m-%d/%H-%M-%S-%3f"    → 2026-03-18/14-32-01-123.wav (a folder a day)
+  # A / makes folders inside recorder.directory. A format that is empty, leads
+  # outside recorder.directory, or holds no time is refused.
 
   # previews: true
   # Visual sample previews.  When enabled (default), every captured or
@@ -208,7 +211,9 @@ recorder:
     # When set, the four input channels are treated as ambisonic and converted
     # to first-order AmbiX B-format (channel order W, Y, Z, X; SN3D) at capture
     # time.  Requires channels: 4.  See the top-level `ambisonic:` section for
-    # playback-side rotation and decoder settings.
+    # playback-side rotation and decoder settings.  Files cut into samples
+    # (subsample <file>) are converted when they have four channels, and cut
+    # as they are otherwise.
     #
     # Supported values:
     #   a_generic : Generic tetrahedral A-format with capsule order

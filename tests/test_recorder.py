@@ -1,5 +1,6 @@
 """Tests for subsample.recorder."""
 
+import dataclasses
 import datetime
 import logging
 import pathlib
@@ -941,6 +942,25 @@ class TestCapturesAreProcessedInWorkerProcesses:
 
 		assert len(handed) == 1
 		assert set(folder.iterdir()) == before
+
+
+def test_a_filename_format_with_a_folder_makes_it (tmp_path: pathlib.Path) -> None:
+
+	"""#4703 (M8): a format with a / failed every capture, since its folder was never made."""
+
+	cfg = _make_config(tmp_path)
+	cfg = subsample.config.Config(
+		recorder=dataclasses.replace(cfg.recorder, filename_format="%Y-%m-%d/%H-%M-%S-%3f"),
+		detection=cfg.detection,
+	)
+	writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params(), processes=False)
+	capture = (numpy.random.default_rng(3).standard_normal((22050, 1)) * 6000.0).astype(numpy.int16)
+
+	writer.enqueue(capture, datetime.datetime(2026, 10, 8, 9, 30, 15, 250000))
+	writer.shutdown()
+
+	assert (tmp_path / "2026-10-08" / "09-30-15-250.wav").exists()
+	assert subsample.cache.cache_path(tmp_path / "2026-10-08" / "09-30-15-250.wav").exists()
 
 
 class TestACaptureWhoseAnalysisFailsIsStillSaved:

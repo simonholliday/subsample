@@ -870,6 +870,66 @@ class TestReanalyzePreservesChannelFormat:
 # ---------------------------------------------------------------------------
 
 
+class TestTheFileASampleWasCutFrom:
+
+	"""#4703 (M7): a sample file mode cut notes its source, so a later cut of the same file replaces it and another's does not.
+
+	The note outlives a re-analysis of the same audio, by each of the three
+	paths that re-analyse, and is dropped when the audio itself changed.
+	"""
+
+	def _cut (self, tmp_path: pathlib.Path) -> pathlib.Path:
+
+		wav = tmp_path / "field_1.wav"
+		tests.helpers._make_wav(wav)
+
+		subsample.cache.save_cache(
+			wav, subsample.cache.compute_audio_md5(wav), tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(), cut_from="/recordings/field.wav",
+		)
+
+		return wav
+
+	def _stale (self, wav: pathlib.Path) -> None:
+
+		sidecar = subsample.cache.cache_path(wav)
+		payload = json.loads(sidecar.read_text())
+		payload["analysis_version"] = "0"
+		sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+	def test_it_is_noted_and_read_back (self, tmp_path: pathlib.Path) -> None:
+
+		assert subsample.cache.cut_from(self._cut(tmp_path)) == "/recordings/field.wav"
+		assert subsample.cache.cut_from(tmp_path / "never_cut.wav") is None
+
+	@pytest.mark.parametrize("reload", ["load_cache", "load_sidecar", "ensure_sample_assets"])
+	def test_it_outlives_a_new_analysis_version (self, tmp_path: pathlib.Path, reload: str) -> None:
+
+		wav = self._cut(tmp_path)
+		self._stale(wav)
+
+		if reload == "load_cache":
+			subsample.cache.load_cache(wav)
+		elif reload == "load_sidecar":
+			subsample.cache.load_sidecar(subsample.cache.cache_path(wav))
+		else:
+			subsample.cache.ensure_sample_assets(wav, with_preview=False)
+
+		assert json.loads(subsample.cache.cache_path(wav).read_text())["analysis_version"] == subsample.analysis.ANALYSIS_VERSION
+		assert subsample.cache.cut_from(wav) == "/recordings/field.wav"
+
+	def test_it_goes_when_the_audio_changed (self, tmp_path: pathlib.Path) -> None:
+
+		wav = self._cut(tmp_path)
+		tests.helpers._make_wav(wav, n_frames=8000)
+
+		subsample.cache.load_cache(wav)
+
+		assert subsample.cache.cut_from(wav) is None
+
+
 class TestPreviewRoundtrip:
 
 	"""save_cache accepts a preview_data kwarg; load_preview_data retrieves it."""

@@ -151,9 +151,12 @@ def _write_atomically (filepath: pathlib.Path, payload: bytes) -> None:
 	or a full disk halfway through left a truncated file with no sidecar, which
 	the next start analysed as if it were the whole recording, and overwriting
 	an existing capture exposed a half-written file to anything watching the
-	directory.
+	directory.  Its folder is made when it does not exist yet: a
+	recorder.filename_format with a `/` in it puts captures in folders of their
+	own, and every capture failed for want of one (#4703, M8).
 	"""
 
+	filepath.parent.mkdir(parents=True, exist_ok=True)
 	handle, temporary = tempfile.mkstemp(dir=filepath.parent, prefix=filepath.name + ".tmp")
 
 	try:
@@ -202,6 +205,7 @@ class _ProcessRequest:
 	filename_base: typing.Optional[str] = None   # None → timestamp-based filename
 	sample_rate: typing.Optional[int] = None      # None → use config sample rate
 	bit_depth: typing.Optional[int] = None        # None → use config bit depth
+	cut_from: typing.Optional[str] = None         # file mode: the file it was cut from
 
 
 class SampleProcessor:
@@ -324,6 +328,12 @@ class SampleProcessor:
 		# Set by abandon(): what is still waiting is saved without its analysis.
 		self._abandoned: bool = False
 
+		# What became of each capture taken, for outcomes.  Guarded by
+		# _futures_lock.
+		self._written:    int = 0
+		self._unanalysed: int = 0
+		self._lost:       int = 0
+
 	def enqueue (
 		self,
 		audio: numpy.ndarray,
@@ -331,6 +341,7 @@ class SampleProcessor:
 		filename_base: typing.Optional[str] = None,
 		sample_rate: typing.Optional[int] = None,
 		bit_depth: typing.Optional[int] = None,
+		cut_from: typing.Optional[str] = None,
 	) -> None:
 
 		"""Submit an audio array for processing.
@@ -349,9 +360,11 @@ class SampleProcessor:
 			sample_rate:   Sample rate for the WAV header. Defaults to config value.
 			bit_depth:     Bit depth for WAV writing and mono conversion. Defaults
 			               to config value.
+			cut_from:      File mode: the file this was cut from, resolved, which
+			               its sidecar notes (cache.save_cache).
 		"""
 
-		req = _ProcessRequest(audio, timestamp, filename_base, sample_rate, bit_depth)
+		req = _ProcessRequest(audio, timestamp, filename_base, sample_rate, bit_depth, cut_from)
 
 		future = self._executor.submit(self._process, req)
 		future.add_done_callback(self._on_future_done)
@@ -376,6 +389,26 @@ class SampleProcessor:
 				"sample-processor backlog: %d in-flight - processing may be falling behind captures",
 				depth,
 			)
+
+	@property
+	def outcomes (self) -> "Outcomes":
+
+		"""What became of the captures taken so far: saved with their analysis, saved without it, or lost."""
+
+		with self._futures_lock:
+			return Outcomes(written=self._written, unanalysed=self._unanalysed, lost=self._lost)
+
+	def _count (self, outcome: str) -> None:
+
+		"""Count one capture's outcome: written, unanalysed or lost."""
+
+		with self._futures_lock:
+			if outcome == "written":
+				self._written += 1
+			elif outcome == "unanalysed":
+				self._unanalysed += 1
+			else:
+				self._lost += 1
 
 	@property
 	def queue_depth (self) -> int:
@@ -467,6 +500,8 @@ class SampleProcessor:
 			self._save_unanalysed(req, exc)
 			return
 
+		self._count("written" if captured.written is not None else "lost")
+
 		if self._on_complete is not None and captured.written is not None:
 			filepath, duration = captured.written
 
@@ -497,10 +532,11 @@ class SampleProcessor:
 		hand-off that could not be written all threw the audio away, while the
 		log said the WAV might be intact.  The audio is written where the
 		capture would have been, without a sidecar, so whatever loads it next
-		analyses it.  An ambisonic capture is converted first, and given a
-		sidecar holding only its format, which that analysis keeps.  ``failure``
-		is None for a capture abandon() skipped; an abandoned one is not a
-		fault, and says so in a line of its own.
+		analyses it.  An ambisonic capture is converted first.  A sidecar
+		holding only its format, and in file mode the file it was cut from,
+		carries those through that analysis.  ``failure`` is None for a capture
+		abandon() skipped; an abandoned one is not a fault, and says so in a
+		line of its own.
 		"""
 
 		cfg         = self._cfg
@@ -517,21 +553,33 @@ class SampleProcessor:
 
 			_write_atomically(filepath, _encoded(req.audio, sample_rate, bit_depth, audio_format))
 
+			placeholder: dict[str, str] = {}
+
 			if ambisonic_format is not None:
+				placeholder["channel_format"] = "b_format_ambix"
+
+			if req.cut_from is not None:
+				placeholder["cut_from"] = req.cut_from
+
+			if placeholder:
 				sidecar = subsample.cache.cache_path(filepath)
 
 				if self._before_sidecar_write is not None:
 					self._before_sidecar_write(sidecar)
 
-				_write_atomically(sidecar, json.dumps({"channel_format": "b_format_ambix"}).encode("utf-8"))
+				_write_atomically(sidecar, json.dumps(placeholder).encode("utf-8"))
 
 		except Exception as exc:
+			self._count("lost")
+
 			if self._abandoned:
 				_log.error("Recording could not be saved: %s", exc, exc_info=True)
 			else:
 				_log.error("Recording could not be analysed: %s - nor saved: %s", failure, exc, exc_info=failure)
 
 			return
+
+		self._count("unanalysed")
 
 		if self._abandoned:
 			_log.info("Saved %s without its analysis", filepath.name)
@@ -586,6 +634,16 @@ class SampleProcessor:
 			return dataclasses.replace(outcome.captured, audio=req.audio)
 
 		return dataclasses.replace(outcome.captured, audio=subsample.parallelism.read_audio(outcome.converted, remove=True))
+
+
+@dataclasses.dataclass(frozen=True)
+class Outcomes:
+
+	"""How many of a processor's captures were saved with their analysis, saved without it, or lost."""
+
+	written:    int
+	unanalysed: int
+	lost:       int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -773,6 +831,7 @@ def _process_capture (
 		channel_format=channel_format_tag,
 		preview_data=preview_data,
 		loop=loop,
+		cut_from=req.cut_from,
 	)
 
 	return _Captured(
@@ -900,6 +959,7 @@ def _write_capture (
 	channel_format:       str = "pcm",
 	preview_data:         typing.Optional[subsample.preview.PreviewData] = None,
 	loop:                 typing.Optional[subsample.loopfind.LoopPoints] = None,
+	cut_from:             typing.Optional[str] = None,
 ) -> typing.Optional[tuple[pathlib.Path, float]]:
 
 	"""Write a single audio segment to disk and save its analysis sidecar.
@@ -945,6 +1005,7 @@ def _write_capture (
 		                ambisonic decoder on playback.
 		preview_data:  Pre-computed preview block; when set, gates writing
 		               the .preview.png and the sidecar preview JSON.
+		cut_from:      File mode: the file this was cut from, for the sidecar.
 	"""
 
 	# Resolve effective format values; per-request overrides take precedence.
@@ -1014,6 +1075,7 @@ def _write_capture (
 		channel_format = channel_format,
 		preview_data   = preview_data,
 		loop           = loop,
+		cut_from       = cut_from,
 	)
 
 	# Raster preview: written only when preview_data was computed.  The

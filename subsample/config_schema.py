@@ -262,7 +262,9 @@ def json_schema () -> dict[str, typing.Any]:
 						extension.  `%3f` adds zero-padded milliseconds.  The time is
 						the moment the recording ended, so a format without `%3f` gives
 						two recordings that end in the same second the same name, and
-						the later one replaces the earlier.
+						the later one replaces the earlier.  A `/` makes folders inside
+						`recorder.directory`: `%Y-%m-%d/%H-%M-%S-%3f` gives a folder a
+						day.
 						""",
 						default="%Y-%m-%d_%H-%M-%S-%3f",
 						examples=["%Y%m%d_%H%M%S"],
@@ -390,7 +392,9 @@ def json_schema () -> dict[str, typing.Any]:
 								FuMA order, which Subsample reorders and renormalises.
 								`b_ambix` is B-format already in AmbiX order, stored as it
 								is.  `null` turns ambisonic capture off.  Requires
-								`channels: 4`.
+								`channels: 4`.  Files cut into samples are treated the same
+								way when they have four audio channels, and are cut as they
+								are otherwise.
 								""",
 								default=None,
 								nullable=True,

@@ -1453,6 +1453,39 @@ class TestRenamedKeyMigrations:
 			""")
 
 
+class TestTheFilenameFormat:
+
+	"""#4703 (M8): recorder.filename_format that could not name a recording, or kept no time, was taken as it was.
+
+	`""` named every capture `.wav`, each replacing the last, and a `/` failed
+	every capture, its folder never made.
+	"""
+
+	def _load (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fmt: str) -> subsample.config.Config:
+		monkeypatch.chdir(tmp_path)
+		(tmp_path / "config.yaml").write_text(f"recorder:\n  filename_format: {fmt!r}\n")
+		return subsample.config.load_config(None)
+
+	@pytest.mark.parametrize(("fmt", "says"), [
+		("", "must give each recording a name"),
+		("%Y-%m-%d/", "must give each recording a name"),
+		("take", "must hold the time"),
+		("/srv/%H-%M-%S", "must keep recordings inside recorder.directory"),
+		("../%H-%M-%S", "must keep recordings inside recorder.directory"),
+	])
+	def test_one_that_cannot_name_a_recording_or_keeps_no_time_is_refused (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fmt: str, says: str,
+	) -> None:
+
+		with pytest.raises(ValueError, match=f"recorder.filename_format {says}"):
+			self._load(tmp_path, monkeypatch, fmt)
+
+	@pytest.mark.parametrize("fmt", ["%Y-%m-%d/%H-%M-%S-%3f", "%Y%m%d_%H%M%S", "take_%3f"])
+	def test_a_folder_a_day_and_coarser_times_are_taken (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fmt: str) -> None:
+
+		assert self._load(tmp_path, monkeypatch, fmt).recorder.filename_format == fmt
+
+
 class TestEmptyAndCommentedValues:
 
 	"""A key with no value, or a section with everything commented out.

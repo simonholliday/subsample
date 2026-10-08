@@ -20,11 +20,13 @@ import wave
 
 import numpy
 import pytest
+import soundfile
 
 import subsample.analysis
 import subsample.audio
 import subsample.bank
 import subsample.buffer
+import subsample.cache
 import subsample.cli
 import subsample.config
 import subsample.detector
@@ -32,6 +34,7 @@ import subsample.events
 import subsample.library
 import subsample.loopfind
 import subsample.osc
+import subsample.parallelism
 import subsample.player
 import subsample.recorder
 import subsample.similarity
@@ -1005,6 +1008,139 @@ class TestProcessInputFiles:
 		messages = " | ".join(r.message for r in caplog.records)
 		assert "not found" in messages
 		assert "Could not read" in messages
+
+	def _wav (self, path: pathlib.Path, bursts: int, channels: int = 1, hz: float = 440.0) -> pathlib.Path:
+
+		"""Write a file of `bursts` half-second tones apart in near-silence, which file mode cuts into that many samples."""
+
+		sr    = 44100
+		rng   = numpy.random.default_rng(42)
+		t     = numpy.arange(int(0.5 * sr)) / sr
+		tone  = numpy.repeat((0.8 * 32767 * numpy.sin(2 * numpy.pi * hz * t))[:, None], channels, axis=1)
+		parts = [rng.standard_normal((int(0.4 * sr), channels)) * 20]
+
+		for _ in range(bursts):
+			parts += [tone, rng.standard_normal((int(0.6 * sr), channels)) * 20]
+
+		path.parent.mkdir(parents=True, exist_ok=True)
+
+		with wave.open(str(path), "wb") as wf:
+			wf.setnchannels(channels)
+			wf.setsampwidth(2)
+			wf.setframerate(sr)
+			wf.writeframes(numpy.concatenate(parts).astype(numpy.int16).tobytes())
+
+		return path
+
+	def _cfg (self, tmp_path: pathlib.Path, audio: str = "") -> subsample.config.Config:
+
+		"""A config cutting into tmp_path/out, with the recorder's audio lines given."""
+
+		lines = [
+			"recorder:",
+			f"  directory: {tmp_path / 'out'}",
+			"  previews: false",
+			*([audio] if audio else []),
+			"detection:",
+			"  threshold_db: 10.0",
+			"  warmup_seconds: 0.0",
+			"  hold_seconds: 0.15",
+		]
+		config_file = tmp_path / "config.yaml"
+		config_file.write_text("\n".join(lines) + "\n")
+
+		return subsample.config.load_config(config_file)
+
+	def test_two_files_of_one_name_keep_each_others_samples (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4703 (M7): day2/ZOOM0001.WAV replaced the samples cut from day1/ZOOM0001.WAV.
+
+		The second takes its folder's name too, and cutting the first again
+		replaces only its own.
+		"""
+
+		day1 = self._wav(tmp_path / "day1" / "ZOOM0001.wav", 1, hz=440.0)
+		day2 = self._wav(tmp_path / "day2" / "ZOOM0001.wav", 1, hz=880.0)
+		out  = tmp_path / "out"
+		cfg  = self._cfg(tmp_path)
+
+		assert subsample.cli._process_input_files([day1, day2], cfg) == 2
+		assert subsample.cli._process_input_files([day1], cfg) == 1
+
+		assert sorted(sample.name for sample in out.glob("*.wav")) == ["ZOOM0001_1.wav", "day2_ZOOM0001_1.wav"]
+		assert subsample.cache.cut_from(out / "ZOOM0001_1.wav") == str(day1.resolve())
+		assert subsample.cache.cut_from(out / "day2_ZOOM0001_1.wav") == str(day2.resolve())
+
+	def test_a_file_cut_again_into_fewer_samples_leaves_none_of_the_old (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4703 (M7): a re-cut replaced its samples by name, and the old extra ones stayed in the library."""
+
+		source = self._wav(tmp_path / "field.wav", 3)
+		out    = tmp_path / "out"
+		cfg    = self._cfg(tmp_path)
+
+		subsample.cli._process_input_files([source], cfg)
+		assert len(list(out.glob("field_*.wav"))) == 3
+
+		self._wav(source, 1)
+
+		with caplog.at_level(logging.INFO, logger="subsample.cli"):
+			subsample.cli._process_input_files([source], cfg)
+
+		assert sorted(sample.name for sample in out.iterdir()) == ["field_1.wav", "field_1.wav.analysis.json"]
+		assert "Removed field_3.wav, left by an earlier cut of field.wav" in caplog.messages
+
+	def test_a_sample_that_notes_no_source_is_never_replaced (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4703 (M7): a sample cut before the note existed, or put there by hand, keeps its name."""
+
+		source = self._wav(tmp_path / "takes" / "field.wav", 1)
+		out    = tmp_path / "out"
+		out.mkdir()
+		(out / "field_1.wav").write_bytes(b"not ours to replace")
+
+		subsample.cli._process_input_files([source], self._cfg(tmp_path))
+
+		assert (out / "field_1.wav").read_bytes() == b"not ours to replace"
+		assert (out / "takes_field_1.wav").exists()
+
+	@pytest.mark.parametrize(("channels", "says"), [
+		(2, "2ch, cut as it is: recorder.audio.ambisonic_format applies to 4-channel files"),
+		(4, "4ch, converted to B-format from a_generic (recorder.audio.ambisonic_format)"),
+	])
+	def test_the_rigs_ambisonic_format_applies_to_four_channel_files_only (
+		self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], channels: int, says: str,
+	) -> None:
+
+		"""#4703 (M6): a stereo file under a 4-capsule rig's config failed every segment, and said "processed"."""
+
+		source = self._wav(tmp_path / "field.wav", 1, channels=channels)
+		cfg    = self._cfg(tmp_path, audio="  audio:\n    channels: 4\n    ambisonic_format: a_generic")
+
+		assert subsample.cli._process_input_files([source], cfg) == 1
+
+		output = capsys.readouterr().out
+		assert f"  44100 Hz  16-bit  {says}\n" in output
+		assert "→ 1 segment(s) written from field.wav" in output
+		assert soundfile.info(str(tmp_path / "out" / "field_1.wav")).channels == channels
+
+	def test_a_file_whose_every_segment_is_lost_is_not_a_success (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+
+		"""#4703 (M6): every segment failed, and the run said "1 segment(s) processed" and exited 0."""
+
+		def disk_full (*args: typing.Any) -> typing.NoReturn:
+			raise OSError(28, "No space left on device")
+
+		monkeypatch.setattr(subsample.parallelism, "write_audio", disk_full)
+		monkeypatch.setattr(subsample.recorder, "_write_atomically", disk_full)
+		source = self._wav(tmp_path / "field.wav", 1)
+
+		assert subsample.cli._process_input_files([source], self._cfg(tmp_path)) == 0
+		assert "→ 0 of 1 segment(s) written from field.wav" in capsys.readouterr().out
 
 
 class TestIntegrateSample:

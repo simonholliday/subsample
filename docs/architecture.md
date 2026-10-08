@@ -103,6 +103,21 @@ Details a change here has to keep:
   with fewer channels through the ITU-R BS.775 downmix matrices in
   `channel.py`, the LFE dropped.
 
+**File mode** (`subsample FILE…`, `cli._process_input_files`) streams each file
+through the same detector and processor, one file at a time, and drains the
+processor before the next.
+- **Names.** A file's samples are `<file>_<n>`, and each sidecar notes the file
+  it was cut from (`cut_from`, kept through a re-analysis of the same audio).
+  Cutting a file again replaces its own samples and removes those it no longer
+  gives. A different file of the same name takes its folder's name too, and a
+  sample that notes no source is never replaced (`cli._segment_base`, #4703).
+  Two days' ZOOM0001.WAV wrote the same names before.
+- **Ambisonics.** `recorder.audio.ambisonic_format` describes the live rig, so
+  it applies only to 4-channel files, and each file's line says what it did.
+- **What counts.** A file whose every segment was lost is not processed, so a
+  run that wrote nothing exits 1. Each file's line says how many segments were
+  written, of how many found.
+
 ## Analysis cache
 
 Each sample's analysis lives in its `.analysis.json` sidecar, keyed by the audio

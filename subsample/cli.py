@@ -29,10 +29,12 @@ import dataclasses
 import datetime
 import gc
 import importlib
+import itertools
 import logging
 import math
 import os
 import pathlib
+import re
 import shutil
 import signal
 import sys
@@ -150,8 +152,11 @@ def parser () -> argparse.ArgumentParser:
 			"Audio files to cut into samples, written to `recorder.directory` "
 			"and named after the source file (e.g. recording_1.wav, "
 			"recording_2.wav, …, or .flac files when "
-			"`recorder.audio.audio_format` is `flac`). Subsample exits once "
-			"they are done, without starting live capture."
+			"`recorder.audio.audio_format` is `flac`). Cutting a file again "
+			"replaces the samples it gave before. Samples of that name cut "
+			"from another file are kept, and this file's take its folder's "
+			"name too (e.g. day2_recording_1.wav). Subsample exits once they "
+			"are done, without starting live capture."
 		),
 	)
 	command.add_argument(
@@ -657,7 +662,8 @@ def _process_input_files (
 			_log.warning("Could not read %s: %s - skipping", path.name, exc)
 			continue
 
-		print(f"  {file_info.sample_rate} Hz  {file_info.bit_depth}-bit  {file_info.channels}ch")
+		file_cfg, ambisonic_note = _file_mode_config(cfg, file_info.channels)
+		print(f"  {file_info.sample_rate} Hz  {file_info.bit_depth}-bit  {file_info.channels}ch{ambisonic_note}")
 
 		audio_dtype = _AUDIO_DTYPE.get(file_info.bit_depth)
 		if audio_dtype is None:
@@ -679,7 +685,11 @@ def _process_input_files (
 
 		analysis_params = subsample.analysis.compute_params(file_info.sample_rate)
 
-		writer = subsample.recorder.SampleProcessor(cfg, analysis_params, on_complete=None, warn_backlog=False)
+		writer = subsample.recorder.SampleProcessor(file_cfg, analysis_params, on_complete=None, warn_backlog=False)
+
+		# Its samples' names, and those an earlier cut of it left (M7).
+		cut_from      = str(path.resolve())
+		base, earlier = _segment_base(path, pathlib.Path(cfg.recorder.directory))
 
 		segment_index = 1
 		buffer_frames = cfg.recorder.audio.buffer_frames
@@ -709,9 +719,10 @@ def _process_input_files (
 					writer.enqueue(
 						trimmed,
 						datetime.datetime.now(),
-						filename_base=f"{path.stem}_{segment_index}",
+						filename_base=f"{base}_{segment_index}",
 						sample_rate=file_info.sample_rate,
 						bit_depth=file_info.bit_depth,
+						cut_from=cut_from,
 					)
 					segment_index += 1
 
@@ -742,9 +753,10 @@ def _process_input_files (
 					writer.enqueue(
 						trimmed,
 						datetime.datetime.now(),
-						filename_base=f"{path.stem}_{segment_index}",
+						filename_base=f"{base}_{segment_index}",
 						sample_rate=file_info.sample_rate,
 						bit_depth=file_info.bit_depth,
+						cut_from=cut_from,
 					)
 					segment_index += 1
 
@@ -781,13 +793,126 @@ def _process_input_files (
 			writer.flush()
 
 			wall_total = time.monotonic() - start_time
-			count = segment_index - 1
-			print(f"  → {count} segment(s) processed from {path.name} in {_format_mmss(wall_total)}")
-			processed += 1
+			count      = segment_index - 1
+			outcomes   = writer.outcomes
+			saved      = outcomes.written + outcomes.unanalysed
+			print(_cut_summary(count, saved, outcomes.unanalysed, path.name, wall_total))
+
+			# A cut that saved nothing of what it found replaces nothing, and
+			# is no success: every segment failing was "processed", exit 0.
+			if count == 0 or saved:
+				_remove_leftover_segments(earlier, count, path.name)
+				processed += 1
+
 		finally:
 			writer.shutdown()
 
 	return processed
+
+
+def _file_mode_config (cfg: subsample.config.Config, channels: int) -> tuple[subsample.config.Config, str]:
+
+	"""The config a file of this many channels is cut under, and what its line says of ambisonics (#4703, M6).
+
+	recorder.audio.ambisonic_format describes the live rig's microphone, and
+	was applied to every file: a stereo file failed every segment, and a
+	4-channel multitrack file was converted as if it were ambisonic.  It
+	applies to 4-channel files only, and the line says when it does.
+	"""
+
+	ambisonic_format = cfg.recorder.audio.ambisonic_format
+
+	if ambisonic_format is None:
+		return cfg, ""
+
+	if channels == 4:
+		return cfg, f", converted to B-format from {ambisonic_format} (recorder.audio.ambisonic_format)"
+
+	audio = dataclasses.replace(cfg.recorder.audio, ambisonic_format=None)
+
+	return (
+		dataclasses.replace(cfg, recorder=dataclasses.replace(cfg.recorder, audio=audio)),
+		", cut as it is: recorder.audio.ambisonic_format applies to 4-channel files",
+	)
+
+
+def _segment_base (source: pathlib.Path, directory: pathlib.Path) -> tuple[str, list[pathlib.Path]]:
+
+	"""The name this file's samples take before their numbers, and the samples an earlier cut of it left (#4703, M7).
+
+	Its own name, unless samples of that name were cut from another file, or
+	note no file at all: then its folder's name before it, and a number after
+	while that is taken too.  Two files called ZOOM0001.WAV, from two days'
+	folders, wrote the same names, and the second replaced the first's
+	samples.  A sample's sidecar notes the file it was cut from.
+	"""
+
+	cut_from = str(source.resolve())
+
+	for attempt in itertools.count():
+		if attempt == 0:
+			base = source.stem
+		elif attempt == 1:
+			base = f"{source.parent.name}_{source.stem}"
+		else:
+			base = f"{source.parent.name}_{source.stem}-{attempt}"
+
+		earlier = _segments_named(directory, base)
+
+		if all(subsample.cache.cut_from(sample) == cut_from for sample in earlier):
+			return base, earlier
+
+	raise AssertionError("unreachable")
+
+
+def _segments_named (directory: pathlib.Path, base: str) -> list[pathlib.Path]:
+
+	"""The samples in a folder named as file mode names a cut's: base_1.wav, base_2.flac, and so on."""
+
+	if not directory.is_dir():
+		return []
+
+	pattern = re.compile(re.escape(base) + r"_(\d+)\.(?:wav|flac)")
+
+	return sorted(sample for sample in directory.iterdir() if pattern.fullmatch(sample.name))
+
+
+def _remove_leftover_segments (earlier: list[pathlib.Path], count: int, source_name: str) -> None:
+
+	"""Remove the samples an earlier cut of this file left and this one did not replace (#4703, M7).
+
+	One numbered past this cut's, or one this cut saved again in the other
+	format.  A re-cut into fewer samples left the old extra ones in the
+	library.  Each goes with its sidecar and preview.
+	"""
+
+	for sample in earlier:
+		index = int(sample.stem.rsplit("_", 1)[1])
+		other = sample.with_suffix(".flac" if sample.suffix == ".wav" else ".wav")
+
+		if index <= count and not (other.exists() and other not in earlier):
+			continue
+
+		for leftover in (sample, subsample.cache.cache_path(sample), sample.with_name(sample.name + subsample.cache.PREVIEW_PNG_SUFFIX)):
+			try:
+				leftover.unlink(missing_ok=True)
+			except OSError as exc:
+				_log.warning("Could not remove %s: %s", leftover.name, exc)
+
+		_log.info("Removed %s, left by an earlier cut of %s", sample.name, source_name)
+
+
+def _cut_summary (count: int, saved: int, unanalysed: int, source_name: str, seconds: float) -> str:
+
+	"""The line that ends a file's cut: how many segments were written, of how many found (#4703, M6)."""
+
+	segments = f"{count} segment(s)" if saved == count else f"{saved} of {count} segment(s)"
+	line     = f"  → {segments} written from {source_name} in {_format_mmss(seconds)}"
+
+	if unanalysed:
+		line += f", {unanalysed} without their analysis"
+
+	return line
 
 
 def _run_recorder (
