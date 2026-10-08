@@ -127,12 +127,14 @@ class LevelDetector:
 		"""
 
 		self._cfg = cfg
+		self._sample_rate = sample_rate
 		self._chunk_size = chunk_size
 		self._max_recording_frames = max_recording_frames
 
 		# Derived frame counts for warmup and hold-time
 		chunks_per_second = sample_rate / chunk_size
-		self._warmup_chunks_remaining: int = round(cfg.warmup_seconds * chunks_per_second)
+		self._warmup_chunks_total: int = round(cfg.warmup_seconds * chunks_per_second)
+		self._warmup_chunks_remaining: int = self._warmup_chunks_total
 		self._hold_chunks_total: int = max(1, round(cfg.hold_seconds * chunks_per_second))
 
 		# CLOSE threshold: a recording ends when the tail falls below this many dB
@@ -376,10 +378,11 @@ class LevelDetector:
 			if recording_length + self._chunk_size > self._max_recording_frames:
 				end_frame = current_frame
 				start_frame = self._recording_start_frame
-				self._state = DetectorState.IDLE
-				_log.info(
-					"Recording force-ended: reached buffer capacity (%d frames)",
-					recording_length,
+				self._learn_the_room_again()
+				_log.warning(
+					"Recording cut at the buffer's length (%.0f s) - learning the room's level again, "
+					"in case the room itself got louder",
+					recording_length / self._sample_rate,
 				)
 				return (start_frame, end_frame)
 
@@ -427,6 +430,23 @@ class LevelDetector:
 		return (start_frame, end_frame)
 
 	# --- Helpers ---
+
+	def _learn_the_room_again (self) -> None:
+
+		"""Forget the ambient floor and calibrate it afresh, as at start (#4703, M3).
+
+		The floor follows the room only between sounds, so a room that got
+		louder by threshold_db or more and stayed so (a fan, air conditioning,
+		a drone left playing) was one endless sound: each capture ran to the
+		buffer's length and the next began at once, a minute of noise saved
+		every minute.  Calibrating again takes the room as it is now; a room
+		that quietens is followed back down between sounds, as ever.
+		"""
+
+		self._state = DetectorState.WARMUP
+		self._warmup_chunks_remaining = self._warmup_chunks_total
+		self._ambient_rms = 0.0
+		self._ambient_peak = 0.0
 
 	def _update_ambient (self, chunk_rms: float, chunk_peak: float) -> None:
 

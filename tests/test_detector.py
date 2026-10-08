@@ -1,5 +1,6 @@
 """Tests for subsample.detector.LevelDetector."""
 
+import logging
 import typing
 
 import numpy
@@ -302,9 +303,53 @@ class TestBufferOverflow:
 			if result is not None:
 				break
 
-		# Force-end should have fired before the loop exhausted
+		# Force-end should have fired before the loop exhausted, and the
+		# detector learns the room again (#4703, M3).
 		assert result is not None
+		assert _state(detector) == subsample.detector.DetectorState.WARMUP
+
+	@pytest.mark.parametrize("warmup_seconds", [0.0, 0.3])
+	def test_a_room_that_got_louder_is_learned_after_one_capture (
+		self, warmup_seconds: float, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4703 (M3): a lasting step in the room's level gave a buffer-length capture every buffer length.
+
+		The floor followed the room only between sounds, so the louder room
+		was one endless sound.  Cut at the buffer's length, the detector learns
+		the room again; a hit over the new level still records.
+		"""
+
+		cfg = _make_detection_config(warmup_seconds=warmup_seconds)
+		detector = subsample.detector.LevelDetector(cfg, sample_rate=1000, chunk_size=100, max_recording_frames=500)
+		frame = 0
+		captures: list[tuple[int, int]] = []
+
+		def feed (chunk: numpy.ndarray) -> None:
+			nonlocal frame
+			frame += 100
+			result = detector.process_chunk(chunk, current_frame=frame)
+			if result is not None:
+				captures.append(result)
+
+		# The quiet room, through the first calibration.
+		for _ in range(5):
+			feed(_silent_chunk())
+
 		assert _state(detector) == subsample.detector.DetectorState.IDLE
+
+		with caplog.at_level("WARNING", logger="subsample.detector"):
+			for _ in range(60):
+				feed(_loud_chunk(amplitude=1000))
+
+		assert len(captures) == 1
+		assert [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING] == [
+			"Recording cut at the buffer's length (0 s) - learning the room's level again, in case the room itself got louder",
+		]
+
+		feed(_loud_chunk(amplitude=10000))
+
+		assert _state(detector) == subsample.detector.DetectorState.RECORDING
 
 	def test_no_force_end_when_limit_is_zero (self) -> None:
 		# max_recording_frames=0 disables the overflow check

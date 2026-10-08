@@ -590,6 +590,60 @@ class TestTransformProcessor:
 			subsample.transform.TransformProcessor._HANDLERS.clear()
 			subsample.transform.TransformProcessor._HANDLERS.update(original_handlers)
 
+	def test_a_shutdown_that_drops_the_waiting_renders_waits_only_for_those_handed_out (self) -> None:
+
+		"""#4703 (M5): Ctrl+C waited for the whole render backlog, saying nothing.
+
+		A waiting render is asked for again when a note wants it, so the
+		player's shutdown drops the queue and finishes only what the workers
+		hold; nothing is asked for after it.
+		"""
+
+		completed: list[subsample.transform.TransformResult] = []
+
+		def _slow_handler (
+			audio:       numpy.ndarray,
+			sample_rate: int,
+			record:      subsample.library.SampleRecord,
+			step:        subsample.transform.PitchShift,
+		) -> numpy.ndarray:
+			time.sleep(0.05)
+			return audio
+
+		original_handlers = dict(subsample.transform.TransformProcessor._HANDLERS)
+
+		try:
+			subsample.transform.TransformProcessor._HANDLERS[subsample.transform.PitchShift] = _slow_handler
+
+			processor = subsample.transform.TransformProcessor(
+				sample_rate=44100, on_complete=completed.append, processes=False,
+			)
+			record = _make_record(sample_id=1)
+			specs  = [
+				subsample.transform.TransformSpec(steps=(subsample.transform.PitchShift(target_midi_note=note),))
+				for note in range(40, 100)
+			]
+
+			for spec in specs:
+				processor.enqueue(record, spec)
+
+			# Stop while the workers are at it.
+			deadline = time.monotonic() + 10.0
+			while not completed and time.monotonic() < deadline:
+				time.sleep(0.005)
+
+			processor.shutdown(drop_waiting=True)
+			handed_out = len(completed)
+			processor.enqueue(record, specs[0])
+			processor.shutdown(drop_waiting=True)
+
+			assert 0 < handed_out < len(specs)
+			assert len(completed) == handed_out, "nothing is asked for after the shutdown"
+
+		finally:
+			subsample.transform.TransformProcessor._HANDLERS.clear()
+			subsample.transform.TransformProcessor._HANDLERS.update(original_handlers)
+
 
 class TestAFailedRenderIsTriedAgain:
 

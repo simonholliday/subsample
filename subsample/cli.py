@@ -77,6 +77,11 @@ _AUDIO_DTYPE: dict[int, numpy.dtype] = {
 # Cadence for in-loop progress logging during file ingestion.
 _PROGRESS_LOG_INTERVAL_SEC: typing.Final[float] = 10.0
 
+# How long the shutdown waits for the recorder to queue its last sounds.  Its
+# loop wakes every half second and the queueing takes milliseconds, so this only
+# bounds a recorder that fails on the way out.
+_LAST_SOUNDS_WAIT_SEC: typing.Final[float] = 5.0
+
 
 def _format_mmss (seconds: float) -> str:
 
@@ -209,10 +214,17 @@ def _list_devices () -> None:
 	Same names and format as the interactive pickers, so a name seen here can
 	be pasted (whole, or any substring) straight into recorder.audio.device,
 	player.audio.device, or player.midi_device in config.yaml.  Where no MIDI
-	system can be opened, it says why in place of the MIDI list.
+	system can be opened, it says why in place of the MIDI list.  Where no audio
+	system can, it says why in one line and exits 1, as a config problem does:
+	it was a traceback (#4703, M9).
 	"""
 
-	pa = subsample.audio.create_pyaudio()
+	try:
+		pa = subsample.audio.create_pyaudio()
+	except OSError as exc:
+		_log.error("%s", exc)
+		raise SystemExit(1)
+
 	try:
 		inputs  = subsample.audio.list_input_devices(pa)
 		outputs = subsample.audio.list_output_devices(pa)
@@ -572,6 +584,41 @@ def _process_chunk (
 	return _build_trimmed_segment(buf, detector, detection_cfg, sample_rate, start_frame, end_frame)
 
 
+def _queue_the_last_sounds (
+	reader:        subsample.audio.AudioReader,
+	buf:           subsample.buffer.CircularBuffer,
+	detector:      subsample.detector.LevelDetector,
+	detection_cfg: subsample.config.DetectionConfig,
+	sample_rate:   int,
+	writer:        subsample.recorder.SampleProcessor,
+) -> None:
+
+	"""Cut and queue what a stopped input had already heard, and the sound still sounding when it stopped (#4703, M2).
+
+	The live loop stopped at the shutdown flag and dropped both: the chunks
+	still waiting to be read, and the recording still open, so a hit just
+	before Ctrl+C was never saved.  File mode already kept a file's last
+	sound.  The open one is cut where the input stopped, its tail faded as
+	any capture's is.
+	"""
+
+	for chunk in reader.drain():
+		trimmed = _process_chunk(chunk, buf, detector, detection_cfg, sample_rate)
+
+		if trimmed is not None:
+			writer.enqueue(trimmed, datetime.datetime.now())
+
+	last = detector.finalize(buf.frames_written)
+
+	if last is None:
+		return
+
+	trimmed = _build_trimmed_segment(buf, detector, detection_cfg, sample_rate, last[0], last[1])
+
+	if trimmed is not None:
+		writer.enqueue(trimmed, datetime.datetime.now())
+
+
 def _process_input_files (
 	files: list[pathlib.Path],
 	cfg: subsample.config.Config,
@@ -756,6 +803,7 @@ def _run_recorder (
 	app_events: typing.Optional[subsample.events.EventEmitter] = None,
 	processor_cell: typing.Optional[list[typing.Optional[subsample.recorder.SampleProcessor]]] = None,
 	before_sidecar_write: typing.Optional[typing.Callable[[pathlib.Path], None]] = None,
+	last_sounds_queued: typing.Optional[threading.Event] = None,
 ) -> None:
 
 	"""Set up an audio input device and run the real-time capture loop.
@@ -782,10 +830,18 @@ def _run_recorder (
 		                    so sample_captured and sample_loaded events are emitted.
 		processor_cell:     Single-element list this stores its SampleProcessor in, so
 		                    the shutdown path can see how many captures are still being
-		                    analysed and wait for them rather than killing them.
+		                    analysed and wait for them rather than killing them.  Set
+		                    once the input is open.
+		last_sounds_queued: Set once the loop has stopped and its last sounds are
+		                    queued, which the shutdown path waits for before it
+		                    counts what is still being analysed.
 	"""
 
-	pa = subsample.audio.create_pyaudio()
+	try:
+		pa = subsample.audio.create_pyaudio()
+	except OSError as exc:
+		print(f"Error opening audio device: {exc}", file=sys.stderr)
+		return
 
 	try:
 		devices = subsample.audio.list_input_devices(pa)
@@ -836,8 +892,6 @@ def _run_recorder (
 				audio_cfg = dataclasses.replace(audio_cfg, channels=detected_channels)
 				_log.info("Auto-detected %d input channel(s) from device", detected_channels)
 
-		reader = subsample.audio.AudioReader(pa, device_index, audio_cfg)
-
 	except (ValueError, OSError) as exc:
 		print(f"Error opening audio device: {exc}", file=sys.stderr)
 		pa.terminate()
@@ -865,13 +919,29 @@ def _run_recorder (
 		app_events=app_events,
 	)
 
-	writer = subsample.recorder.SampleProcessor(
-		cfg,
-		analysis_params,
-		on_complete=on_complete_callback,
-		reserve_for_player=cfg.player.enabled,
-		before_sidecar_write=before_sidecar_write,
-	)
+	# Before the input opens, since it makes recorder.directory: one that
+	# could not be made stopped this thread with a traceback and the input
+	# left open (#4703, M9).
+	try:
+		writer = subsample.recorder.SampleProcessor(
+			cfg,
+			analysis_params,
+			on_complete=on_complete_callback,
+			reserve_for_player=cfg.player.enabled,
+			before_sidecar_write=before_sidecar_write,
+		)
+	except OSError as exc:
+		print(f"Error creating recorder.directory: {exc}", file=sys.stderr)
+		pa.terminate()
+		return
+
+	try:
+		reader = subsample.audio.AudioReader(pa, device_index, audio_cfg)
+	except (ValueError, OSError) as exc:
+		print(f"Error opening audio device: {exc}", file=sys.stderr)
+		writer.shutdown()
+		pa.terminate()
+		return
 
 	# Hand it to the shutdown path, which waits for whatever is still being
 	# analysed: a capture's audio file is written only after its analysis, so a
@@ -915,6 +985,14 @@ def _run_recorder (
 			pa.terminate()
 		except Exception as exc:
 			_log.error("Recorder: pa.terminate() failed during shutdown: %s", exc)
+
+		try:
+			_queue_the_last_sounds(reader, buf, detector, cfg.detection, audio_cfg.sample_rate, writer)
+		except Exception as exc:
+			_log.error("Recorder: the last sounds before stopping could not be saved: %s", exc, exc_info=True)
+
+		if last_sounds_queued is not None:
+			last_sounds_queued.set()
 
 		writer.shutdown()
 
@@ -1000,7 +1078,7 @@ def _build_transform_manager (
 		disk_cache=variant_disk_cache,
 	)
 
-	_register_teardown(transform_manager.shutdown)
+	_register_teardown(lambda: transform_manager.shutdown(drop_waiting=True))
 
 	return transform_manager
 
@@ -1458,7 +1536,9 @@ def main () -> None:
 	except KeyboardInterrupt:
 		# Startup was interrupted before the main loop's handler existed.  The
 		# loads it lands in are the long ones, so this is a normal thing to do.
+		# The teardowns wait for renders in flight; another Ctrl+C stops at once.
 		_say("\nInterrupted.", sys.stderr)
+		previous_handlers.setdefault(signal.SIGINT, _answer_further_ctrl_c(None))
 		_run_teardowns()
 		raise SystemExit(130) from None
 
@@ -1604,13 +1684,7 @@ def _main_impl () -> None:
 	app_events = subsample.events.EventEmitter()
 
 	if cfg.osc.enabled:
-		try:
-			_osc_sender = subsample.osc.OscEventSender(cfg.osc.send_host, cfg.osc.send_port)
-			app_events.on("sample_captured", _osc_sender.on_sample_captured_event)
-			app_events.on("sample_loaded", _osc_sender.on_sample_loaded_event)
-			print(f"  OSC sender   : sending to {cfg.osc.send_host}:{cfg.osc.send_port}")
-		except ImportError:
-			_log.warning("OSC enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
+		_start_osc_sender(cfg, app_events)
 
 	# Reference fingerprints a map can name rather than point at.  Defaults to
 	# the set bundled with the package, so `reference: GM46_OpenHiHat` resolves
@@ -1843,6 +1917,7 @@ def _main_impl () -> None:
 	# _start_player sets this before calling player.run().
 	_player_cell: list[typing.Optional[subsample.player.MidiPlayer]] = [None]
 	_processor_cell: list[typing.Optional[subsample.recorder.SampleProcessor]] = [None]
+	last_sounds_queued = threading.Event()
 	# Declared before the subsystem threads because the recorder is handed the
 	# helper below, which reads this list when a capture is written — by which
 	# time the watchers further down have been added to it.
@@ -1878,6 +1953,7 @@ def _main_impl () -> None:
 				shutdown_event, cfg.player.enabled,
 				transform_manager, _player_cell,
 				app_events, _processor_cell, _capture_sidecar_is_ours,
+				last_sounds_queued,
 			),
 			name="recorder",
 			daemon=True,
@@ -1951,7 +2027,7 @@ def _main_impl () -> None:
 	startup_failed = _wait_for_shutdown(shutdown_event, threads)
 
 	_shut_down(
-		threads, _processor_cell[0], instrument_watchers, midi_map_watcher,
+		threads, _processor_cell[0], last_sounds_queued, instrument_watchers, midi_map_watcher,
 		[receiver for receiver in osc_receivers if receiver is not None],
 		bank_manager, transform_manager, startup_failed,
 	)
@@ -2019,6 +2095,7 @@ def _wait_for_shutdown (shutdown_event: threading.Event, threads: list[threading
 def _shut_down (
 	threads:             list[threading.Thread],
 	processor:           typing.Optional[subsample.recorder.SampleProcessor],
+	last_sounds_queued:  typing.Optional[threading.Event],
 	instrument_watchers: list[subsample.watcher.InstrumentWatcher],
 	midi_map_watcher:    typing.Optional[subsample.watcher.MidiMapWatcher],
 	osc_receivers:       list[typing.Any],
@@ -2030,8 +2107,83 @@ def _shut_down (
 	"""Stop every subsystem in order, finishing the captures still being analysed first, then exit.
 
 	Raises SystemExit(1) after a startup failure, and hard-exits when a
-	subsystem thread is stuck in a device prompt; otherwise returns.
+	subsystem thread is stuck in a device prompt; otherwise returns.  A
+	Ctrl+C while it works stops it harder (_answer_further_ctrl_c).
 	"""
+
+	previous_ctrl_c = _answer_further_ctrl_c(processor)
+
+	try:
+		_stop_everything(
+			threads, processor, last_sounds_queued, instrument_watchers, midi_map_watcher,
+			osc_receivers, bank_manager, transform_manager, startup_failed,
+		)
+
+	finally:
+		signal.signal(signal.SIGINT, previous_ctrl_c)
+
+
+def _answer_further_ctrl_c (processor: typing.Optional[subsample.recorder.SampleProcessor]) -> typing.Any:
+
+	"""Make each Ctrl+C after the first stop harder, rather than raise again, and return the handler it had (#4703, M5).
+
+	The next press saves the captures still being analysed without their
+	analysis, which is made when Subsample next loads them, and then the
+	shutdown carries on; with none left, it stops at once.  The press after
+	that stops at once.  Raised again, each press unwound whatever was
+	waiting: a second waited all over again, and a third printed hundreds of
+	lines of tracebacks.
+	"""
+
+	presses = 0
+
+	def on_ctrl_c (signal_number: int, frame: typing.Any) -> None:
+
+		"""Signal handler: save the waiting captures unanalysed, or stop at once."""
+
+		nonlocal presses
+		presses += 1
+		waiting = processor.queue_depth if processor is not None else 0
+
+		if presses == 1 and processor is not None and waiting:
+			_say(f"Saving {waiting} capture(s) without their analysis, which is made when Subsample next loads them…")
+			processor.abandon()
+			return
+
+		_say("\nInterrupted.", sys.stderr)
+
+		try:
+			sys.stdout.flush()
+			sys.stderr.flush()
+		except OSError:
+			pass
+
+		os._exit(130)
+
+	previous = signal.getsignal(signal.SIGINT)
+	signal.signal(signal.SIGINT, on_ctrl_c)
+
+	return previous
+
+
+def _stop_everything (
+	threads:             list[threading.Thread],
+	processor:           typing.Optional[subsample.recorder.SampleProcessor],
+	last_sounds_queued:  typing.Optional[threading.Event],
+	instrument_watchers: list[subsample.watcher.InstrumentWatcher],
+	midi_map_watcher:    typing.Optional[subsample.watcher.MidiMapWatcher],
+	osc_receivers:       list[typing.Any],
+	bank_manager:        typing.Optional[subsample.bank.BankManager],
+	transform_manager:   typing.Optional[subsample.transform.TransformManager],
+	startup_failed:      bool,
+) -> None:
+
+	"""_shut_down's steps, in order."""
+
+	# The recorder queues its last sounds as it stops (#4703, M2): let it, so
+	# the drain below counts them, rather than racing its last pass.
+	if processor is not None and last_sounds_queued is not None:
+		last_sounds_queued.wait(timeout=_LAST_SOUNDS_WAIT_SEC)
 
 	# Wait for captures still being analysed BEFORE joining with a timeout.
 	# A capture's audio file is written only after its analysis, its preview and
@@ -2052,13 +2204,14 @@ def _shut_down (
 	for osc_receiver in osc_receivers:
 		osc_receiver.stop()
 
-	# Drain any in-flight transform workers before exiting.
+	# Stop the renders: those waiting are dropped, and those the workers hold
+	# finish (#4703, M5).
 	if bank_manager is not None:
 		for bank in bank_manager.all_banks():
 			if bank.transform_manager is not None:
-				bank.transform_manager.shutdown()
+				bank.transform_manager.shutdown(drop_waiting=True)
 	elif transform_manager is not None:
-		transform_manager.shutdown()
+		transform_manager.shutdown(drop_waiting=True)
 
 	# Every program's renders are done, so the worker processes they shared
 	# can stop (#4667).
@@ -2388,6 +2541,31 @@ def _start_midi_map_watcher (
 	return midi_map_watcher
 
 
+def _start_osc_sender (cfg: subsample.config.Config, app_events: subsample.events.EventEmitter) -> None:
+
+	"""Send OSC to osc.send_host as samples are captured and loaded, or say why not and carry on without.
+
+	The sender resolves its host as it is made, so a name that does not
+	resolve stopped Subsample, file mode too, with a traceback that named no
+	setting (#4703, M10).  The receivers already carry on without OSC.
+	"""
+
+	try:
+		sender = subsample.osc.OscEventSender(cfg.osc.send_host, cfg.osc.send_port)
+
+	except ImportError:
+		_log.warning("OSC enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
+		return
+
+	except OSError as exc:
+		_log.warning("OSC sender could not reach osc.send_host %r: %s - OSC sending disabled", cfg.osc.send_host, exc)
+		return
+
+	app_events.on("sample_captured", sender.on_sample_captured_event)
+	app_events.on("sample_loaded", sender.on_sample_loaded_event)
+	print(f"  OSC sender   : sending to {cfg.osc.send_host}:{cfg.osc.send_port}")
+
+
 def _start_osc_receiver (
 	cfg:                subsample.config.Config,
 	instrument_library: subsample.library.InstrumentLibrary,
@@ -2562,7 +2740,7 @@ def _drain_captures (
 	if not remaining:
 		return
 
-	_say(f"Finishing {remaining} capture(s) still being analysed…")
+	_say(f"Finishing {remaining} capture(s) still being analysed… (Ctrl+C again to save them unanalysed)")
 
 	while True:
 		processor.flush()

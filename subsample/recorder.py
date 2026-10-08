@@ -30,6 +30,7 @@ import dataclasses
 import datetime
 import hashlib
 import io
+import json
 import logging
 import math
 import os
@@ -320,6 +321,9 @@ class SampleProcessor:
 		# Ensures the "queue drained" INFO fires once per backlog episode.
 		self._was_backed_up: bool = False
 
+		# Set by abandon(): what is still waiting is saved without its analysis.
+		self._abandoned: bool = False
+
 	def enqueue (
 		self,
 		audio: numpy.ndarray,
@@ -406,6 +410,22 @@ class SampleProcessor:
 
 		self._executor.shutdown(wait=True)
 
+	def abandon (self) -> None:
+
+		"""Save every capture still waiting or being analysed without its analysis, rather than wait for it (#4703, M5).
+
+		The second Ctrl+C asks for this.  The analysis workers are stopped, so
+		what they hold fails at once, and what has not reached them yet skips
+		them; each is saved as its audio alone, which whatever loads it next
+		analyses.  Where the analysis runs on these threads, what they have
+		started finishes first.
+		"""
+
+		self._abandoned = True
+
+		if self._pool is not None:
+			self._pool.stop_now()
+
 	def _on_future_done (self, future: concurrent.futures.Future[None]) -> None:
 
 		"""Done callback — logs INFO when a backlog episode fully drains.
@@ -431,6 +451,10 @@ class SampleProcessor:
 		are caught and logged so one failed recording never kills the worker.
 		"""
 
+		if self._abandoned:
+			self._save_unanalysed(req, None)
+			return
+
 		try:
 			if self._pool is None:
 				captured = _process_capture(
@@ -440,7 +464,7 @@ class SampleProcessor:
 				captured = self._process_in_worker(req)
 
 		except Exception as exc:
-			_log.error("Failed to process recording: %s - WAV may be intact", exc, exc_info=True)
+			self._save_unanalysed(req, exc)
 			return
 
 		if self._on_complete is not None and captured.written is not None:
@@ -448,9 +472,9 @@ class SampleProcessor:
 
 			# The handoff gets its own except so a downstream integration
 			# failure (or a callback arity mismatch) is reported distinctly
-			# — not swallowed under the analysis/write "WAV may be intact"
-			# message, which would hide a sample that never reached the
-			# library / similarity index / transform pipeline.
+			# — not swallowed under the analysis failure's message, which
+			# would hide a sample that never reached the library /
+			# similarity index / transform pipeline.
 			try:
 				self._on_complete(
 					filepath, captured.spectral, captured.rhythm, captured.pitch, captured.timbre,
@@ -464,6 +488,59 @@ class SampleProcessor:
 					"live library",
 					filepath, exc, exc_info=True,
 				)
+
+	def _save_unanalysed (self, req: _ProcessRequest, failure: typing.Optional[Exception]) -> None:
+
+		"""Save a capture whose analysis failed, or was abandoned, as its audio alone, so the recording is not lost (#4703, M1).
+
+		An analysis that raised, a worker killed for want of memory, or a
+		hand-off that could not be written all threw the audio away, while the
+		log said the WAV might be intact.  The audio is written where the
+		capture would have been, without a sidecar, so whatever loads it next
+		analyses it.  An ambisonic capture is converted first, and given a
+		sidecar holding only its format, which that analysis keeps.  ``failure``
+		is None for a capture abandon() skipped; an abandoned one is not a
+		fault, and says so in a line of its own.
+		"""
+
+		cfg         = self._cfg
+		bit_depth   = req.bit_depth if req.bit_depth is not None else cfg.recorder.audio.bit_depth
+		sample_rate = req.sample_rate if req.sample_rate is not None else cfg.recorder.audio.sample_rate
+		filepath, audio_format, _fallback = _capture_target(
+			cfg, self._output_dir, req.timestamp, req.filename_base, bit_depth,
+		)
+		ambisonic_format = cfg.recorder.audio.ambisonic_format
+
+		try:
+			if ambisonic_format is not None:
+				req = _converted_to_b_format(req, ambisonic_format, bit_depth, sample_rate)
+
+			_write_atomically(filepath, _encoded(req.audio, sample_rate, bit_depth, audio_format))
+
+			if ambisonic_format is not None:
+				sidecar = subsample.cache.cache_path(filepath)
+
+				if self._before_sidecar_write is not None:
+					self._before_sidecar_write(sidecar)
+
+				_write_atomically(sidecar, json.dumps({"channel_format": "b_format_ambix"}).encode("utf-8"))
+
+		except Exception as exc:
+			if self._abandoned:
+				_log.error("Recording could not be saved: %s", exc, exc_info=True)
+			else:
+				_log.error("Recording could not be analysed: %s - nor saved: %s", failure, exc, exc_info=failure)
+
+			return
+
+		if self._abandoned:
+			_log.info("Saved %s without its analysis", filepath.name)
+			return
+
+		_log.error(
+			"Recording could not be analysed: %s - its audio is saved as %s, and is analysed when Subsample next loads it",
+			failure, filepath.name, exc_info=failure,
+		)
 
 	def _process_in_worker (self, req: _ProcessRequest) -> "_Captured":
 
@@ -633,30 +710,7 @@ def _process_capture (
 	channel_format_tag: str
 
 	if ambisonic_format is not None:
-		audio_float = req.audio.astype(numpy.float32) / (
-			32768.0 if effective_bit_depth == 16 else 2147483648.0
-		)
-		b_format_float = subsample.ambisonic.process_capture(
-			audio_float, ambisonic_format, sample_rate=effective_sample_rate,
-		)
-
-		# The format conversion can push past full scale even when the
-		# raw capture had headroom (FuMa→AmbiX scales W by √2; the
-		# A-format HF shelf adds gain), and _pcm_float_to_int hard-clips
-		# without a trace — warn here, where the cause is attributable
-		# to conversion gain rather than input gain.
-		b_peak = float(numpy.max(numpy.abs(b_format_float))) if b_format_float.size else 0.0
-
-		if b_peak > 1.0:
-			_log.warning(
-				"ambisonic conversion clipped (peak %+.1f dBFS after %s "
-				"processing) - reduce input gain to leave conversion headroom",
-				20.0 * math.log10(b_peak), ambisonic_format,
-			)
-
-		req = dataclasses.replace(
-			req, audio=_pcm_float_to_int(b_format_float, effective_bit_depth),
-		)
+		req = _converted_to_b_format(req, ambisonic_format, effective_bit_depth, effective_sample_rate)
 		analysis_channel_index = 0
 		channel_format_tag      = "b_format_ambix"
 	else:
@@ -728,6 +782,39 @@ def _process_capture (
 	)
 
 
+def _converted_to_b_format (
+	req:              _ProcessRequest,
+	ambisonic_format: str,
+	bit_depth:        int,
+	sample_rate:      int,
+) -> _ProcessRequest:
+
+	"""The request with its ambisonic capture converted to AmbiX B-format, as the file stores it."""
+
+	audio_float = req.audio.astype(numpy.float32) / (
+		32768.0 if bit_depth == 16 else 2147483648.0
+	)
+	b_format_float = subsample.ambisonic.process_capture(
+		audio_float, ambisonic_format, sample_rate=sample_rate,
+	)
+
+	# The format conversion can push past full scale even when the
+	# raw capture had headroom (FuMa→AmbiX scales W by √2; the
+	# A-format HF shelf adds gain), and _pcm_float_to_int hard-clips
+	# without a trace — warn here, where the cause is attributable
+	# to conversion gain rather than input gain.
+	b_peak = float(numpy.max(numpy.abs(b_format_float))) if b_format_float.size else 0.0
+
+	if b_peak > 1.0:
+		_log.warning(
+			"ambisonic conversion clipped (peak %+.1f dBFS after %s "
+			"processing) - reduce input gain to leave conversion headroom",
+			20.0 * math.log10(b_peak), ambisonic_format,
+		)
+
+	return dataclasses.replace(req, audio=_pcm_float_to_int(b_format_float, bit_depth))
+
+
 def _capture_target (
 	cfg:           subsample.config.Config,
 	output_dir:    pathlib.Path,
@@ -765,6 +852,33 @@ def _capture_target (
 		else _format_filename(timestamp, cfg.recorder.filename_format)
 	)
 	return output_dir / (fname_base + extension), effective_format, fallback_message
+
+
+def _encoded (audio: numpy.ndarray, sample_rate: int, bit_depth: int, audio_format: str) -> bytes:
+
+	"""A capture's whole file, WAV or FLAC, as the bytes it is written as."""
+
+	# Map our internal dtype conventions to libsndfile subtypes:
+	#  - 16-bit int16              → PCM_16
+	#  - 24-bit int32 (<< 8)       → PCM_24 (soundfile keeps the upper
+	#                                3 bytes; our LSB padding is zero)
+	#  - 32-bit int32              → PCM_32
+	_SUBTYPE_BY_BIT_DEPTH: dict[int, str] = {16: "PCM_16", 24: "PCM_24", 32: "PCM_32"}
+
+	# soundfile accepts any file-like object for the `file` argument.
+	buf = io.BytesIO()
+	write_kwargs: dict[str, typing.Any] = {
+		"samplerate": sample_rate,
+		"subtype":    _SUBTYPE_BY_BIT_DEPTH[bit_depth],
+		"format":     "FLAC" if audio_format == "flac" else "WAV",
+	}
+
+	if audio_format == "flac":
+		write_kwargs["compression_level"] = _FLAC_COMPRESSION_LEVEL
+
+	soundfile.write(buf, audio, **write_kwargs)
+
+	return buf.getvalue()
 
 
 def _write_capture (
@@ -852,30 +966,9 @@ def _write_capture (
 
 	n_channels = audio.shape[1]
 
-	# Map our internal dtype conventions to libsndfile subtypes:
-	#  - 16-bit int16              → PCM_16
-	#  - 24-bit int32 (<< 8)       → PCM_24 (soundfile keeps the upper
-	#                                3 bytes; our LSB padding is zero)
-	#  - 32-bit int32              → PCM_32
-	_SUBTYPE_BY_BIT_DEPTH: dict[int, str] = {16: "PCM_16", 24: "PCM_24", 32: "PCM_32"}
-	subtype = _SUBTYPE_BY_BIT_DEPTH[effective_bit_depth]
-
 	# Build the complete file in memory so we can MD5 the exact bytes
-	# that hit disk, then do a single atomic write.  soundfile accepts
-	# any file-like object for the `file` argument.
-	buf = io.BytesIO()
-	write_kwargs: dict[str, typing.Any] = {
-		"samplerate": effective_sample_rate,
-		"subtype":    subtype,
-		"format":     "FLAC" if effective_format == "flac" else "WAV",
-	}
-
-	if effective_format == "flac":
-		write_kwargs["compression_level"] = _FLAC_COMPRESSION_LEVEL
-
-	soundfile.write(buf, audio, **write_kwargs)
-
-	file_bytes = buf.getvalue()
+	# that hit disk, then do a single atomic write.
+	file_bytes = _encoded(audio, effective_sample_rate, effective_bit_depth, effective_format)
 	audio_md5  = hashlib.md5(file_bytes).hexdigest()
 
 	try:

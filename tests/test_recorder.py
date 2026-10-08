@@ -4,6 +4,7 @@ import datetime
 import logging
 import pathlib
 import tempfile
+import time
 import typing
 import unittest.mock
 import wave
@@ -862,14 +863,61 @@ class TestCapturesAreProcessedInWorkerProcesses:
 		writer = subsample.recorder.SampleProcessor(_make_config(tmp_path), tests.helpers._make_params())
 
 		with caplog.at_level(logging.ERROR, logger="subsample"):
-			# No subtype holds 12-bit audio, so the write fails in the worker.
+			# No subtype holds 12-bit audio, so the write fails in the worker,
+			# and the player's own write of the audio alone fails too.
 			writer.enqueue(self._capture(), datetime.datetime.now(), filename_base="take", bit_depth=12)
 			writer.shutdown()
 
-		failed = [r for r in caplog.records if r.getMessage().startswith("Failed to process recording")]
+		failed = [r for r in caplog.records if r.getMessage().startswith("Recording could not be analysed")]
 
 		assert len(failed) == 1
+		assert "nor saved" in failed[0].getMessage()
 		assert "_process_capture" in logging.Formatter().format(failed[0]), "the worker's traceback was lost"
+
+	def test_a_capture_whose_hand_off_cannot_be_written_is_still_saved (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""#4703 (M1): a hand-off to a full temporary folder lost the capture."""
+
+		def disk_full (audio: numpy.ndarray, folder: pathlib.Path) -> typing.NoReturn:
+			raise OSError(28, "No space left on device")
+
+		monkeypatch.setattr(subsample.parallelism, "write_audio", disk_full)
+
+		_writer, handed = self._process(tmp_path, processes=True)
+
+		assert handed == []
+		assert soundfile.read(tmp_path / "take.wav", dtype="int16")[0].reshape(-1, 1).tolist() == self._capture().tolist()
+		assert not subsample.cache.cache_path(tmp_path / "take.wav").exists()
+
+	def test_an_abandoned_capture_is_saved_at_once_without_its_analysis (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4703 (M5): the second Ctrl+C stops the analysis, and the capture being analysed is saved as its audio alone.
+
+		A minute of noise takes its worker many seconds to analyse; stopped half
+		a second in, it is written without a sidecar, which its next load makes.
+		"""
+
+		writer = subsample.recorder.SampleProcessor(_make_config(tmp_path), tests.helpers._make_params())
+		minute = (numpy.random.default_rng(5).standard_normal((44100 * 60, 1)) * 3000.0).astype(numpy.int16)
+
+		try:
+			with caplog.at_level(logging.INFO, logger="subsample"):
+				writer.enqueue(minute, datetime.datetime.now(), filename_base="long")
+				time.sleep(0.5)
+				writer.abandon()
+				writer.shutdown()
+
+		finally:
+			# The stopped pool must not serve the tests after this one.
+			subsample.parallelism.shutdown_shared_pools()
+
+		assert soundfile.info(str(tmp_path / "long.wav")).frames == len(minute)
+		assert not subsample.cache.cache_path(tmp_path / "long.wav").exists()
+		assert "Saved long.wav without its analysis" in caplog.messages
 
 	def test_what_the_analysis_says_reaches_the_player_log (
 		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
@@ -893,4 +941,73 @@ class TestCapturesAreProcessedInWorkerProcesses:
 
 		assert len(handed) == 1
 		assert set(folder.iterdir()) == before
+
+
+class TestACaptureWhoseAnalysisFailsIsStillSaved:
+
+	"""#4703 (M1): a capture whose analysis fails keeps its audio, which is analysed when it is next loaded.
+
+	It was thrown away, while the log said the WAV might be intact.
+	"""
+
+	@pytest.fixture(autouse=True)
+	def _analysis_fails (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		def out_of_memory (*args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:
+			raise MemoryError("analysis ran out of memory")
+
+		monkeypatch.setattr(subsample.analysis, "analyze_all", out_of_memory)
+
+	def test_its_audio_is_saved_without_a_sidecar (self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
+
+		capture = (numpy.random.default_rng(1).standard_normal((22050, 1)) * 6000.0).astype(numpy.int16)
+		writer  = subsample.recorder.SampleProcessor(_make_config(tmp_path), tests.helpers._make_params(), processes=False)
+
+		with caplog.at_level(logging.ERROR, logger="subsample"):
+			writer.enqueue(capture, datetime.datetime.now(), filename_base="take")
+			writer.shutdown()
+
+		assert soundfile.read(tmp_path / "take.wav", dtype="int16")[0].reshape(-1, 1).tolist() == capture.tolist()
+		assert not subsample.cache.cache_path(tmp_path / "take.wav").exists()
+		assert any(
+			message.startswith("Recording could not be analysed: analysis ran out of memory - its audio is saved as take.wav")
+			for message in caplog.messages
+		)
+
+	def test_an_ambisonic_capture_is_saved_as_b_format_and_analysed_as_it (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		capture = (numpy.random.RandomState(42).randn(4410, 4) * 2000.0).astype(numpy.int16)
+		writer  = subsample.recorder.SampleProcessor(
+			_make_ambisonic_config(tmp_path, "a_generic"), tests.helpers._make_params(), processes=False,
+		)
+
+		writer.enqueue(capture, datetime.datetime.now(), filename_base="ambi")
+		writer.shutdown()
+
+		monkeypatch.undo()
+
+		path = tmp_path / "ambi.wav"
+		assets = subsample.cache.ensure_sample_assets(path, with_preview=False)
+
+		assert soundfile.info(str(path)).channels == 4
+		assert assets is not None and assets.channel_format == "b_format_ambix"
+
+	def test_once_abandoned_a_capture_is_saved_without_starting_its_analysis (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4703 (M5): a capture still waiting at the second Ctrl+C skips its analysis, quietly."""
+
+		capture = (numpy.random.default_rng(2).standard_normal((22050, 1)) * 6000.0).astype(numpy.int16)
+		writer  = subsample.recorder.SampleProcessor(_make_config(tmp_path), tests.helpers._make_params(), processes=False)
+
+		with caplog.at_level(logging.INFO, logger="subsample"):
+			writer.abandon()
+			writer.enqueue(capture, datetime.datetime.now(), filename_base="take")
+			writer.shutdown()
+
+		assert (tmp_path / "take.wav").exists()
+		assert caplog.messages == ["Saved take.wav without its analysis"], "no error: the analysis was never tried"
 

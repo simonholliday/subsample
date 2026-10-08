@@ -2022,6 +2022,9 @@ class TransformProcessor:
 		self._dispatched: int                    = 0
 		self._settled:    threading.Condition    = threading.Condition(self._in_flight_lock)
 
+		# Set by shutdown(): no render is asked for or handed out after it.
+		self._stopping:   bool                   = False
+
 		# The source sounds written out for worker processes, by the identity
 		# of the buffer, each with the buffer (so its identity stays its own)
 		# and the number of handed-out renders reading it.  Only the results
@@ -2089,7 +2092,7 @@ class TransformProcessor:
 		key = TransformKey(sample_id=record.sample_id, spec=spec)
 
 		with self._in_flight_lock:
-			if key in self._in_flight:
+			if self._stopping or key in self._in_flight:
 				return
 
 			failure = self._failures.get(key)
@@ -2155,21 +2158,37 @@ class TransformProcessor:
 
 		self._audio_md5s.pop(sample_id, None)
 
-	def shutdown (self) -> None:
+	def shutdown (self, drop_waiting: bool = False) -> None:
 
-		"""Wait for every render asked for, then stop this processor.
+		"""Wait for every render asked for, or with ``drop_waiting`` only those the workers hold, then stop this processor.
 
-		A shared pool of worker processes stays for the session's other
-		processors (subsample.parallelism.shutdown_shared_pools stops it).
+		A waiting render is a variant made ahead of the note that wants it, and
+		is asked for again when one does, so the player's own shutdown drops
+		them: Ctrl+C waited for the whole backlog, saying nothing, and 37
+		waiting renders took 9.7 s (#4703, M5).  Nothing is asked for or handed
+		out once this starts.  Safe to call again.  A shared pool of worker
+		processes stays for the session's other processors
+		(subsample.parallelism.shutdown_shared_pools stops it).
 		"""
 
 		with self._settled:
+			if drop_waiting:
+				self._stopping = True
+
+				for _record, _spec, key in self._pending:
+					self._in_flight.discard(key)
+
+				self._pending.clear()
+
 			while self._pending or self._dispatched or self._trimming:
 				self._settled.wait()
+
+			self._stopping = True
 
 		if self._results_thread is not None:
 			self._inbox.put(_STOP)
 			self._results_thread.join()
+			self._results_thread = None
 
 		if self._owns_pool:
 			self._pool.shutdown(wait=True)
@@ -2709,11 +2728,11 @@ class TransformManager:
 
 		return self._cache.list_variants(sample_id)
 
-	def shutdown (self) -> None:
+	def shutdown (self, drop_waiting: bool = False) -> None:
 
-		"""Shut down the background processor, waiting for in-flight jobs."""
+		"""Shut down the background processor, waiting for its renders: every one, or with ``drop_waiting`` those already handed out."""
 
-		self._processor.shutdown()
+		self._processor.shutdown(drop_waiting=drop_waiting)
 
 # ---------------------------------------------------------------------------
 # Internal audio helpers

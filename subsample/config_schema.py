@@ -421,7 +421,10 @@ def json_schema () -> dict[str, typing.Any]:
 								"""
 								Length of the rolling capture buffer, in seconds.  A
 								recording can be no longer than this, so set it above the
-								longest sound you expect to capture.
+								longest sound you expect to capture.  One that reaches it
+								is cut there, and Subsample then measures the room's
+								background level again, as it does at the start, in case
+								the room itself has got louder.
 								""",
 								default=60,
 								exclusiveMinimum=0,

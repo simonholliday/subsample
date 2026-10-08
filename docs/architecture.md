@@ -43,11 +43,32 @@ it wait for Python's lock (#4666).
   calls `on_complete`.
 - **Where worker processes cannot start,** the whole pipeline stays on the
   thread, as before.
+- **A capture whose analysis fails keeps its audio.** An analysis that raises, a
+  worker killed for want of memory, or a hand-off that cannot be written: the
+  thread writes the audio where the capture would have gone, with no sidecar,
+  and whatever loads it next analyses it (`SampleProcessor._save_unanalysed`,
+  #4703). An ambisonic capture is converted first, and given a sidecar holding
+  only `channel_format`, which that analysis keeps. Before, the audio was lost
+  while the log said the WAV might be intact.
 
 **Stopping finishes the captures.** Ctrl+C, SIGTERM (`kill`, `systemctl stop`,
 `docker stop`) and SIGHUP (a closed terminal or SSH session) stop Subsample the
 same way: the captures still being analysed are written first, and it says how
 many (`cli._drain_captures`, #4702).
+- **The last sounds.** As its loop stops, the recorder cuts what its input had
+  already heard, and the sound still sounding, cut where the input stopped, as
+  file mode does at a file's end (`cli._queue_the_last_sounds`, #4703). The
+  shutdown waits for that, a few seconds at most, before it counts the captures.
+- **Ctrl+C again.** The next press saves the captures still being analysed
+  without their analysis: `SampleProcessor.abandon` stops the analysis workers,
+  so what they hold fails at once into the path above, and what waits skips
+  them. With none waiting, or at the press after, Subsample stops at once
+  (`cli._answer_further_ctrl_c`). Each press used to raise again: the second
+  waited all over again, the third printed hundreds of lines of tracebacks.
+- **Renders are not waited for.** The renders still queued are dropped, since a
+  note asks for its variant again, and only those the workers hold finish
+  (`TransformProcessor.shutdown(drop_waiting=True)`). Ctrl+C waited for the
+  whole backlog, silently: 37 queued renders took 9.7 s.
 - **The signals.** SIGTERM and SIGHUP raise the KeyboardInterrupt that Ctrl+C
   does (`cli._stop_on_signals`). Under `nohup`, SIGHUP stays ignored.
 - **The workers keep going.** A terminal sends Ctrl+C and SIGHUP to the whole
@@ -72,6 +93,11 @@ Details a change here has to keep:
 - **Re-trigger has a floor.** A new hit can split a recording only after
   `max(hold_seconds, _MIN_RETRIGGER_GUARD_SECONDS)`, 0.1 s, so an attack's own
   peak cannot split it.
+- **A capture cut at the buffer's length re-learns the room.** The ambient floor
+  follows the room only between sounds, so a room that got louder by
+  `threshold_db` and stayed so was one endless sound, saved a buffer's length at
+  a time. The detector warms up again after such a cut
+  (`LevelDetector._learn_the_room_again`, #4703); the cut capture is kept.
 - **Fades are S-curves** (half-cosine), at a trim's edges and at a crop.
 - **Channels are kept end to end.** A multi-channel sample reaches an output
   with fewer channels through the ITU-R BS.775 downmix matrices in
@@ -93,6 +119,14 @@ Onset detection and attack refinement run with one analysis window (`n_fft`) of
 digital silence in front of the sound, and every time is shifted back by it, so
 an attack in a file's first moments rises out of silence and is found, and the
 onset envelope is not scaled against the sound's own decay (#3880).
+
+A loopable sample's loop is searched for when its sidecar is written
+(`cache.compute_loop`, `loopfind.find_loop`), in the first `_MAX_REGION_HOPS`
+(1024) hops of its steady stretch: about 12 s at 44.1 kHz and 5.5 s at 96 kHz.
+The search compares every moment of that stretch with every other, so its memory
+grows with the square of its length: uncapped, a 60 s steady capture took 1.3 GB
+and 40 s at 96 kHz 2.5 GB, enough to get a worker killed; capped, about 200 MB
+(#4703).
 
 ## Similarity engine
 

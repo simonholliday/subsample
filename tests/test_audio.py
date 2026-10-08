@@ -182,6 +182,20 @@ class TestAudioReader:
 		mock_stream.stop_stream.assert_called_once()
 		mock_stream.close.assert_called_once()
 
+	def test_once_stopped_the_chunks_never_read_are_drained_in_order (self) -> None:
+
+		"""#4703 (M2): what the input heard before Ctrl+C, and nobody read, is cut into captures as the recorder stops."""
+
+		reader, _ = self._make_reader()
+
+		for value in (1, 2, 3):
+			reader._callback(numpy.full(16, value, dtype=numpy.int16).tobytes(), 16, {}, 0)
+
+		reader.stop()
+
+		assert [int(chunk[0, 0]) for chunk in reader.drain()] == [1, 2, 3]
+		assert reader.drain() == []
+
 	def test_read_returns_none_on_timeout (self) -> None:
 		"""read(timeout=...) should return None when no data arrives before the timeout."""
 		reader, _ = self._make_reader()

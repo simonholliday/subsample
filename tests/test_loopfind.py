@@ -72,6 +72,25 @@ class TestFindSustainRegion:
 	def test_click_has_no_region (self) -> None:
 		assert subsample.loopfind.find_sustain_region(_click(), _SR) is None
 
+	@pytest.mark.parametrize("sample_rate", [44100, 96000])
+	def test_a_long_steady_stretch_is_searched_from_its_start_only (self, sample_rate: int) -> None:
+
+		"""#4703 (M4): the search's memory grows with the square of the region, so it keeps the region's first 1024 hops.
+
+		Uncapped, 60 s of steady sound took 1.3 GB at 44.1 kHz, and the same
+		length at 96 kHz more than twice that.
+		"""
+
+		t    = numpy.arange(int(sample_rate * 60.0)) / sample_rate
+		tone = (0.3 * numpy.sin(2 * numpy.pi * 220.0 * t) * numpy.minimum(t / 0.010, 1.0)).astype(numpy.float32)
+
+		region = subsample.loopfind.find_sustain_region(tone, sample_rate)
+
+		assert region is not None
+		lo, hi = region
+		cap = subsample.loopfind._MAX_REGION_HOPS * subsample.loopfind._HOP
+		assert cap // 2 < hi - lo <= cap
+
 
 class TestFindLoop:
 

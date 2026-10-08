@@ -789,6 +789,7 @@ class BackgroundPool:
 		self._lock    = threading.Lock()
 		self._processes = processes and processes_refused() is None
 		self._executor  = self._make()
+		self._stopped   = False
 
 	@property
 	def in_processes (self) -> bool:
@@ -824,9 +825,15 @@ class BackgroundPool:
 
 	def submit (self, fn: typing.Callable[..., typing.Any], /, *args: typing.Any) -> concurrent.futures.Future[typing.Any]:
 
-		"""Run ``fn(*args)`` on a worker, replacing the pool first if a worker of it died."""
+		"""Run ``fn(*args)`` on a worker, replacing the pool first if a worker of it died.
+
+		A pool stopped by stop_now refuses, as a broken one would.
+		"""
 
 		with self._lock:
+			if self._stopped:
+				raise concurrent.futures.process.BrokenProcessPool(f"the {self.name} workers were stopped")
+
 			try:
 				return self._executor.submit(fn, *args)
 
@@ -849,6 +856,27 @@ class BackgroundPool:
 
 		with self._lock:
 			self._executor.shutdown(wait=wait, cancel_futures=not wait)
+
+	def stop_now (self) -> None:
+
+		"""Stop the worker processes at once, failing what they hold, and refuse any more work (#4703, M5).
+
+		What they held fails as it would had they died, and its owners deal with
+		that as with any failure: a capture is saved without its analysis.  A
+		pool of threads cannot stop what it has started, and only refuses more.
+		"""
+
+		with self._lock:
+			self._stopped = True
+			executor = self._executor
+
+			if isinstance(executor, concurrent.futures.ProcessPoolExecutor):
+				# Private, but the only handle on the processes before 3.14's
+				# kill_workers().
+				for process in list(executor._processes.values()):
+					process.kill()
+
+			executor.shutdown(wait=False, cancel_futures=True)
 
 
 def shared_pool (name: str, workers: int) -> BackgroundPool:

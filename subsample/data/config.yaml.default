@@ -245,6 +245,8 @@ recorder:
     # is kept before a trigger event. Larger = more pre-signal context; smaller = less RAM.
     # At 44100 Hz mono 16-bit, 60s ≈ 5.3 MB. Useful range: 10-120 seconds.
     # Must be large enough to hold at least one complete expected recording.
+    # A recording that reaches it is cut there, and the room level is measured
+    # again (as during detection.warmup_seconds), in case the room got louder.
 
 # ---------------------------------------------------------------------------
 # player - MIDI input listener and sample playback

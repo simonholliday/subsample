@@ -623,6 +623,29 @@ def test_a_pool_whose_worker_died_is_replaced (caplog: pytest.LogCaptureFixture)
 		pool.shutdown()
 
 
+def test_a_stopped_pool_fails_what_its_workers_hold_and_takes_no_more () -> None:
+
+	"""#4703 (M5): the second Ctrl+C stops the analysis workers, so the captures they hold are saved unanalysed.
+
+	A pool replaces a worker that died, as one lost to a shortage of memory;
+	one stopped on purpose must not, or the captures waiting would start
+	their analyses again on new workers.
+	"""
+
+	_skip_without_processes()
+
+	pool = subsample.parallelism.BackgroundPool("test", 1, processes=True)
+	held = pool.submit(time.sleep, 60.0)
+
+	pool.stop_now()
+
+	with pytest.raises((concurrent.futures.process.BrokenProcessPool, concurrent.futures.CancelledError)):
+		held.result(timeout=30.0)
+
+	with pytest.raises(concurrent.futures.process.BrokenProcessPool):
+		pool.submit(int, "4")
+
+
 def _work_on_after_saying_where (marker: str) -> int:
 
 	"""Module-level (picklable) job: say which process holds it, then work on for a moment, as an analysis does."""

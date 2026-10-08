@@ -579,6 +579,22 @@ class AudioReader:
 		self._stream.stop_stream()
 		self._stream.close()
 
+	def drain (self) -> list[numpy.ndarray]:
+
+		"""The chunks still queued, without waiting: once stopped, what the input heard and was never read."""
+
+		chunks: list[numpy.ndarray] = []
+
+		for _ in range(self._queue.qsize()):
+			chunk = self.read(timeout=0)
+
+			if chunk is None:
+				break
+
+			chunks.append(chunk)
+
+		return chunks
+
 	def _callback (
 		self,
 		in_data: typing.Optional[bytes],

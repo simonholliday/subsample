@@ -57,6 +57,14 @@ _REGION_FLOOR_DB:    typing.Final[float] = 12.0
 _REGION_ATTACK_HEAD: typing.Final[float] = 0.30
 _REGION_MARGIN_S:    typing.Final[float] = 0.050
 
+# The longest stretch searched, in hops: the region keeps its first this many
+# (about 12 s at 44.1 kHz, 11 s at 48 kHz, 5.5 s at 96 kHz).  The self-similarity
+# search holds several arrays of this squared, so a 60 s steady capture took
+# 1.3 GB and 40 s at 96 kHz 2.5 GB, enough to get a worker killed on a small
+# machine; capped, a search takes about 200 MB at any length or rate (#4703, M4).
+# Counted in hops rather than seconds so the memory does not grow with the rate.
+_MAX_REGION_HOPS:    typing.Final[int]   = 1024
+
 # Peak RMS below this (~ -80 dBFS) is treated as silence — there is no real
 # sustain content to loop, and a zero-referenced percentile floor would
 # otherwise pass every frame and report a confident loop of nothing.
@@ -156,8 +164,9 @@ def find_sustain_region (mono: numpy.ndarray, sample_rate: int) -> typing.Option
 
 	The region is the longest contiguous run of the RMS envelope above a
 	percentile-referenced floor (so a single loud spike can't sink the test),
-	with the attack skipped and a margin trimmed off each end.  None when no run
-	is long enough to hold a loop.
+	with the attack skipped and a margin trimmed off each end, and no longer
+	than its first _MAX_REGION_HOPS hops.  None when no run is long enough to
+	hold a loop.
 	"""
 
 	env = librosa.feature.rms(y=mono, frame_length=_N_FFT, hop_length=_HOP)[0]
@@ -203,7 +212,7 @@ def find_sustain_region (mono: numpy.ndarray, sample_rate: int) -> typing.Option
 	run_hi = max(run_hi - margin, run_lo)
 
 	lo = int(run_lo * _HOP)
-	hi = int(min(run_hi * _HOP + _N_FFT, mono.size))
+	hi = int(min(run_hi * _HOP + _N_FFT, mono.size, lo + _MAX_REGION_HOPS * _HOP))
 
 	if hi - lo < int(_MIN_LOOP_S * sample_rate):
 		return None
