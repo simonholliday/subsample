@@ -212,6 +212,13 @@ When a variant set for a parent sample would exceed the memory budget, the entir
 oldest parent's variant family is evicted together, keeping the remaining
 families intact and playable.
 
+A sample that leaves the library, evicted or deleted, takes its family with it,
+and its renders still waiting are dropped (`TransformManager.on_parent_evicted`,
+#4703). One a worker already holds is let go when it finishes
+(`TransformManager.keep`, the processor's `on_complete`): kept first and looked
+up after, so no order of the two lets it through. These were kept as the newest
+family, and pushed live samples' variants out to make room.
+
 Renders run in worker processes of their own, not on the player's threads
 (#4667). Python runs one thread's code at a time, so a render on one of the
 player's threads made the audio callback and the note handlers wait their turn
@@ -235,7 +242,12 @@ another process cost none (#4666).
   so the player's drain waits for what they hold; a worker that took Ctrl+C
   died with the capture or render it held (#4702).
 - **The disk cache.** Workers write to it, the player counts what they write,
-  and one worker at a time trims the folder to its budget.
+  and one worker at a time trims the folder to its budget. The session has one
+  disk cache, which every program shares (`cli._variant_disk_cache`, #4703):
+  each program kept its own count and trimmed as if alone, so three grew the
+  folder to 2.6 times its budget. A trim that finds a file already gone, taken
+  by another Subsample's trim, counts it as removed rather than deleting as
+  many again.
 - **Where worker processes cannot start,** renders run on threads as before,
   and the player warns once that they may make it drop out. A temporary folder
   whose path is too long for the forkserver's socket is one such case.
@@ -246,6 +258,19 @@ repeat up to ten minutes, and forgotten once a render works. A failure can pass
 (memory, a full `/tmp` under Rubber Band, a killed subprocess) or recur on every
 attempt, and nothing tells the two apart, so the pause bounds the cost of
 either. The first failure logs its traceback, and a repeat logs one line.
+
+A render that falls back, a vocoder whose carrier file cannot be loaded, waits
+the same pause (#4703). Its dry result is not kept, so a carrier put back is
+used at the next try; unpaused, every note rendered the whole chain again and
+warned, where now the vocoder warns once per carrier.
+
+The radio processor oversamples the sound four times in 64-bit numbers, so a
+copy of it costs 1.4 MB per second of sound at 44.1 kHz, twice that as complex
+numbers, and its fade, AGC and receiver held several at once. `radio.py` frees
+each copy once the next stage has it, and adds its impairments in place
+(#4703): the peak fell by a third, with the same output to the sample, so 20 s
+of stereo with every impairment now adds about 420 MB, not 630. It still grows
+with the sound's length.
 
 ## Playback path
 

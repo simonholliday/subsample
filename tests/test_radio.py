@@ -6,6 +6,7 @@ ratio), faithful matched round-trips, the silence-guard on dead cross-demods,
 heavy-tailed atmospheric crackle, the stereo source-sharing model, and
 byte-identical re-renders.
 """
+import typing
 import warnings
 
 import numpy
@@ -272,3 +273,43 @@ class TestChannelFilter:
 		fm = subsample.radio.channel_filter(low, "fm", None, SR)
 		assert float(numpy.std(am)) > 0.5                # AM low-pass keeps 120 Hz
 		assert float(numpy.std(fm)) < 0.1                # FM band-pass removes it
+
+
+# ---------------------------------------------------------------------------
+# Memory — full-length copies of the oversampled signal
+# ---------------------------------------------------------------------------
+
+class TestMemory:
+
+	@pytest.mark.parametrize("mode", ["am", "fm", "ssb"])
+	def test_a_render_holds_few_copies_of_the_sound (self, mode: str) -> None:
+
+		"""Two seconds of stereo with every impairment peaks under 50 times its input, where it reached 68 to 108 (#4703, M33).
+
+		The oversampled signal is four times the sound's length in 64-bit
+		numbers, and the fade, the AGC and the receiver held several copies of
+		it at once, so 20 s could run a 2 GB Pi out of memory.  Counted by
+		tracemalloc, which sees numpy's arrays but not the resampler's own.
+		"""
+
+		import tracemalloc
+
+		x = (numpy.random.default_rng(0).standard_normal((2 * SR, 2)) * 0.2).astype(numpy.float32)
+		settings: dict[str, typing.Any] = dict(
+			mode=mode, demod="matched", tune=0.0, signal=0.5, static=0.5, fade=0.5,
+			bandwidth=None, stereo="mono", mix=1.0,
+		)
+
+		# A first render imports and sets up what every later one reuses,
+		# which is not what this measures.
+		subsample.radio.render_radio(x[:4410], SR, **settings)
+
+		tracemalloc.start()
+
+		try:
+			subsample.radio.render_radio(x, SR, **settings)
+			_, peak = tracemalloc.get_traced_memory()
+		finally:
+			tracemalloc.stop()
+
+		assert peak < 50 * x.nbytes

@@ -785,6 +785,197 @@ class TestAFailedRenderIsTriedAgain:
 		assert "tried again in 60 s" in failures[1].getMessage()
 
 
+class TestAMissingCarrierWaitsLikeAFailure:
+
+	"""A vocoder whose carrier file is missing renders once per pause, and says so once (#4703, M22).
+
+	Its render falls back to the dry sound, which is rightly not kept, but
+	nor was it paused: every note rendered the whole chain again and logged
+	a warning, 20 of each for 20 notes.
+	"""
+
+	def _setup (
+		self,
+		monkeypatch: pytest.MonkeyPatch,
+		carrier:     pathlib.Path,
+	) -> tuple[subsample.transform.TransformProcessor, subsample.transform.TransformSpec, list[float], list[int], list[subsample.transform.TransformResult], threading.Event]:
+
+		"""A processor rendering a low-pass and a vocoder on this carrier, counting the low-pass renders, on a clock the test sets."""
+
+		renders: list[int] = []
+		kept:    list[subsample.transform.TransformResult] = []
+		low_pass = subsample.transform.TransformProcessor._HANDLERS[subsample.transform.LowPassFilter]
+
+		def _counting (
+			audio:       numpy.ndarray,
+			sample_rate: int,
+			record:      subsample.library.SampleRecord,
+			step:        subsample.transform.LowPassFilter,
+		) -> numpy.ndarray:
+			renders.append(1)
+			return low_pass(audio, sample_rate, record, step)
+
+		monkeypatch.setitem(subsample.transform.TransformProcessor._HANDLERS, subsample.transform.LowPassFilter, _counting)
+		monkeypatch.setattr(subsample.transform, "_WARN_ONCE_SEEN", set())
+
+		idle = threading.Event()
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100, on_complete=kept.append, on_idle=lambda _count: idle.set(), processes=False,
+		)
+
+		now = [0.0]
+		processor._clock = lambda: now[0]
+
+		spec = subsample.transform.TransformSpec(steps=(
+			subsample.transform.LowPassFilter(freq=2000.0),
+			subsample.transform.Vocoder(carrier_path=str(carrier)),
+		))
+
+		return processor, spec, now, renders, kept, idle
+
+	def _play (
+		self,
+		processor: subsample.transform.TransformProcessor,
+		spec:      subsample.transform.TransformSpec,
+		idle:      threading.Event,
+	) -> None:
+
+		"""A note asks for the render, and waits for it if it was started."""
+
+		idle.clear()
+		processor.enqueue(_make_record(sample_id=1, audio=(numpy.sin(numpy.linspace(0.0, 400.0, 4410)) * 16000).astype(numpy.int16)[:, None]), spec)
+
+		if processor._in_flight:
+			assert idle.wait(10.0)
+
+	def test_notes_in_the_pause_render_nothing_and_say_nothing (
+		self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		processor, spec, now, renders, kept, idle = self._setup(monkeypatch, tmp_path / "absent.wav")
+
+		with caplog.at_level("WARNING", logger="subsample.transform"):
+			for _note in range(20):
+				self._play(processor, spec, idle)
+
+			now[0] = 31.0
+			self._play(processor, spec, idle)
+
+		processor.shutdown()
+
+		said = [r.getMessage() for r in caplog.records if "carrier" in r.getMessage()]
+
+		assert len(renders) == 2
+		assert kept == []
+		assert len(said) == 1
+
+		# Between the two is the audio library's own reason, which differs by platform.
+		assert said[0].startswith(f"Vocoder: could not load carrier {str(tmp_path / 'absent.wav')!r}: ")
+		assert said[0].endswith(" - notes using it play unprocessed, and it is tried again after 30 s, then less often")
+
+	def test_a_carrier_put_back_is_used_after_the_pause (
+		self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+	) -> None:
+
+		carrier = tmp_path / "carrier.wav"
+		processor, spec, now, renders, kept, idle = self._setup(monkeypatch, carrier)
+
+		self._play(processor, spec, idle)
+		_write_carrier_wav(carrier)
+		now[0] = 31.0
+		self._play(processor, spec, idle)
+		processor.shutdown()
+
+		assert len(renders) == 2
+		assert len(kept) == 1
+		assert not processor._failures
+
+
+class TestARenderForASampleThatLeftIsLetGo:
+
+	"""Renders for a sample the library has dropped are neither made nor kept (#4703, M20).
+
+	They were kept as the newest family, which pushed live samples' variants
+	out of the memory cache to make room: in the review's repro, a deleted
+	sample's four renders came back and evicted a live one's two.
+	"""
+
+	_PITCH = subsample.transform.TransformSpec(steps=(subsample.transform.PitchShift(target_midi_note=60),))
+
+	def _manager (
+		self,
+		library: subsample.library.InstrumentLibrary,
+	) -> tuple[subsample.transform.TransformManager, subsample.transform.TransformCache, subsample.transform.TransformProcessor]:
+
+		"""A manager for this library whose renders are kept as the session keeps them."""
+
+		cache     = subsample.transform.TransformCache(max_memory_bytes=10 * 1024 * 1024)
+		processor = subsample.transform.TransformProcessor(
+			sample_rate=44100, on_complete=lambda result: manager.keep(result), processes=False,
+		)
+		manager   = subsample.transform.TransformManager(
+			cache=cache, processor=processor, instrument_library=library, cfg=subsample.config.TransformConfig(),
+		)
+
+		return manager, cache, processor
+
+	def test_a_render_finishing_after_its_sample_left_is_not_kept (self) -> None:
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=100 * 1024 * 1024)
+		library.add(_make_record(sample_id=1))
+
+		manager, cache, _processor = self._manager(library)
+
+		manager.keep(_make_result(sample_id=1, spec=self._PITCH))
+		manager.keep(_make_result(sample_id=2, spec=self._PITCH))
+		manager.shutdown()
+
+		assert cache.has_variants(1)
+		assert not cache.has_variants(2)
+
+	def test_renders_waiting_for_a_sample_that_left_are_dropped (
+		self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+	) -> None:
+
+		started  = threading.Event()
+		release  = threading.Event()
+		rendered: list[int] = []
+
+		def _held (
+			audio:       numpy.ndarray,
+			sample_rate: int,
+			record:      subsample.library.SampleRecord,
+			step:        subsample.transform.PitchShift,
+		) -> numpy.ndarray:
+			rendered.append(step.target_midi_note)
+			started.set()
+			release.wait(10.0)
+			return audio
+
+		monkeypatch.setitem(subsample.transform.TransformProcessor._HANDLERS, subsample.transform.PitchShift, _held)
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=100 * 1024 * 1024)
+		path    = tmp_path / "gone.wav"
+		library.add(dataclasses.replace(_make_record(sample_id=3), filepath=path))
+
+		manager, cache, processor = self._manager(library)
+
+		for note in range(40, 80):
+			pitch = subsample.transform.TransformSpec(steps=(subsample.transform.PitchShift(target_midi_note=note),))
+			manager.get_variant(3, pitch, from_disk=False)
+
+		assert started.wait(10.0)
+
+		# The file is deleted, as the watcher removes it.
+		library.remove_by_path(path)
+		manager.on_parent_evicted([3])
+		release.set()
+		manager.shutdown()
+
+		assert len(rendered) <= processor._pool.workers + subsample.transform._DISPATCH_AHEAD
+		assert not cache.has_variants(3)
+
+
 # ---------------------------------------------------------------------------
 # TestTransformManager
 # ---------------------------------------------------------------------------
@@ -5947,4 +6138,76 @@ class TestRendersRunInWorkerProcesses:
 
 		assert len(sizes) >= 2, "nothing much was written, so nothing was tested"
 		assert sum(sizes) <= budget
+
+
+class TestTheVariantFolderHasOneBudget:
+
+	"""Every program, and every Subsample, sharing the variant folder keeps it to one budget (#4703, M21)."""
+
+	def test_one_trim_runs_at_a_time_for_every_program (self, tmp_path: pathlib.Path) -> None:
+
+		"""What any program writes while a trim runs is counted when it ends, and trims again if that is over budget."""
+
+		disk = subsample.transform.VariantDiskCache(tmp_path, max_bytes=1000, sample_rate=44100, evicts=False)
+
+		assert disk.add_written(100)            # nothing measured yet: trim, which measures
+		assert not disk.add_written(5000)       # another program writes while it runs
+		assert disk.trimmed(200)                # 200 measured + 5000 since: trim again
+		assert not disk.add_written(10)
+		assert not disk.trimmed(500)            # 500 + 10 is within budget
+		assert not disk.add_written(100)
+		assert disk.add_written(500)            # 1110: over budget
+
+	def test_trims_at_once_delete_only_what_is_due (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""Two trims that list the folder before either deletes remove 5 of 15 files, not 10.
+
+		The second found the first's files gone, took that as nothing
+		removed, and deleted as many more.
+		"""
+
+		for index in range(15):
+			path = tmp_path / f"{index:05d}.variant"
+			path.write_bytes(b"\0" * 100_000)
+			os.utime(path, (index + 1, index + 1))
+
+		listed  = threading.Barrier(2)
+		listing = os.scandir
+		trims_listed: list[str] = []
+
+		def _listed_by_both (directory: str) -> typing.Iterable[os.DirEntry[str]]:
+
+			# Only the two trims' listings of this folder wait for each other:
+			# pathlib lists folders with scandir too, on Python 3.14.
+			if pathlib.Path(directory) != tmp_path or len(trims_listed) >= 2:
+				return listing(directory)
+
+			trims_listed.append(directory)
+			entries = list(listing(directory))
+
+			for entry in entries:
+				entry.stat()
+
+			listed.wait(10.0)
+
+			return entries
+
+		monkeypatch.setattr(os, "scandir", _listed_by_both)
+
+		trims = [
+			threading.Thread(target=subsample.transform._trim_variant_folder, args=(tmp_path, 1_000_000))
+			for _ in range(2)
+		]
+
+		for trim in trims:
+			trim.start()
+
+		for trim in trims:
+			trim.join()
+
+		monkeypatch.undo()
+
+		assert len(list(tmp_path.iterdir())) == 10
 

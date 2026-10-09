@@ -2172,6 +2172,7 @@ class TestPresetsLoadWithTheirMap:
 
 	def _build_program (
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, preset: str,
+		variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None,
 	) -> tuple[subsample.bank.Bank, subsample.player.MidiMapResult]:
 
 		"""Build program 3 as a run does, from a preset beside a folder of one sample."""
@@ -2192,10 +2193,39 @@ class TestPresetsLoadWithTheirMap:
 		bank = subsample.cli._load_bank(
 			result.bank_definitions[0], result.presets[3],
 			subsample.library.ReferenceLibrary([]), cfg,
-			cfg.recorder.audio.sample_rate, tmp_path,
+			cfg.recorder.audio.sample_rate, tmp_path, variant_disk_cache,
 		)
 
 		return bank, result
+
+	def test_every_program_shares_the_session_s_disk_cache (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""Programs share the variant folder, so they share its budget and its trims (#4703, M21).
+
+		Each built a disk cache of its own, which counted only what that
+		program wrote and trimmed as if alone: three programs grew the folder
+		to 2.6 times its budget, and two trims at once deleted 10 files where
+		5 were due.
+		"""
+
+		shared = subsample.transform.VariantDiskCache(
+			directory=tmp_path / "variants", max_bytes=1_000_000, sample_rate=44100,
+		)
+		preset = (
+			"channel: 10\nassignments:\n  - name: Snare\n    notes: 38\n"
+			"    select:\n      where: { directory: Snare }\n"
+		)
+
+		bank, _result = self._build_program(tmp_path, monkeypatch, preset, shared)
+
+		try:
+			assert bank.transform_manager._disk_cache is shared
+			assert bank.transform_manager._processor._disk_cache is shared
+
+		finally:
+			bank.transform_manager.shutdown()
 
 	def test_a_run_builds_the_program_from_the_rules_the_map_loaded (
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,

@@ -56,7 +56,8 @@ Data flow
           → TransformProcessor.enqueue(record, spec)   [base variant]
               → worker process: pcm_to_float32 → handler chain → compute_level
                   → back in the player, on the results thread:
-                      on_complete callback (TransformCache.put(result))
+                      on_complete callback (TransformManager.keep(result),
+                      which drops it if its sample has left the library)
 
   MIDI note trigger
       → player builds spec via spec_from_process(assignment.process, ...)
@@ -848,8 +849,9 @@ class TransformCache:
 	Cascade eviction
 	-----------------
 	When the instrument library evicts a parent sample, all its derivatives
-	must be evicted immediately.  Call remove_parent(sample_id) from the
-	on_complete callback (see cli.py TransformManager.on_parent_evicted).
+	must be evicted immediately: TransformManager.on_parent_evicted calls
+	remove_parent(sample_id), and TransformManager.keep removes a render
+	that finishes after its sample has gone.
 	"""
 
 	def __init__ (self, max_memory_bytes: int) -> None:
@@ -1179,6 +1181,15 @@ class VariantDiskCache:
 		# says the budget is reached, and the scan that follows counts them.
 		self._bytes_estimate: typing.Optional[int] = None
 
+		# Whether a worker is trimming the folder now, and what was written
+		# since that trim began, which its measured total may not include.
+		# Here rather than in each program's processor, as every program
+		# shares this cache (#4703, M21): each kept its own count and trim, so
+		# the folder grew to about one budget per program, and trims running
+		# at once each deleted as if alone.
+		self._trim_running: bool = False
+		self._unscanned:    int  = 0
+
 		if max_bytes > 0:
 			self._directory.mkdir(parents=True, exist_ok=True)
 
@@ -1435,27 +1446,56 @@ class VariantDiskCache:
 
 	def add_written (self, written: int) -> bool:
 
-		"""Count bytes another copy of this cache wrote; True when the folder is due a trim.
+		"""Count bytes another copy of this cache wrote; True when the caller is to have the folder trimmed now.
 
 		Due on the first count, which has nothing measured yet, and whenever the
-		running estimate passes the budget.  The trim's own total then replaces
-		the estimate (``set_estimate``).
+		running estimate passes the budget, unless a trim is already running,
+		for this program or another: what is written meanwhile is added to its
+		total when it ends (``trimmed``).  True marks a trim running.
 		"""
 
 		with self._lock:
-			if self._bytes_estimate is None:
-				return True
+			if self._trim_running:
+				self._unscanned += written
+				return False
 
-			self._bytes_estimate += written
+			if self._bytes_estimate is not None:
+				self._bytes_estimate += written
 
-			return self._bytes_estimate > self._max_bytes
+				if self._bytes_estimate <= self._max_bytes:
+					return False
 
-	def set_estimate (self, total: int) -> None:
+			self._trim_running = True
+			self._unscanned    = 0
 
-		"""Take a trim's measured total as the folder's size."""
+			return True
+
+	def trimmed (self, total: typing.Optional[int]) -> bool:
+
+		"""End the running trim; True when the caller is to start another now.
+
+		Its measured total, plus what was written while it ran, becomes the
+		folder's size; None, a trim that failed, leaves the estimate as it
+		was.  What was written meanwhile may be in the total too: an overcount
+		only trims again, where an undercount would leave the folder over its
+		budget.
+		"""
 
 		with self._lock:
-			self._bytes_estimate = total
+			unscanned          = self._unscanned
+			self._unscanned    = 0
+			self._trim_running = False
+
+			if total is None:
+				return False
+
+			self._bytes_estimate = total + unscanned
+
+			if unscanned and self._bytes_estimate > self._max_bytes:
+				self._trim_running = True
+				return True
+
+			return False
 
 	def _evict_if_needed (self, written: int) -> None:
 
@@ -1512,12 +1552,18 @@ def _trim_variant_folder (directory: pathlib.Path, max_bytes: int) -> typing.Opt
 			if total <= max_bytes:
 				break
 
+			# A file already gone was removed by another trim, of another
+			# Subsample sharing the folder: it counts as removed, or this trim
+			# deleted as many again (#4703, M21).
 			try:
 				os.unlink(filepath)
-				total -= size
 				evicted += 1
-			except OSError:
+			except FileNotFoundError:
 				pass
+			except OSError:
+				continue
+
+			total -= size
 
 		if evicted > 0:
 			_log.info(
@@ -2031,13 +2077,13 @@ class TransformProcessor:
 		# thread touches it.
 		self._sources: dict[int, tuple[numpy.ndarray, subsample.parallelism.AudioFile, int]] = {}
 
-		# Whether a worker is trimming the disk cache now (one at a time), and
-		# what workers have added to it since that trim began, which its
-		# measured total may not include.  Guarded by _in_flight_lock.
-		self._trimming:  bool = False
-		self._unscanned: int  = 0
+		# Whether a trim of the disk cache this processor started is running,
+		# which its shutdown waits for.  The cache itself runs one trim at a
+		# time for every program sharing it.  Guarded by _in_flight_lock.
+		self._trimming: bool = False
 
-		# Failed renders, remembered so the same job is not re-enqueued and its
+		# Failed renders, and fallbacks such as a vocoder's missing carrier
+		# (#4703, M22), remembered so the same job is not re-enqueued and its
 		# traceback re-logged on every trigger, but only for a pause: a failure
 		# may pass (L-10), so a note after the pause tries again, and each repeat
 		# doubles the pause up to _RETRY_PAUSE_MAX_SECONDS.  A success forgets
@@ -2157,6 +2203,29 @@ class TransformProcessor:
 		"""Drop a sample's remembered hash, once the sample has left the library."""
 
 		self._audio_md5s.pop(sample_id, None)
+
+	def drop_waiting_for (self, sample_ids: set[int]) -> None:
+
+		"""Drop the renders still waiting for these samples, once they have left the library (#4703, M20).
+
+		Those a worker already holds finish, and TransformManager.keep lets
+		them go.
+		"""
+
+		with self._settled:
+			waiting = [job for job in self._pending if job[2].sample_id not in sample_ids]
+
+			if len(waiting) == len(self._pending):
+				return
+
+			for _record, _spec, key in self._pending:
+				if key.sample_id in sample_ids:
+					self._in_flight.discard(key)
+
+			self._pending = collections.deque(waiting)
+
+			if not self._pending and not self._dispatched:
+				self._settled.notify_all()
 
 	def shutdown (self, drop_waiting: bool = False) -> None:
 
@@ -2399,7 +2468,14 @@ class TransformProcessor:
 				except Exception as exc:
 					failure = subsample.parallelism.Failure.caught(exc)
 
-			if failure is None:
+			if failure is None and outcome.fell_back:
+				# A fallback, such as a vocoder whose carrier is missing, is
+				# not kept, so without a pause every note rendered the whole
+				# chain again and said why (#4703, M22).  It waits as a failure
+				# does; the step that fell back has said why, once.
+				with self._in_flight_lock:
+					self._remember_failure(key)
+			elif failure is None:
 				# A render that works after failing starts any later failure afresh.
 				with self._in_flight_lock:
 					self._failures.pop(key, None)
@@ -2478,23 +2554,20 @@ class TransformProcessor:
 		if self._disk_cache is None:
 			return
 
-		due = self._disk_cache.add_written(written)
+		if self._disk_cache.add_written(written):
+			self._start_trim(self._disk_cache)
+
+	def _start_trim (self, disk_cache: VariantDiskCache) -> None:
+
+		"""Have one worker trim the disk cache, which has just marked a trim running for this processor to start."""
 
 		with self._in_flight_lock:
-			if self._trimming:
-				self._unscanned += written
-				return
-
-			if not due:
-				return
-
-			self._trimming  = True
-			self._unscanned = 0
+			self._trimming = True
 
 		settings = _DiskCacheSettings(
-			directory=self._disk_cache.directory,
-			max_bytes=self._disk_cache.max_bytes,
-			sample_rate=self._disk_cache.sample_rate,
+			directory=disk_cache.directory,
+			max_bytes=disk_cache.max_bytes,
+			sample_rate=disk_cache.sample_rate,
 		)
 
 		try:
@@ -2502,6 +2575,8 @@ class TransformProcessor:
 
 		except Exception:
 			_log.warning(_TRIM_FAILED, exc_info=True)
+
+			disk_cache.trimmed(None)
 
 			with self._settled:
 				self._trimming = False
@@ -2515,10 +2590,8 @@ class TransformProcessor:
 
 		"""Take a finished trim's total as the disk cache's size, and trim again if writes since put it past budget.
 
-		Runs on the results thread.  What workers wrote while the trim ran is
-		added to its total, though the trim may have counted some of it: an
-		overcount only trims again, where an undercount would leave the
-		folder over its budget.
+		Runs on the results thread.  The cache adds what any program's workers
+		wrote while the trim ran (VariantDiskCache.trimmed).
 		"""
 
 		total: typing.Optional[int] = None
@@ -2532,16 +2605,11 @@ class TransformProcessor:
 			_log.warning(_TRIM_FAILED, exc_info=True)
 
 		with self._settled:
-			unscanned       = self._unscanned
-			self._unscanned = 0
-			self._trimming  = False
+			self._trimming = False
 			self._settled.notify_all()
 
-		if self._disk_cache is not None and total is not None:
-			self._disk_cache.set_estimate(total + unscanned)
-
-			if unscanned:
-				self._count_disk_written(0)
+		if self._disk_cache is not None and self._disk_cache.trimmed(total):
+			self._start_trim(self._disk_cache)
 
 # ---------------------------------------------------------------------------
 # TransformManager
@@ -2704,13 +2772,34 @@ class TransformManager:
 		# Base variant: always enqueue regardless of pitch content.
 		self._processor.enqueue(record, _BASE_VARIANT_SPEC)
 
+	def keep (self, result: TransformResult) -> None:
+
+		"""Keep a finished render in the memory cache, unless its sample has left the library meanwhile.
+
+		The processor's on_complete.  A render finishing after its sample was
+		evicted or deleted was kept as the newest family, and pushed out live
+		samples' variants to make room (#4703, M20).  Kept first and looked at
+		after: a sample that leaves later has its family removed by
+		on_parent_evicted, and one that left before is removed here, so no
+		order of the two lets a render through.
+		"""
+
+		self._cache.put(result)
+
+		if self._instrument_library.get(result.key.sample_id) is None:
+			self._cache.remove_parent(result.key.sample_id)
+
 	def on_parent_evicted (self, sample_ids: list[int]) -> None:
 
-		"""Cascade-evict all derivatives of the given parent samples.
+		"""Cascade-evict all derivatives of the given parent samples, and drop their renders still waiting.
 
 		Call this immediately after InstrumentLibrary.add() returns evicted IDs,
-		before any new sample is added to the similarity matrix.
+		before any new sample is added to the similarity matrix.  A waiting
+		render for a sample that has gone is work for nothing (#4703, M20);
+		one a worker already holds is let go by keep() when it finishes.
 		"""
+
+		self._processor.drop_waiting_for(set(sample_ids))
 
 		for sid in sample_ids:
 			self._processor.forget_audio_md5(sid)
@@ -4915,10 +5004,17 @@ def _apply_vocoder (
 		return audio
 
 	# Load carrier.
+	# A carrier that cannot be loaded makes the render a fallback, which the
+	# processor pauses as it does a failure, so it is said once per carrier,
+	# not on every note (#4703, M22).
 	try:
 		carrier_mono = _load_carrier(step.carrier_path, sample_rate)
 	except (OSError, soundfile.SoundFileError) as exc:
-		_log.warning("Vocoder: could not load carrier %r: %s - returning dry", step.carrier_path, exc)
+		_warn_once(
+			f"vocoder-carrier:{step.carrier_path}",
+			f"Vocoder: could not load carrier {step.carrier_path!r}: {exc} - "
+			"notes using it play unprocessed, and it is tried again after 30 s, then less often",
+		)
 		_segment_bounds_local.fell_back = True
 		return audio
 
@@ -4926,7 +5022,11 @@ def _apply_vocoder (
 	# at the tile step / trip sosfiltfilt's padlen check — return dry with a
 	# clear message instead of a generic worker traceback.
 	if len(carrier_mono) == 0:
-		_log.warning("Vocoder: carrier %r decoded to zero frames - returning dry", step.carrier_path)
+		_warn_once(
+			f"vocoder-carrier:{step.carrier_path}",
+			f"Vocoder: carrier {step.carrier_path!r} decoded to zero frames - "
+			"notes using it play unprocessed, and it is tried again after 30 s, then less often",
+		)
 		_segment_bounds_local.fell_back = True
 		return audio
 

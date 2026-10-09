@@ -165,9 +165,11 @@ def ssb_mod (msg: numpy.ndarray, fc: float, sr: float, sideband: str = "usb") ->
 
 	z = _analytic(msg)
 	t = _t(len(msg), sr)
+	# A copy of the real part, so the complex product it is taken from is
+	# freed rather than held for the rest of the render (#4703, M33).
 	if sideband == "lsb":
-		return numpy.real(numpy.conj(z) * numpy.exp(1j * 2.0 * numpy.pi * fc * t))
-	return numpy.real(z * numpy.exp(1j * 2.0 * numpy.pi * fc * t))
+		return numpy.array(numpy.real(numpy.conj(z) * numpy.exp(1j * 2.0 * numpy.pi * fc * t)))
+	return numpy.array(numpy.real(z * numpy.exp(1j * 2.0 * numpy.pi * fc * t)))
 
 
 def ssb_demod (s: numpy.ndarray, fc: float, sr: float, lp: float = 4000.0) -> numpy.ndarray:
@@ -176,7 +178,8 @@ def ssb_demod (s: numpy.ndarray, fc: float, sr: float, lp: float = 4000.0) -> nu
 	offset in fc is a constant-Hz frequency shift (the mistuned 'Donald Duck')."""
 
 	t = _t(len(s), sr)
-	base = numpy.real(_analytic(s) * numpy.exp(-1j * 2.0 * numpy.pi * fc * t))
+	base = numpy.array(numpy.real(_analytic(s) * numpy.exp(-1j * 2.0 * numpy.pi * fc * t)))
+	del t
 	sos = scipy.signal.butter(8, lp, btype="low", fs=sr, output="sos")
 	return scipy.signal.sosfiltfilt(sos, base)
 
@@ -317,17 +320,35 @@ def selective_fade (
 	to the on-air signal pre-demod, so the demodulator misbehaves authentically
 	when the carrier notches deeper than the sidebands."""
 
+	# Worked in place, each full-length copy freed when it is done with
+	# (#4703, M33): the oversampled signal is 4x the sound's length, so each
+	# complex copy of it costs 2.8 MB per second of sound at 44.1 kHz, and
+	# the render peaked at 94x its input.  The arithmetic is unchanged, to the
+	# sample.
 	amount = float(numpy.clip(amount, 0.0, 1.0))
 	z = _analytic(s)
 	n = len(s)
 	out = z.copy()
 	for delay_ms in (0.7, 1.5):
 		d = max(1, int(delay_ms * 1e-3 * sr))
-		phase = _slow_lfo(n, sr, 0.3, rng) * (amount * 8.0 * numpy.pi)
-		delayed = numpy.concatenate([numpy.zeros(d, dtype=complex), z[:-d]])
-		out = out + amount * delayed * numpy.exp(1j * phase)
-	amp = 1.0 - amount * 0.5 * (0.5 + 0.5 * _slow_lfo(n, sr, 0.2, rng))
-	return numpy.real(out * amp)
+		phase = _slow_lfo(n, sr, 0.3, rng)
+		phase *= amount * 8.0 * numpy.pi
+		comb = numpy.empty(n, dtype=complex)
+		numpy.multiply(phase, 1j, out=comb)
+		del phase
+		numpy.exp(comb, out=comb)
+		comb[:d] = 0.0
+		comb[d:] *= amount * z[:-d]
+		out += comb
+		del comb
+	del z
+	amp = _slow_lfo(n, sr, 0.2, rng)
+	amp *= 0.5
+	amp += 0.5
+	amp *= amount * 0.5
+	numpy.subtract(1.0, amp, out=amp)
+	out *= amp
+	return out.real.copy()
 
 
 def agc (x: numpy.ndarray, sr: float, target: float = 0.3, win_s: float = 0.12) -> numpy.ndarray:
@@ -336,14 +357,17 @@ def agc (x: numpy.ndarray, sr: float, target: float = 0.3, win_s: float = 0.12) 
 	noise floor SWELLS as the carrier fades (a fading station swims in rising
 	hiss).  Peak-following with a smoothing window (cf. real receiver AGC)."""
 
+	# In place, as selective_fade (#4703, M33).
 	x = numpy.asarray(x, dtype=numpy.float64)
 	w = max(1, int(win_s * sr))
-	env = numpy.abs(x)
-	peak = scipy.ndimage.maximum_filter1d(env, size=w, mode="nearest")
-	smooth = scipy.ndimage.uniform_filter1d(peak, size=w, mode="nearest")
-	gain = target / (smooth + 1e-3)
-	gain = numpy.minimum(gain, 40.0)       # bound the make-up so silence-guard can still catch dead air
-	return x * gain
+	peak = scipy.ndimage.maximum_filter1d(numpy.abs(x), size=w, mode="nearest")
+	gain = scipy.ndimage.uniform_filter1d(peak, size=w, mode="nearest")
+	del peak
+	gain += 1e-3
+	numpy.divide(target, gain, out=gain)
+	numpy.minimum(gain, 40.0, out=gain)    # bound the make-up so silence-guard can still catch dead air
+	gain *= x
+	return gain
 
 
 # ---------------------------------------------------------------------------
@@ -438,13 +462,18 @@ def _receive_one (
 	(pre-demod impairments) -> demodulate -> AGC -> decimate.  Returns audio at
 	`sr`, length == len(msg)."""
 
+	# Each oversampled stage's input is let go once the next has it, and the
+	# impairments are added in place (#4703, M33): held together, they kept
+	# several full-length copies alive at the fade's peak.
 	n = len(msg)
 	os_sr = sr * _OVERSAMPLE
 	msg_os = _resample(msg, sr, os_sr)
 	n_os = len(msg_os)
 
 	band = channel_filter(msg_os, mode, bandwidth, os_sr)
+	del msg_os
 	onair = _modulate(band, mode, os_sr)
+	del band
 
 	impaired = (signal > 0.0) or (static > 0.0) or (fade > 0.0)
 	if impaired:
@@ -452,19 +481,21 @@ def _receive_one (
 		if fade > 0.0:
 			onair = selective_fade(onair, os_sr, fade, numpy.random.default_rng(shared_seed + 7))
 		if signal > 0.0:
-			onair = onair + gaussian_hiss(n_os, signal, carrier_ref, numpy.random.default_rng(hiss_seed))
+			onair += gaussian_hiss(n_os, signal, carrier_ref, numpy.random.default_rng(hiss_seed))
 		if static > 0.0:
-			onair = onair + crackle(
+			onair += crackle(
 				n_os, os_sr, static, carrier_ref, _CARRIER_HZ,
 				numpy.random.default_rng(shared_seed),
 			)
 
 	rx = _demodulate(onair, mode, demod, tune, os_sr)
+	del onair
 
 	if (signal > 0.0) or (fade > 0.0):
 		rx = agc(rx, os_sr)
 
 	out = _resample(rx, os_sr, sr)
+	del rx
 	return _fit_length(out, n)
 
 

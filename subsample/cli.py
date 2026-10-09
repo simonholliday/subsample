@@ -1137,19 +1137,47 @@ def _output_sample_rate (cfg: subsample.config.Config) -> int:
 	return cfg.recorder.audio.sample_rate
 
 
+def _variant_disk_cache (
+	cfg:                subsample.config.Config,
+	output_sample_rate: int,
+) -> typing.Optional[subsample.transform.VariantDiskCache]:
+
+	"""The session's variant disk cache, or None when it is turned off; every program's pipeline shares it.
+
+	One cache for the one folder (#4703, M21): built per program, each kept
+	its own budget and trimmed as if alone, so the folder grew to about one
+	budget per program.
+	"""
+
+	if not cfg.transform.variant_cache_dir or cfg.transform.max_disk_mb <= 0:
+		return None
+
+	_log.info(
+		"Variant disk cache: %s (max %.0f MB)",
+		cfg.transform.variant_cache_dir, cfg.transform.max_disk_mb,
+	)
+
+	return subsample.transform.VariantDiskCache(
+		directory=pathlib.Path(cfg.transform.variant_cache_dir),
+		max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
+		sample_rate=output_sample_rate,
+	)
+
+
 def _build_transform_manager (
 	cfg:                subsample.config.Config,
 	instrument_library: subsample.library.InstrumentLibrary,
 	output_sample_rate: int,
+	variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache],
 	program:            typing.Optional[str] = None,
 ) -> subsample.transform.TransformManager:
 
-	"""Build the transform pipeline for one library: its caches, its worker pool and its manager.
+	"""Build the transform pipeline for one library: its memory cache, its render queue and its manager.
 
 	The workers are running once this returns, so the manager's shutdown is
 	registered as a teardown, for a Ctrl+C during the rest of startup.  A
-	program's name, when given, labels its idle log line; the disk cache is
-	announced only for the single library, since every program shares it.
+	program's name, when given, labels its idle log line.  The disk cache
+	is the session's (_variant_disk_cache), shared by every program.
 	"""
 
 	transform_cache = subsample.transform.TransformCache(
@@ -1159,9 +1187,13 @@ def _build_transform_manager (
 
 	def _on_transform_complete (result: subsample.transform.TransformResult) -> None:
 
-		"""Keep a finished render in the memory cache."""
+		"""Keep a finished render in the memory cache, unless its sample has left the library.
 
-		transform_cache.put(result)
+		Renders are asked for only through the manager, so it is built before
+		the first one finishes.
+		"""
+
+		transform_manager.keep(result)
 
 	def _on_transform_idle (completed: int) -> None:
 
@@ -1171,21 +1203,6 @@ def _build_transform_manager (
 			"Transform queue idle%s - %d variant(s) processed  [cache: %s]",
 			label, completed, transform_cache.format_memory(),
 		)
-
-	variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None
-
-	if cfg.transform.variant_cache_dir and cfg.transform.max_disk_mb > 0:
-		variant_disk_cache = subsample.transform.VariantDiskCache(
-			directory=pathlib.Path(cfg.transform.variant_cache_dir),
-			max_bytes=int(cfg.transform.max_disk_mb * 1024 * 1024),
-			sample_rate=output_sample_rate,
-		)
-
-		if program is None:
-			_log.info(
-				"Variant disk cache: %s (max %.0f MB)",
-				cfg.transform.variant_cache_dir, cfg.transform.max_disk_mb,
-			)
 
 	transform_processor = subsample.transform.TransformProcessor(
 		sample_rate=cfg.recorder.audio.sample_rate,
@@ -1215,6 +1232,7 @@ def _load_bank (
 	cfg: subsample.config.Config,
 	output_sample_rate: int,
 	parent_map_dir: pathlib.Path,
+	variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache],
 ) -> subsample.bank.Bank:
 
 	"""Load a single program: library, similarity matrix, and transform pipeline.
@@ -1241,6 +1259,8 @@ def _load_bank (
 		output_sample_rate: Effective player output sample rate for variant resampling.
 		parent_map_dir:     Directory of the top-level MIDI map, which a
 		                    relative ``map:`` preset path is resolved from.
+		variant_disk_cache: The session's variant disk cache, which every
+		                    program shares, or None.
 
 	Returns:
 		Fully loaded Bank ready for playback.
@@ -1283,9 +1303,12 @@ def _load_bank (
 	if len(instrument_library) > 0:
 		similarity_matrix.bulk_add(instrument_library.samples())
 
-	# Transform pipeline (per-bank).  One pool per bank, each running from
-	# here, so each gets its own teardown for a Ctrl+C during startup.
-	transform_manager = _build_transform_manager(cfg, instrument_library, output_sample_rate, defn.name)
+	# Transform pipeline (per-bank).  One queue and memory cache per bank, each
+	# running from here, so each gets its own teardown for a Ctrl+C during
+	# startup; the disk cache is the session's, shared by every bank.
+	transform_manager = _build_transform_manager(
+		cfg, instrument_library, output_sample_rate, variant_disk_cache, defn.name,
+	)
 
 	# For a `map:` preset, populate the (empty) library + similarity matrix
 	# from the preset's own path / directory references — these resolve
@@ -1919,11 +1942,12 @@ def _main_impl () -> None:
 		presets = preloaded_midi_map_result.presets
 
 		banks: list[subsample.bank.Bank] = []
+		variant_disk_cache = _variant_disk_cache(cfg, output_sample_rate)
 		try:
 			for defn in bank_definitions:
 				bank = _load_bank(
 					defn, presets.get(defn.program), reference_library, cfg,
-					output_sample_rate, parent_map_dir,
+					output_sample_rate, parent_map_dir, variant_disk_cache,
 				)
 				banks.append(bank)
 				source = defn.map_path if defn.map_path is not None else defn.directory
@@ -2032,7 +2056,9 @@ def _main_impl () -> None:
 
 		# --- Transform pipeline ---
 		if cfg.player.enabled:
-			transform_manager = _build_transform_manager(cfg, instrument_library, output_sample_rate)
+			transform_manager = _build_transform_manager(
+				cfg, instrument_library, output_sample_rate, _variant_disk_cache(cfg, output_sample_rate),
+			)
 
 			if len(instrument_library) > 0:
 				for _record in instrument_library.samples():
