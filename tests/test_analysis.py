@@ -813,10 +813,10 @@ class TestZeroCrossingRate:
 		assert result.zcr == 0.0
 
 	def test_white_noise_has_high_zcr (self) -> None:
-		"""White noise alternates sign frequently — score should be high."""
+		"""White noise changes sign at about every other sample, half the most a signal can (ANALYSIS_VERSION 19)."""
 		result = subsample.analysis.analyze_mono(self._white_noise(), self._params())
 
-		assert result.zcr > 0.5
+		assert result.zcr == pytest.approx(0.5, abs=0.05)
 
 	def test_noise_higher_zcr_than_sine (self) -> None:
 		"""Noise should have higher ZCR than a smooth sine wave."""
@@ -2431,59 +2431,64 @@ class TestNumbaRecompileWarning:
 		assert self._WARNING not in self._stderr("import subsample.analysis")
 
 
+@pytest.mark.parametrize("rate", [8000, 11025, 16000, 22050, 44100, 48000, 96000])
 class TestAnAttackAtTheStart:
 
-	"""A hit in a file's first moments is found where it is (#3880).
+	"""A hit in a file's first moments is found where it is (#3880), at every sample rate.
 
 	With no quiet before it for the onset envelope to rise out of, it went
-	undetected, or was placed on its decay.
+	undetected, or was placed on its decay.  At 8 kHz and 11.025 kHz the
+	quiet put in front was too short, and the first hit read 0.08 s late
+	(#4703, M27).
 	"""
 
-	SR = 44100
-
-	def _tap (self) -> numpy.ndarray:
+	def _tap (self, rate: int) -> numpy.ndarray:
 
 		"""A tap as the guide's loop has them: a 180 Hz tone dying away over half a second."""
 
-		t = numpy.arange(int(0.5 * self.SR)) / self.SR
+		t = numpy.arange(int(0.5 * rate)) / rate
 
 		return (0.6 * numpy.sin(2 * numpy.pi * 180.0 * t) * numpy.exp(-t / 0.050)).astype(numpy.float32)
 
-	def _attacks (self, mono: numpy.ndarray) -> tuple[float, ...]:
+	def _attacks (self, mono: numpy.ndarray, rate: int) -> tuple[float, ...]:
 
 		"""The attack times found by the analysis a capture or an import runs."""
 
-		params = subsample.analysis.compute_params(self.SR)
+		params = subsample.analysis.compute_params(rate)
 
 		return subsample.analysis.analyze_all(mono, params, subsample.config.AnalysisConfig())[1].attack_times
 
-	def test_a_single_hit_on_the_first_sample (self) -> None:
+	def test_a_single_hit_on_the_first_sample (self, rate: int) -> None:
 
 		"""Was one attack at 0.092 s, on the tap's decay."""
 
-		attacks = self._attacks(self._tap())
+		attacks = self._attacks(self._tap(rate), rate)
 
 		assert len(attacks) == 1
 		assert attacks[0] == pytest.approx(0.0, abs=0.002)
 
-	def test_a_loop_trimmed_to_its_first_tap (self) -> None:
+	def test_a_loop_trimmed_to_its_first_tap (self, rate: int) -> None:
 
 		"""Was seven attacks for eight taps, as import trims a loop up to its first."""
 
 		starts = (0.0, 0.605, 1.197, 1.803, 2.399, 3.004, 3.604, 4.209)
-		take   = numpy.zeros(int(4.8 * self.SR), dtype=numpy.float32)
-		tap    = self._tap()
+		take   = numpy.zeros(int(4.8 * rate), dtype=numpy.float32)
+		tap    = self._tap(rate)
 
 		for start in starts:
-			index = int(start * self.SR)
+			index = int(start * rate)
 			take[index:index + tap.size] += tap
 
-		assert self._attacks(take) == pytest.approx(starts, abs=0.003)
+		assert self._attacks(take, rate) == pytest.approx(starts, abs=0.003)
 
-	def test_a_hit_after_quiet_is_where_it_was (self) -> None:
-		take = numpy.concatenate([numpy.zeros(int(0.3 * self.SR), dtype=numpy.float32), self._tap()])
+	def test_a_hit_after_quiet_is_where_it_was (self, rate: int) -> None:
 
-		assert self._attacks(take) == pytest.approx((0.3,), abs=0.002)
+		"""Within 2 ms, or one step of the attack's envelope where that is longer: 4 ms at 8 kHz."""
+
+		take  = numpy.concatenate([numpy.zeros(int(0.3 * rate), dtype=numpy.float32), self._tap(rate)])
+		close = max(0.002, subsample.analysis._ENVELOPE_WINDOW / rate)
+
+		assert self._attacks(take, rate) == pytest.approx((0.3,), abs=close)
 
 
 class TestKnownValues:
@@ -2513,9 +2518,9 @@ class TestKnownValues:
 
 	@pytest.mark.parametrize("frequency", [250.0, 1000.0, 4000.0])
 	def test_a_sine_crosses_zero_twice_a_cycle (self, frequency: float) -> None:
-		"""ZCR maps crossings per sample from [0, 0.5] to [0, 1], so a sine at f scores 4f / rate."""
+		"""ZCR is crossings per sample, so a sine at f scores 2f / rate (ANALYSIS_VERSION 19; 4f / rate before)."""
 		result = subsample.analysis.analyze_mono(self._sine(frequency), self._params())
-		assert result.zcr == pytest.approx(4.0 * frequency / self._RATE, rel=0.03)
+		assert result.zcr == pytest.approx(2.0 * frequency / self._RATE, rel=0.03)
 
 	@pytest.mark.parametrize("frequency", [250.0, 1000.0, 4000.0])
 	def test_a_sines_centroid_and_rolloff_are_its_frequency (self, frequency: float) -> None:

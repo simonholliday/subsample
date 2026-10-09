@@ -102,6 +102,32 @@ def _resolved_sample_path (path: pathlib.Path) -> pathlib.Path:
 	return resolved
 
 
+# The same for a path with its folders resolved but its file left as it is, so
+# a symbolic link stays the link, in the folder it was made in (#4703, M26).
+_LINKED_PATH_CACHE: dict[pathlib.Path, pathlib.Path] = {}
+
+
+def linked_path (path: pathlib.Path) -> pathlib.Path:
+
+	"""Return ``path`` absolute, its folders resolved and its file not followed, memoised.
+
+	For a symbolic link, the link itself in its own folder: where a
+	``directory:`` sees it, and what a sample loaded from it is named after.
+	"""
+
+	linked = _LINKED_PATH_CACHE.get(path)
+
+	if linked is None:
+		linked = path.absolute().parent.resolve() / path.name
+
+		if len(_LINKED_PATH_CACHE) >= _RESOLVED_PATH_CACHE_MAX:
+			_LINKED_PATH_CACHE.clear()
+
+		_LINKED_PATH_CACHE[path] = linked
+
+	return linked
+
+
 # WherePredicate.name_regex stores its pattern as a raw string (so the frozen
 # dataclass stays hashable), but matches() runs on the trigger path — so the
 # compiled re.Pattern is memoised module-side here rather than recompiling, or
@@ -379,10 +405,12 @@ class WherePredicate:
 	_compiled_name_regex so the trigger path doesn't recompile per record."""
 	name_path: typing.Optional[str]  = None
 	"""Internal field — set by parse_select for a `path:` (or legacy
-	`name: <path>`) reference; the resolved absolute path string.  Used by
-	_resolve_path_references to load the file, AND evaluated in matches() as an
-	exact resolved-filepath match — the stem is not unique across take-folders,
-	so the filepath is the authoritative discriminator.  Never exposed in YAML."""
+	`name: <path>`) reference; the absolute path string with its folders
+	resolved and a symbolic link kept as the link (linked_path, #4703 M26).
+	Used by _resolve_path_references to load the file, named after the link,
+	AND evaluated in matches() as an exact match of the resolved file — the
+	stem is not unique across take-folders, so the file is the authoritative
+	discriminator.  Never exposed in YAML."""
 	directory: typing.Optional[str]  = None
 	sample_id: typing.Optional[int]  = None
 	"""Internal field — an exact-identity pin (set by zone materialization, and
@@ -430,8 +458,15 @@ class WherePredicate:
 		if not self.onsets.contains(record.rhythm.onset_count):
 			return False
 
-		if not self.tempo.contains(record.rhythm.tempo_bpm):
-			return False
+		# 0 BPM is analysis saying it found no tempo, as every one-shot has, not
+		# a tempo below every bound: it fails a tempo range, as no pitch does
+		# below (#4703, M25).  `where: {tempo: {lt: 100}}` matched every hit.
+		if not self.tempo.is_empty():
+			if record.rhythm.tempo_bpm <= 0.0:
+				return False
+
+			if not self.tempo.contains(record.rhythm.tempo_bpm):
+				return False
 
 		# 0.0 Hz is analysis saying it found no pitch at all, not a pitch below
 		# every bound — so an unpitched sample fails a pitch range rather than
@@ -479,7 +514,10 @@ class WherePredicate:
 			if self.loopable != is_loopable:
 				return False
 
-		if self.name is not None and record.name != self.name:
+		# A path names its file exactly, so the name parse_select took from it
+		# is not checked too: a symbolic link and the file it points to have
+		# names of their own, and either spelling must match (#4703, M26).
+		if self.name is not None and self.name_path is None and record.name != self.name:
 			return False
 
 		if self.name_list is not None and record.name not in self.name_list:
@@ -494,14 +532,14 @@ class WherePredicate:
 				return False
 
 		# `path:` / legacy `name: <path>` — an EXACT file match.  parse_select
-		# also sets `name` (the stem) above, but a stem is not unique across
-		# take-folders, so the authoritative test is the resolved filepath.
-		# Canonicalised via the same memoised .resolve() as `directory:` so the
-		# two agree on symlinks / relative segments.
+		# also sets `name` (the stem), but a stem is not unique across
+		# take-folders, so the test is the file itself: both sides resolved
+		# through the same memo, so a symbolic link and the file it points to
+		# match each other, whichever the map or the library names.
 		if self.name_path is not None:
 			if record.filepath is None:
 				return False
-			if str(_resolved_sample_path(record.filepath)) != self.name_path:
+			if _resolved_sample_path(record.filepath) != _resolved_sample_path(pathlib.Path(self.name_path)):
 				return False
 
 		if self.directory is not None:
@@ -511,9 +549,13 @@ class WherePredicate:
 			# self.directory is already absolute + resolved (parse_select stores
 			# it that way), so only the sample path needs resolving — and that
 			# is memoised, so a steady groove issues no filesystem syscalls here.
-			try:
-				_resolved_sample_path(record.filepath).relative_to(self.directory)
-			except ValueError:
+			# A symbolic link is inside both its own folder and its target's
+			# (#4703, M26): resolved, a kit folder of links into a pool was
+			# never inside the kit.
+			if not (
+				_resolved_sample_path(record.filepath).is_relative_to(self.directory)
+				or linked_path(record.filepath).is_relative_to(self.directory)
+			):
 				return False
 
 		# reference is handled externally by the query runner (needs SimilarityMatrix).
@@ -640,7 +682,12 @@ _register_scorer(
 	),
 )
 _register_scorer("onsets",   lambda r, _p, _s: float(r.rhythm.onset_count))
-_register_scorer("tempo",    lambda r, _p, _s: float(r.rhythm.tempo_bpm))
+# And None for no tempo, as for no pitch: `order: tempo_asc` handed back every
+# one-shot as the slowest sample in the pool (#4703, M25).
+_register_scorer(
+	"tempo",
+	lambda r, _p, _s: float(r.rhythm.tempo_bpm) if r.rhythm.tempo_bpm > 0.0 else None,
+)
 _register_scorer("level",    lambda r, _p, _s: float(r.level.rms))
 _register_scorer("age",      lambda r, _p, _s: float(r.sample_id))
 
@@ -2025,7 +2072,7 @@ def _parse_where (
 					# an implicit path reference.  Preserved indefinitely; new
 					# YAML should use the explicit `path:` key instead.
 					other_kwargs["name"]      = pathlib.Path(raw_name).stem
-					other_kwargs["name_path"] = str((midi_map_dir / raw_name).resolve())
+					other_kwargs["name_path"] = str(linked_path(midi_map_dir / raw_name))
 				else:
 					other_kwargs["name"] = raw_name
 
@@ -2039,8 +2086,10 @@ def _parse_where (
 					f"may be used per where block."
 				)
 			raw_path = _where_text(key, value, assignment_name)
+			# As written, a symbolic link kept: the sample loaded from it is
+			# named after the link, as the library names it (#4703, M26).
 			other_kwargs["name"]      = pathlib.Path(raw_path).stem
-			other_kwargs["name_path"] = str((midi_map_dir / raw_path).resolve())
+			other_kwargs["name_path"] = str(linked_path(midi_map_dir / raw_path))
 
 		elif key == "directory":
 			directory = _where_text(key, value, assignment_name)

@@ -147,9 +147,13 @@ warnings.filterwarnings(
 #     32 onsets each and now 1 to 3, and on 60 real captures most counts fell
 #     while 16 whose first attack had read as past 50 ms now start at 0.
 #
-# Waiting for the next bump, because each would change every fingerprint alone:
-#   - zcr divided by librosa's true maximum, 1.0, rather than 0.5 (_ZCR_MAX).
-ANALYSIS_VERSION: str = "18"
+# 19: the window of silence in front is at least 1024 samples, so at 8 kHz and
+#     11.025 kHz, where n_fft is 512, the first hit is found too: it read 0.08 s
+#     late (#4703, M27).  Other rates are unchanged.  And zcr is divided by
+#     librosa's true maximum, 1.0, rather than 0.5 (_ZCR_MAX), so noise brighter
+#     than white no longer saturates; it changes every fingerprint, and waited
+#     for this bump.
+ANALYSIS_VERSION: str = "19"
 
 # ---------------------------------------------------------------------------
 # Reference constants for log-scale normalisation
@@ -182,14 +186,13 @@ _ACTIVE_THRESHOLD_RATIO: float = 0.1
 
 # Zero crossing rate: librosa counts crossings per sample, so a signal that
 # alternates sign every sample measures 1.0 and white noise about 0.5.  The
-# linear map divides by 0.5, so 1.0 means as noisy as white noise, and brighter
-# noise (closed hats, cabasa, shakers) saturates there: of the 47 shipped GM
-# references only the cabasa reaches it, but the hats crowd into 0.9 to 1.0.
-# Dividing by librosa's true maximum, 1.0, would keep them apart, but it changes
-# every fingerprint, so it waits for the next ANALYSIS_VERSION bump.  The map
-# is linear because ZCR is already perceptually linear (unlike time and
-# frequency, which are logarithmic).
-_ZCR_MAX: float = 0.5
+# linear map divides by that true maximum, so noise brighter than white (closed
+# hats, cabasa, shakers) keeps its place above it.  Divided by 0.5, it
+# saturated there: of the 47 shipped GM references the cabasa reached 1.0 and
+# the hats crowded into 0.9 to 1.0 (ANALYSIS_VERSION 19).  The map is linear
+# because ZCR is already perceptually linear (unlike time and frequency, which
+# are logarithmic).
+_ZCR_MAX: float = 1.0
 
 # Spectral contrast: mean contrast across all sub-bands in dB. librosa
 # spectral_contrast values are always non-negative (they represent the
@@ -364,9 +367,9 @@ class AnalysisResult:
 	0.0 = narrow / pure tone, 1.0 = wide / spectrally complex."""
 
 	zcr: float
-	"""Zero crossing rate, linearly mapped from [0, 0.5] to [0, 1].
-	0.0 = pure DC / very smooth signal, 1.0 = as noisy as white noise, where
-	brighter noise saturates (see _ZCR_MAX). Complements spectral_flatness
+	"""Zero crossing rate, the share of sample pairs that change sign, in [0, 1].
+	0.0 = pure DC / very smooth signal, about 0.5 = white noise, 1.0 = a sign
+	change at every sample (see _ZCR_MAX). Complements spectral_flatness
 	from the time domain: percussive transients and noise both produce high ZCR."""
 
 	harmonic_ratio: float
@@ -1344,8 +1347,11 @@ def analyze_rhythm (
 	# sample was placed on its decay (#3880).  With the first hit unseen, the
 	# envelope was also scaled against the sound's own decay, so the decay's
 	# wiggles passed as further hits.  Both stages run with one window of
-	# digital silence in front, and every time is shifted back by it.
-	lead_in      = params.n_fft
+	# digital silence in front, and every time is shifted back by it.  At least
+	# 1024 samples, half onset_detect's own 2048-sample window: at 8 kHz and
+	# 11.025 kHz n_fft is 512, which was too short, and the first hit read
+	# 0.08 s late there (#4703, M27).
+	lead_in      = max(params.n_fft, 1024)
 	lead_seconds = lead_in / params.sample_rate
 
 	onset_times_raw: numpy.ndarray = librosa.onset.onset_detect(
@@ -2660,16 +2666,15 @@ def _compute_zcr (
 	produce many sign changes (high ZCR), while smooth tonal signals produce few.
 
 	librosa gives about 0.5 for white noise and 1.0 for a signal that
-	alternates sign every sample.  A linear map from [0, 0.5] → [0, 1] is used,
-	so brighter noise than white saturates at 1.0 (see _ZCR_MAX); no log scale
-	is needed.
+	alternates sign every sample, its true maximum, which the score is divided
+	by (see _ZCR_MAX); no log scale is needed.
 
 	Args:
 		mono:   Float32 audio, shape (n_frames,).
 		params: FFT params (used for consistent frame sizing).
 
 	Returns:
-		ZCR score in [0.0, 1.0]. 0 = smooth/DC, 1 = as noisy as white noise or more.
+		ZCR score in [0.0, 1.0]. 0 = smooth/DC, about 0.5 = white noise, 1 = a sign change at every sample.
 	"""
 
 	zcr_frames = librosa.feature.zero_crossing_rate(

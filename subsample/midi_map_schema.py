@@ -69,8 +69,8 @@ _MEASUREMENTS: typing.Final[dict[str, str]] = {
 	"duration":        "The sample's length, kept within bounds. A length is measured from the audio, so it is written as a range: one value would keep only a sample measured at exactly that, which almost none is.",
 	"duration_beats":  "The sample's length in beats at the session tempo, where a beat is a quarter note, kept within bounds. A map that uses it needs a session tempo. It is worked out from a measured length, so it is written as a range rather than as one value.",
 	"onsets":          "How many hits Subsample detected in the sample. A number keeps exactly that count, and bounds keep the counts within them.",
-	"tempo":           "The tempo Subsample detected in the sample, kept within bounds. A detected tempo is measured, so it is written as a range: one value would keep only a sample measured at exactly that, which almost none is.",
-	"pitch":           "The pitch Subsample detected in the sample, as a frequency or as a note name such as `C3`, kept within bounds. A detected pitch is measured, so it is written as a range rather than as one pitch.",
+	"tempo":           "The tempo Subsample detected in the sample, kept within bounds. A detected tempo is measured, so it is written as a range: one value would keep only a sample measured at exactly that, which almost none is. A sample with no tempo found is kept by no range.",
+	"pitch":           "The pitch Subsample detected in the sample, as a frequency or as a note name such as `C3`, kept within bounds. A detected pitch is measured, so it is written as a range rather than as one pitch. A sample with no pitch found is kept by no range.",
 	"quantized_beats": "The sample's length in beats once the assignment's quantise processor has run. A sample not yet quantised does not qualify. A quantised length comes out of the grid whole, so a number keeps exactly that many beats, and bounds keep the lengths within them.",
 }
 
@@ -101,9 +101,9 @@ _NAME_MATCHES: typing.Final[dict[str, tuple[str, str]]] = {
 
 _ORDER_BY: typing.Final[dict[str, tuple[str, str]]] = {
 	"duration":        ("Duration", "The sample's length."),
-	"pitch":           ("Pitch", "The pitch Subsample detected in the sample."),
+	"pitch":           ("Pitch", "The pitch Subsample detected in the sample. A sample with no pitch found comes last, whichever way round."),
 	"onsets":          ("Hits", "How many hits Subsample detected in the sample."),
-	"tempo":           ("Tempo", "The tempo Subsample detected in the sample."),
+	"tempo":           ("Tempo", "The tempo Subsample detected in the sample. A sample with no tempo found comes last, whichever way round."),
 	"level":           ("Level", "How loud the sample is. A velocity pick needs this as the first ranking."),
 	"age":             ("Age", "When Subsample took the sample in, so `desc` puts the newest first."),
 	"quantized_beats": ("Quantised beats", "The sample's length in beats once quantised. A sample not yet quantised comes last, whichever way round."),
@@ -702,13 +702,13 @@ def _where () -> dict[str, typing.Any]:
 	terms: dict[str, typing.Any] = {
 		"name": _name_term(),
 		"path": {
-			"description": "One audio file, by its path relative to the map. It may not be combined with `name`.",
+			"description": "One audio file, by its path relative to the map. It may not be combined with `name`. A symbolic link and the file it points to each name the same sample.",
 			"type": "string",
 			"minLength": 1,
 			"examples": ["kicks/909-kick.wav"],
 		},
 		"directory": {
-			"description": "The samples inside this directory and the directories within it, relative to the map. Subsample loads them at startup.",
+			"description": "The samples inside this directory and the directories within it, relative to the map. Subsample loads them at startup. A symbolic link counts as inside both its own directory and that of the file it points to.",
 			"type": "string",
 			"minLength": 1,
 			"examples": ["kits/acoustic"],

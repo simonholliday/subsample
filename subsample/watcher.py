@@ -83,16 +83,19 @@ class InstrumentWatcher:
 	(debounced); audio file events wait for a sidecar grace period, then
 	check file-size stability before analyzing.
 
-	Sidecars present in known_sidecars at construction time are silently
-	ignored — they were already loaded at startup.  Audio files are NOT
-	filtered that way: an already-loaded path can still be overwritten in
-	place, and only the sidecar-freshness check can tell the difference.
+	What is loaded is kept by audio path, with the digest of the audio it was
+	analysed from (``loaded``, seeded with the startup library), so an event
+	for a file the library already holds is let go, and one for a file that
+	changed, or came back, loads it (#4703, M23).  Neither kind of event is
+	dropped for a path loaded at startup: a sidecar overwritten with its audio,
+	or a sample restored from the Trash, beside a sidecar that never left,
+	stayed missing or stale until a restart.
 	"""
 
 	def __init__ (
 		self,
 		directory: pathlib.Path,
-		known_sidecars: set[pathlib.Path],
+		loaded: dict[pathlib.Path, typing.Optional[str]],
 		on_sample_loaded: typing.Callable[[subsample.library.SampleRecord], None],
 		target_sample_rate: typing.Optional[int] = None,
 		with_preview: bool = False,
@@ -102,17 +105,20 @@ class InstrumentWatcher:
 
 		"""Set up a watcher on directory's top level; nothing is watched until start().
 
-		A file that arrives with no sidecar is analysed on the session's
-		analysis worker processes (#4667), unless ``processes`` is False, as
+		``loaded`` maps each audio path the library already holds, resolved,
+		to the digest of the audio its analysis was made from (None where the
+		sidecar gave none).  A file that arrives with no sidecar, and a sidecar
+		of another analysis version, are analysed on the session's analysis
+		worker processes (#4667, #4703 M24), unless ``processes`` is False, as
 		the tests that patch the analysis need.
 		"""
 
 		self._directory = directory
-		# Audio + sidecar paths already loaded, so a spurious create/modify event
-		# for one is ignored.  MUTABLE (guarded by _lock): a deletion discards the
-		# path so a later re-create at it reloads — else a re-encoded/re-synced
-		# startup file at the SAME path would be suppressed forever.
-		self._known_sidecars: set[pathlib.Path] = set(known_sidecars)
+		# What the library holds from this folder: audio path → the digest of
+		# the audio delivered, so a spurious event for a file already loaded is
+		# let go and a changed one reloads (#4703, M23).  A deletion forgets
+		# the path, so a file restored to it loads again.  Guarded by _lock.
+		self._loaded: dict[pathlib.Path, typing.Optional[str]] = dict(loaded)
 		self._on_sample_loaded = on_sample_loaded
 		# Called with an audio path when its file is deleted or renamed away, so
 		# the removed sample leaves the live subsystems instead of lingering as a
@@ -246,10 +252,18 @@ class InstrumentWatcher:
 		arrives, so registering afterwards is a race the writer loses.  It is
 		one-shot, exactly like the watcher's own writes: a later, genuinely
 		external regeneration of the same sidecar still triggers a load.
+
+		The audio beside it counts as loaded, by its writer, so its own event
+		does not load it from the fresh sidecar either (#4703, M23); whose
+		digest it is, the sidecar says when the audio path first reads it.
 		"""
 
+		path  = sidecar_path.resolve()
+		audio = path.with_name(path.name[: -len(subsample.cache.SIDECAR_SUFFIX)])
+
 		with self._lock:
-			self._self_written_sidecars.add(sidecar_path.resolve())
+			self._self_written_sidecars.add(path)
+			self._loaded[audio] = None
 
 
 	def _on_sidecar_event (self, sidecar_path: pathlib.Path) -> None:
@@ -263,9 +277,6 @@ class InstrumentWatcher:
 
 		path = sidecar_path.resolve()
 
-		if path in self._known_sidecars:
-			return
-
 		with self._lock:
 			# One-shot suppression: this sidecar was just written by our own
 			# audio path, which is already loading the sample — reacting to
@@ -275,20 +286,27 @@ class InstrumentWatcher:
 				self._self_written_sidecars.discard(path)
 				return
 
+		self._schedule_sidecar_load(path)
+
+	def _schedule_sidecar_load (self, sidecar_path: pathlib.Path) -> None:
+
+		"""Load this sidecar and its audio after the debounce, unless a load of it is already due, which this replaces."""
+
+		with self._lock:
 			if self._stopped:
 				return
 
 			# Cancel any existing timer for this path — file may still be writing.
-			existing = self._timers.pop(path, None)
+			existing = self._timers.pop(sidecar_path, None)
 			if existing is not None:
 				existing.cancel()
 
 			timer = threading.Timer(
 				_DEBOUNCE_SECONDS,
 				self._attempt_load,
-				args=(path, 0),
+				args=(sidecar_path, 0),
 			)
-			self._timers[path] = timer
+			self._timers[sidecar_path] = timer
 
 			# Start inside the lock so stop() cannot cancel and clear this timer
 			# between registration and start.
@@ -320,8 +338,18 @@ class InstrumentWatcher:
 
 		# Pass the watcher's preview setting through: if this sidecar turns out to
 		# be version-stale, the re-analysis behind load_sidecar has to know to
-		# rebuild the preview, or a hot-loaded sample arrives without one.
-		result = subsample.cache.load_sidecar(sidecar_path, with_preview=self._with_preview)
+		# rebuild the preview, or a hot-loaded sample arrives without one.  On an
+		# analysis worker, as that re-analysis would otherwise run here, in the
+		# player's process, one per sidecar at once (#4703, M24); its rewrite of
+		# the sidecar then finds the sample already loaded.
+		result: typing.Optional[subsample.cache.SampleAssets]
+
+		if self._processes:
+			result = subsample.parallelism.run_in_analysis_worker(
+				subsample.cache.load_sidecar, sidecar_path, with_preview=self._with_preview,
+			)
+		else:
+			result = subsample.cache.load_sidecar(sidecar_path, with_preview=self._with_preview)
 
 		if result is None:
 			self._schedule_retry(sidecar_path, attempt, reason="sidecar not readable")
@@ -363,14 +391,31 @@ class InstrumentWatcher:
 			channel_format = result.channel_format,
 			loop           = result.loop,
 			audio_sample_rate = self._target_sample_rate or result.params.sample_rate,
+			audio_md5      = result.audio_md5,
 		)
 
-		# A stop() racing this callback joins the timer thread, so delivering
-		# here is safe — but skip when stop already ran to completion (the
-		# downstream systems may be torn down).  Mirrors MidiMapWatcher._fire.
+		self._deliver(record, audio_path.resolve())
+
+	def _deliver (self, record: subsample.library.SampleRecord, audio_path: pathlib.Path) -> None:
+
+		"""Hand a loaded sample to the library, unless it already holds this audio from this path (#4703, M23).
+
+		Looked at and noted together, under the lock, so two loads of the same
+		file deliver it once.  A stop() racing this callback joins the timer
+		thread, so delivering here is safe — but skip when stop already ran to
+		completion (the downstream systems may be torn down).  Mirrors
+		MidiMapWatcher._fire.
+		"""
+
 		with self._lock:
 			if self._stopped:
 				return
+
+			if record.audio_md5 is not None and self._loaded.get(audio_path) == record.audio_md5:
+				_log.debug("Watcher: %s is already loaded as it is - skipping", audio_path.name)
+				return
+
+			self._loaded[audio_path] = record.audio_md5
 
 		self._on_sample_loaded(record)
 
@@ -432,14 +477,11 @@ class InstrumentWatcher:
 		try:
 			self._on_sample_removed(audio_path)
 
-			# Forget this path so a later re-create at it reloads (the known
-			# sets suppress re-integration of already-loaded files; after a
-			# deletion this path is no longer loaded).  Same resolved forms the
-			# add path and cli seeding use.
-			resolved_audio = audio_path.resolve()
-			sidecar = (audio_path.parent / (audio_path.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
+			# Forget this path, so the same file restored to it, beside a
+			# sidecar that never left, loads again (#4703, M23).  The same
+			# resolved form the loads and cli seeding use.
 			with self._lock:
-				self._known_sidecars.discard(sidecar)
+				self._loaded.pop(audio_path.resolve(), None)
 		except Exception:
 			_log.exception(
 				"Instrument watcher: error removing deleted sample %s", audio_path,
@@ -511,17 +553,11 @@ class InstrumentWatcher:
 		with self._lock:
 			self._timers.pop(audio_path, None)
 
-		sidecar = subsample.cache.cache_path(audio_path)
-
 		# Only a FRESH sidecar (analysed from the current bytes) is authoritative.
 		# A stale one — left behind when the audio was replaced/updated in place —
 		# must not short-circuit the load, or the new audio never enters the
 		# library.  The grace/load path below re-analyses it via ensure_sample_assets.
-		if sidecar.exists() and subsample.cache.sidecar_matches_audio(audio_path):
-			_log.debug(
-				"Watcher: fresh sidecar already exists for %s - skipping audio path",
-				audio_path.name,
-			)
+		if self._loads_from_its_sidecar(audio_path):
 			return
 
 		_log.debug(
@@ -547,6 +583,39 @@ class InstrumentWatcher:
 				return
 			self._timers[audio_path] = timer
 			timer.start()
+
+	def _loads_from_its_sidecar (self, audio_path: pathlib.Path) -> bool:
+
+		"""True when this audio has a fresh sidecar, which loads it, so the audio path is not needed.
+
+		The sidecar's own event loaded it, as a rule, but not always: a sample
+		restored from the Trash beside a sidecar that never left, a file
+		overwritten together with a new sidecar, and a sidecar more than 7 s
+		ahead of its audio each stayed missing or stale (#4703, M23).  So when
+		the library does not already hold this audio from this path, the
+		sidecar is loaded from here.
+		"""
+
+		md5 = subsample.cache.fresh_sidecar_md5(audio_path)
+
+		if md5 is None:
+			return False
+
+		# Held with no digest: loaded by its writer (note_self_written), which
+		# wrote this sidecar, or from a sidecar too old to carry one.
+		with self._lock:
+			held = audio_path in self._loaded and self._loaded[audio_path] in (None, md5)
+
+			if held:
+				self._loaded[audio_path] = md5
+
+		if held:
+			_log.debug("Watcher: %s is already loaded as it is - skipping", audio_path.name)
+		else:
+			_log.debug("Watcher: %s has a fresh sidecar - loading it", audio_path.name)
+			self._schedule_sidecar_load(subsample.cache.cache_path(audio_path).resolve())
+
+		return True
 
 	def _attempt_audio_load (
 		self,
@@ -584,15 +653,9 @@ class InstrumentWatcher:
 			self._timers.pop(audio_path, None)
 
 		# 1. A FRESH sidecar appeared (e.g. a remote instance delivered one for
-		#    this audio) — another path is handling it, skip.  A stale sidecar for
+		#    this audio) — it loads the sample, skip.  A stale sidecar for
 		#    replaced-in-place audio must NOT skip; fall through and re-analyse.
-		sidecar = subsample.cache.cache_path(audio_path)
-
-		if sidecar.exists() and subsample.cache.sidecar_matches_audio(audio_path):
-			_log.debug(
-				"Watcher: fresh sidecar appeared for %s during grace - skipping",
-				audio_path.name,
-			)
+		if self._loads_from_its_sidecar(audio_path):
 			return
 
 		# 2. File-size stability check.
@@ -698,16 +761,13 @@ class InstrumentWatcher:
 			channel_format = result.channel_format,
 			loop           = result.loop,
 			audio_sample_rate = self._target_sample_rate or result.params.sample_rate,
+			audio_md5      = result.audio_md5,
 		)
 
-		# Skip delivery when stop() already ran — the sidecar is written, so the
+		# Skipped when stop() already ran — the sidecar is written, so the
 		# sample loads on the next startup instead of being pushed into systems
-		# that are tearing down.  Mirrors the sidecar path and MidiMapWatcher._fire.
-		with self._lock:
-			if self._stopped:
-				return
-
-		self._on_sample_loaded(record)
+		# that are tearing down.
+		self._deliver(record, audio_path)
 
 
 class _InstrumentFileHandler (watchdog.events.FileSystemEventHandler):

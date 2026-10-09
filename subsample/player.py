@@ -2487,7 +2487,10 @@ def _load_instrument_from_path (
 		SampleRecord with audio loaded, or None if loading fails.
 	"""
 
-	path = pathlib.Path(path).resolve()
+	# A symbolic link is kept as the link, in its own folder, and the sample
+	# named after it, as the library loader names it: resolved, the same file
+	# was named after its target here and after the link there (#4703, M26).
+	path = subsample.query.linked_path(pathlib.Path(path))
 	name = path.stem
 
 	if not path.exists():
@@ -2534,6 +2537,7 @@ def _load_instrument_from_path (
 		channel_format = result.channel_format,
 		loop           = result.loop,
 		audio_sample_rate = target_sample_rate or result.params.sample_rate,
+		audio_md5      = result.audio_md5,
 	)
 
 

@@ -1,5 +1,5 @@
 {
-  "analysis_version": "18",
+  "analysis_version": "19",
   "audio_md5": "e66d21fc230104f7aca51db83cb629c8",
   "sample_rate": 44100,
   "bit_depth": 16,
@@ -7,6 +7,7 @@
   "channel_format": "pcm",
   "duration": 0.4559637188208617,
   "captured_at": null,
+  "cut_from": null,
   "params": {
     "n_fft": 2048,
     "hop_length": 512,
@@ -18,7 +19,7 @@
     "release": 0.611649661953827,
     "spectral_centroid": 0.897459851407396,
     "spectral_bandwidth": 0.8072207684036007,
-    "zcr": 0.948291015625,
+    "zcr": 0.4741455078125,
     "harmonic_ratio": 0.07249960552623783,
     "spectral_contrast": 0.36239877537990395,
     "voiced_fraction": 0.0,

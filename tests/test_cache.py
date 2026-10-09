@@ -929,6 +929,29 @@ class TestTheFileASampleWasCutFrom:
 
 		assert subsample.cache.cut_from(wav) is None
 
+	@pytest.mark.parametrize("damage", ["preview", "level"])
+	def test_it_outlives_a_repair_of_the_same_audio (self, tmp_path: pathlib.Path, damage: str) -> None:
+
+		"""A sidecar whose preview, or one of its fields, cannot be read is analysed again, and keeps it.
+
+		The two repairs dropped it, so the next cut of another file of that
+		name could replace the sample.
+		"""
+
+		wav = self._cut(tmp_path)
+		sidecar = subsample.cache.cache_path(wav)
+		payload = json.loads(sidecar.read_text())
+
+		if damage == "preview":
+			payload["preview"] = {"version": -1}
+		else:
+			payload["level"] = []
+
+		sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+		assert subsample.cache.ensure_sample_assets(wav, with_preview=damage == "preview") is not None
+		assert subsample.cache.cut_from(wav) == "/recordings/field.wav"
+
 
 class TestPreviewRoundtrip:
 

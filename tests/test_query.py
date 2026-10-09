@@ -2440,6 +2440,71 @@ class TestStrictMode:
 			subsample.query.parse_select({"where": {"pitched": 1}}, "test")
 
 
+class TestASymbolicLink:
+
+	"""A kit folder of symbolic links into a pool of samples (#4703, M26).
+
+	`directory: kit` never matched a link in it, as the link was followed to
+	the pool before the folder was compared, and `path:` naming the link
+	missed it whenever the map's own loader had named it after the target.
+	"""
+
+	def _kit (self, tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+
+		"""kit/kick.wav, a link to pool/BD01.wav."""
+
+		(tmp_path / "pool").mkdir()
+		(tmp_path / "kit").mkdir()
+		target = tmp_path / "pool" / "BD01.wav"
+		target.write_bytes(b"RIFF")
+		link = tmp_path / "kit" / "kick.wav"
+		link.symlink_to(pathlib.Path("..") / "pool" / "BD01.wav")
+
+		return link, target
+
+	def _record (self, filepath: pathlib.Path) -> subsample.library.SampleRecord:
+
+		"""A sample loaded from this file, named after it as both loaders name one."""
+
+		return dataclasses.replace(_make_record(name=filepath.stem), filepath=filepath)
+
+	@pytest.mark.parametrize("folder", ["kit", "pool"])
+	def test_a_link_is_inside_its_own_folder_and_its_targets (self, tmp_path: pathlib.Path, folder: str) -> None:
+		link, _target = self._kit(tmp_path)
+
+		spec = subsample.query.parse_select([{"where": {"directory": folder}}], "Kit", midi_map_dir=tmp_path)[0]
+
+		assert spec.where.matches(self._record(link))
+
+	def test_a_folder_it_is_not_in_does_not_match (self, tmp_path: pathlib.Path) -> None:
+		link, _target = self._kit(tmp_path)
+		(tmp_path / "other").mkdir()
+
+		spec = subsample.query.parse_select([{"where": {"directory": "other"}}], "Kit", midi_map_dir=tmp_path)[0]
+
+		assert not spec.where.matches(self._record(link))
+
+	@pytest.mark.parametrize("written", ["kit/kick.wav", "pool/BD01.wav"])
+	@pytest.mark.parametrize("loaded_from", ["link", "target"])
+	def test_either_spelling_names_the_sample_however_it_was_loaded (
+		self, tmp_path: pathlib.Path, written: str, loaded_from: str,
+	) -> None:
+		link, target = self._kit(tmp_path)
+
+		spec   = subsample.query.parse_select([{"where": {"path": written}}], "Kick", midi_map_dir=tmp_path)[0]
+		record = self._record(link if loaded_from == "link" else target)
+
+		assert spec.where.matches(record)
+
+	def test_the_path_is_kept_as_the_link_for_loading (self, tmp_path: pathlib.Path) -> None:
+		link, _target = self._kit(tmp_path)
+
+		spec = subsample.query.parse_select([{"where": {"path": "kit/kick.wav"}}], "Kick", midi_map_dir=tmp_path)[0]
+
+		# Its folders resolved, as macOS's temporary folder is itself a link.
+		assert spec.where.name_path == str(link.parent.resolve() / link.name)
+
+
 class TestNamePathSplit:
 
 	"""`where: { path: ... }` — explicit path reference (A8)."""
@@ -3345,3 +3410,45 @@ class TestUnpitchedSamplesAreNotLowPitched:
 		noise = _make_record(sample_id=1, dominant_pitch_hz=0.0)
 
 		assert [r.sample_id for r in subsample.query.query(spec, [noise], None)] == [1]
+
+
+class TestASampleWithNoTempoIsNotTheSlowest:
+
+	"""0 BPM is analysis saying it found no tempo, as every single hit has, not a slow tempo (#4703, M25).
+
+	As with pitch before it, every hit passed `where: {tempo: {lt: 100}}`
+	and sorted first under `order: tempo_asc`.
+	"""
+
+	def test_a_sample_with_no_tempo_fails_a_tempo_range (self) -> None:
+		spec = subsample.query.parse_select([{"where": {"tempo": {"lt": 100}}}], "test")[0]
+
+		hit  = _make_record(sample_id=1, tempo_bpm=0.0)
+		slow = _make_record(sample_id=2, tempo_bpm=80.0)
+
+		assert [r.sample_id for r in subsample.query.query(spec, [hit, slow], None)] == [2]
+
+	def test_the_older_max_tempo_key_leaves_it_out_too (self) -> None:
+		spec = subsample.query.parse_select([{"where": {"max_tempo": 100}}], "test")[0]
+
+		hit  = _make_record(sample_id=1, tempo_bpm=0.0)
+		slow = _make_record(sample_id=2, tempo_bpm=80.0)
+
+		assert [r.sample_id for r in subsample.query.query(spec, [hit, slow], None)] == [2]
+
+	@pytest.mark.parametrize("direction", ["asc", "desc"])
+	def test_a_sample_with_no_tempo_comes_last_either_way (self, direction: str) -> None:
+		spec = subsample.query.parse_select([{"order": [{"by": "tempo", "dir": direction}]}], "test")[0]
+
+		hit  = _make_record(sample_id=1, tempo_bpm=0.0)
+		slow = _make_record(sample_id=2, tempo_bpm=80.0)
+		fast = _make_record(sample_id=3, tempo_bpm=140.0)
+
+		ranked = [r.sample_id for r in subsample.query.query(spec, [hit, slow, fast], None)]
+
+		assert ranked == ([2, 3, 1] if direction == "asc" else [3, 2, 1])
+
+	def test_a_select_that_never_mentions_tempo_keeps_it (self) -> None:
+		spec = subsample.query.parse_select([{"where": {"duration": {"gte": 0.0}}}], "test")[0]
+
+		assert [r.sample_id for r in subsample.query.query(spec, [_make_record(sample_id=1, tempo_bpm=0.0)], None)] == [1]

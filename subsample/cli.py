@@ -2436,11 +2436,7 @@ def _start_library_watchers (
 			for bank in bank_manager.all_banks():
 				_bank = bank  # capture for closure
 
-				known_sc = {
-					(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
-					for r in _bank.instrument_library.samples()
-					if (fp := r.filepath) is not None
-				}
+				loaded_here = _loaded_by_path(_bank.instrument_library)
 
 				def _make_bank_callback (b: subsample.bank.Bank) -> typing.Callable[[subsample.library.SampleRecord], None]:
 
@@ -2472,7 +2468,7 @@ def _start_library_watchers (
 
 				watcher = subsample.watcher.InstrumentWatcher(
 					directory=_bank.directory,
-					known_sidecars=known_sc,
+					loaded=loaded_here,
 					on_sample_loaded=_make_bank_callback(_bank),
 					target_sample_rate=output_sample_rate,
 					with_preview=cfg.recorder.previews,
@@ -2484,11 +2480,6 @@ def _start_library_watchers (
 
 		# Single-directory mode.
 		elif cfg.library.directory is not None:
-			known_sidecars: set[pathlib.Path] = {
-				(fp.parent / (fp.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
-				for r in instrument_library.samples()
-				if (fp := r.filepath) is not None
-			}
 
 			def _on_watched_sample (record: subsample.library.SampleRecord) -> None:
 
@@ -2508,7 +2499,7 @@ def _start_library_watchers (
 
 			watcher = subsample.watcher.InstrumentWatcher(
 				directory=pathlib.Path(cfg.library.directory),
-				known_sidecars=known_sidecars,
+				loaded=_loaded_by_path(instrument_library),
 				on_sample_loaded=_on_watched_sample,
 				target_sample_rate=output_sample_rate,
 				with_preview=cfg.recorder.previews,
@@ -2519,6 +2510,19 @@ def _start_library_watchers (
 				print(f"  Watcher      : monitoring {cfg.library.directory} for new samples")
 
 	return watchers
+
+
+def _loaded_by_path (
+	instrument_library: subsample.library.InstrumentLibrary,
+) -> dict[pathlib.Path, typing.Optional[str]]:
+
+	"""Each loaded sample's audio path, resolved, with the digest of the audio its analysis came from: what a library watcher starts from (#4703, M23)."""
+
+	return {
+		record.filepath.resolve(): record.audio_md5
+		for record in instrument_library.samples()
+		if record.filepath is not None
+	}
 
 
 class _ReloadOncePlaying:
@@ -2866,6 +2870,7 @@ def _start_osc_receiver (
 				channel_format = result.channel_format,
 				loop           = result.loop,
 				audio_sample_rate = output_sample_rate,
+				audio_md5      = result.audio_md5,
 			)
 
 			# An analysis that outlasts the receiver's wait at stop ends here

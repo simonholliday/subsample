@@ -108,6 +108,25 @@ class TestLoadInstrumentFromPath:
 		# Sidecar should have been written for next time.
 		assert subsample.cache.cache_path(path).exists()
 
+	def test_a_link_is_loaded_as_the_link (self, tmp_path: pathlib.Path) -> None:
+
+		"""Named after the link and kept at its path, as the library loader keeps one (#4703, M26).
+
+		It was followed to its target, and named after that.
+		"""
+
+		(tmp_path / "pool").mkdir()
+		(tmp_path / "kit").mkdir()
+		tests.helpers._make_wav(tmp_path / "pool" / "BD01.wav")
+		link = tmp_path / "kit" / "kick.wav"
+		link.symlink_to(pathlib.Path("..") / "pool" / "BD01.wav")
+
+		record = subsample.player._load_instrument_from_path(link, with_preview=False)
+
+		assert record is not None
+		assert record.name == "kick"
+		assert record.filepath == link.parent.resolve() / link.name
+
 	def test_returns_none_when_wav_missing (self, tmp_path: pathlib.Path) -> None:
 		"""Returns None when WAV file is absent (sidecar only)."""
 		sidecar = tests.helpers._write_sidecar(tmp_path, "sidecar_only")

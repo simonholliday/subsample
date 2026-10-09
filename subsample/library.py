@@ -124,6 +124,9 @@ class SampleRecord:
 		           recorder rate.  The transform engine needs the true audio rate
 		           to run DSP and resample correctly.  None (no audio, or an older
 		           construction site) means "assume the processor's own rate".
+		audio_md5: Digest of the audio file's bytes the analysis was made from,
+		           where a sidecar gave one: the library watcher compares it to
+		           tell a sample already loaded from one that changed (#4703, M23).
 	"""
 
 	sample_id:   int
@@ -141,6 +144,7 @@ class SampleRecord:
 	channel_format: str = "pcm"
 	loop:        typing.Optional[subsample.loopfind.LoopPoints] = None
 	audio_sample_rate: typing.Optional[int] = None
+	audio_md5:   typing.Optional[str] = None
 
 
 class ReferenceLibrary:
@@ -591,6 +595,7 @@ class _LoadedSample:
 	audio:       typing.Optional[numpy.ndarray]
 	channel_format: str = "pcm"
 	loop:        typing.Optional[subsample.loopfind.LoopPoints] = None
+	audio_md5:   typing.Optional[str] = None
 
 
 def _sweep_orphans (directory: pathlib.Path, reference_directory: typing.Optional[pathlib.Path] = None) -> None:
@@ -713,7 +718,7 @@ def _load_one_sample (
 		spectral=result.spectral, rhythm=result.rhythm, pitch=result.pitch, timbre=result.timbre,
 		level=result.level, band_energy=result.band_energy, params=result.params, duration=result.duration,
 		name=name, audio_path=audio_path, audio=audio,
-		channel_format=result.channel_format, loop=result.loop,
+		channel_format=result.channel_format, loop=result.loop, audio_md5=result.audio_md5,
 	)
 
 
@@ -861,6 +866,7 @@ def load_instrument_library (
 			# Audio was resampled to target_sample_rate on load (or kept at its
 			# native analysis rate when no target was requested).
 			audio_sample_rate = target_sample_rate or loaded_sample.params.sample_rate,
+			audio_md5      = loaded_sample.audio_md5,
 		)
 
 		lib.add(record)

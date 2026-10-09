@@ -106,6 +106,10 @@ class SampleAssets:
 	sample is not a loop candidate, or is one but has no clean junction — see
 	compute_loop); its start/end/crossfade are frame indices in the sample's own
 	timeline, valid as-is for any transform that preserves that timeline.
+
+	``audio_md5`` is the digest of the audio file's bytes the analysis was made
+	from, None for a sidecar that predates it: what the library watcher compares
+	to tell a sample it has loaded from one that changed (#4703, M23).
 	"""
 
 	spectral:       subsample.analysis.AnalysisResult
@@ -118,6 +122,7 @@ class SampleAssets:
 	band_energy:    subsample.analysis.BandEnergyResult
 	channel_format: str
 	loop:           typing.Optional[subsample.loopfind.LoopPoints] = None
+	audio_md5:      typing.Optional[str]                         = None
 
 
 def cache_path (audio_path: pathlib.Path) -> pathlib.Path:
@@ -157,36 +162,40 @@ def compute_audio_md5 (audio_path: pathlib.Path) -> str:
 	return hasher.hexdigest()
 
 
-def sidecar_matches_audio (audio_path: pathlib.Path) -> bool:
+def fresh_sidecar_md5 (audio_path: pathlib.Path) -> typing.Optional[str]:
 
-	"""True when a sidecar exists for ``audio_path`` and was analysed from the
-	file's CURRENT bytes (its stored audio_md5 matches the file now).
+	"""The audio's digest when a sidecar exists for ``audio_path`` and was
+	analysed from the file's CURRENT bytes (its stored audio_md5 matches the
+	file now), else None.
 
-	A missing, unreadable, or md5-mismatched sidecar returns False.  Used by the
-	watcher to tell an authoritative sidecar (skip local analysis) from a stale
-	one left behind when the audio was replaced/updated in place — in the latter
-	case the file must be re-analysed rather than silently skipped.
+	A missing, unreadable, or md5-mismatched sidecar gives None.  Used by the
+	watcher to tell an authoritative sidecar (no local analysis needed) from a
+	stale one left behind when the audio was replaced/updated in place — in the
+	latter case the file must be re-analysed rather than silently skipped — and
+	to tell a sidecar it has loaded from one of new audio (#4703, M23).
 	"""
 
 	sidecar = cache_path(audio_path)
 
 	if not sidecar.exists():
-		return False
+		return None
 
 	payload = _load_payload(sidecar, "sidecar")
 
 	if payload is None:
-		return False
+		return None
 
 	stored_md5 = payload.get("audio_md5")
 
 	if not stored_md5:
-		return False
+		return None
 
 	try:
-		return bool(stored_md5 == compute_audio_md5(audio_path))
+		current_md5 = compute_audio_md5(audio_path)
 	except OSError:
-		return False
+		return None
+
+	return current_md5 if stored_md5 == current_md5 else None
 
 
 def compute_loop (
@@ -571,7 +580,7 @@ def _reanalyze_and_save (
 	return SampleAssets(
 		spectral=spectral, rhythm=rhythm, pitch=pitch, timbre=timbre,
 		params=params, duration=duration, level=level, band_energy=band_energy,
-		channel_format=channel_format, loop=loop,
+		channel_format=channel_format, loop=loop, audio_md5=audio_md5,
 	)
 
 
@@ -702,6 +711,7 @@ def ensure_sample_assets (
 				audio_path, cached_version=None, silent=True,
 				channel_format=prior_channel_format,
 				with_preview=with_preview,
+				cut_from=_cut_from_in(payload),
 			)
 
 		try:
@@ -725,10 +735,13 @@ def ensure_sample_assets (
 			"Sidecar %s parsed but is structurally invalid - re-analyzing to heal it",
 			sidecar.name,
 		)
+		# The same audio, so it keeps the file it was cut from, as every other
+		# re-analysis of the same audio does (#4703: these two dropped it).
 		return _reanalyze_and_save(
 			audio_path, cached_version=None, silent=True,
 			channel_format=prior_channel_format,
 			with_preview=with_preview,
+			cut_from=_cut_from_in(payload),
 		)
 
 	return assets
@@ -928,6 +941,7 @@ def _deserialize_payload (
 		band_energy = _deserialize_band_energy(payload.get("band_energy", {}))
 		channel_format = str(payload.get("channel_format", "pcm"))
 		loop        = _deserialize_loop(payload.get("loop"))
+		audio_md5   = payload.get("audio_md5")
 
 	except (AttributeError, KeyError, TypeError, ValueError) as exc:
 		# AttributeError belongs here too: a block that is valid JSON but the
@@ -940,6 +954,7 @@ def _deserialize_payload (
 		spectral=spectral, rhythm=rhythm, pitch=pitch, timbre=timbre,
 		params=params, duration=duration, level=level, band_energy=band_energy,
 		channel_format=channel_format, loop=loop,
+		audio_md5=str(audio_md5) if audio_md5 else None,
 	)
 
 

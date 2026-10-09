@@ -133,7 +133,16 @@ must regenerate the shipped references in the same commit (the recipe is in
 Onset detection and attack refinement run with one analysis window (`n_fft`) of
 digital silence in front of the sound, and every time is shifted back by it, so
 an attack in a file's first moments rises out of silence and is found, and the
-onset envelope is not scaled against the sound's own decay (#3880).
+onset envelope is not scaled against the sound's own decay (#3880). The silence
+is at least 1024 samples, half onset detection's own 2048-sample window: at
+8 kHz and 11.025 kHz `n_fft` is 512, and the first hit read 0.08 s late there
+(`ANALYSIS_VERSION` 19, #4703).
+
+The zero-crossing rate is divided by its true maximum, 1.0, a sign change at
+every sample, so white noise reads about 0.5 and brighter noise keeps its place
+above it (`_ZCR_MAX`, `ANALYSIS_VERSION` 19). Divided by 0.5 it saturated: the
+cabasa read 1.0 and the hats crowded into 0.9 to 1.0. Its share of each
+sample's spectral match halved with it.
 
 A loopable sample's loop is searched for when its sidecar is written
 (`cache.compute_loop`, `loopfind.find_loop`), in the first `_MAX_REGION_HOPS`
@@ -637,13 +646,32 @@ has stopped changing, and only then is analysed, its sidecar written and the
 sample loaded, so a bare file plays about ten seconds after it lands. Both
 paths retry a file still being written.
 
+The watcher keeps what the library holds by audio path, with the digest of the
+audio each sample was analysed from (`SampleRecord.audio_md5`), seeded from the
+startup library (`cli._loaded_by_path`), so it loads what the library does not
+hold however the files arrive (#4703). An event for a file already loaded as it
+is, is let go. Audio with an up-to-date sidecar of other audio than the library
+holds, or of a path it does not hold, has that sidecar loaded. A deletion
+forgets the path. Before, the audio path skipped any file with an up-to-date
+sidecar, trusting the sidecar's own event, which was dropped for any sidecar
+loaded at startup: a sample restored from the Trash beside a sidecar that never
+left, a file overwritten together with a new sidecar, and a sidecar more than
+7 s ahead of its audio each stayed missing or stale until a restart. A sidecar
+the recorder announces (`note_self_written`) marks its audio as held by its
+writer, so a recording is still loaded once, by its own callback. A sidecar of
+another analysis version is loaded on an analysis worker, which re-analyses
+it; its rewrite then finds the sample already loaded. On the watcher's own
+timer threads that ran one re-analysis per sidecar at once, and loaded each
+sample twice.
+
 **Analysing a file while playing happens on an analysis worker process**
 (`parallelism.run_in_analysis_worker`, #4667).
-- **Who uses it:** the watcher's bare files, OSC `/sample/import`, and a map's
-  reference sounds, at start or on a reload. A reference given by path is
-  checked against its audio each time, as a library sample is, so a replaced
-  one is analysed again (#4703); its sidecar was read as it stood. Without its
-  audio, the sidecar alone is the reference.
+- **Who uses it:** the watcher's bare files and its sidecars of another
+  analysis version, OSC `/sample/import`, and a map's reference sounds, at
+  start or on a reload. A reference given by path is checked against its audio
+  each time, as a library sample is, so a replaced one is analysed again
+  (#4703); its sidecar was read as it stood. Without its audio, the sidecar
+  alone is the reference.
 - **How it works:** the caller's thread waits on `cache.ensure_sample_assets`
   in the worker, and logs what it logged, then reads the file for playing.
 - **Why:** on the caller's thread, analysis made the audio wait for Python's

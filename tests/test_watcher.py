@@ -10,9 +10,12 @@ keep the test suite fast: debounce, grace, and stability windows are
 all shortened to sub-second values.
 """
 
+import json
 import logging
+import os
 import pathlib
 import queue
+import shutil
 import threading
 import time
 import typing
@@ -26,6 +29,7 @@ import subsample.analysis
 import subsample.cache
 import subsample.library
 import subsample.mounts
+import subsample.parallelism
 import subsample.watcher
 
 import tests.helpers
@@ -91,6 +95,16 @@ def _restore_audio_timings (originals: dict[str, float]) -> None:
 	subsample.watcher._STABILITY_MAX_CHECKS = int(originals["stability_max"])
 
 
+
+def _loaded_as_now (wav_path: pathlib.Path) -> dict[pathlib.Path, typing.Optional[str]]:
+
+	"""What a startup that loaded this sample tells its watcher: its path, and the digest its sidecar holds."""
+
+	sidecar = subsample.cache.cache_path(wav_path)
+
+	return {wav_path.resolve(): json.loads(sidecar.read_text(encoding="utf-8"))["audio_md5"]}
+
+
 # ---------------------------------------------------------------------------
 # TestInstrumentWatcher — sidecar path (existing behaviour)
 # ---------------------------------------------------------------------------
@@ -101,14 +115,14 @@ class TestInstrumentWatcher:
 		self,
 		directory: pathlib.Path,
 		callback: typing.Callable[[subsample.library.SampleRecord], None],
-		known_sidecars: typing.Optional[set[pathlib.Path]] = None,
+		loaded: typing.Optional[dict[pathlib.Path, typing.Optional[str]]] = None,
 	) -> subsample.watcher.InstrumentWatcher:
 
-		"""Construct a watcher with empty known sets by default."""
+		"""Construct a watcher with nothing loaded at startup by default."""
 
 		return subsample.watcher.InstrumentWatcher(
 			directory=directory,
-			known_sidecars=known_sidecars or set(),
+			loaded=loaded or {},
 			on_sample_loaded=callback,
 		)
 
@@ -140,7 +154,7 @@ class TestInstrumentWatcher:
 
 	def test_known_sidecar_ignored (self, tmp_path: pathlib.Path) -> None:
 
-		"""Sidecars listed in known_sidecars at construction time are silently skipped."""
+		"""A sample loaded at startup, its sidecar touched but unchanged, is not loaded again."""
 
 		# Write the sample before starting the watcher; register as known.
 		wav_path, sidecar_path = _write_wav_and_sidecar(tmp_path, "snare")
@@ -149,7 +163,7 @@ class TestInstrumentWatcher:
 		watcher = self._make_watcher(
 			tmp_path,
 			lambda _r: called.set(),
-			known_sidecars={sidecar_path.resolve()},
+			loaded=_loaded_as_now(wav_path),
 		)
 		watcher.start()
 
@@ -261,7 +275,7 @@ class TestInstrumentWatcherAudioPath:
 		directory: pathlib.Path,
 		callback: typing.Callable[[subsample.library.SampleRecord], None],
 		with_preview: bool = False,
-		known_sidecars: typing.Optional[set[pathlib.Path]] = None,
+		loaded: typing.Optional[dict[pathlib.Path, typing.Optional[str]]] = None,
 		processes: bool = True,
 	) -> subsample.watcher.InstrumentWatcher:
 
@@ -269,7 +283,7 @@ class TestInstrumentWatcherAudioPath:
 
 		return subsample.watcher.InstrumentWatcher(
 			directory=directory,
-			known_sidecars=known_sidecars or set(),
+			loaded=loaded or {},
 			on_sample_loaded=callback,
 			with_preview=with_preview,
 			processes=processes,
@@ -545,7 +559,7 @@ class TestInstrumentWatcherAudioPath:
 		called = threading.Event()
 		watcher = self._make_watcher(
 			tmp_path, lambda _r: called.set(),
-			known_sidecars={subsample.cache.cache_path(wav_path).resolve()},
+			loaded=_loaded_as_now(wav_path),
 		)
 		watcher.start()
 
@@ -748,7 +762,7 @@ class TestInstrumentWatcherDeletion:
 		removed: list[pathlib.Path] = []
 		watcher = subsample.watcher.InstrumentWatcher(
 			directory=tmp_path,
-			known_sidecars=set(),
+			loaded={},
 			on_sample_loaded=lambda record: None,
 			on_sample_removed=removed.append,
 		)
@@ -758,7 +772,7 @@ class TestInstrumentWatcherDeletion:
 	def test_noop_without_removal_callback (self, tmp_path: pathlib.Path) -> None:
 		watcher = subsample.watcher.InstrumentWatcher(
 			directory=tmp_path,
-			known_sidecars=set(),
+			loaded={},
 			on_sample_loaded=lambda record: None,
 		)
 		watcher._on_audio_file_deleted(tmp_path / "01.wav")   # must not raise
@@ -768,7 +782,7 @@ class TestInstrumentWatcherDeletion:
 		removed: list[pathlib.Path] = []
 		watcher = subsample.watcher.InstrumentWatcher(
 			directory=tmp_path,
-			known_sidecars=set(),
+			loaded={},
 			on_sample_loaded=lambda record: None,
 			on_sample_removed=removed.append,
 		)
@@ -787,7 +801,7 @@ class TestInstrumentWatcherDeletion:
 
 		watcher = subsample.watcher.InstrumentWatcher(
 			directory=tmp_path,
-			known_sidecars=set(),
+			loaded={},
 			on_sample_loaded=lambda record: None,
 			on_sample_removed=boom,
 		)
@@ -795,22 +809,21 @@ class TestInstrumentWatcherDeletion:
 			watcher._on_audio_file_deleted(tmp_path / "01.wav")   # must not raise
 		assert any("removing deleted sample" in r.message for r in caplog.records)
 
-	def test_deletion_forgets_known_sidecar (self, tmp_path: pathlib.Path) -> None:
-		"""After removal the deleted sidecar is discarded from the known set, so a
-		later re-create at the same path reloads instead of being suppressed."""
-		audio = tmp_path / "01.wav"
-		sidecar = (audio.parent / (audio.name + subsample.cache.SIDECAR_SUFFIX)).resolve()
+	def test_deletion_forgets_the_loaded_sample (self, tmp_path: pathlib.Path) -> None:
+		"""After removal the deleted path is forgotten, so a later re-create at the
+		same path reloads instead of being suppressed."""
+		audio = (tmp_path / "01.wav").resolve()
 		watcher = subsample.watcher.InstrumentWatcher(
 			directory=tmp_path,
-			known_sidecars={sidecar},
+			loaded={audio: "deadbeef00000000deadbeef00000000"},
 			on_sample_loaded=lambda record: None,
 			on_sample_removed=lambda path: None,
 		)
-		assert sidecar in watcher._known_sidecars
+		assert audio in watcher._loaded
 
 		watcher._on_audio_file_deleted(audio)
 
-		assert sidecar not in watcher._known_sidecars
+		assert audio not in watcher._loaded
 
 
 class TestMidiMapWatcher:
@@ -1056,7 +1069,7 @@ class TestACaptureIsIntegratedOnce:
 
 		watcher = subsample.watcher.InstrumentWatcher(
 			directory=tmp_path,
-			known_sidecars=set(),
+			loaded={},
 			on_sample_loaded=lambda record: loaded.append(record),
 			target_sample_rate=None,
 			with_preview=False,
@@ -1076,6 +1089,195 @@ class TestACaptureIsIntegratedOnce:
 
 		for timer in watcher._timers.values():
 			timer.cancel()
+
+
+class TestWhatTheLibraryHoldsIsKept:
+
+	"""The watcher loads what the library does not hold, by path and by audio, however its files arrive (#4703, M23, M24).
+
+	It skipped any audio with an up-to-date sidecar, trusting the sidecar's own
+	event to load it, and dropped that event for any sidecar loaded at
+	startup.  A sample restored from the Trash, a file overwritten together
+	with a new sidecar, and a sidecar more than 7 s ahead of its audio each
+	stayed missing or stale until a restart.
+	"""
+
+	@pytest.fixture(autouse=True)
+	def _quick (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		"""Every wait in the watcher a fraction of a second."""
+
+		monkeypatch.setattr(subsample.watcher, "_DEBOUNCE_SECONDS", 0.2)
+		monkeypatch.setattr(subsample.watcher, "_RETRY_DELAY_SECONDS", 0.2)
+		monkeypatch.setattr(subsample.watcher, "_MAX_RETRIES", 1)
+		monkeypatch.setattr(subsample.watcher, "_AUDIO_DEBOUNCE_SECONDS", 0.3)
+		monkeypatch.setattr(subsample.watcher, "_SIDECAR_GRACE_SECONDS", 0.5)
+		monkeypatch.setattr(subsample.watcher, "_STABILITY_CHECK_SECONDS", 0.3)
+
+	def _analysed (self, directory: pathlib.Path, n_frames: int) -> pathlib.Path:
+
+		"""A WAV of this many frames with its sidecar, analysed as the library leaves one."""
+
+		directory.mkdir(parents=True, exist_ok=True)
+		wav = directory / "kick.wav"
+		tests.helpers._make_wav(wav, n_frames=n_frames)
+		subsample.cache.ensure_sample_assets(wav, with_preview=False)
+
+		return wav
+
+	def _watch (
+		self,
+		directory: pathlib.Path,
+		loaded: dict[pathlib.Path, typing.Optional[str]],
+		processes: bool = False,
+	) -> tuple[subsample.watcher.InstrumentWatcher, "queue.Queue[subsample.library.SampleRecord]", threading.Event]:
+
+		"""A started watcher on this folder, what it loads, and a flag set when it removes one."""
+
+		arrived: "queue.Queue[subsample.library.SampleRecord]" = queue.Queue()
+		removed = threading.Event()
+
+		watcher = subsample.watcher.InstrumentWatcher(
+			directory=directory,
+			loaded=loaded,
+			on_sample_loaded=arrived.put,
+			on_sample_removed=lambda _path: removed.set(),
+			processes=processes,
+		)
+		watcher.start()
+
+		return watcher, arrived, removed
+
+	def _all (self, arrived: "queue.Queue[subsample.library.SampleRecord]", wait: float) -> list[subsample.library.SampleRecord]:
+
+		"""Everything loaded within this many seconds."""
+
+		records: list[subsample.library.SampleRecord] = []
+		deadline = time.monotonic() + wait
+
+		while time.monotonic() < deadline:
+			try:
+				records.append(arrived.get(timeout=0.1))
+			except queue.Empty:
+				pass
+
+		return records
+
+	def test_a_sample_restored_from_the_trash_loads_again (self, tmp_path: pathlib.Path) -> None:
+
+		"""Its sidecar never left, so only the audio comes and goes."""
+
+		wav = self._analysed(tmp_path / "watched", 2048)
+		watcher, arrived, removed = self._watch(wav.parent, _loaded_as_now(wav))
+		trash = tmp_path / "Trash"
+		trash.mkdir()
+
+		try:
+			shutil.move(wav, trash / wav.name)
+			assert removed.wait(_TIMEOUT)
+
+			shutil.move(trash / wav.name, wav)
+			records = self._all(arrived, 3.0)
+		finally:
+			watcher.stop()
+
+		assert [record.name for record in records] == ["kick"]
+
+	def test_a_file_overwritten_with_its_new_sidecar_loads_its_new_sound (self, tmp_path: pathlib.Path) -> None:
+
+		"""As a sync, or another Subsample, delivers both."""
+
+		wav  = self._analysed(tmp_path / "watched", 2048)
+		new  = self._analysed(tmp_path / "staging", 4410)
+		watcher, arrived, _removed = self._watch(wav.parent, _loaded_as_now(wav))
+
+		try:
+			shutil.copyfile(new, wav)
+			shutil.copyfile(subsample.cache.cache_path(new), subsample.cache.cache_path(wav))
+			records = self._all(arrived, 3.0)
+		finally:
+			watcher.stop()
+
+		assert [round(record.duration, 2) for record in records] == [0.1]
+
+	def test_a_sidecar_long_ahead_of_its_audio_loads_when_the_audio_comes (self, tmp_path: pathlib.Path) -> None:
+
+		"""The sidecar's own load gives up waiting for the audio, so the audio's arrival loads it."""
+
+		new = self._analysed(tmp_path / "staging", 2048)
+		watched = tmp_path / "watched"
+		watched.mkdir()
+		watcher, arrived, _removed = self._watch(watched, {})
+
+		try:
+			shutil.copyfile(subsample.cache.cache_path(new), watched / subsample.cache.cache_path(new).name)
+			before = self._all(arrived, 1.5)
+
+			shutil.copyfile(new, watched / new.name)
+			after = self._all(arrived, 3.0)
+		finally:
+			watcher.stop()
+
+		assert before == []
+		assert [record.name for record in after] == ["kick"]
+
+	def test_a_recording_is_still_loaded_once_by_its_own_callback (self, tmp_path: pathlib.Path) -> None:
+
+		"""A sidecar its writer told the watcher about leaves its audio to that writer, as before."""
+
+		new = self._analysed(tmp_path / "staging", 2048)
+		watched = tmp_path / "watched"
+		watched.mkdir()
+		watcher, arrived, _removed = self._watch(watched, {})
+
+		try:
+			watcher.note_self_written(watched / subsample.cache.cache_path(new).name)
+
+			# Each written whole and renamed into place, as the recorder writes them.
+			for source in (new, subsample.cache.cache_path(new)):
+				shutil.copyfile(source, watched / (source.name + ".tmp"))
+				os.replace(watched / (source.name + ".tmp"), watched / source.name)
+
+			records = self._all(arrived, 3.0)
+		finally:
+			watcher.stop()
+
+		assert records == []
+
+	def test_a_sidecar_of_another_analysis_version_is_analysed_on_a_worker_and_loaded_once (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""Re-analysed on the watcher's own thread, one per sidecar at once, and its rewrite loaded it again (#4703, M24)."""
+
+		new = self._analysed(tmp_path / "staging", 2048)
+		sidecar = subsample.cache.cache_path(new)
+		payload = json.loads(sidecar.read_text(encoding="utf-8"))
+		payload["analysis_version"] = "0-older"
+		sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+		on_workers: list[str] = []
+
+		def _in_worker (fn: typing.Callable[..., typing.Any], *args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+			on_workers.append(fn.__name__)
+			return fn(*args, **kwargs)
+
+		monkeypatch.setattr(subsample.parallelism, "run_in_analysis_worker", _in_worker)
+
+		watched = tmp_path / "watched"
+		watched.mkdir()
+		watcher, arrived, _removed = self._watch(watched, {}, processes=True)
+
+		try:
+			shutil.copyfile(new, watched / new.name)
+			shutil.copyfile(sidecar, watched / sidecar.name)
+			records = self._all(arrived, 3.0)
+		finally:
+			watcher.stop()
+
+		assert [record.name for record in records] == ["kick"]
+		assert "load_sidecar" in on_workers
+		assert json.loads((watched / sidecar.name).read_text(encoding="utf-8"))["analysis_version"] == subsample.analysis.ANALYSIS_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -1118,7 +1320,7 @@ class TestWatchingANetworkDrive:
 			done.set()
 
 		watcher = subsample.watcher.InstrumentWatcher(
-			directory=tmp_path, known_sidecars=set(), on_sample_loaded=on_loaded,
+			directory=tmp_path, loaded={}, on_sample_loaded=on_loaded,
 		)
 
 		assert isinstance(watcher._observer, subsample.watcher._NetworkDriveObserver)
@@ -1141,7 +1343,7 @@ class TestWatchingANetworkDrive:
 		"""Polling is only for a network drive."""
 
 		watcher = subsample.watcher.InstrumentWatcher(
-			directory=tmp_path, known_sidecars=set(), on_sample_loaded=lambda _record: None,
+			directory=tmp_path, loaded={}, on_sample_loaded=lambda _record: None,
 		)
 
 		assert not isinstance(watcher._observer, subsample.watcher._NetworkDriveObserver)

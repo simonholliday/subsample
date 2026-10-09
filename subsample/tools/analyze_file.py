@@ -213,7 +213,8 @@ output:
                release     0 a sudden stop, 1 a long decay
                centroid    0 bassy, 1 bright
                bandwidth   0 a pure tone, 1 spectrally complex
-               zcr         how often the wave crosses zero: 0 smooth, 1 noisy
+               zcr         how often the wave crosses zero: 0 smooth, 0.5 white
+                           noise, 1 at every sample
                harmonic    0 percussive, 1 harmonic
                contrast    0 a flat spectrum, 1 strong spectral peaks
                voiced      the share of the sound with a detected pitch
