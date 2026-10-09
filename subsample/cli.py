@@ -1403,6 +1403,7 @@ def _start_player (
 	transform_manager: typing.Optional[subsample.transform.TransformManager] = None,
 	bank_manager: typing.Optional[subsample.bank.BankManager] = None,
 	preloaded_midi_map_result: typing.Optional[subsample.player.MidiMapResult] = None,
+	once_playing: typing.Optional["_ReloadOncePlaying"] = None,
 ) -> None:
 
 	"""Select a MIDI input device (or create a virtual port), then run the player.
@@ -1572,6 +1573,10 @@ def _start_player (
 		cpu_saving_power=power_saving is not None,
 	)
 	player_cell[0] = player
+
+	# A map saved while the player started is reloaded now (#4703, M11).
+	if once_playing is not None:
+		once_playing.published()
 
 	try:
 		# update_pitched_assignments materialises zones and rebuilds the
@@ -1874,6 +1879,11 @@ def _main_impl () -> None:
 
 	preloaded_midi_map_result = _preload_midi_map(cfg, reference_library.names())
 
+	# What the map's files were when it was read, so a save during the long
+	# loads below is not missed (#4703, M11).
+	map_read_as = _modification_times(preloaded_midi_map_result.source_files) if preloaded_midi_map_result is not None else {}
+	once_playing = _ReloadOncePlaying()
+
 	if preloaded_midi_map_result is not None:
 		bank_definitions = preloaded_midi_map_result.bank_definitions
 		bank_channel = preloaded_midi_map_result.bank_channel
@@ -2097,7 +2107,7 @@ def _main_impl () -> None:
 					cfg, shutdown_event, instrument_library,
 					similarity_matrix, reference_library, _player_cell,
 					transform_manager, bank_manager,
-					preloaded_midi_map_result,
+					preloaded_midi_map_result, once_playing,
 				),
 				name="player",
 				daemon=True,
@@ -2130,7 +2140,7 @@ def _main_impl () -> None:
 	):
 		midi_map_watcher = _start_midi_map_watcher(
 			cfg, preloaded_midi_map_result, reference_library, instrument_library,
-			similarity_matrix, transform_manager, _player_cell,
+			similarity_matrix, transform_manager, _player_cell, once_playing, map_read_as,
 		)
 
 	# --- OSC receivers ---
@@ -2485,6 +2495,68 @@ def _start_library_watchers (
 	return watchers
 
 
+class _ReloadOncePlaying:
+
+	"""A map reload asked for before the player was up, made once it is (#4703, M11).
+
+	The map watcher starts before the player thread publishes its player, and
+	a reload that found no player was dropped: a map saved while the player
+	started played its old version until it was saved again.
+	"""
+
+	def __init__ (self) -> None:
+
+		"""Nothing asked for, and no player yet."""
+
+		self._lock      = threading.Lock()
+		self._playing   = False
+		self._reload: typing.Optional[typing.Callable[[], None]] = None
+
+	def wanted (self, reload: typing.Callable[[], None]) -> bool:
+
+		"""Ask for a reload: True when the player is up and the caller makes it now, False when it waits."""
+
+		with self._lock:
+			if self._playing:
+				return True
+
+			self._reload = reload
+
+			return False
+
+	def published (self) -> None:
+
+		"""The player is up: make the reload asked for before it was, if one was."""
+
+		with self._lock:
+			self._playing = True
+			reload, self._reload = self._reload, None
+
+		if reload is None:
+			return
+
+		# On the player's thread, before it plays: a failure must not stop it.
+		try:
+			reload()
+		except Exception as exc:
+			_log.error("MIDI map reload failed - keeping current map: %s", exc)
+
+
+def _modification_times (paths: typing.Iterable[pathlib.Path]) -> dict[pathlib.Path, typing.Optional[int]]:
+
+	"""Each file's modification time, in nanoseconds, or None where it cannot be read."""
+
+	times: dict[pathlib.Path, typing.Optional[int]] = {}
+
+	for path in paths:
+		try:
+			times[path] = path.stat().st_mtime_ns
+		except OSError:
+			times[path] = None
+
+	return times
+
+
 def _start_midi_map_watcher (
 	cfg:                subsample.config.Config,
 	preloaded:          subsample.player.MidiMapResult,
@@ -2493,6 +2565,8 @@ def _start_midi_map_watcher (
 	similarity_matrix:  typing.Optional[subsample.similarity.SimilarityMatrix],
 	transform_manager:  typing.Optional[subsample.transform.TransformManager],
 	player_cell:        list[typing.Optional[subsample.player.MidiPlayer]],
+	once_playing:       typing.Optional["_ReloadOncePlaying"] = None,
+	map_read_as:        typing.Optional[dict[pathlib.Path, typing.Optional[int]]] = None,
 ) -> typing.Optional[subsample.watcher.MidiMapWatcher]:
 
 	"""Start player.watch_midi_map's watcher, and return it, or None if it could not start.
@@ -2538,8 +2612,12 @@ def _start_midi_map_watcher (
 		warned of here: it does not hold up an edit to the map.  Edits to
 		the map, a set it includes or a definitions file reload as normal,
 		and once the map parses, the watcher follows the files it was
-		read from this time (#389).
+		read from this time (#389).  Asked for before the player is up, the
+		reload waits for it (_ReloadOncePlaying, #4703).
 		"""
+
+		if once_playing is not None and not once_playing.wanted(lambda: _on_midi_map_changed(path)):
+			return
 
 		player = player_cell[0]
 
@@ -2662,6 +2740,11 @@ def _start_midi_map_watcher (
 		return None
 
 	print(f"  MIDI map     : watching {watching} for changes")
+
+	# Saved after it was read and before the watcher started, during the
+	# library's load: the watcher never saw it (#4703, M11).
+	if map_read_as is not None and _modification_times(watched) != map_read_as:
+		_on_midi_map_changed(watched[0])
 
 	return midi_map_watcher
 

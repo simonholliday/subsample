@@ -5636,6 +5636,123 @@ class TestUpdatePitchedAssignments:
 		transform_manager.get_variant.assert_not_called()
 		assert any("stable pitch" in r.message for r in caplog.records)
 
+	def _player_picking (
+		self,
+		pick: subsample.query.PickSpec,
+		sample_ids: list[int],
+		notes: list[int] = [48, 50],
+	) -> tuple[subsample.player.MidiPlayer, unittest.mock.MagicMock]:
+
+		"""A pitched player whose keys each pick from these samples, newest first, and its transform manager."""
+
+		asgn = _make_assignment(name="Pitched", order_by="newest", repitch=True, one_shot=False)
+		note_map: subsample.player.NoteMap = {(0, note): [(asgn, pick)] for note in notes}
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+
+		records = []
+
+		for sid in sample_ids:
+			record = unittest.mock.MagicMock()
+			record.sample_id = sid
+			record.name      = f"tone-{sid}"
+			record.duration  = float(sid)
+			records.append(record)
+
+		_mock(player._instrument_library.samples).return_value = records
+		_mock(player._instrument_library.get).side_effect = lambda sid: next(
+			(r for r in records if r.sample_id == sid), None,
+		)
+
+		transform_manager = unittest.mock.MagicMock()
+		player._transform_manager = transform_manager
+
+		return player, transform_manager
+
+	def test_a_pick_has_every_sample_it_reaches_pitched_ahead (self) -> None:
+
+		"""A key picking from the best four has all four pitched to it before it plays (#4703, M15).
+
+		Only the best match was, so the other three played unpitched on
+		their first hit.
+		"""
+
+		player, transform_manager = self._player_picking(
+			subsample.query.PickSpec(1, 4), [60, 50, 40, 30, 20, 10],
+		)
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=True):
+			player.update_pitched_assignments()
+
+		queued = sorted(
+			(c.args[1].steps[0].target_midi_note, c.args[0])
+			for c in transform_manager.get_variant.call_args_list
+		)
+
+		assert queued == [(note, sid) for note in (48, 50) for sid in (30, 40, 50, 60)]
+
+	def test_a_sample_with_no_pitch_is_left_out_once (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""A sample in reach with no stable pitch is skipped for every key, and named once."""
+
+		import logging
+
+		player, transform_manager = self._player_picking(
+			subsample.query.PickSpec(1, 3), [60, 50, 40, 30],
+		)
+
+		with unittest.mock.patch(
+			"subsample.analysis.has_stable_pitch",
+			side_effect=lambda spectral, pitch, duration: duration != 50.0,
+		):
+			with caplog.at_level(logging.WARNING, logger="subsample.player"):
+				player.update_pitched_assignments()
+
+		queued_ids = {c.args[0] for c in transform_manager.get_variant.call_args_list}
+		warnings   = [r.getMessage() for r in caplog.records if "stable pitch" in r.getMessage()]
+
+		assert queued_ids == {60, 40}
+		assert transform_manager.get_variant.call_count == 4
+		assert warnings == ["Pitched Pitched: 'tone-50' has no stable pitch - skipping its pitch variants"]
+
+	def test_a_wide_pick_is_pitched_ahead_for_its_first_eight (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""`pick: any` over 12 samples prepares the best 8 per key, and says so once.
+
+		The rest are prepared when first played: 12 samples on every key
+		of a keyboard would queue more renders than a session can wait for.
+		"""
+
+		import logging
+
+		sample_ids = list(range(120, 0, -10))
+
+		player, transform_manager = self._player_picking(
+			subsample.query.PickSpec(None, None), sample_ids,
+		)
+
+		with unittest.mock.patch("subsample.analysis.has_stable_pitch", return_value=True):
+			with caplog.at_level(logging.INFO, logger="subsample.player"):
+				player.update_pitched_assignments()
+
+		queued_ids = {c.args[0] for c in transform_manager.get_variant.call_args_list}
+		said       = [r.getMessage() for r in caplog.records if "its pick reaches" in r.getMessage()]
+
+		assert queued_ids == set(sample_ids[:subsample.player._PITCH_RANKS_AHEAD])
+		assert transform_manager.get_variant.call_count == 2 * subsample.player._PITCH_RANKS_AHEAD
+		assert said == [
+			"Pitched Pitched: its pick reaches 12 samples - pitch variants are prepared ahead "
+			"for the first 8, and for the rest when first played",
+		]
+
 	def test_enqueues_for_pitched_filter (self) -> None:
 		"""Variants are pre-rendered for an assignment with pitched: true filter."""
 
@@ -7712,6 +7829,150 @@ class TestValidateAssignmentExtracts:
 		subsample.player._validate_assignment_extracts(note_map, lib)
 
 		assert spy.call_count == 1
+
+
+class TestAnExtractLeavesOutWhatItCannotPlay:
+
+	"""A sample arriving after the map loaded, which an assignment's extract cannot take its part from (#4703, M16).
+
+	The load's check never saw it, so every note it was picked for raised,
+	logged a traceback, and silenced the layers stacked after it.
+	"""
+
+	def _record (self, name: str, channels: int) -> subsample.library.SampleRecord:
+
+		"""A sample of this many audio channels, with sound in each."""
+
+		return subsample.library.SampleRecord(
+			sample_id   = subsample.library.allocate_id(),
+			name        = name,
+			spectral    = tests.helpers._make_spectral(),
+			rhythm      = tests.helpers._make_rhythm(),
+			pitch       = tests.helpers._make_pitch(),
+			timbre      = tests.helpers._make_timbre(),
+			level       = tests.helpers._make_level(),
+			band_energy = tests.helpers._make_band_energy(),
+			params      = tests.helpers._make_params(),
+			duration    = 0.1,
+			audio       = numpy.full((4410, channels), 8000, dtype=numpy.int16),
+		)
+
+	def _player (
+		self,
+		records: list[subsample.library.SampleRecord],
+	) -> tuple[subsample.player.MidiPlayer, subsample.query.Assignment, subsample.query.Assignment]:
+
+		"""A kick drum whose note plays the room mic's channel 3 and the close mic stacked, newest sample first."""
+
+		newest = (subsample.query.OrderClause(by="age", dir="desc"),)
+
+		room = subsample.query.Assignment(
+			name="Room mic", select=(subsample.query.SelectSpec(order=newest),),
+			extract=subsample.query.ExtractSpec(kind="channel", channel_index=3),
+		)
+		close = subsample.query.Assignment(name="Close mic", select=(subsample.query.SelectSpec(order=newest),))
+
+		library = subsample.library.InstrumentLibrary(max_memory_bytes=10_000_000)
+
+		for record in records:
+			library.add(record)
+
+		note_map: subsample.player.NoteMap = {
+			(9, 36): [(room, subsample.query.PickSpec(1, 1)), (close, subsample.query.PickSpec(1, 1))],
+		}
+
+		player = subsample.player.MidiPlayer(
+			"Test Device",
+			threading.Event(),
+			instrument_library=library,
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map=note_map,
+			sample_rate=44100,
+			bit_depth=16,
+		)
+		player._clock = lambda: 0.0
+
+		return player, room, close
+
+	def _strike (self, player: subsample.player.MidiPlayer) -> None:
+
+		"""Hit the kick, as the MIDI input would."""
+
+		import mido
+
+		player._safe_handle_message(mido.Message("note_on", channel=9, note=36, velocity=100))
+
+	def test_a_later_sample_it_cannot_play_is_left_out (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""A mono recording arriving after the map loaded plays on the close mic, and the room mic keeps its own."""
+
+		import logging
+
+		four = self._record("kit-4ch", 4)
+		mono = self._record("phone-mono", 1)
+
+		player, room, close = self._player([four])
+		subsample.player._validate_assignment_extracts(player._note_map, player._instrument_library)
+
+		player._instrument_library.add(mono)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			player.update_assignments()
+			player.update_assignments()
+			self._strike(player)
+
+		said = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+		assert player._candidate_cache[id(room)].ids  == [four.sample_id]
+		assert player._candidate_cache[id(close)].ids == [mono.sample_id, four.sample_id]
+		assert len(player._voices) == 2
+		assert said == [
+			"MIDI map assignment 'Room mic': extract 'channel' cannot be applied to pcm 1ch samples, "
+			"such as 'phone-mono' - leaving them out of its choices "
+			"(extract 'channel.3': index out of range for 1-channel input (valid: 1..1))",
+		]
+
+	def test_with_nothing_it_can_play_the_other_layers_still_play (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""With only mono samples, the room mic is silent and the close mic plays, without an error."""
+
+		import logging
+
+		player, room, _close = self._player([self._record("phone-mono", 1)])
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			player.update_assignments()
+			self._strike(player)
+
+		assert player._candidate_cache[id(room)].ids == []
+		assert len(player._voices) == 1
+		assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+	def test_a_layer_that_fails_is_said_once_and_the_others_play (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""A layer that raises is skipped, said once with its traceback, and the note's other layer plays every time."""
+
+		import logging
+
+		four = self._record("kit-4ch", 4)
+		mono = self._record("phone-mono", 1)
+
+		player, room, _close = self._player([four, mono])
+		player.update_assignments()
+
+		# However it got there, a sample the room mic cannot take channel 3 from.
+		player._candidate_cache[id(room)] = subsample.player._Candidates(ids=[mono.sample_id], loudness=None)
+
+		with caplog.at_level(logging.DEBUG, logger="subsample.player"):
+			self._strike(player)
+			self._strike(player)
+
+		errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+		assert len(player._voices) == 2
+		assert len(errors) == 1
+		assert errors[0].getMessage().startswith("MIDI map assignment 'Room mic' could not play: extract 'channel.3'")
+		assert errors[0].exc_info is not None
 
 
 class TestSelectSegment:

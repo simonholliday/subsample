@@ -200,6 +200,14 @@ percussive and tonal alike - so the playback path never pays the float32
 conversion cost at trigger time. Pitch and time-stretch variants are additional
 cache entries, derived from the same PCM source.
 
+A `repitch` assignment has each key's variants prepared for every sample its
+pick can reach, up to the best 8 (`_PITCH_RANKS_AHEAD`, #4703). Only the best
+match's were, so a pick of several played the others unpitched on their first
+hit. Each is a render per key, 80-180 ms on a desktop and several times that on
+a Pi, so `pick: any` over 200 samples across 88 keys would queue 17,600; the
+rest render when first played, and the player says so once per assignment. A
+sample in reach with no stable pitch is named once and skipped.
+
 When a variant set for a parent sample would exceed the memory budget, the entire
 oldest parent's variant family is evicted together, keeping the remaining
 families intact and playable.
@@ -286,6 +294,16 @@ held in `mode: loop` is laid out over its bars the same way, a buffer at a time
 (`_ring_layout`). Only the last-resort fallback still converts a whole sample on
 the note-on, for a fresh capture whose base variant is not ready.
 
+A sample an assignment's `extract` cannot take its part from is left out of
+that assignment's candidates, as a `where:` filter would leave it out
+(`_playable_by`, #4703), and named once per assignment and channel format. The
+map's load refuses such a sample already in the library, but recordings, the
+watcher, OSC imports, another program's folder and zone-tuned keys come after
+that check, and one of them raised on every note it was picked for, logged a
+traceback, and silenced the layers stacked after it. Each layer of a note now
+plays apart from the others: one that raises is skipped, and said once with its
+traceback.
+
 ## Performance
 
 ### Pre-rendered playback
@@ -353,7 +371,9 @@ of latency on average, and one at most.
 (`time.perf_counter`) before any work, so a slow handler does not make its note
 late. Each voice a message starts records the time as `_Voice.starts_at`; a
 note-off, a same-note steal, a choke and CC 120 and 123 record theirs as
-`releases_at` (`_release`, which keeps the first). The audio callback moves a
+`releases_at` (`_release`, which keeps the first, or an earlier one while the
+fade has not begun, so a CC 120 after a note-off timed ahead stops the sound
+now, #4703). The audio callback moves a
 span of arrival times on by exactly one buffer per call (`_advance_span`), so
 a callback early or late by scheduling jitter moves no note, and pulls it 5% of
 the way towards its own clock each call so the audio device's clock and the
@@ -390,9 +410,13 @@ A callback that runs early, before a message in its span has arrived, plays that
 message at the start of the next buffer: one buffer of delay cannot absorb
 jitter beyond the span. Simulated with callbacks jittering by 1 ms either way at
 256 frames, hits 7 ms apart played 7 ms apart within 0.05 ms on average and
-0.8 ms at worst, against 2.3 ms and 3.7 ms before. A looping voice released
-mid-buffer stops looping at that buffer's start, not at its release frame, so it
-may reach its tail up to a buffer early, under the fade.
+0.8 ms at worst, against 2.3 ms and 3.7 ms before.
+
+A looping voice loops on to its release's own frame (`_Voice.stops_looping_at`,
+set by `_stop_looping`), and plays past the loop's end from there (#4703). It
+stopped looping when the release was handled, so a held loop released by an OSC
+note-off two seconds ahead ran into its tail at once and ended at about one
+second, and one released by MIDI reached its tail up to a buffer early.
 
 ### Native dependencies
 
@@ -591,7 +615,10 @@ paths retry a file still being written.
 **Analysing a file while playing happens on an analysis worker process**
 (`parallelism.run_in_analysis_worker`, #4667).
 - **Who uses it:** the watcher's bare files, OSC `/sample/import`, and a map's
-  reference sounds, at start or on a reload.
+  reference sounds, at start or on a reload. A reference given by path is
+  checked against its audio each time, as a library sample is, so a replaced
+  one is analysed again (#4703); its sidecar was read as it stood. Without its
+  audio, the sidecar alone is the reference.
 - **How it works:** the caller's thread waits on `cache.ensure_sample_assets`
   in the worker, and logs what it logged, then reads the file for playing.
 - **Why:** on the caller's thread, analysis made the audio wait for Python's
@@ -627,6 +654,13 @@ not a `map:` preset's, since programs take a restart (#389). The reload parses
 the map again and swaps the active note map, keeping the old one when the new
 one fails to parse or validate. Once it parses, the watcher follows the files it
 was read from this time, so a set added to an ensemble is watched from then on.
+
+A map saved while Subsample starts is reloaded once the player is playing
+(`cli._ReloadOncePlaying`, #4703). The watcher starts before the player, and a
+reload that found no player was dropped; a save before the watcher started was
+not seen at all. Either way the old map played until the next save. The
+watcher now holds a reload until the player is up, and on starting compares
+each file's modification time with the one it had when the map was read.
 
 ## Programs and ensembles
 

@@ -6,8 +6,10 @@ import unittest.mock
 
 import pytest
 
+import subsample.cache
 import subsample.config
 import subsample.library
+import subsample.parallelism
 import subsample.player
 import subsample.query
 import subsample.similarity
@@ -42,6 +44,44 @@ class TestLoadReferenceFromPath:
 		record = subsample.player._load_reference_from_path(wav_path)
 		assert record is not None
 		assert record.name == str(wav_path.resolve())
+
+	def test_a_replaced_reference_is_analysed_again (self, tmp_path: pathlib.Path) -> None:
+
+		"""A reference whose audio is replaced matches by the new sound, analysed on a worker (#4703, M17).
+
+		Its sidecar was read without a look at the audio, so it kept the
+		analysis of the sound it replaced.
+		"""
+
+		path = tmp_path / "my_ref.wav"
+		tests.helpers._make_wav(path, n_frames=2205)
+
+		before = subsample.player._load_reference_from_path(path)
+
+		tests.helpers._make_wav(path, n_frames=22050)
+
+		with unittest.mock.patch.object(
+			subsample.parallelism, "run_in_analysis_worker",
+			wraps=subsample.parallelism.run_in_analysis_worker,
+		) as worker:
+			after = subsample.player._load_reference_from_path(path)
+
+		assert before is not None and after is not None
+		assert before.duration == pytest.approx(0.05)
+		assert after.duration  == pytest.approx(0.5)
+		assert worker.call_args.args[:2] == (subsample.cache.ensure_sample_assets, path)
+
+	def test_a_reference_without_its_audio_is_its_sidecar (self, tmp_path: pathlib.Path) -> None:
+
+		"""With only the sidecar there, the reference is read from it as it stands."""
+
+		tests.helpers._write_sidecar(tmp_path, "sidecar_only")
+
+		record = subsample.player._load_reference_from_path(tmp_path / "sidecar_only.wav")
+
+		assert record is not None
+		assert record.duration == 1.0
+		assert record.filepath is None
 
 
 # ---------------------------------------------------------------------------

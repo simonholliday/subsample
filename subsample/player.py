@@ -328,6 +328,14 @@ def _loudness_positions (
 	return [(level - lo) / span for level in levels]
 
 
+# How many of the samples a key's pick can reach have their pitch variants
+# prepared ahead, by rank (#4703, M15).  Each is a render per key, 80-180 ms on
+# a desktop and several times that on a Pi, so `pick: any` over a 200-sample
+# pool across 88 keys would queue 17,600; the rest are prepared when first
+# played.
+_PITCH_RANKS_AHEAD: typing.Final[int] = 8
+
+
 def _ranks_for (pick_spec: subsample.query.PickSpec, ranked_len: int) -> range:
 
 	"""Iterable of 1-indexed ranks this PickSpec might draw at trigger time.
@@ -2373,9 +2381,10 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 
 	"""Load a reference sample from a filesystem path.
 
-	If the analysis sidecar does not exist but the audio file does, the
-	sidecar is generated automatically so users can point at any WAV file
-	as a reference without running the analysis script first.
+	Where the audio file exists, its sidecar is made if missing and made
+	again if stale, as the library's samples are, so users can point at any
+	WAV file as a reference without running the analysis script first, and
+	replace it.  Where it does not, the sidecar alone is the reference.
 
 	The reference sample's name (key in the similarity matrix) is set to
 	the canonical absolute path string so that get_matches(str(path)) works.
@@ -2390,38 +2399,48 @@ def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.
 	path = pathlib.Path(path).resolve()
 	sidecar_path = subsample.cache.cache_path(path)
 
-	# Auto-generate the sidecar if missing but the audio file exists.  Route
-	# through ensure_sample_assets (the same heal path the library loader uses)
-	# rather than hand-rolling the write — so the reference sidecar upholds every
-	# writer contract: hash-before-decode, read through read_audio_file (float
-	# ceiling honoured), the configured AnalysisConfig, compute_loop (no
+	result: typing.Optional[subsample.cache.SampleAssets]
+
+	# With its audio there, the sidecar is checked against it, and made again
+	# when it is missing, from an older analysis, or of other audio (#4703,
+	# M17): read as it stood, a reference whose audio was replaced kept
+	# matching by the sound it replaced.  Through ensure_sample_assets, the
+	# library loader's own path, so the sidecar keeps every writer contract:
+	# hash-before-decode, read through read_audio_file (float ceiling
+	# honoured), the configured AnalysisConfig, compute_loop (no
 	# permanently-unloopable trap), and channel-format-aware analysis.
-	if not sidecar_path.exists() and path.exists():
-		_log.info("Generating analysis sidecar for reference %s", path.name)
+	if path.exists():
+		if not sidecar_path.exists():
+			_log.info("Generating analysis sidecar for reference %s", path.name)
 
 		# On an analysis worker process: a map reload while playing would
 		# otherwise make the audio and the notes wait (#4667).
-		if subsample.parallelism.run_in_analysis_worker(subsample.cache.ensure_sample_assets, path, with_preview=False) is None:
+		result = subsample.parallelism.run_in_analysis_worker(subsample.cache.ensure_sample_assets, path, with_preview=False)
+
+		if result is None:
 			_log.warning(
 				"Could not generate sidecar for %s - this reference will be skipped",
 				path.name,
 			)
 			return None
 
-	if not sidecar_path.exists():
-		_log.warning(
-			"Reference sample sidecar not found for %s - this reference will be skipped",
-			path,
-		)
-		return None
+	# Without its audio, a reference is its sidecar alone.
+	else:
+		if not sidecar_path.exists():
+			_log.warning(
+				"Reference sample sidecar not found for %s - this reference will be skipped",
+				path,
+			)
+			return None
 
-	result = subsample.cache.load_sidecar(sidecar_path)
-	if result is None:
-		_log.warning(
-			"Failed to load analysis sidecar for %s - this reference will be skipped",
-			path,
-		)
-		return None
+		result = subsample.cache.load_sidecar(sidecar_path)
+
+		if result is None:
+			_log.warning(
+				"Failed to load analysis sidecar for %s - this reference will be skipped",
+				path,
+			)
+			return None
 
 	return subsample.library.SampleRecord(
 		sample_id      = subsample.library.allocate_id(),
@@ -4152,10 +4171,12 @@ class _Voice:
 	"""When the message that released this voice arrived, so its fade begins
 	one buffer later at the frame that falls on, and the voice plays on unfaded
 	until then.  Set with ``releasing``; None begins the fade at the start of
-	the next buffer.  Cleared once the fade has begun.  Stopping a loop is not
-	delayed: a looping voice released mid-buffer plays straight on from that
-	buffer's start, so it may reach its tail up to one buffer early, under the
-	fade that follows."""
+	the next buffer.  Cleared once the fade has begun."""
+
+	stops_looping_at: typing.Optional[float] = None
+	"""When the message that released this looping voice arrived, so it loops
+	on to the frame that falls on, and plays past the loop's end from there
+	(_stop_looping, #4703).  None while it loops on, or once it has stopped."""
 
 	@property
 	def length (self) -> int:
@@ -4218,14 +4239,97 @@ def _release (voice: _Voice, at: typing.Optional[float]) -> None:
 	"""Mark a voice released by a message that arrived at ``at`` (#600).
 
 	A voice already released keeps its first release's time, so a later
-	message never puts off a fade that is due or under way.  Called under
-	_voices_lock.
+	message never puts off a fade that is due or under way; a message timed
+	earlier, as a CC120 after an OSC note-off sent ahead, brings a fade not
+	yet begun forward (#4703, M13).  Called under _voices_lock.
 	"""
 
 	if not voice.releasing:
 		voice.releases_at = at
+	elif voice.fade_pos == 0 and voice.releases_at is not None:
+		voice.releases_at = None if at is None else min(voice.releases_at, at)
 
 	voice.releasing = True
+
+
+def _stop_looping (voice: _Voice, at: typing.Optional[float]) -> None:
+
+	"""Make a looping voice stop looping as of ``at``, when the message that released it arrived (#4703, M12).
+
+	It loops on to the frame that falls on, and plays past the loop's end from
+	there.  The loop stopped when the message was handled, so an OSC note-off
+	sent seconds ahead ran a held loop into its tail, and to its end, seconds
+	early; and a MIDI note-off stopped it up to a buffer early.  An earlier
+	time than one already set brings it forward.  Called under _voices_lock.
+	"""
+
+	if not voice.looping:
+		return
+
+	if at is None:
+		voice.looping          = False
+		voice.stops_looping_at = None
+		return
+
+	if voice.stops_looping_at is None or at < voice.stops_looping_at:
+		voice.stops_looping_at = at
+
+
+def _loop_into (voice: _Voice, out: numpy.ndarray) -> None:
+
+	"""Fill ``out`` with a held loop voice's frames, wrapping loop_end to loop_start.
+
+	Called by the audio callback under _voices_lock, for a whole buffer or the
+	part of one a release due later leaves looping (#4703).
+	"""
+
+	# Held mode: loop voice.  Play forward, wrapping loop_end→loop_start,
+	# and crossfade the last loop_crossfade frames of each lap into the
+	# lead-in before loop_start (replicating loopfind.bake_loop_body so
+	# the wrap is seamless).  The buffer is the ORIGINAL audio, so the
+	# attack plays on the first lap and — on note-off (looping cleared)
+	# — the normal/release branch plays straight past loop_end into the
+	# real tail with no baking.  (A note-off landing mid-crossfade steps
+	# from a blended sample to the raw tail; the release fade masks it,
+	# but release: full has no fade — a rare, faint edge.)  Fills the
+	# WHOLE buffer: a held loop never runs short.
+	xf       = voice.loop_crossfade
+	xf_start = voice.loop_end - xf     # first frame of the wrap crossfade
+	filled   = 0
+
+	while filled < len(out):
+		# n >= 1 every pass, so this cannot spin: a voice only
+		# loops when _append_voice found loop_end - loop_start at
+		# least _MIN_LOOP_SECONDS, and the foot of this loop wraps
+		# position back to loop_start.  Cleared in review; noted so
+		# it is not traced again (#1481).
+		n     = min(len(out) - filled, voice.loop_end - voice.position)
+		chunk = voice.frames(voice.position, voice.position + n)
+
+		if xf > 0 and voice.loop_xfade_in is not None and voice.position + n > xf_start:
+			# Split the chunk at the crossfade window: copy the part
+			# before it straight, blend the part inside it (outgoing
+			# approach-to-loop_end fading into the pre-loop_start lead-in).
+			head = max(0, xf_start - voice.position)
+			if head > 0:
+				out[filled : filled + head] += chunk[:head]
+			k    = (voice.position + head) - xf_start
+			m    = n - head
+			# k + m <= xf always (n <= loop_end - position bounds it), so
+			# loop_xfade_in[k : k + m] never overruns — not an off-by-one.
+			ramp = (numpy.arange(k, k + m, dtype=numpy.float32) / numpy.float32(xf))[:, numpy.newaxis]
+			out[filled + head : filled + n] += (
+				chunk[head:] * (1.0 - ramp)
+				+ voice.loop_xfade_in[k : k + m] * ramp
+			)
+		else:
+			out[filled : filled + n] += chunk
+
+		voice.position += n
+		filled         += n
+
+		if voice.position >= voice.loop_end:
+			voice.position = voice.loop_start
 
 
 def _hit_of (result: subsample.transform.TransformResult, segment: typing.Optional[int]) -> float:
@@ -4938,6 +5042,21 @@ class MidiPlayer:
 		self._mix_matrix_cache: dict[_MixCacheKey, numpy.ndarray] = {}
 		self._mix_matrix_lock:  threading.Lock                    = threading.Lock()
 
+		# Whether an extract can take its part from a sample of each channel
+		# format and count: None where it can, else why not (#4703, M16).
+		# Filled by _playable_by as samples arrive, and the assignments and
+		# formats whose samples it has said it leaves out, so each is said
+		# once.  Read and written by the re-evaluation and MIDI threads; a
+		# race costs a repeated check or warning, never a wrong answer.
+		self._extract_verdicts: dict[tuple[subsample.query.ExtractSpec, str, int], typing.Optional[str]] = {}
+		self._extract_left_out: set[tuple[str, subsample.query.ExtractSpec, str, int]] = set()
+
+		# The assignments, and kinds of error, a note-on has failed to play and
+		# said so, by name: a layer that raises is skipped so the note's other
+		# layers play, and said once rather than with a traceback on every note.
+		# Read and written only by the MIDI handler, under _handler_lock.
+		self._layer_failures_said: set[tuple[str, str]] = set()
+
 		# Per-note segment counter for round-robin segment playback.
 		# Cleared on MIDI map reload and bank switch.
 		# Keyed by (channel, note, id(Assignment)) so each layer on the same
@@ -5630,6 +5749,24 @@ class MidiPlayer:
 				# worth at a time (_Voice.frames, #4654).
 				out       = output[start:]
 				length    = voice.length
+
+				# A loop released by a message due later loops on to that
+				# message's frame, and the rest of the buffer goes on from
+				# there, past the loop's end (#4703, M12).
+				if voice.looping and voice.stops_looping_at is not None:
+					turn = max(0, self._frame_of(voice.stops_looping_at, frame_count) - start)
+
+					if turn >= len(out):
+						_loop_into(voice, out)
+						active.append(voice)
+						continue
+
+					_loop_into(voice, out[:turn])
+					start                 += turn
+					out                    = output[start:]
+					voice.looping          = False
+					voice.stops_looping_at = None
+
 				remaining = length - voice.position
 
 				if voice.releasing and voice.fade_pos == 0 and voice.releases_at is not None:
@@ -5700,54 +5837,7 @@ class MidiPlayer:
 						active.append(voice)
 
 				elif voice.looping:
-					# Held mode: loop voice.  Play forward, wrapping loop_end→loop_start,
-					# and crossfade the last loop_crossfade frames of each lap into the
-					# lead-in before loop_start (replicating loopfind.bake_loop_body so
-					# the wrap is seamless).  The buffer is the ORIGINAL audio, so the
-					# attack plays on the first lap and — on note-off (looping cleared)
-					# — the normal/release branch plays straight past loop_end into the
-					# real tail with no baking.  (A note-off landing mid-crossfade steps
-					# from a blended sample to the raw tail; the release fade masks it,
-					# but release: full has no fade — a rare, faint edge.)  Fills the
-					# WHOLE buffer: a held loop never runs short.
-					xf       = voice.loop_crossfade
-					xf_start = voice.loop_end - xf     # first frame of the wrap crossfade
-					filled   = 0
-
-					while filled < len(out):
-						# n >= 1 every pass, so this cannot spin: a voice only
-						# loops when _append_voice found loop_end - loop_start at
-						# least _MIN_LOOP_SECONDS, and the foot of this loop wraps
-						# position back to loop_start.  Cleared in review; noted so
-						# it is not traced again (#1481).
-						n     = min(len(out) - filled, voice.loop_end - voice.position)
-						chunk = voice.frames(voice.position, voice.position + n)
-
-						if xf > 0 and voice.loop_xfade_in is not None and voice.position + n > xf_start:
-							# Split the chunk at the crossfade window: copy the part
-							# before it straight, blend the part inside it (outgoing
-							# approach-to-loop_end fading into the pre-loop_start lead-in).
-							head = max(0, xf_start - voice.position)
-							if head > 0:
-								out[filled : filled + head] += chunk[:head]
-							k    = (voice.position + head) - xf_start
-							m    = n - head
-							# k + m <= xf always (n <= loop_end - position bounds it), so
-							# loop_xfade_in[k : k + m] never overruns — not an off-by-one.
-							ramp = (numpy.arange(k, k + m, dtype=numpy.float32) / numpy.float32(xf))[:, numpy.newaxis]
-							out[filled + head : filled + n] += (
-								chunk[head:] * (1.0 - ramp)
-								+ voice.loop_xfade_in[k : k + m] * ramp
-							)
-						else:
-							out[filled : filled + n] += chunk
-
-						voice.position += n
-						filled         += n
-
-						if voice.position >= voice.loop_end:
-							voice.position = voice.loop_start
-
+					_loop_into(voice, out)
 					active.append(voice)   # a held loop is never retired here
 
 				else:
@@ -6327,7 +6417,7 @@ class MidiPlayer:
 						if voice.channel != msg.channel:
 							continue
 
-						voice.looping        = False
+						_stop_looping(voice, at)
 						voice.release_to_end = False
 						if voice.fade_pos == 0:
 							voice.release_frames = self._release_fade_frames
@@ -6345,7 +6435,7 @@ class MidiPlayer:
 							continue
 
 						if not voice.one_shot:
-							voice.looping = False
+							_stop_looping(voice, at)
 							if not voice.release_to_end:
 								_release(voice, at)
 
@@ -6424,9 +6514,26 @@ class MidiPlayer:
 
 		# Fire every covering layer.  A normal (non-stacked) note loops exactly
 		# once; stacked members sound together as one composite hit.  Each call
-		# is independent, so one layer finding no sample never silences another.
+		# is independent, so one layer finding no sample never silences another,
+		# and nor does one that fails (#4703, M16): it is said once, with its
+		# traceback, and skipped on every note after.
 		for assignment, pick_spec, effective_velocity in layers:
-			self._trigger_one(msg, assignment, pick_spec, effective_velocity, at, fine, timed)
+			try:
+				self._trigger_one(msg, assignment, pick_spec, effective_velocity, at, fine, timed)
+			except Exception as exc:
+				failure = (assignment.name, type(exc).__name__)
+
+				if failure in self._layer_failures_said:
+					_log.debug("MIDI map assignment %r could not play: %s", assignment.name, exc)
+					continue
+
+				self._layer_failures_said.add(failure)
+
+				_log.error(
+					"MIDI map assignment %r could not play: %s - the note's other layers play on, "
+					"and this is not said again",
+					assignment.name, exc, exc_info=True,
+				)
 
 	def _build_trigger_spec (
 		self,
@@ -6724,7 +6831,7 @@ class MidiPlayer:
 		with self._voices_lock:
 			for voice in self._voices:
 				if voice.note == note and voice.channel == channel and not voice.one_shot:
-					voice.looping = False
+					_stop_looping(voice, at)
 					if not voice.release_to_end:
 						_release(voice, at)
 
@@ -6757,7 +6864,7 @@ class MidiPlayer:
 			for voice in self._voices:
 				if (voice.channel, voice.note) not in victims:
 					continue
-				voice.looping        = False
+				_stop_looping(voice, at)
 				voice.release_to_end = False    # override release: full — must not ring out
 				if voice.fade_pos == 0:
 					# Force the fast declick, overriding any configured release.
@@ -7141,7 +7248,7 @@ class MidiPlayer:
 			# every note's assigned sample).
 			candidates = subsample.query.query(
 				template.select[0],
-				eff_library.samples(),
+				self._playable_by(template.name, template.extract, eff_library.samples()),
 				eff_similarity,
 				bpm=self._target_bpm,
 			)
@@ -7321,7 +7428,7 @@ class MidiPlayer:
 		# Variant-dependent select — resolve live (see _rebuild_candidate_cache).
 		eff_similarity = self._effective_similarity_matrix
 		eff_transform  = self._effective_transform_manager
-		all_samples    = eff_library.samples()
+		samples        = self._playable_by(assignment.name, assignment.extract, eff_library.samples())
 
 		# The same CC values a note-on would resolve with, so the variant that is
 		# scored is the variant that plays.
@@ -7337,7 +7444,7 @@ class MidiPlayer:
 		for select_spec in assignment.select:
 
 			ranked = subsample.query.query(
-				select_spec, all_samples, eff_similarity, beats_resolver,
+				select_spec, samples, eff_similarity, beats_resolver,
 				energy_profile_resolver=energy_profile_resolver,
 				bpm=self._target_bpm,
 			)
@@ -7349,6 +7456,65 @@ class MidiPlayer:
 				return ranked[index].sample_id
 
 		return None
+
+	def _playable_by (
+		self,
+		name:    str,
+		extract: typing.Optional[subsample.query.ExtractSpec],
+		samples: list[subsample.library.SampleRecord],
+	) -> list[subsample.library.SampleRecord]:
+
+		"""The samples this assignment's extract can take its part from, as a where: filter would choose them.
+
+		The map's load refuses an extract that a sample in the library cannot
+		give, but samples arrive later too: recordings, the watcher, OSC
+		imports, another program's folder, and zone-tuned keys are made after
+		the check.  Such a sample raised on every note and silenced the layers
+		stacked after it (#4703, M16); now it is left out of the assignment's
+		choices, and named once per assignment and channel format.  A sample
+		whose audio is not loaded is kept, as nothing is known against it.
+		"""
+
+		if extract is None:
+			return samples
+
+		playable: list[subsample.library.SampleRecord] = []
+
+		for record in samples:
+
+			if record.audio is None:
+				playable.append(record)
+				continue
+
+			fmt      = record.channel_format
+			channels = int(record.audio.shape[1])
+			key      = (extract, fmt, channels)
+
+			if key not in self._extract_verdicts:
+				try:
+					subsample.channel.build_extract_matrix(extract, channels, fmt)
+					self._extract_verdicts[key] = None
+				except ValueError as exc:
+					self._extract_verdicts[key] = str(exc)
+
+			refusal = self._extract_verdicts[key]
+
+			if refusal is None:
+				playable.append(record)
+				continue
+
+			said = (name, extract, fmt, channels)
+
+			if said not in self._extract_left_out:
+				self._extract_left_out.add(said)
+
+				_log.warning(
+					"MIDI map assignment %r: extract %r cannot be applied to %s %dch samples, "
+					"such as %r - leaving them out of its choices (%s)",
+					name, extract.kind, fmt, channels, record.name, refusal,
+				)
+
+		return playable
 
 	def _rebuild_candidate_cache (self) -> dict[int, list[subsample.library.SampleRecord]]:
 
@@ -7412,10 +7578,11 @@ class MidiPlayer:
 				)
 
 				ranked: list[subsample.library.SampleRecord] = []
+				samples = self._playable_by(assignment.name, assignment.extract, all_samples)
 
 				for select_spec in assignment.select:
 					ranked = subsample.query.query(
-						select_spec, all_samples, eff_similarity, beats_resolver,
+						select_spec, samples, eff_similarity, beats_resolver,
 						energy_profile_resolver=energy_profile_resolver,
 						bpm=self._target_bpm,
 					)
@@ -7612,45 +7779,63 @@ class MidiPlayer:
 			if not ranked:
 				continue
 
-			notes = [n for n, _p in note_picks]
-
-			# Repitch: all notes share pick=1 (same sample, pitched per note).
-			# Each note's spec is built by the SAME helper the trigger path
-			# uses, so the pre-computed keys are identical to trigger-time
-			# keys even for chains that add a vocoder, CC-bound params, or a
-			# quantize step alongside the repitch.  get_variant enqueues on
-			# miss and dedups against in-flight work.
+			# Repitch: each key's variants, for every rank its pick can reach,
+			# up to _PITCH_RANKS_AHEAD (#4703, M15).  Notes with no pick of
+			# their own share pick 1.  Only the best match was prepared, so a
+			# pick that reached others played them unpitched on their first
+			# hit.  Each note's spec is built by the SAME helper the trigger
+			# path uses, so the pre-computed keys are identical to
+			# trigger-time keys even for chains that add a vocoder, CC-bound
+			# params, or a quantize step alongside the repitch.  get_variant
+			# enqueues on miss and dedups against in-flight work.
 			if asgn.process.has_repitch():
 				# transform.auto_pitch=false disables the note-range fan-out;
 				# variants then render lazily on first trigger instead.
 				if not eff_transform.auto_pitch_enabled:
 					continue
 
-				record = eff_library.get(ranked[0].sample_id)
+				queued   = 0
+				reaches  = 0
+				unstable: dict[int, str] = {}
 
-				if record is None:
-					continue
+				for note, pick_spec in note_picks:
+					ranks   = _ranks_for(pick_spec, len(ranked))
+					reaches = max(reaches, len(ranks))
 
-				if not subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
-					_log.warning(
-						"Pitched %s: best match %r has no stable pitch - skipping pitch variants",
-						asgn.name, record.name,
-					)
+					for rank in ranks[:_PITCH_RANKS_AHEAD]:
+						record = eff_library.get(ranked[rank - 1].sample_id)
 
-				else:
-					for note in notes:
+						if record is None or record.sample_id in unstable:
+							continue
+
+						if not subsample.analysis.has_stable_pitch(record.spectral, record.pitch, record.duration):
+							unstable[record.sample_id] = record.name
+							continue
+
 						spec = self._build_trigger_spec(asgn, record, note)
 
 						if spec.steps:
 							eff_transform.get_variant(record.sample_id, spec)
+							queued += 1
 
-					_total_assignments += 1
-					_total_variants += len(notes)
-
-					_log.debug(
-						"Pitched %s: queued %d variant(s) for %r",
-						asgn.name, len(notes), record.name,
+				for name in unstable.values():
+					_log.warning(
+						"Pitched %s: %r has no stable pitch - skipping its pitch variants",
+						asgn.name, name,
 					)
+
+				if reaches > _PITCH_RANKS_AHEAD:
+					_log.info(
+						"Pitched %s: its pick reaches %d samples - pitch variants are prepared ahead "
+						"for the first %d, and for the rest when first played",
+						asgn.name, reaches, _PITCH_RANKS_AHEAD,
+					)
+
+				if queued:
+					_total_assignments += 1
+					_total_variants += queued
+
+					_log.debug("Pitched %s: queued %d variant(s)", asgn.name, queued)
 
 			# Beat-quantize: each note may pick a different sample, and a range
 			# PickSpec may resolve to any rank in [lo, hi] at trigger time —

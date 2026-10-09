@@ -2924,6 +2924,109 @@ class TestWaitForShutdown:
 		assert "Stopping" in capsys.readouterr().out
 
 
+class TestAMapSavedWhileThePlayerStarts:
+
+	"""#4703 (M11): a map saved before the player was up played its old version until it was saved again.
+
+	The watcher starts before the player thread publishes its player, and a
+	reload that found none was dropped; and the map is read before the
+	library's load, which can take a minute, while the watcher starts after.
+	"""
+
+	class _Player:
+
+		"""Stands in for the player: counts its reloads."""
+
+		def __init__ (self) -> None:
+			self.reloads = 0
+
+		def reload_midi_map (self, result: subsample.player.MidiMapResult) -> None:
+			self.reloads += 1
+
+	def _map (self, tmp_path: pathlib.Path) -> tuple[subsample.config.Config, pathlib.Path]:
+
+		map_path = tmp_path / "map.yaml"
+		map_path.write_bytes((subsample.config.data_dir() / "midi-map-gm-drums.yaml").read_bytes())
+		cfg = _default_cfg()
+		cfg = dataclasses.replace(
+			cfg, player=dataclasses.replace(cfg.player, enabled=True, midi_map=str(map_path), watch_midi_map=True),
+		)
+
+		return cfg, map_path
+
+	def _watch (
+		self, cfg: subsample.config.Config, read_as: typing.Optional[dict[pathlib.Path, typing.Optional[int]]] = None,
+	) -> tuple[subsample.watcher.MidiMapWatcher, list[typing.Any], subsample.cli._ReloadOncePlaying]:
+
+		references = subsample.library.load_reference_library(subsample.cli._reference_directory(cfg))
+		preloaded  = subsample.player.load_configured_map(cfg, references.names())
+		cell: list[typing.Any] = [None]
+		once       = subsample.cli._ReloadOncePlaying()
+		watcher    = subsample.cli._start_midi_map_watcher(
+			cfg, preloaded, references, subsample.library.InstrumentLibrary(10**8), None, None, cell, once,
+			read_as if read_as is not None else subsample.cli._modification_times(preloaded.source_files),
+		)
+
+		assert watcher is not None
+
+		return watcher, cell, once
+
+	def test_one_saved_before_the_player_is_up_is_reloaded_once_it_is (self, tmp_path: pathlib.Path) -> None:
+
+		cfg, map_path = self._map(tmp_path)
+		watcher, cell, once = self._watch(cfg)
+
+		try:
+			map_path.write_text(map_path.read_text() + "\n# an edit\n")
+
+			deadline = time.monotonic() + 10.0
+			while once._reload is None and time.monotonic() < deadline:
+				time.sleep(0.05)
+
+			player  = self._Player()
+			cell[0] = player
+			once.published()
+
+			assert player.reloads == 1
+
+		finally:
+			watcher.stop()
+
+	def test_one_saved_while_the_library_loaded_is_reloaded_too (self, tmp_path: pathlib.Path) -> None:
+
+		cfg, map_path = self._map(tmp_path)
+		read_as = subsample.cli._modification_times([map_path.resolve()])
+		map_path.write_text(map_path.read_text() + "\n# an edit during the load\n")
+		os.utime(map_path, ns=(time.time_ns(), (read_as[map_path.resolve()] or 0) + 10**9))
+
+		watcher, cell, once = self._watch(cfg, read_as)
+
+		try:
+			player  = self._Player()
+			cell[0] = player
+			once.published()
+
+			assert player.reloads == 1
+
+		finally:
+			watcher.stop()
+
+	def test_a_map_left_alone_is_not_reloaded (self, tmp_path: pathlib.Path) -> None:
+
+		cfg, _map_path = self._map(tmp_path)
+		watcher, cell, once = self._watch(cfg)
+
+		try:
+			player  = self._Player()
+			cell[0] = player
+			once.published()
+
+			assert player.reloads == 0
+
+		finally:
+			watcher.stop()
+
+
 class TestShutDown:
 
 	"""The order things stop in, and how the process ends."""

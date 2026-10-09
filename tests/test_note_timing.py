@@ -399,3 +399,76 @@ class TestArrival:
 		player._handle_message(msg, 2.5)
 
 		assert voice.releasing and voice.releases_at == 2.5
+
+
+class TestALoopStopsAtItsOwnFrame:
+
+	"""#4703 (M12, M13): a held loop released by a message timed later loops on until then.
+
+	The loop stopped when the message was handled, so an OSC note-off sent
+	half a second ahead ran the loop into its tail and to its end, half a
+	second early.  And a release timed earlier than one pending, as a CC120
+	after an OSC note-off sent ahead, could not bring it forward.
+	"""
+
+	def _held_loop (self, release_to_end: bool = False) -> tuple[subsample.player.MidiPlayer, _Clock, subsample.player._Voice]:
+
+		"""A player with a looping voice 0.3 s long, its loop 0.1 to 0.2 s, already playing."""
+
+		clock  = _Clock()
+		player = _player(clock)
+		voice  = _voice(player, length=_frame(0.3))
+		voice.looping, voice.loop_start, voice.loop_end = True, _frame(0.1), _frame(0.2)
+		voice.release_to_end = release_to_end
+		_buffer(player, clock, 1.0)
+
+		return player, clock, voice
+
+	@pytest.mark.parametrize("release_to_end", [False, True], ids=["faded", "release-full"])
+	def test_a_loop_released_half_a_second_ahead_loops_until_then (self, release_to_end: bool) -> None:
+
+		player, clock, voice = self._held_loop(release_to_end)
+
+		subsample.player.MidiPlayer._release_held(player, 36, 9, 1.5025)
+
+		# Each buffer plays the span just ended: up to the one ending at 1.50 s.
+		for index in range(1, 51):
+			played = _buffer(player, clock, 1.0 + index * 0.01)
+			assert played == pytest.approx(0.5, abs=1e-4), f"silent {index * 10} ms in"
+
+		turn  = _frame(0.0025)
+		at_it = _buffer(player, clock, 1.51)
+
+		assert at_it[:turn] == pytest.approx(0.5, abs=1e-4)
+		assert not voice.looping
+
+		if not release_to_end:
+			assert at_it[turn + 100] < 0.5
+
+	def test_a_release_timed_earlier_brings_a_pending_one_forward (self) -> None:
+
+		"""An OSC note-off for half a second ahead, then All Sound Off now: the sound stops now."""
+
+		player, clock, voice = self._held_loop()
+
+		subsample.player.MidiPlayer._release_held(player, 36, 9, 1.5025)
+		player._handle_message(mido.Message("control_change", channel=9, control=120, value=0), 1.0025)
+		_buffer(player, clock, 1.01)
+		_buffer(player, clock, 1.02)
+		after = _buffer(player, clock, 1.03)
+
+		assert numpy.all(after == 0.0)
+		assert voice not in player._voices
+
+	def test_the_earlier_of_two_times_wins_whichever_comes_first (self) -> None:
+
+		voice = subsample.player._Voice(audio=numpy.zeros((10, 2), dtype=numpy.float32), note=36, channel=9, looping=True)
+
+		subsample.player._stop_looping(voice, 2.0)
+		subsample.player._release(voice, 2.0)
+		subsample.player._stop_looping(voice, 1.1)
+		subsample.player._release(voice, 1.1)
+		subsample.player._stop_looping(voice, 1.5)
+		subsample.player._release(voice, 1.5)
+
+		assert (voice.stops_looping_at, voice.releases_at) == (1.1, 1.1)

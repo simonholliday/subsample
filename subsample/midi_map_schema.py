@@ -1142,7 +1142,7 @@ def _extract () -> dict[str, typing.Any]:
 	}
 
 	return {
-		"description": "Plays one part of a multi-channel recording as mono, as a microphone facing a chosen way would hear it, before `pan` and `output` place it. `channel.2` plays the second audio channel alone. The same sample plays whole wherever another assignment does not extract it. A part the recording cannot give is refused when the map loads.",
+		"description": "Plays one part of a multi-channel recording as mono, as a microphone facing a chosen way would hear it, before `pan` and `output` place it. `channel.2` plays the second audio channel alone. The same sample plays whole wherever another assignment does not extract it. A part the recording cannot give is refused when the map loads, and a sample arriving later that cannot give it is left out of this assignment's choices, with a warning.",
 		"anyOf": [
 			{"oneOf": _words(subsample.query.EXTRACT_KINDS, _EXTRACT_PARTS, "extract kind")},
 			{"type": "string", "pattern": r"^channel\.[0-9]+$"},
