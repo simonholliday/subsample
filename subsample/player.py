@@ -2810,12 +2810,11 @@ def _resolve_path_references (
 				# variants of an evicted parent were never released.
 				evicted = instrument_lib.add(record)
 				# Rank the new sample against every reference too.  At startup
-				# this no-ops (references are added just below, and add() early-
-				# returns while the matrix has none) and the add_reference pass
-				# ranks it via its instrument snapshot; on a hot-reload the
-				# references already exist, so this is what threads the newly
-				# loaded samples into their rankings — without it a similarity
-				# select silently never sees them until restart.
+				# the matrix has no references yet and only keeps the sample,
+				# which the add_reference pass below scores (#4704, L16); on a
+				# hot-reload the references already exist, so this is what
+				# threads the newly loaded samples into their rankings — without
+				# it a similarity select silently never sees them until restart.
 				for matrix in matrices:
 					if evicted:
 						matrix.remove(evicted)
@@ -2836,10 +2835,9 @@ def _resolve_path_references (
 		if record is None:
 			continue
 
-		# Add to every bank's similarity matrix
-		instruments = instrument_lib.samples()
+		# Add to every bank's similarity matrix, each scoring the samples it holds
 		for matrix in matrices:
-			matrix.add_reference(record, instruments)
+			matrix.add_reference(record)
 
 		_log.debug("Added path-based reference from %s", path)
 
@@ -2848,7 +2846,6 @@ def _resolve_path_references (
 	# from the library already produced a WARNING and had its assignment skipped
 	# in load_midi_map, so there is nothing to report again here.
 	if reference_library is not None and ref_names:
-		instruments = instrument_lib.samples()
 		added = 0
 
 		for ref_name in sorted(ref_names):
@@ -2858,7 +2855,7 @@ def _resolve_path_references (
 				continue
 
 			for matrix in matrices:
-				matrix.add_reference(record, instruments)
+				matrix.add_reference(record)
 
 			added += 1
 

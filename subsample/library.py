@@ -552,12 +552,25 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 	# Phase 2 — sequential: construct SampleRecords in sorted filename order.
 	records: list[SampleRecord] = []
 
+	# A reference is found by its name, without the extension and whatever
+	# its letter case, so Kick.wav, kick.wav and kick.flac are one reference.
+	# The first in file-name order is kept, and the rest are named: they used
+	# to collapse silently into whichever came last (#4704, L17).
+	kept: dict[str, str] = {}
+	left_out: dict[str, list[str]] = {}
+
 	for sidecar_path, result in zip(sidecar_paths, raw_results):
 		if result is None:
 			continue
 
 		audio_name = sidecar_path.name[: -len(subsample.cache.SIDECAR_SUFFIX)]
 		name = pathlib.Path(audio_name).stem
+
+		if name.upper() in kept:
+			left_out.setdefault(name.upper(), []).append(audio_name)
+			continue
+
+		kept[name.upper()] = audio_name
 
 		records.append(SampleRecord(
 			sample_id      = allocate_id(),
@@ -575,6 +588,13 @@ def load_reference_library (directory: pathlib.Path) -> ReferenceLibrary:
 			channel_format = result.channel_format,
 			loop           = result.loop,
 		))
+
+	for key, others in left_out.items():
+		_log.warning(
+			"Reference %r is %s: %s left out, as names that differ only in letter "
+			"case or extension are one reference - rename one to keep both",
+			pathlib.Path(kept[key]).stem, kept[key], ", ".join(others),
+		)
 
 	_log.info("Loaded %d reference sample(s) from %s", len(records), directory)
 

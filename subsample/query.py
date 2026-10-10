@@ -50,6 +50,7 @@ import numpy
 import pymididefs.notes
 
 import subsample.analysis
+import subsample.cache
 import subsample.definitions
 import subsample.processors
 
@@ -1803,6 +1804,32 @@ def _parse_name_list (
 	return tuple(stems)
 
 
+def _ends_in_audio_extension (name: str) -> bool:
+
+	"""True when a name or pattern ends in an extension the library loads, which no sample's name has."""
+
+	return pathlib.PurePath(name).suffix.lower() in subsample.cache.AUDIO_EXTENSIONS
+
+
+def _warn_of_extensions (names: tuple[str, ...], assignment_name: str) -> None:
+
+	"""Warn of each exact name that ends in an audio extension, which can match no sample.
+
+	A name is matched against the file name without its extension, so
+	`name: kick.wav` matched nothing, without a word, where the same in a
+	wildcard is warned of (#4704, L19).
+	"""
+
+	for name in names:
+		if _ends_in_audio_extension(name):
+			_log.warning(
+				"MIDI map assignment %r: name %r ends in an audio extension, but "
+				"names match the file name without it - it will match nothing.  "
+				"Drop the extension (e.g. %r).",
+				assignment_name, name, pathlib.PurePath(name).stem,
+			)
+
+
 def _parse_name_operator_dict (
 	value: dict[str, typing.Any],
 	assignment_name: str,
@@ -1877,15 +1904,13 @@ def _parse_name_operator_dict (
 	# A glob ending in an audio extension can never match: record.name is the
 	# extensionless stem.  Warn rather than reject (it is valid glob syntax) so a
 	# `matches: "*.wav"` copied from a filename doesn't silently match nothing.
-	if op == "matches":
-		_AUDIO_EXTS = (".wav", ".flac", ".aif", ".aiff", ".ogg", ".mp3", ".m4a", ".opus")
-		if op_value.lower().endswith(_AUDIO_EXTS):
-			_log.warning(
-				"MIDI map assignment %r: name pattern %r ends in an audio "
-				"extension, but patterns match the extensionless filename stem - "
-				"it will match nothing.  Drop the extension (e.g. '*kick*').",
-				assignment_name, op_value,
-			)
+	if op == "matches" and _ends_in_audio_extension(op_value):
+		_log.warning(
+			"MIDI map assignment %r: name pattern %r ends in an audio "
+			"extension, but patterns match the extensionless filename stem - "
+			"it will match nothing.  Drop the extension (e.g. '*kick*').",
+			assignment_name, op_value,
+		)
 
 	if op == "regex":
 		try:
@@ -2062,6 +2087,7 @@ def _parse_where (
 
 			if isinstance(value, list):
 				other_kwargs["name_list"] = _parse_name_list(value, assignment_name)
+				_warn_of_extensions(other_kwargs["name_list"], assignment_name)
 			elif isinstance(value, dict):
 				field_name, raw_pattern = _parse_name_operator_dict(value, assignment_name)
 				other_kwargs[field_name] = raw_pattern
@@ -2075,6 +2101,7 @@ def _parse_where (
 					other_kwargs["name_path"] = str(linked_path(midi_map_dir / raw_name))
 				else:
 					other_kwargs["name"] = raw_name
+					_warn_of_extensions((raw_name,), assignment_name)
 
 		elif key == "path":
 			# Explicit path reference: load this exact WAV and match only it.

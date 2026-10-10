@@ -1,6 +1,7 @@
 """Tests for subsample/query.py — sample query engine and MIDI map parser."""
 
 import dataclasses
+import logging
 import pathlib
 import random
 import typing
@@ -2568,6 +2569,33 @@ class TestParseNamePatternForms:
 			subsample.query.parse_select(
 				{"where": {"name": {"matches": ".hidden*"}}}, "test",
 			)
+
+	@pytest.mark.parametrize(("name", "warned"), [
+		pytest.param("kick.wav", ["kick.wav"], id="exact"),
+		pytest.param(["kick.WAV", "snare", "hat.flac"], ["kick.WAV", "hat.flac"], id="list"),
+		pytest.param("kick", [], id="no-extension"),
+		pytest.param("kick.v2", [], id="a-dot-that-is-no-extension"),
+	])
+	def test_a_name_with_an_audio_extension_is_warned_of (
+		self, caplog: pytest.LogCaptureFixture, name: typing.Any, warned: list[str],
+	) -> None:
+
+		"""#4704 (L19 of the 2026-10-07 review): an exact name matches the file name without its extension.
+
+		`name: kick.wav` matched nothing without a word, as did the list
+		form, where the wildcard form already warned.
+		"""
+
+		with caplog.at_level(logging.WARNING, logger="subsample.query"):
+			subsample.query.parse_select({"where": {"name": name}}, "Kick")
+
+		messages = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+
+		assert messages == [
+			f"MIDI map assignment 'Kick': name {each!r} ends in an audio extension, but names match "
+			f"the file name without it - it will match nothing.  Drop the extension (e.g. {pathlib.PurePath(each).stem!r})."
+			for each in warned
+		]
 
 	# -- Happy paths --
 

@@ -3,6 +3,7 @@
 import dataclasses
 import threading
 import typing
+import unittest.mock
 
 import numpy
 import pytest
@@ -636,11 +637,11 @@ class TestSimilarityMatrix:
 
 		# Now add a new reference with a high flatness (should match i1 better)
 		new_ref = _make_record("/tmp/new_ref", _make_spectral(spectral_flatness=0.95))
-		matrix.add_reference(new_ref, [i1, i2])
+		matrix.add_reference(new_ref)
 
 		# The new reference should have i1 at rank 0 and i2 at rank 1
-		assert matrix.get_match("/tmp/new_ref".upper(), 0) == i1.sample_id
-		assert matrix.get_match("/tmp/new_ref".upper(), 1) == i2.sample_id
+		assert matrix.get_match("/tmp/new_ref", 0) == i1.sample_id
+		assert matrix.get_match("/tmp/new_ref", 1) == i2.sample_id
 
 	def test_add_reference_idempotent (self) -> None:
 		"""add_reference() should be idempotent — calling twice should have no effect."""
@@ -651,24 +652,119 @@ class TestSimilarityMatrix:
 		matrix.add(inst)
 
 		new_ref = _make_record("/tmp/new", _make_spectral())
-		matrix.add_reference(new_ref, [inst])
+		matrix.add_reference(new_ref)
 
 		# Call again with the same reference — should be a no-op
-		matrix.add_reference(new_ref, [inst])
+		matrix.add_reference(new_ref)
 
 		# Should still be retrievable
-		assert matrix.get_match("/tmp/new".upper(), 0) == inst.sample_id
+		assert matrix.get_match("/tmp/new", 0) == inst.sample_id
 
 	def test_add_reference_empty_instruments_creates_empty_ranking (self) -> None:
-		"""add_reference() with empty instrument list should create an empty ranking."""
+		"""add_reference() on a matrix with no samples should create an empty ranking."""
 		ref = _make_record("REF", _make_spectral())
 		matrix = subsample.similarity.SimilarityMatrix(_library_with(ref), _DEFAULT_CFG)
 
 		new_ref = _make_record("/tmp/empty", _make_spectral())
-		matrix.add_reference(new_ref, [])
+		matrix.add_reference(new_ref)
 
 		# The new reference should exist but have no matches
-		assert matrix.get_match("/tmp/empty".upper(), 0) is None
+		assert matrix.get_match("/tmp/empty", 0) is None
+
+	def test_a_new_reference_ranks_what_the_matrix_holds_when_it_is_added (self) -> None:
+
+		"""#4704 (L16 of the 2026-10-07 review): no snapshot to go stale.
+
+		add_reference scored a library snapshot its caller took, so a capture
+		added in between was never ranked for the new reference, and a sample
+		evicted in between came back in its ranking as a ghost.
+		"""
+
+		matrix = self._matrix("BD")
+		kept, evicted, capture = (_make_record(n, _make_spectral(spectral_flatness=f)) for n, f in (("A", 0.2), ("B", 0.5), ("C", 0.8)))
+
+		for record in (kept, evicted):
+			matrix.add(record)
+
+		matrix.remove([evicted.sample_id])
+		matrix.add(capture)
+		matrix.add_reference(_make_record("/refs/snare", _make_spectral(spectral_flatness=0.8)))
+
+		ranked = [match.sample_id for match in matrix.get_matches("/refs/snare")]
+
+		assert ranked == [capture.sample_id, kept.sample_id]
+
+	def test_a_reference_added_to_a_matrix_of_none_ranks_its_samples (self) -> None:
+
+		"""The matrix starts with no references, as the player's does, and keeps its samples for the first."""
+
+		matrix = self._matrix()
+		samples = [_make_record(n, _make_spectral(spectral_flatness=f)) for n, f in (("A", 0.1), ("B", 0.9))]
+		matrix.bulk_add(samples)
+
+		assert len(matrix) == 2
+
+		matrix.add_reference(_make_record("HAT", _make_spectral(spectral_flatness=0.9)))
+
+		assert matrix.get_match("hat", 0) == samples[1].sample_id
+
+	def test_path_references_differing_in_letter_case_are_two (self) -> None:
+
+		"""#4704 (L18 of the 2026-10-07 review): on Linux /refs/Kick.wav and /refs/kick.wav are two files.
+
+		Keyed by the name in upper case, the second was taken for the first
+		and never added, so its assignments ranked against the other sound.
+		"""
+
+		matrix = self._matrix()
+		sample = _make_record("A", _make_spectral(spectral_flatness=0.9))
+		matrix.add(sample)
+		matrix.add_reference(_make_record("/refs/Kick.wav", _make_spectral(spectral_flatness=0.9)))
+		matrix.add_reference(_make_record("/refs/kick.wav", _make_spectral(spectral_flatness=0.1)))
+
+		upper = matrix.get_matches("/refs/Kick.wav")
+		lower = matrix.get_matches("/refs/kick.wav")
+
+		assert upper and lower
+		assert upper[0].score != lower[0].score
+		assert matrix.get_matches("/REFS/KICK.WAV") == []
+
+	def test_scores_read_while_a_reference_is_added (self) -> None:
+
+		"""#4704 (L15 of the 2026-10-07 review): a sample's scores are read whole.
+
+		get_scores read a sample's row after letting go of the lock, and a
+		reference added meanwhile grew that row: "dictionary changed size
+		during iteration", which dropped a capture's hand-off.  The writer is
+		forced into the read here, as a thread switch could put it there.
+		"""
+
+		matrix = self._matrix("BD")
+		sample = _make_record("A", _make_spectral())
+		matrix.add(sample)
+
+		real = subsample.similarity.SimilarityScore
+		writers: list[threading.Thread] = []
+
+		def _grow_the_row () -> None:
+			with matrix._lock:
+				matrix._scores[sample.sample_id]["SN"] = 0.5
+
+		def _score_while_written (*args: typing.Any, **kwargs: typing.Any) -> subsample.similarity.SimilarityScore:
+			if not writers:
+				writers.append(threading.Thread(target=_grow_the_row))
+				writers[0].start()
+				writers[0].join(timeout=0.2)
+
+			return real(*args, **kwargs)
+
+		with unittest.mock.patch.object(subsample.similarity, "SimilarityScore", _score_while_written):
+			scores = matrix.get_scores(sample.sample_id)
+
+		writers[0].join(timeout=5.0)
+
+		assert not writers[0].is_alive()
+		assert [score.name for score in scores] == ["BD"]
 
 	# ----- thread safety ----------------------------------------------------
 

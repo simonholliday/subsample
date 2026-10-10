@@ -1,6 +1,7 @@
 """Tests for subsample/library.py — reference and instrument sample libraries."""
 
 import dataclasses
+import logging
 import pathlib
 import typing
 
@@ -242,6 +243,33 @@ class TestLoadReferenceLibrary:
 		_write_sidecar(tmp_path, "BD0025", ".WAV")
 		lib = subsample.library.load_reference_library(tmp_path)
 		assert lib.get("BD0025") is not None
+
+	def test_names_that_clash_keep_the_first_and_say_so (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4704 (L17 of the 2026-10-07 review): Kick.wav, kick.wav and kick.flac are one reference.
+
+		They collapsed into whichever came last, silently, and the log said 4
+		references loaded where there were 2.  The first in file-name order is
+		kept, and the others are named.
+		"""
+
+		for stem, ext in (("Kick", ".wav"), ("kick", ".wav"), ("kick", ".flac"), ("snare", ".wav")):
+			_write_sidecar(tmp_path, stem, ext)
+
+		with caplog.at_level(logging.INFO, logger="subsample.library"):
+			lib = subsample.library.load_reference_library(tmp_path)
+
+		kick = lib.get("kick")
+
+		assert len(lib) == 2
+		assert kick is not None and kick.name == "Kick"
+
+		messages = [record.getMessage() for record in caplog.records if record.name == "subsample.library"]
+
+		assert "Reference 'Kick' is Kick.wav: kick.flac, kick.wav left out, as names that differ only in letter case or extension are one reference - rename one to keep both" in messages
+		assert f"Loaded 2 reference sample(s) from {tmp_path}" in messages
 
 	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
 		_write_sidecar(tmp_path, "KICK")

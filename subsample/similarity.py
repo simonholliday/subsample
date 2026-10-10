@@ -49,6 +49,7 @@ import numpy
 import subsample.analysis
 import subsample.config
 import subsample.library
+import subsample.query
 
 
 # Decimal places every similarity score is rounded to (see _score_matrix).  Far
@@ -127,11 +128,14 @@ class SimilarityMatrix:
 		_similarity_cfg: Similarity weights used when building feature vectors.
 		                 Stored here so all vectors (reference and instrument)
 		                 are built consistently with the same weights.
-		_ref_vectors:   Precomputed reference vectors {name_upper: array}.
-		                Populated at construction; extended by add_reference().
-		_rankings:      Per-reference ranked lists {name_upper: [RankedMatch, ...]}.
+		_ref_vectors:   Precomputed reference vectors {key: array}, keyed by
+		                _reference_key.  Populated at construction; extended by
+		                add_reference().
+		_rankings:      Per-reference ranked lists {key: [RankedMatch, ...]}.
 		                Always sorted descending by score.
-		_scores:        Score cache {sample_id: {name_upper: score}}.
+		_vectors:       Each instrument sample's feature vector {sample_id: array},
+		                which add_reference() scores a new reference against.
+		_scores:        Score cache {sample_id: {key: score}}.
 		                Also acts as a reverse index for eviction: pop the entry
 		                here, then do a linear scan of each ranking list to remove
 		                the matching entry. True eviction cost is O(M × N) where
@@ -151,14 +155,22 @@ class SimilarityMatrix:
 
 		# Precompute reference vectors once — references never change after init
 		self._ref_vectors: dict[str, numpy.ndarray] = {
-			rec.name.upper(): _build_feature_vector(rec, similarity_cfg)
+			_reference_key(rec.name): _build_feature_vector(rec, similarity_cfg)
 			for rec in reference_library.samples()
 		}
 		self._rankings: dict[str, list[RankedMatch]] = {
 			name: [] for name in self._ref_vectors
 		}
 
-		# Maps sample_id → {ref_name_upper → score}.
+		# Every instrument sample's feature vector, whether or not any
+		# reference is held yet: a reference added later is scored against
+		# these, under the lock (#4704, L16).  It used to score a snapshot of
+		# the library its caller took, so a capture added between the
+		# snapshot and the scoring was never ranked for it, and a sample
+		# evicted in between came back in its ranking as a ghost.
+		self._vectors: dict[int, numpy.ndarray] = {}
+
+		# Maps sample_id → {reference key → score}.
 		# Doubles as a reverse index: to evict a sample, pop its entry here
 		# and remove it from each referenced ranking list.
 		self._scores: dict[int, dict[str, float]] = {}
@@ -180,7 +192,7 @@ class SimilarityMatrix:
 			records: Instrument samples to add (no duplicates expected).
 		"""
 
-		if not records or not self._ref_vectors:
+		if not records:
 			return
 
 		if self._scores:
@@ -190,16 +202,28 @@ class SimilarityMatrix:
 				"Only call bulk_add() on a freshly constructed matrix."
 			)
 
-		ref_names = list(self._ref_vectors.keys())
-		ref_matrix = numpy.array([self._ref_vectors[n] for n in ref_names])  # M × D
-
 		inst_matrix = numpy.array(
 			[_build_feature_vector(r, self._similarity_cfg) for r in records],
 		)  # N × D
 
+		ref_names = list(self._ref_vectors.keys())
+
+		# Each sample's vector is kept, with or without references to score
+		# it against: a reference added later scores these (#4704, L16).
+		if not ref_names:
+			with self._lock:
+				for i, record in enumerate(records):
+					self._vectors[record.sample_id] = inst_matrix[i]
+					self._scores[record.sample_id] = {}
+
+			return
+
+		ref_matrix    = numpy.array([self._ref_vectors[n] for n in ref_names])  # M × D
 		scores_matrix = _score_matrix(inst_matrix, ref_matrix)  # N × M
 
 		with self._lock:
+			for i, record in enumerate(records):
+				self._vectors[record.sample_id] = inst_matrix[i]
 
 			# Populate score cache for each instrument
 			for i, record in enumerate(records):
@@ -238,9 +262,6 @@ class SimilarityMatrix:
 			record: The newly captured instrument sample.
 		"""
 
-		if not self._ref_vectors:
-			return
-
 		vec = _build_feature_vector(record, self._similarity_cfg)
 		sid = record.sample_id
 
@@ -262,6 +283,7 @@ class SimilarityMatrix:
 			if sid in self._scores:
 				self._drop_locked(sid)
 
+			self._vectors[sid] = vec
 			score_row: dict[str, float] = {}
 
 			for ref_name, ref_vec in self._ref_vectors.items():
@@ -275,52 +297,45 @@ class SimilarityMatrix:
 
 			self._scores[sid] = score_row
 
-	def add_reference (
-		self,
-		record: subsample.library.SampleRecord,
-		instruments: list[subsample.library.SampleRecord],
-	) -> None:
+	def add_reference (self, record: subsample.library.SampleRecord) -> None:
 
-		"""Add a new reference and score it against all current instrument samples.
+		"""Add a new reference and score it against every instrument sample this matrix holds.
 
-		Used to add path-based references at MIDI-map load time. Computes similarity
-		between the new reference and every instrument in the library, building the
-		ranked list and updating score caches.
+		Used to add the references a MIDI map names, at load time.  Scored
+		under the lock against the samples held when it runs, so none added or
+		evicted meanwhile is missed or kept (#4704, L16).
 
 		Idempotent: calling with a reference whose name is already in the matrix
 		is a no-op (the existing reference is not replaced).
 
 		Args:
-			record:      The reference sample record (name.upper() becomes the key).
-			instruments: All current instrument samples (for scoring).
+			record: The reference sample record (_reference_key(name) becomes the key).
 		"""
 
-		key = record.name.upper()
+		key = _reference_key(record.name)
+		vec = _build_feature_vector(record, self._similarity_cfg)
 
 		with self._lock:
 			if key in self._ref_vectors:
 				return  # Already present; idempotent
 
-			vec = _build_feature_vector(record, self._similarity_cfg)
-
 			self._ref_vectors[key] = vec
 			self._rankings[key] = []
 
-			for inst in instruments:
-				inst_vec = _build_feature_vector(inst, self._similarity_cfg)
-				score = _cosine_similarity(vec, inst_vec)
+			if not self._vectors:
+				return
 
-				# Add to the ranking for this reference
-				bisect.insort(
-					self._rankings[key],
-					RankedMatch(sample_id=inst.sample_id, score=score),
-					key=lambda m: -m.score,
-				)
+			sample_ids = list(self._vectors)
+			scores     = _score_matrix(numpy.array([self._vectors[sid] for sid in sample_ids]), vec[numpy.newaxis, :])[:, 0]
 
-				# Update the per-instrument score cache (for get_scores)
-				if inst.sample_id not in self._scores:
-					self._scores[inst.sample_id] = {}
-				self._scores[inst.sample_id][key] = score
+			# Stable, so ties keep the order the samples were added in, as
+			# bulk_add and add() break them.
+			for k in numpy.argsort(-scores, kind="stable"):
+				sid   = sample_ids[int(k)]
+				score = float(scores[int(k)])
+
+				self._rankings[key].append(RankedMatch(sample_id=sid, score=score))
+				self._scores[sid][key] = score
 
 	def remove (self, sample_ids: list[int]) -> None:
 
@@ -348,6 +363,7 @@ class SimilarityMatrix:
 		this must never take it itself.
 		"""
 
+		self._vectors.pop(sample_id, None)
 		ref_scores = self._scores.pop(sample_id, {})
 
 		for ref_name in ref_scores:
@@ -377,7 +393,7 @@ class SimilarityMatrix:
 		"""
 
 		with self._lock:
-			ranked = self._rankings.get(reference_name.upper())
+			ranked = self._rankings.get(_reference_key(reference_name))
 			if ranked is None or rank >= len(ranked):
 				return None
 			return ranked[rank].sample_id
@@ -400,7 +416,7 @@ class SimilarityMatrix:
 		"""
 
 		with self._lock:
-			ranked = self._rankings.get(reference_name.upper(), [])
+			ranked = self._rankings.get(_reference_key(reference_name), [])
 			if limit > 0:
 				return ranked[:limit]
 			return ranked[:]
@@ -420,14 +436,16 @@ class SimilarityMatrix:
 			Empty if the sample_id is not in the matrix.
 		"""
 
+		# Read whole under the lock: add_reference() adds to a sample's row,
+		# so a row read outside it could change size mid-read, which raised
+		# and took a capture's hand-off with it (#4704, L15).
 		with self._lock:
-			ref_scores = self._scores.get(sample_id, {})
+			scores = [
+				SimilarityScore(name=name, score=score)
+				for name, score in self._scores.get(sample_id, {}).items()
+			]
 
-		return sorted(
-			[SimilarityScore(name=name, score=score) for name, score in ref_scores.items()],
-			key=lambda s: s.score,
-			reverse=True,
-		)
+		return sorted(scores, key=lambda s: s.score, reverse=True)
 
 	def __len__ (self) -> int:
 
@@ -560,6 +578,19 @@ def _l2_normalize (v: numpy.ndarray) -> numpy.ndarray:
 		return numpy.zeros_like(v)
 
 	return v / norm
+
+
+def _reference_key (name: str) -> str:
+
+	"""A reference's key in the matrix: a path as written, and a bare name in upper case.
+
+	A bare name is looked up whatever its letter case (`reference: kick`
+	finds `Kick`).  A path reference is named by its resolved path, and on
+	Linux /refs/Kick.wav and /refs/kick.wav are two files, which an
+	upper-cased key made one reference (#4704, L18).
+	"""
+
+	return name if subsample.query.is_path_like(name) else name.upper()
 
 
 def _cosine_similarity (a: numpy.ndarray, b: numpy.ndarray) -> float:
