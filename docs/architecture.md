@@ -401,7 +401,15 @@ an analysis worker process (see Watchers). Its dispatcher is not strict
 (python-osc 1.10.2's `strict_timing=False`, #4703): a strict one sleeps on the
 server's thread until a bundle's time, so one import timed an hour ahead held
 every import after it for the hour, and stop() could not end it. Its stop waits
-a bounded time for the serve loop too.
+a bounded time for the serve loop too. The file is analysed where it is, and its
+analysis files are written beside it, as in a library folder (#4704, L35).
+
+Both OSC receivers warn of a packet they cannot read at most once a minute.
+python-osc decodes a string with a bare decode, so one that is not UTF-8 raises
+past its own ParseError: the note receiver catches it with the parse errors,
+and the import receiver's server (`osc._import_server`) turns it into the
+warning in `handle_error`, where socketserver printed a traceback for each
+packet (#4704, L34).
 
 A second OSC receiver, `OscNoteReceiver` on its own port, takes `/note/on` and
 `/note/off` (#3610, #603). It reads each packet itself, walking bundles with

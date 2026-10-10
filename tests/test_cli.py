@@ -2471,6 +2471,8 @@ class TestAnUnreadableMapPathIsReported:
 
 		assert any("Cannot load the MIDI map" in record.message for record in caplog.records)
 
+	# Root reads a file whatever its permissions, so the map would load (#4704, L36).
+	@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a file with no read permission")
 	def test_a_map_that_cannot_be_read (
 		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
 	) -> None:

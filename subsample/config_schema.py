@@ -85,9 +85,10 @@ def json_schema () -> dict[str, typing.Any]:
 				counting from C, is the pitch class holding most of the sound's
 				energy, or -1 for a sound too short or too quiet to measure.  With
 				`receive_enabled`, a `/sample/import` message naming an audio file
-				has Subsample analyse the file where it is and add it to the library
-				until the next restart; to keep it, put it in `library.directory` as
-				well.  Requires the optional `python-osc` package.  With
+				has Subsample analyse the file where it is, writing its analysis
+				files beside it as it does in a library folder, and add it to the
+				library until the next restart; to keep it, put it in
+				`library.directory` as well.  Requires the optional `python-osc` package.  With
 				`notes_enabled`, `/note/on` and `/note/off` messages play notes
 				through the MIDI map, as MIDI notes do: `/note/on` carries the MIDI
 				channel, 1 to 16, the note, 0 to 127, and the velocity as a decimal
@@ -137,8 +138,9 @@ def json_schema () -> dict[str, typing.Any]:
 						"string",
 						"""
 						Network interface the OSC receiver binds to.  The receiver
-						reads whatever path a message names, without authentication,
-						so the default accepts messages from this machine only.  Set
+						reads whatever audio file a message names, and writes its
+						analysis files beside it, without authentication, so the
+						default accepts messages from this machine only.  Set
 						`0.0.0.0` to accept them from other hosts on a network you
 						control.
 						""",

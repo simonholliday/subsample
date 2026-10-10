@@ -3,8 +3,9 @@
 Sends sample events when recordings are captured or library samples are loaded,
 and optionally receives /sample/import messages to load audio files into the
 in-memory instrument library from other OSC-compatible applications.  Files
-are read in place (not copied); the sample is available for playback until
-the next restart.
+are read in place (not copied), and their analysis files are written beside
+them, as in a library folder, so a file imported again is not analysed again;
+the sample is available for playback until the next restart.
 
 A second receiver, OscNoteReceiver, takes /note/on and /note/off messages and
 hands each note to the player with the time its bundle names (#3610, #603).
@@ -22,6 +23,7 @@ import logging
 import pathlib
 import queue
 import socketserver
+import sys
 import threading
 import time
 import typing
@@ -42,6 +44,10 @@ _IMPORT_QUEUE_LIMIT: int = 64
 
 # How long stop() waits for the import being analysed when it is called.
 _STOP_WAIT_SECONDS: float = 10.0
+
+# How often a receiver repeats a warning about one kind of bad message.  A
+# sender with a mistake sends it on every note, and once a minute says it.
+_WARNING_SECONDS: float = 60.0
 
 
 class OscEventSender:
@@ -154,11 +160,14 @@ class OscReceiver:
 	refused with a warning.
 
 	SECURITY: ``/sample/import`` reads/loads an arbitrary filesystem path
-	supplied by the sender, so the server binds to loopback (127.0.0.1) by
-	default — only local senders can reach it.  Pass host="0.0.0.0" (via
-	``osc.receive_host`` in config.yaml) to accept messages from other hosts
-	on a trusted LAN, understanding that this exposes unauthenticated remote
-	file read/load.
+	supplied by the sender, and writes its analysis files (the .analysis.json
+	sidecar, and the .preview.png when recorder.previews is on) beside it, so
+	the server binds to loopback (127.0.0.1) by default — only local senders
+	can reach it.  Pass host="0.0.0.0" (via ``osc.receive_host`` in
+	config.yaml) to accept messages from other hosts on a trusted LAN,
+	understanding that this exposes unauthenticated remote file read/load, and
+	those two writes beside any audio file the process can read (#4704, L35:
+	Simon's call was to keep the writes and say so).
 	"""
 
 	def __init__ (
@@ -189,9 +198,10 @@ class OscReceiver:
 		dispatcher.map("/sample/import", self._handle_import)
 
 		self._on_import = on_import
-		self._server = pythonosc.osc_server.BlockingOSCUDPServer(
-			(host, port), dispatcher,
-		)
+		self._server = _import_server((host, port), dispatcher, self._unreadable)
+
+		# When each kind of bad message was last warned about.
+		self._warned: dict[str, float] = {}
 
 		# None is the worker's signal to stop.
 		self._imports: queue.Queue[typing.Optional[str]] = queue.Queue(maxsize=_IMPORT_QUEUE_LIMIT)
@@ -289,6 +299,12 @@ class OscReceiver:
 
 		_log.info("OSC /sample/import: %s", file_path)
 
+	def _unreadable (self) -> None:
+
+		"""Warn of a packet python-osc could not read, at most once a minute."""
+
+		_warn_now_and_then(self._warned, "packet", "OSC receiver: a packet that is not OSC - ignored")
+
 	def _work (self) -> None:
 
 		"""Import each queued path in turn, until stop() sends None."""
@@ -303,11 +319,6 @@ class OscReceiver:
 				self._on_import(file_path)
 			except Exception:
 				_log.warning("OSC /sample/import handler failed for %s", file_path, exc_info=True)
-
-
-# How often the note receiver repeats a warning about one kind of bad message.
-# A sender with a mistake sends it on every note, and once a minute says it.
-_NOTE_WARNING_SECONDS: float = 60.0
 
 
 class _NoteRequestHandler (socketserver.BaseRequestHandler):
@@ -373,10 +384,13 @@ class OscNoteReceiver:
 		self._bundle       = pythonosc.osc_bundle.OscBundle
 		self._message      = pythonosc.osc_message.OscMessage
 		self._immediately  = pythonosc.parsing.osc_types.IMMEDIATELY
+		# python-osc reads a string with a bare decode, so one that is not
+		# UTF-8 raises past its own ParseError (#4704, L34).
 		self._parse_errors = (
 			pythonosc.osc_bundle.ParseError,
 			pythonosc.osc_message.ParseError,
 			pythonosc.parsing.osc_types.ParseError,
+			UnicodeDecodeError,
 		)
 
 		self._on_note = on_note
@@ -511,13 +525,52 @@ class OscNoteReceiver:
 
 		"""Log a warning about one kind of bad message, at most once a minute."""
 
-		now = time.monotonic()
+		_warn_now_and_then(self._warned, kind, message)
 
-		if now - self._warned.get(kind, -_NOTE_WARNING_SECONDS) < _NOTE_WARNING_SECONDS:
-			return
 
-		self._warned[kind] = now
-		_log.warning("%s", message)
+def _warn_now_and_then (warned: dict[str, float], kind: str, message: str) -> None:
+
+	"""Log a warning about one kind of bad message unless one was in the last minute; ``warned`` holds when each kind last was."""
+
+	now = time.monotonic()
+
+	if now - warned.get(kind, -_WARNING_SECONDS) < _WARNING_SECONDS:
+		return
+
+	warned[kind] = now
+	_log.warning("%s", message)
+
+
+def _import_server (
+	address:    tuple[str, int],
+	dispatcher: typing.Any,
+	unreadable: typing.Callable[[], None],
+) -> socketserver.UDPServer:
+
+	"""python-osc's UDP server, with a packet it cannot read said in a warning (#4704, L34).
+
+	python-osc reads a string with a bare decode, so a packet holding one
+	that is not UTF-8 raised past its own ParseError handling, and
+	socketserver printed a traceback for each to the terminal, outside the
+	log.  The class is made here because python-osc is imported only when a
+	receiver is.
+	"""
+
+	import pythonosc.osc_server
+
+	class ImportServer (pythonosc.osc_server.BlockingOSCUDPServer):
+
+		def handle_error (self, request: typing.Any, client_address: typing.Any) -> None:
+
+			"""Warn of a packet that is not UTF-8 where OSC needs text; anything else as socketserver does."""
+
+			if isinstance(sys.exc_info()[1], UnicodeDecodeError):
+				unreadable()
+				return
+
+			super().handle_error(request, client_address)
+
+	return ImportServer(address, dispatcher)
 
 
 def _whole (value: typing.Any, lowest: int, highest: int) -> typing.Optional[int]:

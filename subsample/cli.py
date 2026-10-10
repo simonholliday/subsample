@@ -2927,7 +2927,8 @@ def _start_osc_receiver (
 		def _on_osc_import (file_path_str: str) -> None:
 			"""Handle a /sample/import OSC message.
 
-			Reads and analyses the file in place (does not copy), then
+			Reads and analyses the file in place (does not copy), writing
+			its analysis files beside it as a library folder's are, then
 			loads it into the in-memory instrument library for immediate
 			playback.  The sample is available until the next restart.
 			"""

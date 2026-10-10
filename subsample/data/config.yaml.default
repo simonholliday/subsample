@@ -35,6 +35,7 @@
 #
 # Receiver: listens for /sample/import messages containing a file path,
 # and triggers analysis and import of the specified audio file into the library.
+# Its analysis files are written beside it, as in a library folder.
 #
 # Note receiver: plays each /note/on and /note/off message through the MIDI
 # map, as MIDI notes play.  A message in a bundle plays at the bundle's time,
@@ -48,9 +49,10 @@
 #   receive_enabled: false
 #   receive_port: 9002
 #   receive_host: "127.0.0.1"   # loopback by default; the /sample/import handler
-#                               # reads an arbitrary path, so binding to
-#                               # "0.0.0.0" exposes unauthenticated remote file
-#                               # read/load - only do so on a trusted LAN.
+#                               # reads any audio file a message names and
+#                               # writes its analysis files beside it, so
+#                               # binding to "0.0.0.0" lets any host do that,
+#                               # unauthenticated - only on a trusted LAN.
 #   notes_enabled: false
 #   notes_port: 9003
 #   notes_host: "127.0.0.1"     # loopback by default; "0.0.0.0" is safer than

@@ -262,6 +262,43 @@ class TestOscReceiver:
 		assert received == ["/tmp/later.wav", "/tmp/now.wav"]
 		assert time.monotonic() - started < 5.0
 
+	def test_a_packet_not_in_utf8_is_warned_about_not_printed (
+		self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str],
+	) -> None:
+
+		"""python-osc reads a string with a bare decode, so socketserver printed a traceback for each such packet (#4704, L34)."""
+
+		import socket
+
+		received: list[str] = []
+		delivered = threading.Event()
+
+		def on_import (path: str) -> None:
+			received.append(path)
+			delivered.set()
+
+		receiver, port = self._make_receiver(on_import)
+		sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+		try:
+			with caplog.at_level(logging.WARNING, logger="subsample.osc"):
+				for _ in range(3):
+					sender.sendto(_not_utf8("/sample/import"), ("127.0.0.1", port))
+
+				sender.sendto(_bundle(time.time(), ("/sample/import", ["/tmp/after.wav"])), ("127.0.0.1", port))
+
+				assert delivered.wait(timeout=5.0), "the import after the bad packets was not made"
+
+		finally:
+			sender.close()
+			receiver.stop()
+
+		warnings = [record.message for record in caplog.records if record.name == "subsample.osc" and record.levelno == logging.WARNING]
+
+		assert received == ["/tmp/after.wav"]
+		assert warnings == ["OSC receiver: a packet that is not OSC - ignored"]
+		assert "Traceback" not in capsys.readouterr().err
+
 	def test_start_stop_lifecycle (self) -> None:
 		"""Receiver starts and stops cleanly."""
 
@@ -511,6 +548,16 @@ def _wait_until (condition: typing.Callable[[], bool], timeout: float = 5.0) -> 
 _Note = tuple[bool, int, int, float, float, bool]
 
 
+def _not_utf8 (address: str) -> bytes:
+
+	"""The datagram of a message to ``address`` whose one string argument is not UTF-8."""
+
+	def padded (raw: bytes) -> bytes:
+		return raw + b"\0" * (4 - len(raw) % 4)
+
+	return padded(address.encode()) + padded(b",s") + padded(b"\xfe\xff")
+
+
 def _bundle (when: float, *messages: tuple[str, list[typing.Any]]) -> bytes:
 
 	"""The datagram of a bundle of these messages, timed for ``when`` (seconds since the epoch)."""
@@ -722,6 +769,22 @@ class TestOscNoteReceiver:
 			receiver.stop()
 
 		assert len([record for record in caplog.records if "/note/on" in record.message]) == 1
+
+	def test_a_packet_not_in_utf8_is_warned_about (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""It raised past python-osc's ParseError, out of the warning (#4704, L34)."""
+
+		receiver = subsample.osc.OscNoteReceiver(port=0, on_note=lambda *_args: None)
+
+		try:
+			with caplog.at_level(logging.WARNING, logger="subsample.osc"):
+				receiver._handle_packet(_not_utf8("/note/on"))
+		finally:
+			receiver.stop()
+
+		warnings = [record.message for record in caplog.records if record.name == "subsample.osc" and record.levelno == logging.WARNING]
+
+		assert warnings == ["OSC note receiver: a packet that is not OSC - ignored"]
 
 	def test_another_address_is_ignored (self) -> None:
 
