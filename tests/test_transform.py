@@ -1166,7 +1166,7 @@ class TestTransformManagerGetVariant:
 		assert cache.get(key) is not None             # ...and the variant landed
 
 	def test_disk_hit_promoted_to_memory (self, tmp_path: pathlib.Path) -> None:
-		manager, cache, lib, disk, _processor = self._make_stack(tmp_path)
+		manager, cache, lib, disk, processor = self._make_stack(tmp_path)
 		record = _make_record(sample_id=1)
 		lib.add(record)
 		spec = self._spec()
@@ -1175,7 +1175,7 @@ class TestTransformManagerGetVariant:
 		# A distinctive constant no Reverse of the record could produce.
 		marker = numpy.full((100, 1), 0.123, dtype=numpy.float32)
 		disk.put(
-			hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest(), spec,
+			processor.source_digest(record), spec,
 			subsample.transform.TransformResult(
 				key=key, audio=marker, duration=0.1,
 				level=subsample.analysis.LevelResult(peak=0.123, rms=0.1),
@@ -1195,7 +1195,7 @@ class TestTransformManagerGetVariant:
 		render worker finds the file and keeps it in memory for the next note (#4488)."""
 
 		# Threads: the spied reads have to be the worker's.
-		manager, cache, lib, disk, _processor = self._make_stack(tmp_path, processes=False)
+		manager, cache, lib, disk, processor = self._make_stack(tmp_path, processes=False)
 		record = _make_record(sample_id=1)
 		lib.add(record)
 		spec = self._spec()
@@ -1203,7 +1203,7 @@ class TestTransformManagerGetVariant:
 
 		marker = numpy.full((100, 1), 0.123, dtype=numpy.float32)
 		disk.put(
-			hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest(), spec,
+			processor.source_digest(record), spec,
 			subsample.transform.TransformResult(
 				key=key, audio=marker, duration=0.1,
 				level=subsample.analysis.LevelResult(peak=0.123, rms=0.1),
@@ -1293,7 +1293,7 @@ class TestTransformManagerGetVariant:
 
 		marker = numpy.full((100, 1), 0.321, dtype=numpy.float32)
 		disk.put(
-			hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest(), spec,
+			processor.source_digest(record), spec,
 			subsample.transform.TransformResult(
 				key=key, audio=marker, duration=0.1,
 				level=subsample.analysis.LevelResult(peak=0.321, rms=0.1),
@@ -1317,8 +1317,98 @@ class TestTransformManagerGetVariant:
 		processor.enqueue(record, spec)
 		manager.shutdown()
 
-		md5 = hashlib.md5(tests.helpers._audio(record).tobytes()).hexdigest()
-		assert disk.get(md5, spec, key) is not None
+		assert disk.get(processor.source_digest(record), spec, key) is not None
+
+	@staticmethod
+	def _settle (processor: subsample.transform.TransformProcessor) -> None:
+
+		"""Wait for a thread processor's renders to finish."""
+
+		deadline = time.monotonic() + 10.0
+
+		while processor._in_flight and time.monotonic() < deadline:
+			time.sleep(0.01)
+
+	def test_a_sample_analysed_again_is_not_served_its_old_render (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4704 (L9 of the 2026-10-07 review): the disk cache knows a sample by its analysis too.
+
+		A render reads the analysis as well as the audio, the tempo a stretch
+		follows among it.  Keyed by the audio alone, a sample analysed again
+		with other settings was served the render made for its old analysis.
+		"""
+
+		manager, cache, lib, _disk, processor = self._make_stack(tmp_path, processes=False)
+		record = _make_record(sample_id=1, tempo_bpm=120.0)
+		lib.add(record)
+		spec = self._spec()
+
+		assert manager.get_variant(1, spec) is None
+		self._settle(processor)
+
+		again = dataclasses.replace(record, rhythm=dataclasses.replace(record.rhythm, tempo_bpm=90.0))
+		lib.add(again)
+		cache.remove_parent(1)
+
+		assert manager.get_variant(1, spec) is None
+		manager.shutdown()
+
+	def test_a_variant_played_from_memory_outlasts_one_never_played (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4704 (L10 of the 2026-10-07 review): a trim keeps the variants being played.
+
+		Only a read from disk touched a file, so the variants played most,
+		which stay in memory, looked the least used and were the first a trim
+		deleted.
+		"""
+
+		manager, _cache, lib, disk, processor = self._make_stack(tmp_path, processes=False)
+		record = _make_record(sample_id=1)
+		lib.add(record)
+		played = subsample.transform.TransformSpec(steps=(subsample.transform.LowPassFilter(freq=1000.0),))
+		idle   = subsample.transform.TransformSpec(steps=(subsample.transform.LowPassFilter(freq=3000.0),))
+
+		for spec in (played, idle):
+			manager.get_variant(1, spec)
+			self._settle(processor)
+
+		source = processor.source_digest(record)
+		played_file = tmp_path / f"{subsample.transform.variant_cache_key(source, played, 44100)}.variant"
+		idle_file   = tmp_path / f"{subsample.transform.variant_cache_key(source, idle, 44100)}.variant"
+		now = time.time()
+		os.utime(played_file, (now - 600, now - 600))
+		os.utime(idle_file, (now - 300, now - 300))
+
+		for _ in range(3):
+			assert manager.get_variant(1, played) is not None
+
+		subsample.transform._trim_variant_folder(tmp_path, played_file.stat().st_size, disk.played_files())
+
+		assert played_file.exists()
+		assert not idle_file.exists()
+		assert disk.played_files() == ()
+		manager.shutdown()
+
+	def test_a_file_a_killed_render_left_is_cleared (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4704 (L13 of the 2026-10-07 review): a trim removes a stale half-written file, and counts a fresh one.
+
+		A worker killed mid-write leaves its .tmp file, which no trim counted
+		or ever removed: 10.6 MB stayed while the trim reported 0 bytes.
+		"""
+
+		old = tmp_path / "abandoned.tmp"
+		old.write_bytes(b"x" * 1000)
+		now = time.time()
+		os.utime(old, (now - 600, now - 600))
+		fresh = tmp_path / "writing.tmp"
+		fresh.write_bytes(b"x" * 300)
+
+		total = subsample.transform._trim_variant_folder(tmp_path, 10_000)
+
+		assert not old.exists()
+		assert fresh.exists()
+		assert total == 300
 
 	def test_base_variant_never_touches_disk (self, tmp_path: pathlib.Path) -> None:
 		manager, cache, lib, _disk, processor = self._make_stack(tmp_path)
@@ -2572,6 +2662,51 @@ class TestLimit:
 		result = subsample.transform._apply_limit(audio, 44100, record, step)
 		assert result.dtype == numpy.float32
 
+	@staticmethod
+	def _sounds () -> dict[str, numpy.ndarray]:
+
+		"""Two seconds of stereo noise, and a decaying 55 Hz kick, as the review measured them."""
+
+		rng = numpy.random.default_rng(3)
+		t = numpy.arange(44100) / 44100
+
+		return {
+			"noise": (rng.standard_normal((88200, 2)) * 0.3).astype(numpy.float32),
+			"kick":  numpy.repeat((numpy.sin(2 * numpy.pi * 55 * t) * numpy.exp(-t * 8)).astype(numpy.float32)[:, None], 2, axis=1),
+		}
+
+	@pytest.mark.parametrize("lookahead_ms", [0.0, 1.0, 5.0, 10.0])
+	def test_no_peak_passes_the_ceiling (self, lookahead_ms: float) -> None:
+
+		"""#4704 (L12 of the 2026-10-07 review): the limiter holds its ceiling.
+
+		It was the compressor at 100:1 with a one-pole attack, which let the
+		front of each peak through, and look-ahead moved that late gain
+		earlier as a whole: noise passed a -6 dB ceiling by 0.55 dB with no
+		look-ahead and by 1.26 dB with 10 ms.
+		"""
+
+		step = subsample.transform.Limiter(threshold_db=-6.0, release_ms=50.0, lookahead_ms=lookahead_ms)
+
+		for name, audio in self._sounds().items():
+			result = subsample.transform._apply_limit(audio, 44100, _make_record(sample_id=1), step)
+
+			assert 20.0 * numpy.log10(float(numpy.max(numpy.abs(result)))) <= -6.0 + 1e-4, name
+
+	def test_look_ahead_reduces_before_the_peak (self) -> None:
+
+		"""What it is for: a burst after quiet is met with the gain already down."""
+
+		audio = numpy.full((4410, 1), 0.1, dtype=numpy.float32)
+		audio[2205:] = 0.9
+		step = subsample.transform.Limiter(threshold_db=-6.0, release_ms=50.0, lookahead_ms=5.0)
+
+		result = subsample.transform._apply_limit(audio, 44100, _make_record(sample_id=1), step)
+
+		# 5 ms is 220 frames: the gain starts down that far before the burst.
+		assert float(result[2205 - 50, 0]) < 0.1
+		assert float(result[2205 - 300, 0]) == pytest.approx(0.1)
+
 
 # ---------------------------------------------------------------------------
 # TestSpecFromProcess
@@ -3427,6 +3562,48 @@ class TestDistort:
 		assert isinstance(step, subsample.transform.Distort)
 		assert step.mode == "fold"
 		assert step.drive_db == 12.0
+
+	@staticmethod
+	def _driven (mode: str, drive_db: float) -> tuple[numpy.ndarray, numpy.ndarray]:
+
+		"""A decaying 220 Hz tone at half scale, and what the mode makes of it at this drive."""
+
+		t = numpy.arange(44100) / 44100
+		audio = (0.5 * numpy.sin(2 * numpy.pi * 220 * t) * numpy.exp(-3 * t)).astype(numpy.float32)[:, None]
+		step = subsample.transform.Distort(mode=mode, drive_db=drive_db, tone=1.0, mix=1.0, bit_depth=6)
+
+		return audio, subsample.transform._apply_distort(audio.copy(), 44100, _make_record(sample_id=1), step)
+
+	@staticmethod
+	def _snr_db (reference: numpy.ndarray, result: numpy.ndarray) -> float:
+
+		"""How far the result stays from the sound it was made from, as signal to error, in dB."""
+
+		error = result.astype(numpy.float64) - reference.astype(numpy.float64)
+
+		return float(10.0 * numpy.log10(numpy.sum(reference.astype(numpy.float64) ** 2) / numpy.sum(error ** 2)))
+
+	def test_more_drive_crushes_harder (self) -> None:
+
+		"""#4704 (L8 of the 2026-10-07 review): more drive, more distortion, in bit_crush too.
+
+		Unclipped, the drive only spread the sound across more of the grid,
+		and the level compensation scaled it back, so more drive gave finer
+		steps: at 6 bits, 24/35/48 dB signal to noise at 0/12/24 dB of drive.
+		"""
+
+		snr = [self._snr_db(*self._driven("bit_crush", drive)) for drive in (0.0, 12.0, 24.0)]
+
+		assert snr[0] > snr[1] > snr[2]
+
+	def test_drive_distorts_a_downsample (self) -> None:
+
+		"""The level compensation took the drive straight back out: 0 and 24 dB differed by 6e-8."""
+
+		_audio, gentle = self._driven("downsample", 0.0)
+		_audio, driven = self._driven("downsample", 24.0)
+
+		assert float(numpy.max(numpy.abs(driven - gentle))) > 0.1
 
 	def test_hard_clip_clips (self) -> None:
 		"""Hard-clip mode limits output to ±1."""

@@ -600,10 +600,19 @@ together, keeping remaining families intact and playable.
 
 Variants are also persisted to a disk cache (`samples/variant-cache/` by default) so
 they survive restarts. Each variant is stored as a single binary file named by a
-SHA-256 hash of the source audio, transform chain, output sample rate, and
-analysis version - any change to any of these produces a different key, so stale
-cache hits are impossible. Recently-used files are kept warm (LRU by modification
-time); oldest files are evicted when the disk budget is exceeded. Quantised
+SHA-256 hash of the source audio and its analysis, transform chain, output
+sample rate, and analysis version - any change to any of these produces a
+different key, so stale cache hits are impossible. The analysis is in it because
+renders read it (#4704): the pitch a shift starts from, the tempo and attacks a
+stretch follows, the level and brightness adaptive settings follow. Keyed by the
+audio alone, a sample analysed again with other analysis settings was served the
+render made for its old analysis. Recently-used files are kept warm (LRU by modification
+time); oldest files are evicted when the disk budget is exceeded. A read from disk
+touches its file, and so does a trim, first, for every variant played from memory
+since the last (`VariantDiskCache.played_files`, #4704): touched only on a disk
+read, the variants played most, which stay in memory, were the first deleted. A
+trim also deletes the `.tmp` files a render killed mid-write leaves, once they
+are five minutes old. Quantised
 variants also store a grid energy profile - per-grid-slot RMS energy normalised
 to [0, 1] - alongside the audio; the `beat_match` order scorer compares against it.
 

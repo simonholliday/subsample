@@ -674,7 +674,8 @@ analysis:
 #   variant_cache_dir: samples/variant-cache
 #   # Directory for persistent disk cache of transform variants.
 #   # Variants are stored as binary files keyed by SHA-256 hash of the parent
-#   # audio, transform spec, output sample rate, and analysis version.
+#   # audio and its analysis, transform spec, output sample rate, and analysis
+#   # version.
 #   # Empty string or null disables disk caching.
 #   # Keep it on a disk: a folder held in memory, as /tmp is on some systems,
 #   # takes its space from memory.

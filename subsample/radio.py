@@ -47,6 +47,14 @@ _FM_DEV_HZ:   typing.Final[float] = 2500.0    # NFM peak deviation
 _DEEMPH_TAU:  typing.Final[float] = 750e-6    # NFM de-emphasis time constant
 _CRACKLE_TAU: typing.Final[float] = 0.9e-3    # sferic IF-ring decay
 
+# The shortest sound the effects here can take.  Their zero-phase filters pad
+# each end (sosfiltfilt), and on 9 frames or fewer, in every mode and at every
+# rate, they raised, so the render failed and was retried every 30 s to 10
+# min (#4704, L33).  A shorter sound, a click of under 0.2 ms, passes through
+# untouched, and each effect says so once.
+_SHORTEST_FRAMES: typing.Final[int] = 10
+_said_too_short: set[str] = set()
+
 # Valid mode/demod/stereo enum strings are enforced at MIDI-map parse time in
 # query.py's radio validation block; by the time render_radio runs they are
 # trusted (an unknown demod falls back to the AM detector by construction).
@@ -67,10 +75,9 @@ def _analytic (x: numpy.ndarray) -> numpy.ndarray:
 
 	"""The analytic signal of x (its Hilbert transform as the imaginary part), in float64."""
 
-	# ⓒ Buffers shorter than ~10 frames make the zero-phase filters below
-	# raise (sosfiltfilt padlen).  That is out of contract by design: no
-	# capture or pipeline path produces sub-10-frame audio, and guarding
-	# every helper would add noise to the hot DSP for an unreachable case.
+	# ⓒ Buffers shorter than 10 frames make the zero-phase filters below
+	# raise (sosfiltfilt padlen).  The render_* entry points pass such a
+	# sound through untouched (_too_short), so the helpers need no guard.
 	return scipy.signal.hilbert(numpy.asarray(x, dtype=numpy.float64))
 
 
@@ -522,7 +529,7 @@ def render_radio (
 	audio = numpy.asarray(audio, dtype=numpy.float64)
 	n_frames, channels = audio.shape
 
-	if mix <= 0.0:
+	if mix <= 0.0 or _too_short(audio, "radio"):
 		return audio.astype(numpy.float32)
 
 	collapse = (stereo != "stereo") or channels == 1
@@ -578,7 +585,7 @@ def render_freqshift (
 	"""Standalone Bode/SSB frequency shifter (per channel, shared phase)."""
 
 	audio = numpy.asarray(audio, dtype=numpy.float64)
-	if mix <= 0.0 or shift_hz == 0.0:
+	if mix <= 0.0 or shift_hz == 0.0 or _too_short(audio, "freqshift"):
 		return audio.astype(numpy.float32)
 	wet = numpy.stack(
 		[freq_shift(audio[:, c], shift_hz, float(sample_rate)) for c in range(audio.shape[1])],
@@ -594,13 +601,30 @@ def render_wobble (
 	"""Standalone oscillator-warble (LFO frequency drift), per channel."""
 
 	audio = numpy.asarray(audio, dtype=numpy.float64)
-	if mix <= 0.0 or (depth == 0.0 and base == 0.0):
+	if mix <= 0.0 or (depth == 0.0 and base == 0.0) or _too_short(audio, "wobble"):
 		return audio.astype(numpy.float32)
 	wet = numpy.stack(
 		[freq_shift_lfo(audio[:, c], float(sample_rate), base, rate, depth) for c in range(audio.shape[1])],
 		axis=1,
 	)
 	return _finish(wet, audio, float(sample_rate), mix)
+
+
+def _too_short (audio: numpy.ndarray, effect: str) -> bool:
+
+	"""True when a sound is too short for the effect's filters, which then passes it through; said once per effect."""
+
+	if audio.shape[0] >= _SHORTEST_FRAMES:
+		return False
+
+	if effect not in _said_too_short:
+		_said_too_short.add(effect)
+		_log.warning(
+			"%s: a sound of %d frame(s) is too short for it, so it plays unprocessed",
+			effect, audio.shape[0],
+		)
+
+	return True
 
 
 def _finish (

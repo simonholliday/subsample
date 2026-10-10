@@ -136,6 +136,7 @@ import weakref
 import librosa
 import numpy
 import pyrubberband
+import scipy.ndimage
 import scipy.signal
 import soundfile
 
@@ -326,16 +327,15 @@ class Compress:
 @dataclasses.dataclass(frozen=True)
 class Limiter:
 
-	"""Brickwall limiter — shortcut to the compressor with limiter presets.
+	"""Brickwall limiter: no sample passes the ceiling.
 
 	The `limit` processor's step.  Named Limiter, not Limit, because
 	subsample.processors.Limit is a parameter's bounds and _declared_limit
 	uses both side by side (L-27 of the 2026-09-21 review).
 
-	Internally uses the same feed-forward compressor with hard knee,
-	ratio 100:1, near-instant attack, and look-ahead to catch transients
-	before they overshoot.  Only threshold, release, and look-ahead are
-	user-adjustable; the remaining parameters are fixed for clean limiting.
+	Each sample takes the deepest reduction any sample in the look-ahead
+	window after it needs, eased in across the window and released at the
+	release time (see _apply_limit).
 
 	threshold_db:   Maximum output level (dBFS).
 	release_ms:     How fast gain recovers after a peak (ms).
@@ -1085,11 +1085,15 @@ _VARIANT_HEADER_SIZE = struct.calcsize(_VARIANT_HEADER_FORMAT)  # 32 bytes
 #    delaying the sound, so a limited or gated render starts on time and keeps
 #    its end, and slices a quantise step published before it stay true (L-3 of
 #    the 2026-09-21 review).
-TRANSFORM_VERSION: str = "6"
+# 7: distort clips the driven sound at full scale before bit_crush and
+#    downsample, so drive distorts there as it does elsewhere; and limit is a
+#    brickwall, taking the deepest reduction its look-ahead window needs, so
+#    no peak passes the ceiling (L8 and L12 of the 2026-10-07 review, #4704).
+TRANSFORM_VERSION: str = "7"
 
 
 def variant_cache_key (
-	audio_md5:          str,
+	source:             str,
 	spec:               "TransformSpec",
 	output_sample_rate: int,
 ) -> str:
@@ -1097,14 +1101,16 @@ def variant_cache_key (
 	"""Compute a deterministic SHA-256 hex digest for a transform variant.
 
 	Includes everything that affects the variant's audio: the parent sample
-	content (MD5), the ordered transform chain (spec), the output device sample
-	rate, the analysis algorithm version, the transform-DSP version, and the
-	content identity of any external carrier file a step references.  Any change
-	to any of these produces a different key — no stale hits.
+	(``source``: its PCM and the analysis its renders read, as
+	TransformProcessor.source_digest gives them), the ordered transform chain
+	(spec), the output device sample rate, the analysis algorithm version, the
+	transform-DSP version, and the content identity of any external carrier
+	file a step references.  Any change to any of these produces a different
+	key — no stale hits.
 	"""
 
 	h = hashlib.sha256()
-	h.update(audio_md5.encode())
+	h.update(source.encode())
 	h.update(subsample.analysis.ANALYSIS_VERSION.encode())
 	h.update(TRANSFORM_VERSION.encode())
 	h.update(str(output_sample_rate).encode())
@@ -1190,6 +1196,11 @@ class VariantDiskCache:
 		self._trim_running: bool = False
 		self._unscanned:    int  = 0
 
+		# Each program's account of the variants it played from memory, which
+		# a trim touches first (#4704, L10); weak, so a manager this outlives
+		# is not kept for it.
+		self._played_sources: list[weakref.WeakMethod[typing.Callable[[], list[tuple[str, "TransformSpec"]]]]] = []
+
 		if max_bytes > 0:
 			self._directory.mkdir(parents=True, exist_ok=True)
 
@@ -1230,17 +1241,17 @@ class VariantDiskCache:
 
 	def get (
 		self,
-		audio_md5: str,
-		spec:      "TransformSpec",
-		key:       "TransformKey",
+		source: str,
+		spec:   "TransformSpec",
+		key:    "TransformKey",
 	) -> typing.Optional["TransformResult"]:
 
-		"""Look up a cached variant on disk.  Returns None on miss or error."""
+		"""Look up a cached variant on disk, by its source's digest.  Returns None on miss or error."""
 
 		if not self.enabled:
 			return None
 
-		hex_digest = variant_cache_key(audio_md5, spec, self._sample_rate)
+		hex_digest = variant_cache_key(source, spec, self._sample_rate)
 		path = self._directory / f"{hex_digest}.variant"
 
 		if not path.exists():
@@ -1356,9 +1367,9 @@ class VariantDiskCache:
 
 	def put (
 		self,
-		audio_md5: str,
-		spec:      "TransformSpec",
-		result:    "TransformResult",
+		source: str,
+		spec:   "TransformSpec",
+		result: "TransformResult",
 	) -> int:
 
 		"""Write a variant to disk, and return the bytes written (0 when nothing was).
@@ -1370,7 +1381,7 @@ class VariantDiskCache:
 		if not self.enabled:
 			return 0
 
-		hex_digest = variant_cache_key(audio_md5, spec, self._sample_rate)
+		hex_digest = variant_cache_key(source, spec, self._sample_rate)
 		path = self._directory / f"{hex_digest}.variant"
 
 		if path.exists():
@@ -1514,13 +1525,55 @@ class VariantDiskCache:
 				if self._bytes_estimate <= self._max_bytes:
 					return
 
-			total = _trim_variant_folder(self._directory, self._max_bytes)
+			total = _trim_variant_folder(self._directory, self._max_bytes, self.played_files())
 
 			if total is not None:
 				self._bytes_estimate = total
 
+	def add_played_source (
+		self, source: typing.Callable[[], list[tuple[str, "TransformSpec"]]],
+	) -> None:
 
-def _trim_variant_folder (directory: pathlib.Path, max_bytes: int) -> typing.Optional[int]:
+		"""Have each trim ask this bound method which variants were played from memory since the last.
+
+		It answers as (source digest, spec) pairs, and forgets them as it does.
+		"""
+
+		with self._lock:
+			self._played_sources.append(weakref.WeakMethod(source))
+
+	def played_files (self) -> tuple[str, ...]:
+
+		"""The files of the variants every program has played from memory since the last trim.
+
+		Only a read from disk touched a file, so a trim deleted first the
+		variants played most, which stay in memory (#4704, L10).
+		"""
+
+		names: list[str] = []
+
+		for reference in list(self._played_sources):
+			source = reference()
+
+			if source is None:
+				continue
+
+			for digest, spec in source():
+				names.append(f"{variant_cache_key(digest, spec, self._sample_rate)}.variant")
+
+		return tuple(names)
+
+
+# How old a half-written variant file must be before a trim takes it for one
+# a stopped render left behind.  A write takes well under a second.
+_LEFTOVER_SECONDS: typing.Final[float] = 300.0
+
+
+def _trim_variant_folder (
+	directory: pathlib.Path,
+	max_bytes: int,
+	played:    tuple[str, ...] = (),
+) -> typing.Optional[int]:
 
 	"""Delete the least recently used variant files until the folder is within budget.
 
@@ -1528,17 +1581,55 @@ def _trim_variant_folder (directory: pathlib.Path, max_bytes: int) -> typing.Opt
 	A function of its own so a render worker can run it (#4667): a scan of a
 	full cache lists and stats every file, which in the player's process would
 	hold its lock between each.
+
+	``played`` names the files of variants played from memory since the last
+	trim, which are touched first: only a read from disk touched a file, so
+	the variants played most, which stay in memory, looked the least used and
+	were the first deleted (#4704, L10).  A ``.tmp`` file older than
+	_LEFTOVER_SECONDS is one a render killed mid-write left, and is deleted;
+	a newer one is a write under way, and counts towards the budget (#4704,
+	L13: they were neither counted nor ever removed).
 	"""
+
+	for name in played:
+		try:
+			os.utime(directory / name)
+		except OSError:
+			pass
 
 	try:
 		entries = []
+		writing = 0
+		leftovers = 0
+		now = time.time()
 
 		for entry in os.scandir(directory):
-			if entry.name.endswith(".variant") and entry.is_file():
+			if not entry.is_file():
+				continue
+
+			if entry.name.endswith(".variant"):
 				stat = entry.stat()
 				entries.append((stat.st_mtime, stat.st_size, entry.path))
 
-		total = sum(size for _, size, _ in entries)
+			elif entry.name.endswith(".tmp"):
+				stat = entry.stat()
+
+				if now - stat.st_mtime < _LEFTOVER_SECONDS:
+					writing += stat.st_size
+					continue
+
+				try:
+					os.unlink(entry.path)
+					leftovers += 1
+				except FileNotFoundError:
+					pass
+				except OSError:
+					writing += stat.st_size
+
+		if leftovers:
+			_log.info("Variant disk cache: removed %d unfinished file(s) a stopped render left", leftovers)
+
+		total = writing + sum(size for _, size, _ in entries)
 
 		if total <= max_bytes:
 			return total
@@ -1638,6 +1729,51 @@ class _DiskCacheSettings:
 	sample_rate: int
 
 
+def _analysis_digest (record: "subsample.library.SampleRecord") -> str:
+
+	"""A SHA-256 digest of a record's analysis, every result in it, arrays by their bytes.
+
+	The whole analysis rather than the fields today's renders read, so a
+	processor that comes to read another cannot be served a stale render.
+	"""
+
+	digest = hashlib.sha256()
+
+	for part in (record.spectral, record.rhythm, record.pitch, record.timbre, record.level, record.band_energy):
+		_digest_into(digest, part)
+
+	return digest.hexdigest()
+
+
+def _digest_into (digest: typing.Any, value: typing.Any) -> None:
+
+	"""Fold one analysis value into a digest: a dataclass field by field, an array by its bytes, the rest by repr.
+
+	repr alone would shorten a long array with an ellipsis, so two analyses
+	differing only in the middle of their pulse curves would share a digest.
+	"""
+
+	if dataclasses.is_dataclass(value) and not isinstance(value, type):
+		for field in dataclasses.fields(value):
+			digest.update(field.name.encode())
+			_digest_into(digest, getattr(value, field.name))
+
+	elif isinstance(value, numpy.ndarray):
+		digest.update(f"{value.dtype}{value.shape}".encode())
+		digest.update(numpy.ascontiguousarray(value).tobytes())
+
+	elif isinstance(value, (tuple, list)):
+		digest.update(b"(")
+
+		for item in value:
+			_digest_into(digest, item)
+
+		digest.update(b")")
+
+	else:
+		digest.update(repr(value).encode())
+
+
 @dataclasses.dataclass(frozen=True)
 class _RenderJob:
 
@@ -1647,14 +1783,15 @@ class _RenderJob:
 	file (``source``), and the render goes back as one, written to
 	``hand_back``.  On a thread the record keeps its audio, the render stays in
 	memory, and ``disk_cache`` is the processor's own cache rather than its
-	settings.
+	settings.  ``source_digest`` names the record's audio and analysis in the
+	disk cache, and is None for a job that does not use it.
 	"""
 
 	record:             "subsample.library.SampleRecord"
 	source:             typing.Optional[subsample.parallelism.AudioFile]
 	spec:               TransformSpec
 	key:                TransformKey
-	audio_md5:          typing.Optional[str]
+	source_digest:      typing.Optional[str]
 	sample_rate:        int
 	output_sample_rate: int
 	disk_cache:         typing.Union[VariantDiskCache, _DiskCacheSettings, None]
@@ -1776,8 +1913,8 @@ def _render_variant (
 		# which bypasses TransformManager.get_variant().  Base variants (empty
 		# spec) never touch the disk cache, so the processor hashes the source
 		# only for a job that does.
-		if disk_cache is not None and spec.steps and job.audio_md5 is not None:
-			disk_hit = disk_cache.get(job.audio_md5, spec, key)
+		if disk_cache is not None and spec.steps and job.source_digest is not None:
+			disk_hit = disk_cache.get(job.source_digest, spec, key)
 
 			if disk_hit is not None:
 				return disk_hit, False, 0
@@ -1930,10 +2067,10 @@ def _render_variant (
 		if (
 			disk_cache is not None
 			and spec.steps
-			and job.audio_md5 is not None
+			and job.source_digest is not None
 			and not fell_back
 		):
-			written = disk_cache.put(job.audio_md5, spec, result)
+			written = disk_cache.put(job.source_digest, spec, result)
 
 		# A cache that trims itself (the processor's own, on a thread) has
 		# counted what it wrote; only a worker process's copy leaves that to
@@ -1951,12 +2088,18 @@ def _render_variant (
 		_segment_bounds_local.fell_back = False
 
 
-def _trim_in_worker (settings: _DiskCacheSettings) -> tuple[typing.Optional[int], tuple[logging.LogRecord, ...]]:
+def _trim_in_worker (
+	settings: _DiskCacheSettings,
+	played:   tuple[str, ...] = (),
+) -> tuple[typing.Optional[int], tuple[logging.LogRecord, ...]]:
 
-	"""Trim the variant folder to its budget on a render worker, and hand back its size and what it logged."""
+	"""Trim the variant folder to its budget on a render worker, and hand back its size and what it logged.
+
+	``played`` names the files to touch first (see _trim_variant_folder).
+	"""
 
 	with subsample.parallelism.relaying_logs() as records:
-		total = _trim_variant_folder(settings.directory, settings.max_bytes)
+		total = _trim_variant_folder(settings.directory, settings.max_bytes, played)
 
 	return total, tuple(records)
 
@@ -2037,6 +2180,12 @@ class TransformProcessor:
 		# the buffer it was taken from (see audio_md5).  Plain dict: single-key
 		# get/set/pop are GIL-atomic, and the worst race is one hash done twice.
 		self._audio_md5s: dict[int, tuple[weakref.ref[numpy.ndarray], str]] = {}
+
+		# Each sample's source digest (see source_digest), by sample_id, with a
+		# weak reference to the record it was taken from: a record is frozen,
+		# so the same record has the same analysis, and one analysed again is
+		# a new record.  The digest walks the whole analysis, about 0.1 ms.
+		self._source_digests: dict[int, tuple[weakref.ref["subsample.library.SampleRecord"], str]] = {}
 
 		# The CPUs this process may run on, not the machine's (#4702): a 2-CPU
 		# allowance on a 64-core host made 31 render processes beside the audio.
@@ -2167,8 +2316,9 @@ class TransformProcessor:
 
 		"""The MD5 of a record's source PCM, hashed once per buffer.
 
-		Keys the disk cache, and every job and every trigger's disk look-up
-		needs it, so it was hashed again each time: an 88-note repitch fan-out
+		Keys the disk cache with the analysis (source_digest), and every job
+		and every trigger's disk look-up needs it, so it was hashed again each
+		time: an 88-note repitch fan-out
 		hashed one buffer 88 times.  An entry is used only while it still
 		describes this record's buffer, by identity through a weak reference,
 		so a sample re-added under its own id with new audio is hashed afresh,
@@ -2198,11 +2348,35 @@ class TransformProcessor:
 
 		return digest
 
+	def source_digest (self, record: "subsample.library.SampleRecord") -> str:
+
+		"""What names a record in the disk cache: its PCM's MD5 and a digest of its analysis.
+
+		A render reads the analysis as well as the audio: the pitch it shifts
+		from, the tempo and attacks it stretches, the level and the brightness
+		its adaptive settings follow.  Keyed by the audio alone, a sample
+		analysed again with other settings (analysis.start_bpm, tempo_min,
+		tempo_max) was served the render made for its old analysis (#4704, L9).
+		"""
+
+		entry = self._source_digests.get(record.sample_id)
+
+		if entry is not None and entry[0]() is record:
+			return entry[1]
+
+		digest = hashlib.sha256(self.audio_md5(record).encode())
+		digest.update(_analysis_digest(record).encode())
+
+		self._source_digests[record.sample_id] = (weakref.ref(record), digest.hexdigest())
+
+		return digest.hexdigest()
+
 	def forget_audio_md5 (self, sample_id: int) -> None:
 
-		"""Drop a sample's remembered hash, once the sample has left the library."""
+		"""Drop a sample's remembered hashes, once the sample has left the library."""
 
 		self._audio_md5s.pop(sample_id, None)
+		self._source_digests.pop(sample_id, None)
 
 	def drop_waiting_for (self, sample_ids: set[int]) -> None:
 
@@ -2302,14 +2476,14 @@ class TransformProcessor:
 		is hashed only for a job that does.
 		"""
 
-		audio_md5: typing.Optional[str] = None
+		source_digest: typing.Optional[str] = None
 
 		if self._disk_cache is not None and spec.steps:
-			audio_md5 = self.audio_md5(record)
+			source_digest = self.source_digest(record)
 
 		if not in_processes:
 			return _RenderJob(
-				record=record, source=None, spec=spec, key=key, audio_md5=audio_md5,
+				record=record, source=None, spec=spec, key=key, source_digest=source_digest,
 				sample_rate=self._sample_rate, output_sample_rate=self._output_sample_rate,
 				disk_cache=self._disk_cache, hand_back=None,
 			)
@@ -2326,7 +2500,7 @@ class TransformProcessor:
 		return _RenderJob(
 			record=dataclasses.replace(record, audio=None),
 			source=self._hold_source(record),
-			spec=spec, key=key, audio_md5=audio_md5,
+			spec=spec, key=key, source_digest=source_digest,
 			sample_rate=self._sample_rate, output_sample_rate=self._output_sample_rate,
 			disk_cache=disk_cache, hand_back=subsample.parallelism.hand_off_folder(),
 		)
@@ -2571,7 +2745,7 @@ class TransformProcessor:
 		)
 
 		try:
-			future = self._pool.submit(_trim_in_worker, settings)
+			future = self._pool.submit(_trim_in_worker, settings, disk_cache.played_files())
 
 		except Exception:
 			_log.warning(_TRIM_FAILED, exc_info=True)
@@ -2660,6 +2834,15 @@ class TransformManager:
 		self._cfg                = cfg
 		self._disk_cache         = disk_cache
 
+		# The variants played from memory since the disk cache last asked,
+		# whose files its trim touches (#4704, L10).  Added to on the MIDI
+		# thread, where a set's add is all the work, and turned into file
+		# names on the thread that trims.
+		self._played: set[TransformKey] = set()
+
+		if disk_cache is not None:
+			disk_cache.add_played_source(self._played_sources)
+
 	def get_variant (
 		self,
 		sample_id: int,
@@ -2689,6 +2872,9 @@ class TransformManager:
 		result = self._cache.get(key)
 
 		if result is not None:
+			if self._disk_cache is not None:
+				self._played.add(key)
+
 			return result
 
 		record = self._instrument_library.get(sample_id)
@@ -2697,8 +2883,8 @@ class TransformManager:
 		# The source hash is the processor's memo, shared with its workers, so
 		# the re-evaluation threads that look up this way hash each buffer once.
 		if from_disk and self._disk_cache is not None and record is not None and record.audio is not None:
-			audio_md5 = self._processor.audio_md5(record)
-			disk_hit = self._disk_cache.get(audio_md5, spec, key)
+			source = self._processor.source_digest(record)
+			disk_hit = self._disk_cache.get(source, spec, key)
 
 			if disk_hit is not None:
 				self._cache.put(disk_hit)
@@ -2713,6 +2899,29 @@ class TransformManager:
 			self._processor.enqueue(record, spec)
 
 		return None
+
+	def _played_sources (self) -> list[tuple[str, TransformSpec]]:
+
+		"""The variants played from memory since the last call, as the disk cache names them, forgotten as they are given.
+
+		list() copies the set without letting another thread in, so a play
+		added meanwhile goes to the next trim, or, landing in the set just
+		swapped out, is missed once.
+		"""
+
+		played = self._played
+		self._played = set()
+		named: list[tuple[str, TransformSpec]] = []
+
+		for key in list(played):
+			record = self._instrument_library.get(key.sample_id)
+
+			if record is None or record.audio is None:
+				continue
+
+			named.append((self._processor.source_digest(record), key.spec))
+
+		return named
 
 	def get_base (self, sample_id: int) -> typing.Optional[TransformResult]:
 
@@ -3945,18 +4154,67 @@ def _apply_limit (
 	step:        Limiter,
 ) -> numpy.ndarray:
 
-	"""Brickwall limiter — compressor with limiter presets."""
+	"""Brickwall limiter: no sample passes the ceiling (#4704, L12).
 
-	return _compress(
-		audio, sample_rate,
-		threshold_db = step.threshold_db,
-		ratio        = 100.0,
-		attack_ms    = 0.01,
-		release_ms   = step.release_ms,
-		knee_db      = 0.0,
-		makeup_db    = 0.0,
-		lookahead_ms = step.lookahead_ms,
-	)
+	The reduction each sample needs to sit at the ceiling is found first.
+	Each sample then takes the deepest that any sample in the look-ahead
+	window after it needs, and a moving average over the window eases it
+	in: every value averaged at a peak is at least as deep as the peak
+	needs, so the peak is held.  The gain comes back up at the release time,
+	never higher than the sample needs.  With no look-ahead the reduction is
+	instant, as a brickwall's must be.
+
+	It was the compressor at 100:1 with a 0.01 ms one-pole attack, which
+	let the front of each peak through, and its look-ahead moved that late
+	gain earlier as a whole: noise passed a -6 dB ceiling by 0.55 dB, and by
+	1.26 dB with 10 ms of look-ahead.  Linked across channels, as compress is.
+	"""
+
+	n_frames = audio.shape[0]
+
+	if n_frames == 0:
+		return audio
+
+	audio_f64 = audio.astype(numpy.float64)
+
+	if audio_f64.ndim == 1:
+		envelope = numpy.abs(audio_f64)
+	else:
+		envelope = numpy.max(numpy.abs(audio_f64), axis=1)
+
+	needed = numpy.minimum(0.0, step.threshold_db - 20.0 * numpy.log10(envelope + _COMPRESS_EPSILON))
+
+	# Capped at half the buffer, as compress caps it: on a click shorter
+	# than the window, every sample would take the reduction of its peak.
+	lookahead = min(int(round(step.lookahead_ms / 1000.0 * sample_rate)), n_frames // 2)
+
+	if lookahead > 0:
+		size = lookahead + 1
+
+		# The deepest need in [i, i + lookahead], then its mean over
+		# [i - lookahead, i]: each window of the mean holds i's own peak.
+		deepest = scipy.ndimage.minimum_filter1d(needed, size, mode="nearest", origin=-(size // 2))
+		needed  = scipy.ndimage.uniform_filter1d(deepest, size, mode="nearest", origin=(size - 1) // 2)
+
+	alpha   = math.exp(-1.0 / (sample_rate * max(step.release_ms / 1000.0, 1e-6)))
+	gain_db = numpy.empty(n_frames, dtype=numpy.float64)
+	gain    = 0.0
+
+	for i in range(n_frames):
+		target = needed[i]
+
+		# Down at once, as far as needed; back up at the release time.
+		gain = target if target < gain else alpha * gain + (1.0 - alpha) * target
+		gain_db[i] = gain
+
+	linear_gain = numpy.power(10.0, gain_db / 20.0)
+
+	if audio_f64.ndim == 1:
+		audio_f64 *= linear_gain
+	else:
+		audio_f64 *= linear_gain[:, numpy.newaxis]
+
+	return audio_f64.astype(numpy.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -4266,15 +4524,20 @@ def _apply_distort (
 	elif mode == "bit_crush":
 		# Step size 2^(1-N) — the spacing of an N-bit converter (2^N levels
 		# across full scale).  A 2^-N step would sound one bit finer than
-		# the requested depth.
+		# the requested depth.  The driven sound is clipped at full scale
+		# first, as an overdriven converter clips (#4704, L8): unclipped,
+		# drive only spread the sound over more of the grid, which the level
+		# compensation below then scaled back, so more drive gave finer steps.
 		bits = int(_declared_limit("distort", "bit_depth").clamp(step.bit_depth))
 		scale = float(2 ** (bits - 1))
-		wet = (numpy.round(driven * scale) / scale).astype(numpy.float32)
+		wet = (numpy.round(numpy.clip(driven, -1.0, 1.0) * scale) / scale).astype(numpy.float32)
 
 	elif mode == "downsample":
 		factor = int(_declared_limit("distort", "downsample_factor").clamp(step.downsample_factor))
-		# Repeat every Nth sample along the time axis.
-		wet = numpy.repeat(driven[::factor], factor, axis=0)[:n_frames]
+		# Repeat every Nth sample along the time axis, clipped at full scale
+		# first as bit_crush is: unclipped, the level compensation took the
+		# drive straight back out, and drive did nothing (#4704, L8).
+		wet = numpy.repeat(numpy.clip(driven, -1.0, 1.0)[::factor], factor, axis=0)[:n_frames]
 
 	else:
 		_log.warning("Unknown distortion mode %r - returning unchanged", mode)

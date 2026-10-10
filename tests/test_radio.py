@@ -77,6 +77,44 @@ class TestContract:
 		assert subsample.radio.render_freqshift(x, SR, shift_hz=500.0, mix=1.0).shape == x.shape
 		assert subsample.radio.render_wobble(x, SR, depth=6.0, rate=0.3, base=0.0, mix=1.0).shape == x.shape
 
+	def test_a_sound_too_short_for_the_filters_passes_through (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4704 (L33 of the 2026-10-07 review): a click of 9 frames or fewer plays unprocessed.
+
+		The zero-phase filters raised on it, in every mode and at every rate,
+		so the render failed and was tried again every 30 s to 10 min.  The
+		shortest they take is 10 frames, which still renders.
+		"""
+
+		monkeypatch.setattr(subsample.radio, "_said_too_short", set(), raising=False)
+		click = _tone(700.0, n=9)
+
+		with caplog.at_level("WARNING", logger="subsample.radio"):
+			for _ in range(2):
+				out = subsample.radio.render_radio(
+					click, SR, mode="am", demod="matched", tune=0.0, signal=0.5,
+					static=0.5, fade=0.5, bandwidth=None, stereo="mono", mix=1.0,
+				)
+				numpy.testing.assert_array_equal(out, click)
+
+			numpy.testing.assert_array_equal(subsample.radio.render_freqshift(click, SR, shift_hz=500.0, mix=1.0), click)
+			numpy.testing.assert_array_equal(subsample.radio.render_wobble(click, SR, depth=6.0, rate=0.3, base=0.0, mix=1.0), click)
+
+		warned = [record.getMessage() for record in caplog.records if record.levelno == 30]
+
+		assert warned == [
+			"radio: a sound of 9 frame(s) is too short for it, so it plays unprocessed",
+			"freqshift: a sound of 9 frame(s) is too short for it, so it plays unprocessed",
+			"wobble: a sound of 9 frame(s) is too short for it, so it plays unprocessed",
+		]
+
+		assert subsample.radio.render_radio(
+			_tone(700.0, n=10), SR, mode="am", demod="matched", tune=0.0, signal=0.5,
+			static=0.5, fade=0.5, bandwidth=None, stereo="mono", mix=1.0,
+		).shape == (10, 2)
+
 
 # ---------------------------------------------------------------------------
 # Frequency shift — constant Hz, NOT a pitch ratio (the SSB-mistune signature)

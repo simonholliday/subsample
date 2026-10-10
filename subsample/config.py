@@ -528,14 +528,15 @@ class TransformConfig:
 	variant_cache_dir: str = "samples/variant-cache"
 	"""Directory for persistent disk cache of transform variants.
 	Variants are stored as binary files keyed by a SHA-256 hash of the
-	parent audio, transform spec, output sample rate, and analysis version.
+	parent audio and its analysis, transform spec, output sample rate, and
+	analysis version.
 	Set to empty string or null to disable disk caching."""
 
 	max_disk_mb: float = 500.0
 	"""Maximum disk space (MB) for cached variant files.  0 = disabled.
 	Like the memory shares, 500.0 is only the dataclass default; load_config
 	sizes it from the global budget unless config.yaml gives one.
-	Least-recently-used files are evicted (a cache read touches mtime, so recently played variants survive) when the budget is
+	Least-recently-used files are evicted (a variant played has its file's mtime touched, at once when read from disk and at the next trim when played from memory, so recently played variants survive) when the budget is
 	exceeded.  At 44100 Hz float32 stereo, 500 MB ≈ 1500 seconds."""
 
 	carrier_memory_mb: float = 10.0
