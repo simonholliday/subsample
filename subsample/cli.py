@@ -596,6 +596,7 @@ def _queue_the_last_sounds (
 	detection_cfg: subsample.config.DetectionConfig,
 	sample_rate:   int,
 	writer:        subsample.recorder.SampleProcessor,
+	dropped:       "_DroppedInput",
 ) -> None:
 
 	"""Cut and queue what a stopped input had already heard, and the sound still sounding when it stopped (#4703, M2).
@@ -608,11 +609,14 @@ def _queue_the_last_sounds (
 	"""
 
 	for chunk in reader.drain():
+		dropped.before(detector)
 		trimmed = _process_chunk(chunk, buf, detector, detection_cfg, sample_rate)
+		missing = dropped.owed(detector, trimmed)
 
 		if trimmed is not None:
-			writer.enqueue(trimmed, datetime.datetime.now())
+			writer.enqueue(trimmed, datetime.datetime.now(), missing_seconds=missing)
 
+	dropped.before(detector)
 	last = detector.finalize(buf.frames_written)
 
 	if last is None:
@@ -621,7 +625,66 @@ def _queue_the_last_sounds (
 	trimmed = _build_trimmed_segment(buf, detector, detection_cfg, sample_rate, last[0], last[1])
 
 	if trimmed is not None:
-		writer.enqueue(trimmed, datetime.datetime.now())
+		writer.enqueue(trimmed, datetime.datetime.now(), missing_seconds=dropped.owed(detector, trimmed))
+
+
+class _DroppedInput:
+
+	"""Input the recorder dropped for falling behind: said once each time it falls behind, and owed to the capture recorded across it.
+
+	The input queue drops what the reader is too slow to take, so a sound
+	recorded across the drop has a splice where it was.  It was neither
+	counted nor said (#4704, L23).  Simon's call: the capture is kept, and
+	the writer names it with how much it misses.
+	"""
+
+	def __init__ (self, reader: subsample.audio.AudioReader, sample_rate: int) -> None:
+
+		"""Follow one reader's drops, at its sample rate."""
+
+		self._reader      = reader
+		self._sample_rate = sample_rate
+		self._behind:  int = 0   # frames dropped since the recorder fell behind
+		self._missing: int = 0   # frames the recording open now misses
+
+	def before (self, detector: subsample.detector.LevelDetector) -> None:
+
+		"""Take what was dropped before the chunk just read: the open recording misses it, and a stretch behind that has ended is said."""
+
+		lost = self._reader.take_dropped()
+
+		if lost:
+			self._behind += lost
+
+			if detector.state is subsample.detector.DetectorState.RECORDING:
+				self._missing += lost
+
+			return
+
+		if self._behind:
+			_log.warning(
+				"Recorder fell behind and dropped %.2f s of input audio - the machine was too busy to keep up",
+				self._behind / self._sample_rate,
+			)
+			self._behind = 0
+
+	def owed (
+		self,
+		detector: subsample.detector.LevelDetector,
+		trimmed:  typing.Optional[numpy.ndarray],
+	) -> typing.Optional[float]:
+
+		"""The seconds a capture just cut misses, or None; what a recording that was never cut missed is forgotten."""
+
+		if trimmed is not None:
+			missing, self._missing = self._missing, 0
+
+			return missing / self._sample_rate if missing else None
+
+		if detector.state is not subsample.detector.DetectorState.RECORDING:
+			self._missing = 0
+
+		return None
 
 
 def _process_input_files (
@@ -1076,6 +1139,8 @@ def _run_recorder (
 
 	print(f"Calibrating ambient noise for {cfg.detection.warmup_seconds:.0f}s…")
 
+	dropped = _DroppedInput(reader, audio_cfg.sample_rate)
+
 	try:
 		while not shutdown_event.is_set():
 			chunk = reader.read(timeout=0.5)
@@ -1084,10 +1149,12 @@ def _run_recorder (
 				# Timeout — loop back to check shutdown_event.
 				continue
 
+			dropped.before(detector)
 			trimmed = _process_chunk(chunk, buf, detector, cfg.detection, audio_cfg.sample_rate)
+			missing = dropped.owed(detector, trimmed)
 
 			if trimmed is not None:
-				writer.enqueue(trimmed, datetime.datetime.now())
+				writer.enqueue(trimmed, datetime.datetime.now(), missing_seconds=missing)
 
 	finally:
 		if reader.overflow_count > 0:
@@ -1095,6 +1162,12 @@ def _run_recorder (
 				"Audio overflows detected during capture: %d - "
 				"recordings may contain discontinuities",
 				reader.overflow_count,
+			)
+
+		if reader.dropped_frames > 0:
+			_log.warning(
+				"Input audio dropped during capture: %.2f s in all, while the recorder fell behind",
+				reader.dropped_frames / audio_cfg.sample_rate,
 			)
 
 		# Isolate each teardown step: if reader.stop() raises (e.g. PortAudio
@@ -1112,7 +1185,7 @@ def _run_recorder (
 			_log.error("Recorder: pa.terminate() failed during shutdown: %s", exc)
 
 		try:
-			_queue_the_last_sounds(reader, buf, detector, cfg.detection, audio_cfg.sample_rate, writer)
+			_queue_the_last_sounds(reader, buf, detector, cfg.detection, audio_cfg.sample_rate, writer, dropped)
 		except Exception as exc:
 			_log.error("Recorder: the last sounds before stopping could not be saved: %s", exc, exc_info=True)
 
@@ -2202,21 +2275,25 @@ def _main_impl () -> None:
 
 	_start_threads(threads)
 
-	startup_failed = _wait_for_shutdown(shutdown_event, threads)
+	try:
+		startup_failed = _wait_for_shutdown(shutdown_event, threads)
 
-	_shut_down(
-		threads, _processor_cell[0], last_sounds_queued, instrument_watchers, midi_map_watcher,
-		[receiver for receiver in osc_receivers if receiver is not None],
-		bank_manager, transform_manager, startup_failed,
-	)
+		_shut_down(
+			threads, _processor_cell[0], last_sounds_queued, instrument_watchers, midi_map_watcher,
+			[receiver for receiver in osc_receivers if receiver is not None],
+			bank_manager, transform_manager, startup_failed,
+		)
 
-	# For a process that outlives this run: the tests run many in one.
-	gc.unfreeze()
+	finally:
+		# For a process that outlives this run, however its shutdown ended:
+		# the tests run many in one.
+		gc.unfreeze()
+		subsample.audio.release_portaudio()
 
 
 def _start_threads (threads: list[threading.Thread]) -> None:
 
-	"""Freeze what start-up loaded out of the garbage collector's reach, then start the recorder and the player.
+	"""Freeze what start-up loaded out of the garbage collector's reach, start PortAudio, then start the recorder and the player.
 
 	The player does the same just before its audio opens (MidiPlayer.run,
 	#4679), and its collection then walks only what it loaded itself (#4702).
@@ -2227,6 +2304,12 @@ def _start_threads (threads: list[threading.Thread]) -> None:
 
 	gc.collect()
 	gc.freeze()
+
+	# PortAudio started here, before the threads that use it, so their own
+	# starts hide no stderr (#4704, L27).  After the library scans, which fork
+	# their workers only while no native thread is running.
+	if threads:
+		subsample.audio.hold_portaudio()
 
 	for thread in threads:
 		thread.start()

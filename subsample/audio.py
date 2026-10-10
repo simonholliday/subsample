@@ -40,6 +40,11 @@ DeviceInfo = typing.Mapping[str, typing.Union[str, int, float]]
 # calls from different threads corrupt each other's fd state and crash.
 _pyaudio_init_lock = threading.Lock()
 
+# PortAudio as hold_portaudio started it for the session, or None.  While it
+# is held, a later start only counts itself in and prints nothing, so it does
+# not hide stderr (#4704, L27).
+_held: typing.Optional[pyaudio.PyAudio] = None
+
 
 @dataclasses.dataclass(frozen=True)
 class AudioFileInfo:
@@ -376,6 +381,14 @@ def _suppress_c_stderr () -> typing.Generator[None, None, None]:
 		os.close(fd_null)
 		raise
 
+	# fd 2 is the whole process's, so a line another thread logged while it
+	# pointed at /dev/null was lost (#4704, L27).  Holding the log handlers'
+	# locks makes such a line wait for it instead.
+	handlers = list(logging.getLogger().handlers)
+
+	for handler in handlers:
+		handler.acquire()
+
 	try:
 		os.dup2(fd_null, 2)
 		yield
@@ -383,6 +396,9 @@ def _suppress_c_stderr () -> typing.Generator[None, None, None]:
 		os.dup2(fd_saved, 2)
 		os.close(fd_null)
 		os.close(fd_saved)
+
+		for handler in reversed(handlers):
+			handler.release()
 
 
 def create_pyaudio () -> pyaudio.PyAudio:
@@ -402,6 +418,11 @@ def create_pyaudio () -> pyaudio.PyAudio:
 
 	with _pyaudio_init_lock:
 		try:
+			# Already started for the session, PortAudio only counts this one
+			# in, and prints nothing, so stderr is left alone (#4704, L27).
+			if _held is not None:
+				return pyaudio.PyAudio()
+
 			with _suppress_c_stderr():
 				return pyaudio.PyAudio()
 
@@ -414,6 +435,44 @@ def create_pyaudio () -> pyaudio.PyAudio:
 				f"server running?  Subsample needs PipeWire, PulseAudio or JACK "
 				f"- on a headless box try `pw-jack subsample`."
 			) from exc
+
+
+def hold_portaudio () -> None:
+
+	"""Start PortAudio for the session, on the calling thread, before the recorder and the player start it on theirs.
+
+	Their starts hid the whole process's stderr while ALSA and JACK said
+	what they say at start, and they ran at once on two threads, so a line
+	either thread said then, such as the recorder's "Error opening audio
+	device", was lost (#4704, L27).  Started here first, theirs print
+	nothing and hide nothing.  A start that fails here is left for theirs
+	to report.  release_portaudio ends it.
+	"""
+
+	global _held
+
+	if _held is not None:
+		return
+
+	try:
+		_held = create_pyaudio()
+	except OSError:
+		_held = None
+
+
+def release_portaudio () -> None:
+
+	"""End the session's hold on PortAudio, which hold_portaudio took."""
+
+	global _held
+
+	held, _held = _held, None
+
+	if held is not None:
+		try:
+			held.terminate()
+		except Exception as exc:
+			_log.debug("PortAudio did not end cleanly: %s", exc)
 
 
 def unpack_audio (raw_bytes: bytes, bit_depth: int, channels: int) -> numpy.ndarray:
@@ -483,7 +542,11 @@ class AudioReader:
 		reader.stop()           # stops and closes the stream
 	"""
 
-	_QUEUE_MAX: int = 64  # chunks of headroom (≈0.74s at 44100 Hz with the default 512-frame chunk; scales with buffer_frames)
+	# How far the reader may fall behind before input is dropped, in seconds,
+	# and in chunks at the least.  It was 64 chunks whatever their size: 186 ms
+	# at 128 frames, which a busy machine outlasts (#4704, L23).
+	_QUEUE_SECONDS: float = 2.0
+	_QUEUE_MIN_CHUNKS: int = 64
 
 	def __init__ (
 		self,
@@ -511,8 +574,16 @@ class AudioReader:
 			)
 
 		self._bit_depth = audio_cfg.bit_depth
-		self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self._QUEUE_MAX)
+		self._queue: queue.Queue[bytes] = queue.Queue(maxsize=max(
+			self._QUEUE_MIN_CHUNKS,
+			math.ceil(self._QUEUE_SECONDS * audio_cfg.sample_rate / audio_cfg.buffer_frames),
+		))
 		self._overflow_count: int = 0
+
+		# Frames dropped because the reader fell behind, in all, and as of the
+		# last take_dropped().  Only the callback adds to the first.
+		self._dropped_frames: int = 0
+		self._dropped_taken:  int = 0
 
 		# Input channel routing: when specific physical inputs are selected,
 		# we open the stream with enough channels to cover the highest index,
@@ -572,6 +643,26 @@ class AudioReader:
 
 		return self._overflow_count
 
+	@property
+	def dropped_frames (self) -> int:
+
+		"""Frames of input dropped in all because the reader fell behind."""
+
+		return self._dropped_frames
+
+	def take_dropped (self) -> int:
+
+		"""Frames of input dropped since the last call, because the reader fell behind.
+
+		A sound recorded across them has a splice where they were (#4704, L23).
+		"""
+
+		dropped = self._dropped_frames
+		new = dropped - self._dropped_taken
+		self._dropped_taken = dropped
+
+		return new
+
 	def stop (self) -> None:
 
 		"""Stop the stream and release it."""
@@ -619,9 +710,10 @@ class AudioReader:
 			try:
 				self._queue.put_nowait(in_data)
 			except queue.Full:
-				# Main loop has fallen far behind — drop the chunk.
-				# Dropping one chunk is less harmful than stalling the audio thread.
-				pass
+				# Main loop has fallen far behind — drop the chunk, and count it,
+				# so the capture across it can be named (#4704, L23).  Dropping
+				# one chunk is less harmful than stalling the audio thread.
+				self._dropped_frames += frame_count
 
 		return (None, pyaudio.paContinue)
 

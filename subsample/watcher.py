@@ -1174,6 +1174,46 @@ class _NetworkDriveObserver (watchdog.observers.api.BaseObserver):
 		super().__init__(_NetworkDriveEmitter, timeout=_POLL_SECONDS)
 
 
+# The stat fields beyond the ten a stat result unpacks to (its float times,
+# its nanoseconds and so on), which _without_device carries over.  Python 3.14
+# refuses one of the ten named again, so the seven of them with names are left
+# out; the other three are the times as whole seconds.
+_STAT_FIELDS: typing.Final[frozenset[str]] = frozenset({
+	"st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size",
+})
+_STAT_EXTRAS: typing.Final[tuple[str, ...]] = tuple(
+	name for name in dir(os.stat_result) if name.startswith("st_") and name not in _STAT_FIELDS
+)
+
+
+def _without_device (
+	stat: typing.Callable[[str], os.stat_result],
+) -> typing.Callable[[str], os.stat_result]:
+
+	"""This stat with the device number zeroed, for the network drive's listings (#4704, L25).
+
+	watchdog knows a file by its inode and device, and a network drive
+	mounted again comes back under another device number, so every file in
+	it read as deleted and created again: the whole library left and
+	returned, with new ids and its variants rendered again.  A share
+	mounted with CIFS's noserverino changes its inode numbers too, which
+	this cannot help.
+	"""
+
+	def _stat (path: str) -> os.stat_result:
+
+		"""The file's stat, on device 0."""
+
+		st = stat(path)
+
+		return os.stat_result(
+			(st.st_mode, st.st_ino, 0) + tuple(st)[3:os.stat_result.n_sequence_fields],
+			{name: getattr(st, name) for name in _STAT_EXTRAS if hasattr(st, name)},
+		)
+
+	return _stat
+
+
 class _NetworkDriveEmitter (watchdog.observers.polling.PollingEmitter):
 
 	"""watchdog's polling emitter, made to wait out a network drive that drops.
@@ -1191,6 +1231,7 @@ class _NetworkDriveEmitter (watchdog.observers.polling.PollingEmitter):
 
 		"""Set up as watchdog's emitter is, then list the folder through _take_snapshot_or_keep."""
 
+		kwargs["stat"] = _without_device(kwargs.get("stat", os.stat))
 		super().__init__(*args, **kwargs)
 
 		self._folder = pathlib.Path(os.fsdecode(self.watch.path))
@@ -1212,10 +1253,19 @@ class _NetworkDriveEmitter (watchdog.observers.polling.PollingEmitter):
 			return self._keep_listing(str(exc))
 
 		# Checked after listing, so a drive that went during the listing counts.
-		if not self._folder.is_dir():
+		# On Python 3.12 and 3.13 is_dir() raises what it cannot read, an EIO
+		# from a dropped drive among it, where 3.14 says False: raised here, it
+		# stopped the emitter for good, with nothing logged (#4704, L24).
+		try:
+			there = self._folder.is_dir()
+			drive = subsample.mounts.network_filesystem(self._folder)
+		except OSError as exc:
+			return self._keep_listing(str(exc))
+
+		if not there:
 			return self._keep_listing("it is not there")
 
-		if subsample.mounts.network_filesystem(self._folder) != self._network_drive:
+		if drive != self._network_drive:
 			return self._keep_listing("its network drive is not mounted")
 
 		if not self._reachable:

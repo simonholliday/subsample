@@ -1,5 +1,6 @@
 """Tests for subsample.detector.LevelDetector."""
 
+import dataclasses
 import logging
 import typing
 
@@ -666,6 +667,60 @@ class TestRetrigger:
 
 		assert len(segments) == 1  # the first hit was closed at the second's onset
 		assert detector.state == subsample.detector.DetectorState.RECORDING  # hit 2 now open
+
+	@staticmethod
+	def _first_segment_ms (frames: int, first_hit_at: int, second_hit_chunk: int) -> typing.Optional[float]:
+
+		"""How long the first of two hits comes out, the second struck at the start of a later chunk.
+
+		As the review measured it: a hit late in its chunk, so its refined
+		start is late, decaying under a louder one.  None when they are not split.
+		"""
+
+		rate = 44100
+		cfg = dataclasses.replace(
+			subsample.config.load_config(subsample.config._locate_default_config()).detection,
+			hold_seconds=0.05, retrigger_threshold_db=12.0, warmup_seconds=0.5,
+		)
+		detector = subsample.detector.LevelDetector(cfg, rate, frames)
+
+		warm  = int(0.6 * rate) // frames + 1
+		total = warm + second_hit_chunk + 20
+		signal = numpy.random.default_rng(0).normal(0.0, 10.0, total * frames)
+
+		first = warm * frames + first_hit_at
+		n = numpy.arange(len(signal) - first)
+		signal[first:] += 3000.0 * numpy.exp(-n / (0.03 * rate)) * numpy.sin(2 * numpy.pi * 200 * n / rate)
+
+		second = (warm + second_hit_chunk - 1) * frames
+		n = numpy.arange(len(signal) - second)
+		signal[second:] += 20000.0 * numpy.exp(-n / (0.05 * rate)) * numpy.sin(2 * numpy.pi * 300 * n / rate)
+
+		pcm = numpy.clip(signal, -32768, 32767).astype(numpy.int16).reshape(-1, 1)
+
+		for i in range(total):
+			cut = detector.process_chunk(pcm[i * frames:(i + 1) * frames], (i + 1) * frames)
+
+			if cut is not None:
+				return (cut[1] - cut[0]) / rate * 1000.0
+
+		return None
+
+	@pytest.mark.parametrize("frames", [512, 1024, 2048])
+	def test_no_split_comes_before_the_guard (self, frames: int) -> None:
+
+		"""#4704 (L21 of the 2026-10-07 review): the guard is kept to the frame.
+
+		Counted in whole chunks from the triggering one, rounded, it let a
+		split through at 94 ms of the promised 100 at 512 frames, 70.8 at
+		1024 and 47.6 at 2048.
+		"""
+
+		lengths = [self._first_segment_ms(frames, frames - 40, chunk) for chunk in range(2, 14)]
+		split = [length for length in lengths if length is not None]
+
+		assert split
+		assert min(split) >= 100.0
 
 	def test_attack_peak_does_not_split_a_single_hit (self) -> None:
 		# The min-segment guard (and the climbing follower) must stop a hit's own

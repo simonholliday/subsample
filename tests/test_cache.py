@@ -991,6 +991,68 @@ class TestTheFileASampleWasCutFrom:
 		assert subsample.cache.cut_from(wav) == "/recordings/field.wav"
 
 
+class TestACaptureKeepsItsTime:
+
+	"""#4704 (L26 of the 2026-10-07 review): when a take was recorded outlives every re-analysis.
+
+	Each wrote its sidecar without it, so the version-19 re-analysis would
+	have erased the capture time of every capture in a library.  Simon's
+	call: kept when the audio itself changed too, as an edit does not change
+	when the take was recorded.
+	"""
+
+	def _captured (self, tmp_path: pathlib.Path) -> pathlib.Path:
+
+		wav = tmp_path / "2026-10-07_12-00-00.wav"
+		tests.helpers._make_wav(wav)
+
+		subsample.cache.save_cache(
+			wav, subsample.cache.compute_audio_md5(wav), tests.helpers._make_params(),
+			tests.helpers._make_spectral(), tests.helpers._make_rhythm(),
+			tests.helpers._make_pitch(), tests.helpers._make_timbre(),
+			1.0, tests.helpers._make_level(), captured_at="2026-10-07T12:00:00",
+		)
+
+		return wav
+
+	@staticmethod
+	def _captured_at (wav: pathlib.Path) -> typing.Any:
+		return json.loads(subsample.cache.cache_path(wav).read_text())["captured_at"]
+
+	@pytest.mark.parametrize("reload", ["load_cache", "load_sidecar", "ensure_sample_assets"])
+	def test_it_outlives_a_new_analysis_version (self, tmp_path: pathlib.Path, reload: str) -> None:
+
+		wav = self._captured(tmp_path)
+		sidecar = subsample.cache.cache_path(wav)
+		payload = json.loads(sidecar.read_text())
+		payload["analysis_version"] = "0"
+		sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+		if reload == "load_cache":
+			subsample.cache.load_cache(wav)
+		elif reload == "load_sidecar":
+			subsample.cache.load_sidecar(sidecar)
+		else:
+			subsample.cache.ensure_sample_assets(wav, with_preview=False)
+
+		assert json.loads(sidecar.read_text())["analysis_version"] == subsample.analysis.ANALYSIS_VERSION
+		assert self._captured_at(wav) == "2026-10-07T12:00:00"
+
+	@pytest.mark.parametrize("reload", ["load_cache", "ensure_sample_assets"])
+	def test_it_outlives_an_edit_of_the_audio (self, tmp_path: pathlib.Path, reload: str) -> None:
+
+		wav = self._captured(tmp_path)
+		tests.helpers._make_wav(wav, n_frames=8000)
+
+		if reload == "load_cache":
+			subsample.cache.load_cache(wav)
+		else:
+			subsample.cache.ensure_sample_assets(wav, with_preview=False)
+
+		assert json.loads(subsample.cache.cache_path(wav).read_text())["audio_md5"] == subsample.cache.compute_audio_md5(wav)
+		assert self._captured_at(wav) == "2026-10-07T12:00:00"
+
+
 class TestPreviewRoundtrip:
 
 	"""save_cache accepts a preview_data kwarg; load_preview_data retrieves it."""

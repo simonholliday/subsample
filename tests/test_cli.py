@@ -2,6 +2,7 @@
 
 import argparse
 import dataclasses
+import gc
 import importlib
 import io
 import logging
@@ -665,7 +666,10 @@ def test_start_up_is_frozen_before_the_recorder_and_the_player_start () -> None:
 	calls   = unittest.mock.Mock()
 	threads = [threading.Thread(target=calls.recorder), threading.Thread(target=calls.player)]
 
-	with unittest.mock.patch("gc.collect") as collect, unittest.mock.patch("gc.freeze") as freeze:
+	# PortAudio is not this test's: started for real, it would stay started,
+	# and the process could not fork its workers for the tests after.
+	with unittest.mock.patch("gc.collect") as collect, unittest.mock.patch("gc.freeze") as freeze, \
+		unittest.mock.patch.object(subsample.audio, "hold_portaudio"):
 		calls.attach_mock(collect, "collect")
 		calls.attach_mock(freeze, "freeze")
 
@@ -2629,6 +2633,16 @@ def test_an_osc_send_host_that_cannot_be_found_is_warned_of_and_the_run_goes_on 
 	app_events.emit("sample_captured", path="nothing-listens.wav")
 
 
+def _quiet_reader () -> unittest.mock.MagicMock:
+
+	"""A stand-in AudioReader that neither overflowed nor dropped any input."""
+
+	reader = unittest.mock.MagicMock(overflow_count=0, dropped_frames=0)
+	reader.take_dropped.return_value = 0
+
+	return reader
+
+
 def _default_cfg () -> subsample.config.Config:
 
 	"""The shipped default config, as a fresh project has it."""
@@ -2682,7 +2696,7 @@ class TestRunRecorder:
 	) -> tuple[unittest.mock.MagicMock, unittest.mock.MagicMock, list[typing.Optional[subsample.recorder.SampleProcessor]]]:
 		"""Run the capture thread over `reads` chunks, each of which completes a capture; return the reader class, the processor class and the processor cell."""
 		shutdown_event = threading.Event()
-		reader = reader if reader is not None else unittest.mock.MagicMock(overflow_count=0)
+		reader = reader if reader is not None else _quiet_reader()
 		chunk = numpy.zeros((cfg.recorder.audio.buffer_frames, 1), dtype=numpy.int16)
 		remaining = [reads]
 
@@ -2752,8 +2766,11 @@ class TestRunRecorder:
 	) -> None:
 		self._devices(monkeypatch)
 
+		reader = _quiet_reader()
+		reader.overflow_count = 3
+
 		with caplog.at_level(logging.WARNING, logger="subsample.cli"):
-			self._run(self._cfg(), monkeypatch, reader=unittest.mock.MagicMock(overflow_count=3))
+			self._run(self._cfg(), monkeypatch, reader=reader)
 
 		assert "Audio overflows detected during capture: 3 - recordings may contain discontinuities" in caplog.text
 
@@ -2786,7 +2803,7 @@ class TestRunRecorder:
 		"""An unplugged interface can make the stream and PortAudio refuse to close; the queue still finishes."""
 		pa = self._devices(monkeypatch)
 		pa.terminate.side_effect = OSError("PortAudio not initialised")
-		reader = unittest.mock.MagicMock(overflow_count=0)
+		reader = _quiet_reader()
 		reader.stop.side_effect = OSError("device unplugged")
 
 		with caplog.at_level(logging.ERROR, logger="subsample.cli"):
@@ -2856,7 +2873,7 @@ class TestRunRecorder:
 			stop.set()
 			return None
 
-		reader = unittest.mock.MagicMock(overflow_count=0)
+		reader = _quiet_reader()
 		reader.read.side_effect = read
 		reader.drain.return_value = waiting
 		processor_class = unittest.mock.MagicMock()
@@ -2987,6 +3004,82 @@ class TestWaitForShutdown:
 		assert subsample.cli._wait_for_shutdown(event, []) is False
 		assert event.is_set(), "every subsystem is told to stop"
 		assert "Stopping" in capsys.readouterr().out
+
+
+class TestDroppedInput:
+
+	"""#4704 (L23 of the 2026-10-07 review): input dropped for falling behind is said, and owed to its capture."""
+
+	@staticmethod
+	def _detector (state: subsample.detector.DetectorState) -> subsample.detector.LevelDetector:
+		detector = unittest.mock.MagicMock(spec=subsample.detector.LevelDetector)
+		detector.state = state
+
+		return typing.cast(subsample.detector.LevelDetector, detector)
+
+	def test_a_capture_recorded_across_a_drop_is_owed_it (self) -> None:
+
+		recording = self._detector(subsample.detector.DetectorState.RECORDING)
+		reader = _quiet_reader()
+		dropped = subsample.cli._DroppedInput(reader, 1000)
+		cut = numpy.zeros((10, 1), dtype=numpy.int16)
+
+		reader.take_dropped.return_value = 250
+		dropped.before(recording)
+		assert dropped.owed(recording, None) is None
+
+		reader.take_dropped.return_value = 120
+		dropped.before(recording)
+		assert dropped.owed(recording, cut) == pytest.approx(0.37)
+
+		reader.take_dropped.return_value = 0
+		dropped.before(recording)
+		assert dropped.owed(recording, cut) is None
+
+	def test_a_drop_between_sounds_is_owed_to_none (self) -> None:
+
+		idle = self._detector(subsample.detector.DetectorState.IDLE)
+		reader = _quiet_reader()
+		dropped = subsample.cli._DroppedInput(reader, 1000)
+
+		reader.take_dropped.return_value = 500
+		dropped.before(idle)
+
+		assert dropped.owed(idle, numpy.zeros((10, 1), dtype=numpy.int16)) is None
+
+	def test_each_time_it_falls_behind_is_said_once (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		idle = self._detector(subsample.detector.DetectorState.IDLE)
+		reader = _quiet_reader()
+		dropped = subsample.cli._DroppedInput(reader, 1000)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.cli"):
+			for lost in (100, 150, 0, 0, 40, 0):
+				reader.take_dropped.return_value = lost
+				dropped.before(idle)
+
+		assert [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING] == [
+			"Recorder fell behind and dropped 0.25 s of input audio - the machine was too busy to keep up",
+			"Recorder fell behind and dropped 0.04 s of input audio - the machine was too busy to keep up",
+		]
+
+
+class TestPortAudioStartsBeforeItsThreads:
+
+	def test_it_is_held_before_the_recorder_and_the_player_start (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		"""#4704 (L27 of the 2026-10-07 review): their own starts then hide no stderr."""
+
+		order: list[str] = []
+		monkeypatch.setattr(subsample.audio, "hold_portaudio", lambda: order.append("hold"))
+		monkeypatch.setattr(gc, "freeze", lambda: None)
+
+		thread = unittest.mock.MagicMock(spec=threading.Thread)
+		thread.start.side_effect = lambda: order.append("start")
+
+		subsample.cli._start_threads([thread])
+
+		assert order == ["hold", "start"]
 
 
 class TestAPlayerThatFailsToStart:

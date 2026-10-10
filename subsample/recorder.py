@@ -46,6 +46,7 @@ import subsample.ambisonic
 import subsample.analysis
 import subsample.cache
 import subsample.config
+import subsample.file_mode
 import subsample.loopfind
 import subsample.parallelism
 import subsample.preview
@@ -142,7 +143,7 @@ class _OnCompleteCallback(typing.Protocol):
 		"""Take one finished capture."""
 
 
-def _write_atomically (filepath: pathlib.Path, payload: bytes) -> None:
+def _write_atomically (filepath: pathlib.Path, payload: bytes, *, durable: bool = True) -> None:
 
 	"""Put the bytes at that path, or leave whatever was there untouched.
 
@@ -154,6 +155,11 @@ def _write_atomically (filepath: pathlib.Path, payload: bytes) -> None:
 	directory.  Its folder is made when it does not exist yet: a
 	recorder.filename_format with a `/` in it puts captures in folders of their
 	own, and every capture failed for want of one (#4703, M8).
+
+	``durable`` flushes the bytes to the disk before the rename, and the
+	folder after it, so a power cut cannot leave the name on an empty or
+	cut-short file (#4704, L28).  A recording is; a placeholder sidecar,
+	which the next load makes again, is not.
 	"""
 
 	filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +172,14 @@ def _write_atomically (filepath: pathlib.Path, payload: bytes) -> None:
 		with os.fdopen(handle, "wb") as opened:
 			opened.write(payload)
 
+			if durable:
+				opened.flush()
+				os.fsync(opened.fileno())
+
 		os.replace(temporary, filepath)
+
+		if durable:
+			subsample.file_mode.sync_folder(filepath.parent)
 
 	except Exception:
 		try:
@@ -175,6 +188,37 @@ def _write_atomically (filepath: pathlib.Path, payload: bytes) -> None:
 			pass
 
 		raise
+
+
+def _clipped_inputs (
+	audio:     numpy.ndarray,
+	bit_depth: int,
+	inputs:    typing.Optional[tuple[int, ...]],
+) -> list[tuple[int, float]]:
+
+	"""Each input of a capture that reached full scale, numbered as the interface labels it, with its peak.
+
+	``inputs`` is recorder.audio.input as config holds it, from 0, or None
+	for the first inputs.  The threshold sits just below full scale because
+	integer PCM cannot represent +1.0 exactly (int16's positive rail is
+	32767/32768 ≈ 0.99997), so a `>= 1.0` test only ever fired on the
+	negative rail.  Read per channel from its extremes, so no float copy of
+	the capture is made.
+	"""
+
+	if audio.shape[0] == 0:
+		return []
+
+	divisor = 32768.0 if bit_depth == 16 else 2147483648.0
+	highest = audio.max(axis=0).astype(numpy.float64)
+	lowest  = audio.min(axis=0).astype(numpy.float64)
+	peaks   = numpy.maximum(highest, -lowest) / divisor
+
+	return [
+		((inputs[channel] if inputs is not None else channel) + 1, float(peak))
+		for channel, peak in enumerate(peaks)
+		if peak >= 0.999
+	]
 
 
 def _format_filename (timestamp: datetime.datetime, fmt: str) -> str:
@@ -206,6 +250,7 @@ class _ProcessRequest:
 	sample_rate: typing.Optional[int] = None      # None → use config sample rate
 	bit_depth: typing.Optional[int] = None        # None → use config bit depth
 	cut_from: typing.Optional[str] = None         # file mode: the file it was cut from
+	missing_seconds: typing.Optional[float] = None  # input dropped while it was recorded
 
 
 class SampleProcessor:
@@ -342,6 +387,7 @@ class SampleProcessor:
 		sample_rate: typing.Optional[int] = None,
 		bit_depth: typing.Optional[int] = None,
 		cut_from: typing.Optional[str] = None,
+		missing_seconds: typing.Optional[float] = None,
 	) -> None:
 
 		"""Submit an audio array for processing.
@@ -362,9 +408,12 @@ class SampleProcessor:
 			               to config value.
 			cut_from:      File mode: the file this was cut from, resolved, which
 			               its sidecar notes (cache.save_cache).
+			missing_seconds: How much input was dropped while this was recorded,
+			               the recorder having fallen behind; the capture is kept
+			               and named with it (#4704, L23).
 		"""
 
-		req = _ProcessRequest(audio, timestamp, filename_base, sample_rate, bit_depth, cut_from)
+		req = _ProcessRequest(audio, timestamp, filename_base, sample_rate, bit_depth, cut_from, missing_seconds)
 
 		future = self._executor.submit(self._process, req)
 		future.add_done_callback(self._on_future_done)
@@ -567,7 +616,7 @@ class SampleProcessor:
 				if self._before_sidecar_write is not None:
 					self._before_sidecar_write(sidecar)
 
-				_write_atomically(sidecar, json.dumps(placeholder).encode("utf-8"))
+				_write_atomically(sidecar, json.dumps(placeholder).encode("utf-8"), durable=False)
 
 		except Exception as exc:
 			self._count("lost")
@@ -767,6 +816,13 @@ def _process_capture (
 	analysis_channel_index: typing.Optional[int]
 	channel_format_tag: str
 
+	# Clipping is judged on each input as it was recorded, before any mixdown
+	# or conversion (#4704, L22): judged on the mono mix, one input hard
+	# against full scale beside a quiet one read as half scale, and was never
+	# warned of.  Skipped for file imports (filename_base set), where the
+	# clipping already happened.
+	clipped = _clipped_inputs(req.audio, effective_bit_depth, cfg.recorder.audio.input) if req.filename_base is None else []
+
 	if ambisonic_format is not None:
 		req = _converted_to_b_format(req, ambisonic_format, effective_bit_depth, effective_sample_rate)
 		analysis_channel_index = 0
@@ -788,15 +844,14 @@ def _process_capture (
 		cfg.analysis,
 	)
 
-	# Warn on clipped live recordings so the user knows to reduce gain.
-	# Skipped for file imports (filename_base set) — clipping already occurred.
-	# Threshold sits just below full scale because integer PCM cannot
-	# represent +1.0 exactly (int16 positive rail is 32767/32768 ≈
-	# 0.99997) — a `>= 1.0` test only ever fired on the negative rail.
-	if req.filename_base is None and level.peak >= 0.999:
+	# Warn on clipped live recordings so the user knows to reduce gain.  A
+	# peak a hair under full scale, as int16's top is, reads 0.0, not -0.0.
+	for physical_input, peak in clipped:
+		peak_db = 20.0 * math.log10(peak)
+
 		_log.warning(
-			"input clipped (peak %.1f dBFS) - reduce input gain to avoid distortion",
-			20.0 * math.log10(level.peak),
+			"input %d clipped (peak %.1f dBFS) - reduce its gain to avoid distortion",
+			physical_input, peak_db if peak_db <= -0.05 else 0.0,
 		)
 
 	# Compute preview data from the same mono float signal analyze_all()
@@ -833,6 +888,12 @@ def _process_capture (
 		loop=loop,
 		cut_from=req.cut_from,
 	)
+
+	if write_result is not None and req.missing_seconds:
+		_log.warning(
+			"Saved %s with %.2f s of its audio missing, dropped while the recorder fell behind - listen to it before you keep it",
+			write_result[0].name, req.missing_seconds,
+		)
 
 	return _Captured(
 		written=write_result, audio=req.audio,

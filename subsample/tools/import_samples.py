@@ -32,6 +32,7 @@ import subsample.analysis
 import subsample.audio
 import subsample.cache
 import subsample.config
+import subsample.file_mode
 import subsample.parallelism
 import subsample.tools._shared
 
@@ -309,6 +310,9 @@ def _import_file (
 
 	try:
 		soundfile.write(str(target_path), faded, samplerate, subtype=subtype)
+
+		# On the disk before the sidecar names it, as a recording is (#4704, L28).
+		subsample.file_mode.sync_file(target_path)
 	except (OSError, soundfile.SoundFileError) as exc:
 		print(f"  {filepath.name}  ERROR writing: {exc}", file=sys.stderr)
 		return False

@@ -552,6 +552,7 @@ def _reanalyze_and_save (
 			audio_path, audio_md5, params, spectral, rhythm, pitch, timbre,
 			duration, level, band_energy,
 			bit_depth=file_info.bit_depth, channels=file_info.channels,
+			captured_at=_captured_at_before(audio_path),
 			channel_format=channel_format,
 			preview_data=preview_data, loop=loop, cut_from=cut_from,
 		)
@@ -908,6 +909,27 @@ def load_preview_data (
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _captured_at_before (audio_path: pathlib.Path) -> typing.Optional[str]:
+
+	"""When a capture was recorded, as the sidecar about to be replaced says, or None.
+
+	Every re-analysis wrote its sidecar without it, so a version bump erased
+	the capture time of every capture in a library (#4704, L26).  It is
+	read here, where every re-analysis passes, rather than handed down by
+	each caller.  Simon's call: kept even when the audio changed, as an edit
+	does not change when the take was recorded.
+	"""
+
+	try:
+		payload = json.loads(cache_path(audio_path).read_text(encoding="utf-8"))
+	except (OSError, ValueError):
+		return None
+
+	value = payload.get("captured_at") if isinstance(payload, dict) else None
+
+	return value if isinstance(value, str) else None
+
 
 def cut_from (audio_path: pathlib.Path) -> typing.Optional[str]:
 

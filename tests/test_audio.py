@@ -1,18 +1,24 @@
 """Tests for subsample.audio."""
 
+import logging
+import os
 import pathlib
 import tempfile
+import threading
+import time
 import typing
 import unittest.mock
 import wave
 
 import numpy
+import pyaudio
 import pytest
 import soundfile
 
 import subsample.audio
 import subsample.devices
 import subsample.config
+import subsample.parallelism
 
 
 class TestUnpackAudio16Bit:
@@ -207,6 +213,36 @@ class TestAudioReader:
 
 		assert result is None
 
+	@pytest.mark.parametrize(("buffer_frames", "chunks"), [(128, 690), (512, 173), (4096, 64)])
+	def test_the_queue_holds_two_seconds (self, buffer_frames: int, chunks: int) -> None:
+
+		"""#4704 (L23 of the 2026-10-07 review): the reader may fall 2 s behind before input is dropped.
+
+		It held 64 chunks whatever their size: 186 ms at 128 frames.
+		"""
+
+		reader, _ = self._make_reader(buffer_frames=buffer_frames)
+
+		assert reader._queue.maxsize == chunks
+
+	def test_dropped_input_is_counted (self) -> None:
+
+		"""What the full queue throws away is counted, so the capture across it can be named."""
+
+		reader, _ = self._make_reader(buffer_frames=16)
+		raw = numpy.zeros(16, dtype=numpy.int16).tobytes()
+
+		for _ in range(reader._queue.maxsize + 5):
+			reader._callback(raw, 16, {}, 0)
+
+		assert reader.dropped_frames == 80
+		assert reader.take_dropped() == 80
+		assert reader.take_dropped() == 0
+
+		reader._callback(raw, 16, {}, 0)
+
+		assert reader.take_dropped() == 16
+
 	def test_read_no_timeout_returns_chunk (self) -> None:
 		"""read() with no timeout argument should still return a chunk when data is available."""
 		buffer_frames = 16
@@ -222,6 +258,73 @@ class TestAudioReader:
 
 		assert chunk is not None
 		assert chunk.shape == (buffer_frames, 1)
+
+
+class TestPortAudioStartsOnce:
+
+	"""#4704 (L27 of the 2026-10-07 review): no thread's stderr is lost while PortAudio starts."""
+
+	def test_a_line_logged_on_another_thread_while_stderr_is_hidden_waits_for_it (
+		self, capfd: pytest.CaptureFixture[str],
+	) -> None:
+
+		"""fd 2 is the whole process's: a line another thread logged while it pointed at /dev/null was lost."""
+
+		class _ToStderr (logging.Handler):
+
+			def emit (self, record: logging.LogRecord) -> None:
+				os.write(2, (record.getMessage() + "\n").encode())
+
+		handler = _ToStderr()
+		logging.getLogger().addHandler(handler)
+		logger = logging.getLogger("tests.portaudio")
+		logger.propagate = True
+		other = threading.Thread(target=logger.error, args=("Error opening audio device: busy",))
+
+		try:
+			with subsample.audio._suppress_c_stderr():
+				other.start()
+				time.sleep(0.2)
+
+			other.join(timeout=5.0)
+
+		finally:
+			logging.getLogger().removeHandler(handler)
+
+		assert "Error opening audio device: busy" in capfd.readouterr().err
+
+	def test_once_held_a_start_leaves_stderr_alone (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		"""The recorder's and player's starts find PortAudio running, which prints nothing."""
+
+		def _hides () -> typing.Any:
+			raise AssertionError("stderr was hidden")
+
+		monkeypatch.setattr(subsample.audio, "_held", unittest.mock.MagicMock(), raising=False)
+		monkeypatch.setattr(subsample.audio, "_suppress_c_stderr", _hides)
+
+		# create_pyaudio notes that forking is no longer safe, which must not
+		# outlast this test: the tests after it fork their workers.
+		monkeypatch.setattr(subsample.parallelism, "_native_subsystem_started", False)
+		monkeypatch.setattr(pyaudio, "PyAudio", unittest.mock.MagicMock)
+
+		assert subsample.audio.create_pyaudio() is not None
+
+	def test_it_is_held_until_released (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		started = unittest.mock.MagicMock()
+		monkeypatch.setattr(subsample.audio, "_held", None)
+		monkeypatch.setattr(subsample.audio, "create_pyaudio", lambda: started)
+
+		subsample.audio.hold_portaudio()
+		subsample.audio.hold_portaudio()
+
+		assert subsample.audio._held is started
+
+		subsample.audio.release_portaudio()
+
+		started.terminate.assert_called_once()
+		assert subsample.audio._held is None
 
 
 class TestFindDeviceByName:

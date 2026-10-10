@@ -150,9 +150,12 @@ class LevelDetector:
 			10.0 ** (cfg.retrigger_threshold_db / 20.0)
 			if cfg.retrigger_threshold_db is not None else None
 		)
-		self._retrigger_guard_chunks: int = max(
-			self._hold_chunks_total,
-			round(_MIN_RETRIGGER_GUARD_SECONDS * chunks_per_second),
+		# The guard in frames, from the recording's refined start (#4704, L21).
+		# Counted in whole chunks from the triggering chunk, rounded, it let a
+		# split through early: 94 ms instead of 100 at 256- and 512-frame
+		# buffers, and 47.6 ms at 2048 frames, under any hold_seconds below 0.2.
+		self._retrigger_guard_frames: int = round(
+			max(cfg.hold_seconds, _MIN_RETRIGGER_GUARD_SECONDS) * sample_rate,
 		)
 		self._onset_backoff_samples: int = round(_ONSET_BACKOFF_SECONDS * sample_rate)
 
@@ -162,8 +165,7 @@ class LevelDetector:
 		self._hold_chunks_remaining: int = 0
 		self._recording_start_frame: int = 0
 
-		# Per-recording state for the re-trigger tail follower / min-segment guard.
-		self._recording_chunks: int = 0
+		# Per-recording state for the re-trigger tail follower.
 		self._tail_follower: float = 0.0
 
 	@property
@@ -344,9 +346,8 @@ class LevelDetector:
 			chunk_start = current_frame - chunk.shape[0]
 			self._recording_start_frame = max(0, chunk_start + self._onset_offset(chunk))
 			self._hold_chunks_remaining = self._hold_chunks_total
-			# This triggering chunk is frame 1 of the new recording; seed the tail
-			# follower at the attack level so re-trigger measures rises above it.
-			self._recording_chunks = 1
+			# Seed the tail follower at the attack level so re-trigger measures
+			# rises above it.
 			self._tail_follower = chunk_rms
 			return None
 
@@ -386,22 +387,23 @@ class LevelDetector:
 				)
 				return (start_frame, end_frame)
 
-		self._recording_chunks += 1
-
 		# Re-trigger: a sharp rise over the decaying tail is the next hit.  Finalise
 		# the current sample at this chunk's start (where the new attack begins) and
 		# immediately open a fresh recording, staying in RECORDING.  Suppressed until
 		# the min-segment guard elapses, which spans the attack so its own peak — a
 		# rise over the quieter onset chunk — cannot split the hit off from its tail.
+		# The new recording starts no earlier than this chunk, so the one closed
+		# here is at least the guard long.
+		chunk_start = current_frame - chunk.shape[0]
+
 		if (
 			self._retrigger_ratio is not None
-			and self._recording_chunks > self._retrigger_guard_chunks
+			and chunk_start - self._recording_start_frame >= self._retrigger_guard_frames
 			and self._exceeds_retrigger(chunk_rms)
 		):
-			boundary = max(0, current_frame - chunk.shape[0] + self._onset_offset(chunk))
+			boundary = max(0, chunk_start + self._onset_offset(chunk))
 			start_frame = self._recording_start_frame
 			self._recording_start_frame = boundary
-			self._recording_chunks = 1
 			self._hold_chunks_remaining = self._hold_chunks_total
 			self._tail_follower = chunk_rms
 			return (start_frame, boundary)

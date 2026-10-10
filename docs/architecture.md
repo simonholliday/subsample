@@ -93,7 +93,28 @@ Details a change here has to keep:
   hit inside it included.
 - **Re-trigger has a floor.** A new hit can split a recording only after
   `max(hold_seconds, _MIN_RETRIGGER_GUARD_SECONDS)`, 0.1 s, so an attack's own
-  peak cannot split it.
+  peak cannot split it.  It is counted in frames from the recording's refined
+  start (`_retrigger_guard_frames`, #4704): counted in whole chunks, rounded, a
+  split came at 94 ms at 512 frames and 47.6 ms at 2048.
+- **Falling behind is said.** The input queue holds 2 s of chunks
+  (`AudioReader._QUEUE_SECONDS`, 64 chunks at the least), and the chunks it
+  drops when the recorder falls further behind are counted. Each time it does
+  is said once, the total at shutdown, and a capture recorded across a drop is
+  kept and named with how much it misses (`cli._DroppedInput`, #4704). It held
+  64 chunks whatever their size, 186 ms at 128 frames, and dropped silently,
+  splicing the capture.
+- **Clipping is per input.** The warning reads each input's peak as recorded,
+  before any mixdown or B-format conversion, and names the input as the
+  interface labels it (`recorder._clipped_inputs`, #4704); on the mono mix,
+  one clipped input beside a quiet one never warned.
+- **A recording outlasts a power cut.** Its audio is flushed to the disk before
+  it is renamed into place, and its folder after (`file_mode.sync_folder`,
+  `sync_file`, #4704), and so is what `subsample import` writes. Sidecars,
+  previews and renders are not: each is made again from the audio, and a
+  re-analysis writes thousands.
+- **The capture time is kept.** `captured_at` survives every re-analysis, of
+  the same audio or an edit of it (`cache._captured_at_before`, #4704): each
+  wrote it as null, so an `ANALYSIS_VERSION` bump erased it library-wide.
 - **A capture cut at the buffer's length re-learns the room.** The ambient floor
   follows the room only between sounds, so a room that got louder by
   `threshold_db` and stayed so was one endless sound, saved a buffer's length at
@@ -474,6 +495,17 @@ library. `libportaudio` links JACK unconditionally, so PortAudio probes for a
 sound server at start and aborts with `Unanticipated host error` (-9999) when
 none runs, even though Subsample never asks for JACK.
 
+What ALSA and JACK print as PortAudio starts is hidden by pointing fd 2, the
+whole process's stderr, at /dev/null for the moment (`audio._suppress_c_stderr`).
+So PortAudio is started once, on the main thread, just before the recorder and
+the player threads (`audio.hold_portaudio`, #4704), after the library scans,
+whose workers fork only while no native thread runs. PortAudio counts its
+users, so the threads' own starts find it running, print nothing and hide
+nothing; while it is hidden, the log handlers' locks are held, so a line
+another thread logs waits rather than vanishes. They started it at once on
+their own threads, and a line either said then, such as the recorder's "Error
+opening audio device", was lost.
+
 ### End-to-end 32-bit float
 
 Every audio sample is converted to float32 immediately after capture and stays in
@@ -717,9 +749,13 @@ stops for good at the first listing that fails, and reads a folder that has
 gone as empty, reporting every file in it deleted; `_NetworkDriveEmitter`
 keeps the last listing while the folder cannot be read on the drive it was
 on, so a dropped connection or an unmounted share leaves the library as it
-was, and the next good listing reports only what changed meanwhile. The map
-watcher keeps one observer of each kind and puts each directory on the one it
-needs.
+was, and the next good listing reports only what changed meanwhile. The
+emitter's listings ignore the device number (`watcher._without_device`, #4704),
+since a share mounted again comes back under a new one and every file read as
+deleted and created again; and a folder it cannot check (an EIO from
+`is_dir()`, which Python 3.12 and 3.13 raise) is waited out like one it cannot
+list, where it stopped the emitter for good. The map watcher keeps one
+observer of each kind and puts each directory on the one it needs.
 
 **The map watcher** (`MidiMapWatcher`) fires half a second after the last save
 of any file the map is read from. The loader records those files as

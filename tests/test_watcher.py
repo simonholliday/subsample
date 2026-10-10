@@ -1452,6 +1452,67 @@ class TestANetworkDriveThatDrops:
 
 		return folder
 
+	def test_a_folder_that_cannot_be_checked_is_waited_out (
+		self, tmp_path: pathlib.Path, shares: set[pathlib.Path], monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""#4704 (L24 of the 2026-10-07 review): an EIO from is_dir() no longer stops the watcher.
+
+		On Python 3.12 and 3.13 is_dir() raises what it cannot read, where
+		3.14 says False, and raised after a listing that worked, it stopped
+		the emitter for good, with nothing logged.
+		"""
+
+		folder = self._share_with_a_kick(tmp_path, shares)
+		emitter, events = self._emitter(folder)
+		real = pathlib.Path.is_dir
+
+		def _eio (path: pathlib.Path, *args: typing.Any, **kwargs: typing.Any) -> bool:
+			if path == folder:
+				raise OSError(5, "Input/output error", str(path))
+
+			return real(path, *args, **kwargs)
+
+		monkeypatch.setattr(pathlib.Path, "is_dir", _eio)
+
+		assert self._poll(emitter, events) == []
+
+		monkeypatch.setattr(pathlib.Path, "is_dir", real)
+		(folder / "snare.wav").write_bytes(b"RIFF")
+
+		assert self._poll(emitter, events) == [("created", "snare.wav")]
+
+	def test_a_share_mounted_again_reports_nothing_changed (
+		self, tmp_path: pathlib.Path, shares: set[pathlib.Path],
+	) -> None:
+
+		"""#4704 (L25 of the 2026-10-07 review): a remount's new device number is not every file new.
+
+		watchdog knows a file by its inode and device, so a share mounted
+		again read as every file deleted and created, and the whole library
+		left and came back.
+		"""
+
+		folder = self._share_with_a_kick(tmp_path, shares)
+		device = [0]
+
+		def _stat (path: str) -> os.stat_result:
+			st = os.stat(path)
+
+			return os.stat_result(
+				(st.st_mode, st.st_ino, st.st_dev + device[0]) + tuple(st)[3:os.stat_result.n_sequence_fields],
+				{name: getattr(st, name) for name in subsample.watcher._STAT_EXTRAS if hasattr(st, name)},
+			)
+
+		events = watchdog.observers.api.EventQueue()
+		watch = watchdog.observers.api.ObservedWatch(str(folder), recursive=False)
+		emitter = subsample.watcher._NetworkDriveEmitter(events, watch, timeout=0, stat=_stat)
+		emitter.on_thread_start()
+
+		device[0] = 7
+
+		assert self._poll(emitter, events) == []
+
 	def test_a_new_file_is_reported (self, tmp_path: pathlib.Path, shares: set[pathlib.Path]) -> None:
 
 		"""What a poll is for."""

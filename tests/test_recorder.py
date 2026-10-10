@@ -3,6 +3,7 @@
 import dataclasses
 import datetime
 import logging
+import os
 import pathlib
 import tempfile
 import time
@@ -931,7 +932,85 @@ class TestCapturesAreProcessedInWorkerProcesses:
 			writer.enqueue(clipped, datetime.datetime.now())
 			writer.shutdown()
 
-		assert any(message.startswith("input clipped") for message in caplog.messages)
+		assert any(message.startswith("input 1 clipped") for message in caplog.messages)
+
+	@pytest.mark.parametrize(("inputs", "named"), [(None, 1), ((2, 3), 3)])
+	def test_a_clipped_input_is_named_though_the_other_is_quiet (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+		inputs: typing.Optional[tuple[int, int]], named: int,
+	) -> None:
+
+		"""#4704 (L22 of the 2026-10-07 review): clipping is judged on each input as recorded.
+
+		Judged on the mono mix, one input hard against full scale beside a
+		quiet one read as half scale, and was never warned of.  The input is
+		named as the interface labels it.
+		"""
+
+		cfg = _make_config(tmp_path)
+		cfg = dataclasses.replace(cfg, recorder=dataclasses.replace(
+			cfg.recorder, audio=dataclasses.replace(cfg.recorder.audio, channels=2, input=inputs),
+		))
+		stereo = numpy.zeros((22050, 2), dtype=numpy.int16)
+		stereo[:, 0] = 32767
+		stereo[:, 1] = 300
+
+		writer = subsample.recorder.SampleProcessor(cfg, tests.helpers._make_params())
+
+		with caplog.at_level(logging.WARNING, logger="subsample"):
+			writer.enqueue(stereo, datetime.datetime.now())
+			writer.shutdown()
+
+		assert f"input {named} clipped (peak 0.0 dBFS) - reduce its gain to avoid distortion" in caplog.messages
+
+	def test_a_capture_missing_input_is_kept_and_named (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4704 (L23 of the 2026-10-07 review): Simon's call, kept, and named with how much it misses."""
+
+		writer = subsample.recorder.SampleProcessor(_make_config(tmp_path), tests.helpers._make_params())
+		tone = (numpy.sin(numpy.arange(22050) * 0.05) * 8000).astype(numpy.int16).reshape(-1, 1)
+
+		with caplog.at_level(logging.WARNING, logger="subsample"):
+			writer.enqueue(tone, datetime.datetime(2026, 10, 10, 12, 0, 0), missing_seconds=0.37)
+			writer.shutdown()
+
+		assert (tmp_path / "2026-10-10_12-00-00.wav").exists()
+		assert (
+			"Saved 2026-10-10_12-00-00.wav with 0.37 s of its audio missing, dropped while the "
+			"recorder fell behind - listen to it before you keep it"
+		) in caplog.messages
+
+	def test_a_capture_is_on_the_disk_before_it_is_named (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""#4704 (L28 of the 2026-10-07 review): flushed before the rename, and its folder after.
+
+		Unflushed, a power cut soon after could leave the name on an empty or
+		cut-short file.  A placeholder sidecar is not flushed, as the next
+		load makes it again.
+		"""
+
+		synced: list[int] = []
+		real = os.fsync
+
+		def _fsync (handle: int) -> None:
+			synced.append(handle)
+			real(handle)
+
+		monkeypatch.setattr(os, "fsync", _fsync)
+
+		target = tmp_path / "take.wav"
+		subsample.recorder._write_atomically(target, b"RIFF")
+		durable = len(synced)
+
+		subsample.recorder._write_atomically(tmp_path / "take.wav.analysis.json", b"{}", durable=False)
+
+		assert target.read_bytes() == b"RIFF"
+		assert durable == 2
+		assert len(synced) == 2
 
 	def test_captures_leave_no_files_behind (self, tmp_path: pathlib.Path) -> None:
 
