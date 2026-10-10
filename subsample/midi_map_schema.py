@@ -219,7 +219,7 @@ def _map_terms () -> dict[str, typing.Any]:
 			"examples": [10],
 		},
 		"programs": {
-			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names. Each program is selected by its Program Change number alone, so a map holds up to 128, and Bank Select messages are not read. A switch changes the kit on every MIDI channel at once: a `directory:` program's samples serve all of this map's assignments, and a `map:` preset's assignments replace all of them, so a MIDI channel the preset does not play falls silent until the next switch. Each keeps its own samples in memory, and one too large for `library.max_memory_mb` is reported at startup, since switching to it then reloads samples from disk. A switch to a program whose assignments fail to apply keeps the previous program playing, and the log says why. A change to this block, to `program_channel` or `default_program`, or to a preset's own file takes a restart.",
+			"description": "Instrument sets that a MIDI Program Change switches between, all loaded at startup so that a switch is instant. Without it, Subsample plays the library its configuration names. Each program is selected by its Program Change number alone, so a map holds up to 128, and Bank Select messages are not read. A switch changes the kit on every MIDI channel at once: a `directory:` program's samples serve all of this map's assignments, and a `map:` preset's assignments replace all of them, so a MIDI channel the preset does not play falls silent until the next switch. Each keeps its own samples in memory. One whose samples do not all fit within `library.max_memory_mb` leaves out those it loaded first, which it then cannot play, and startup names it. A switch to a program whose assignments fail to apply keeps the previous program playing, and the log says why. A change to this block, to `program_channel` or `default_program`, or to a preset's own file takes a restart.",
 			"type": "array",
 			"items": {"$ref": "#/$defs/program"},
 			"examples": [[
@@ -539,7 +539,9 @@ def _zone_tuned () -> dict[str, typing.Any]:
 		"range": {
 			"description": "The part of the keyboard the zone covers, low note then high note.",
 			"type": "array",
-			"items": {"$ref": "#/$defs/note"},
+			# Each end is one note: the string a note may be also carries a
+			# range, which an end may not be (#4704, L4).
+			"items": {"$ref": "#/$defs/note", "not": {"type": "string", "pattern": r"\.\."}},
 			"minItems": 2,
 			"maxItems": 2,
 			"default": [0, 127],

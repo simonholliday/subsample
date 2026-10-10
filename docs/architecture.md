@@ -430,7 +430,11 @@ An OSC note in a bundle takes the bundle's time as its arrival (#603), so a
 sender that sends ahead has its notes played on their frames however the
 network delays the packets, as long as the two machines' clocks agree. A
 note-off timed ahead releases its voice at its own frame in the same way, and a
-note more than two seconds ahead is warned about, at most once a minute.
+note more than two seconds ahead is warned about, at most once a minute. An OSC
+note plays nothing until the output stream is open (`MidiPlayer._stream_open`,
+#4704): one sent while the player started used to wait for the first buffer and
+sound with every other early note, and a player whose stream fails to open is
+unpublished, so nothing goes on sending it notes.
 
 Such a note also starts its sound early, by where the sound's hit comes, so the
 hit lands on the note's time (#604, `_hit_start`). The sequencer cannot do this

@@ -1225,6 +1225,29 @@ def _build_transform_manager (
 	return transform_manager
 
 
+def _warn_of_programs_left_out (banks: list[subsample.bank.Bank], max_memory_mb: float) -> None:
+
+	"""Name each program whose samples did not all fit in library.max_memory_mb, and how many it left out.
+
+	A program too large for the limit leaves out the samples it loaded first,
+	and nothing loads them again, so it cannot play them.  The check this
+	replaces compared the memory used with the limit, which leaving them out
+	keeps it under, so it never fired, and it promised a reload on switch
+	that does not exist (#4704, L20).
+	"""
+
+	for bank in banks:
+		left_out = bank.instrument_library.left_out
+
+		if left_out > 0:
+			_log.warning(
+				"Program %r: %d sample(s) did not fit in library.max_memory_mb "
+				"(%.0f MB) and were left out, so it cannot play them - raise "
+				"the limit to keep them",
+				bank.name, left_out, max_memory_mb,
+			)
+
+
 def _load_bank (
 	defn: subsample.bank.BankDefinition,
 	preset: typing.Optional[subsample.player.MidiMapResult],
@@ -1615,7 +1638,9 @@ def _start_player (
 		# a clean message instead of escaping this thread target as a raw
 		# traceback.  Returning ends the thread; the main loop notices all
 		# subsystem threads have stopped and exits (see the wait loop) rather
-		# than parking on shutdown_event forever.
+		# than parking on shutdown_event forever.  The player is unpublished,
+		# so nothing goes on sending it notes (#4704, L7).
+		player_cell[0] = None
 		print(f"\nError starting player: {exc}", file=sys.stderr)
 
 
@@ -1964,19 +1989,11 @@ def _main_impl () -> None:
 
 		bank_manager = subsample.bank.BankManager(banks, bank_channel, default_program=default_bank)
 
-		# Eager-load memory guard (WARN only — never blocks startup).  A
-		# program whose audio cannot stay fully resident within
-		# library.max_memory_mb is evicting at load, so the first triggers
-		# after a switch to it will reload from disk (lag).  And because each
-		# program's library is capped independently, N programs can use up to
-		# N× the configured budget in aggregate.
-		for bank in banks:
-			if bank.instrument_library.memory_used >= bank.instrument_library.memory_limit:
-				_log.warning(
-					"Program %r exceeds library.max_memory_mb (%.0f MB) - samples "
-					"will reload on switch (lag); raise the limit to keep it resident",
-					bank.name, cfg.library.max_memory_mb,
-				)
+		# Eager-load memory guards (WARN only — never blocks startup).
+		_warn_of_programs_left_out(banks, cfg.library.max_memory_mb)
+
+		# Each program's library is capped independently, so N programs can
+		# use up to N× the configured budget in aggregate.
 		total_used = sum(b.instrument_library.memory_used for b in banks)
 		if total_used > max_instrument_bytes:
 			_log.warning(

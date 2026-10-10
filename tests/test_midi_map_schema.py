@@ -201,6 +201,7 @@ _LIMIT_PROBES: dict[str, _LimitProbe] = {
 	"$defs/order_clause/anyOf/1/properties/pattern/items":
 		lambda value: _map(assignments=[_assignment(
 			select={"where": {"pitched": True}, "order": [{"by": "beat_match", "pattern": [value, 1]}]},
+			process=[_QUANTISED],
 		)]),
 	"$defs/channel/anyOf/0":
 		lambda value: _map(assignments=[_assignment(channel=value)]),
@@ -877,10 +878,11 @@ class TestWordsComeFromTheParser:
 			clause["pattern"] = [1, 0]
 
 		where: dict[str, typing.Any] = {"reference": "BD0025"} if name == "similarity" else {"pitched": True}
+		process = [_QUANTISED] if name in ("quantized_beats", "beat_match") else None
 
 		result = _load(
 			tmp_path,
-			_map(assignments=[_assignment(select={"where": where, "order": [clause]})]),
+			_map(assignments=[_assignment(select={"where": where, "order": [clause]}, process=process)]),
 			references=["BD0025"],
 		)
 
@@ -892,10 +894,11 @@ class TestWordsComeFromTheParser:
 		"""Every older ranking word the schema still publishes is one a map may write."""
 
 		where: dict[str, typing.Any] = {"reference": "BD0025"} if token == "similarity" else {"pitched": True}
+		process = [_QUANTISED] if token.startswith("quantized_beats") else None
 
 		result = _load(
 			tmp_path,
-			_map(assignments=[_assignment(select={"where": where, "order": token})]),
+			_map(assignments=[_assignment(select={"where": where, "order": token}, process=process)]),
 			references=["BD0025"],
 		)
 
@@ -1735,3 +1738,137 @@ class TestUnitsComeFromTheClosedSet:
 		}
 
 		assert declared == set(subsample.processors.UNITS)
+
+
+class TestTheReferenceAndTheLoaderAgree:
+
+	"""#4704 (L1, L3, L4 of the 2026-10-07 review): a map the reference allows loads, and one it refuses does not."""
+
+	_VALIDATOR = jsonschema.Draft202012Validator(_SCHEMA)
+
+	@pytest.mark.parametrize("select", [
+		pytest.param({"where": {"quantized_beats": 4}}, id="where-quantized_beats"),
+		pytest.param({"where": {"pitched": True}, "order": "quantized_beats_asc"}, id="order-quantized_beats"),
+		pytest.param(
+			{"where": {"pitched": True}, "order": [{"by": "beat_match", "pattern": [1, 0]}]},
+			id="order-beat_match",
+		),
+	])
+	def test_measuring_the_grid_without_a_quantiser_is_refused (
+		self, tmp_path: pathlib.Path, select: dict[str, typing.Any],
+	) -> None:
+
+		"""The reference says beat_match needs a quantise processor, and now the loader does.
+
+		Such an assignment loaded: with no tempo its note never played, and with
+		one each sample was ranked on a stretch to tempo.bpm it never played.
+		"""
+
+		with pytest.raises(ValueError, match="'Probe': .* needs a stretch_quantize or pad_quantize step"):
+			_load(tmp_path, _map(assignments=[_assignment(select=select)]))
+
+		assert _load(tmp_path, _map(assignments=[_assignment(select=select, process=[_QUANTISED])])) is not None
+
+	def test_assignments_all_commented_out_load_as_none (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""Step 3 of the shipped map has a new user comment its examples out.
+
+		That leaves `assignments:` empty, which YAML reads as null, and the map
+		was refused: "'assignments' must be a list, got NoneType".
+		"""
+
+		path = tmp_path / "midi-map.yaml"
+		path.write_text("assignments:\n  # - name: Kick\n  #   notes: 36\n", encoding="utf-8")
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			result = subsample.player.load_midi_map(path, [])
+
+		assert result.note_map == {}
+		assert any("has no assignments" in record.message for record in caplog.records if record.levelno == logging.WARNING)
+
+	@pytest.mark.parametrize(("notes", "expected"), [
+		pytest.param(["C1", "D2..E2"], [24, 38, 39, 40], id="a-range-in-a-list"),
+		pytest.param([36, "40..41"], [36, 40, 41], id="a-numbered-range-in-a-list"),
+	])
+	def test_a_range_may_stand_in_a_list_of_notes (
+		self, tmp_path: pathlib.Path, notes: list[typing.Any], expected: list[int],
+	) -> None:
+
+		"""The reference takes a range wherever it takes a note, and the loader refused one in a list."""
+
+		mapping = _map(assignments=[_assignment(notes=notes)])
+
+		assert self._VALIDATOR.is_valid(mapping)
+		assert sorted(note for _channel, note in _load(tmp_path, mapping).note_map) == expected
+
+	@pytest.mark.parametrize("silenced_by", [
+		pytest.param("C2..D2", id="a-range"),
+		pytest.param(["C2..D2"], id="a-range-in-a-list"),
+		pytest.param(["self", "C2..D2"], id="beside-self"),
+	])
+	def test_a_range_may_silence_a_note (
+		self, tmp_path: pathlib.Path, silenced_by: typing.Any,
+	) -> None:
+
+		"""A hat cut by any key from C2 to D2, which the reference allowed and the loader refused."""
+
+		mapping = _map(assignments=[_assignment(silenced_by=silenced_by)])
+
+		assert self._VALIDATOR.is_valid(mapping)
+
+		choke = _first(_load(tmp_path, mapping)).silenced_by
+
+		assert choke is not None
+		assert choke.notes == frozenset({36, 37, 38})
+
+	def test_a_zones_ends_are_single_notes (self, tmp_path: pathlib.Path) -> None:
+
+		"""Each end of a zone is one note, in the reference as in the loader, which says so."""
+
+		zone = {"mode": "zone-tuned", "range": ["C2..C3", "C4"]}
+		mapping = _map(assignments=[_assignment(notes=zone, process=[{"repitch": {}}])])
+
+		assert not self._VALIDATOR.is_valid(mapping)
+
+		with pytest.raises(ValueError, match="each a single note"):
+			_load(tmp_path, mapping)
+
+	def test_a_release_knob_runs_backwards_when_min_is_above_max (self, tmp_path: pathlib.Path) -> None:
+
+		"""A min above max turns a knob round, the reference says of every knob, release's too."""
+
+		mapping = _map(assignments=[_assignment(mode="gated", release={"cc": 72, "min": 3000, "max": 20})])
+
+		assert self._VALIDATOR.is_valid(mapping)
+
+		time = _release(_load(tmp_path, mapping)).time
+
+		assert isinstance(time, subsample.query.CcBinding)
+		assert time.resolve(0) == 3000.0
+		assert time.resolve(127) == 20.0
+
+	def test_a_curve_inside_a_knobs_time_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""The curve is the release's, beside time: written inside it, it was dropped for cosine."""
+
+		mapping = _map(assignments=[_assignment(
+			mode="gated", release={"time": {"cc": 72, "curve": "exponential"}},
+		)])
+
+		assert not self._VALIDATOR.is_valid(mapping)
+
+		with pytest.raises(ValueError, match="Write curve beside time"):
+			_load(tmp_path, mapping)
+
+	def test_an_output_written_as_a_mapping_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""`output: {1: 3}` loaded as its keys, playing on output 1 alone."""
+
+		mapping = _map(assignments=[_assignment(output={1: 3})])
+
+		assert not self._VALIDATOR.is_valid(mapping)
+
+		with pytest.raises(ValueError, match="output must be a list"):
+			_load(tmp_path, mapping)

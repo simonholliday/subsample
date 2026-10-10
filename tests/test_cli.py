@@ -35,6 +35,7 @@ import subsample.library
 import subsample.loopfind
 import subsample.osc
 import subsample.parallelism
+import subsample.performance
 import subsample.player
 import subsample.recorder
 import subsample.similarity
@@ -2170,6 +2171,40 @@ class TestPresetsLoadWithTheirMap:
 			for record in caplog.records
 		)
 
+	def test_a_program_too_large_for_the_memory_limit_is_named (
+		self, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4704 (L20 of the 2026-10-07 review): startup names a program that left samples out.
+
+		Its check compared the memory used with the limit, which leaving the
+		earliest samples out keeps it under, so it never fired, and it said they
+		would reload on switch, which nothing does.
+		"""
+
+		def _program (name: str, sounds: int) -> subsample.bank.Bank:
+			library = subsample.library.InstrumentLibrary(max_memory_bytes=1024 * 1024)
+
+			# 1 MB each, so the limit holds one.
+			for index in range(sounds):
+				library.add(_make_record(f"{name}-{index}", numpy.zeros((512 * 1024, 1), dtype=numpy.int16)))
+
+			bank = unittest.mock.MagicMock(spec=subsample.bank.Bank)
+			bank.name = name
+			bank.instrument_library = library
+
+			return typing.cast(subsample.bank.Bank, bank)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.cli"):
+			subsample.cli._warn_of_programs_left_out([_program("Brushes", 3), _program("Sticks", 1)], 1.0)
+
+		warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+
+		assert warnings == [
+			"Program 'Brushes': 2 sample(s) did not fit in library.max_memory_mb (1 MB) "
+			"and were left out, so it cannot play them - raise the limit to keep them",
+		]
+
 	def _build_program (
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, preset: str,
 		variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None,
@@ -2952,6 +2987,43 @@ class TestWaitForShutdown:
 		assert subsample.cli._wait_for_shutdown(event, []) is False
 		assert event.is_set(), "every subsystem is told to stop"
 		assert "Stopping" in capsys.readouterr().out
+
+
+class TestAPlayerThatFailsToStart:
+
+	def test_it_is_unpublished_so_nothing_sends_it_notes (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+
+		"""#4704 (L7 of the 2026-10-07 review): a player whose audio never opened stays out of reach.
+
+		It was left published, so OSC notes went on piling up in it while the
+		recorder kept the run alive.
+		"""
+
+		def _fails (self: subsample.player.MidiPlayer) -> None:
+			raise OSError("Invalid sample rate")
+
+		monkeypatch.setattr(subsample.player.MidiPlayer, "run", _fails)
+		monkeypatch.setattr(subsample.performance, "power_saving", lambda: None)
+
+		cfg = _default_cfg()
+		cfg = dataclasses.replace(cfg, player=dataclasses.replace(
+			cfg.player, enabled=True, midi_map=str(tmp_path / "map.yaml"), virtual_midi_port="Subsample test",
+		))
+		references = subsample.library.ReferenceLibrary([])
+		cell: list[typing.Optional[subsample.player.MidiPlayer]] = [None]
+
+		subsample.cli._start_player(
+			cfg, threading.Event(), subsample.library.InstrumentLibrary(10**8),
+			subsample.similarity.SimilarityMatrix(references, cfg.similarity), references, cell,
+			preloaded_midi_map_result=subsample.player.MidiMapResult(
+				note_map={}, bank_definitions=[], bank_channel=10,
+			),
+		)
+
+		assert cell[0] is None
+		assert "Error starting player: Invalid sample rate" in capsys.readouterr().err
 
 
 class TestAMapSavedWhileThePlayerStarts:

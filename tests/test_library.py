@@ -565,6 +565,27 @@ class TestInstrumentLibrary:
 		assert lib.get(r2.sample_id) is r2
 		assert lib.get(r3.sample_id) is r3
 
+	def test_it_counts_what_it_left_out_for_memory (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4704 (L20): what the limit drops is counted, and a replaced sample is not.
+
+		A program's startup check reads the count, to name a program that cannot
+		play some of its samples.
+		"""
+
+		lib = subsample.library.InstrumentLibrary(max_memory_bytes=4000)  # fits two
+
+		for name in ("A", "B", "C", "D"):
+			lib.add(_make_instrument_record(name, n_frames=1000))
+
+		assert lib.left_out == 2
+
+		path = tmp_path / "kick.wav"
+		lib.add(_make_instrument_record("kick", n_frames=1000, filepath=path))
+		lib.add(_make_instrument_record("kick", n_frames=1000, filepath=path))
+
+		assert lib.left_out == 3
+
 	def test_add_returns_evicted_ids (self) -> None:
 		limit = 2000  # fits one 1000-frame int16 record
 		lib = subsample.library.InstrumentLibrary(max_memory_bytes=limit)

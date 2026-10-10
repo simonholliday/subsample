@@ -55,6 +55,10 @@ def _player (clock: _Clock) -> subsample.player.MidiPlayer:
 	player._clock = clock
 	player._limiter_enabled = False
 
+	# The test plays the audio callback itself, so its stream counts as open,
+	# as run() marks a real one: an OSC note before that plays nothing.
+	player._stream_open.set()
+
 	return player
 
 

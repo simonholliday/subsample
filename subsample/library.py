@@ -244,6 +244,9 @@ class InstrumentLibrary:
 		self._name_index: dict[str, int] = {}
 		self._total_bytes: int = 0
 		self._max_bytes: int = max_memory_bytes
+		# Samples dropped to keep within the limit, which nothing brings back
+		# (#4704, L20): a program's startup check reads it.
+		self._left_out: int = 0
 		# Protects multi-step add/evict operations: the recorder's writer thread
 		# calls add() while the main thread may call samples() or get().
 		self._lock = threading.Lock()
@@ -351,6 +354,7 @@ class InstrumentLibrary:
 						del self._name_index[old_record.name]
 
 					evicted.append(oldest_id)
+					self._left_out += 1
 
 			self._index[record.sample_id] = record
 			if key_path is not None:
@@ -455,6 +459,14 @@ class InstrumentLibrary:
 		"""Configured maximum audio memory in bytes."""
 
 		return self._max_bytes
+
+	@property
+	def left_out (self) -> int:
+
+		"""How many samples have been dropped to keep within the memory limit, oldest first."""
+
+		with self._lock:
+			return self._left_out
 
 	def format_memory (self) -> str:
 

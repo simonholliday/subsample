@@ -704,6 +704,99 @@ class TestMidiPlayer:
 		unfreeze.assert_called_once()
 		assert "Player: the audio stream did not close cleanly at shutdown: [Errno -9999] Unanticipated host error" in caplog.messages
 
+	def _run_with_buffer_frames (self, mock_pa: unittest.mock.MagicMock) -> subsample.player.MidiPlayer:
+
+		"""Run a player asking for 128-frame buffers, with its shutdown already set."""
+
+		shutdown_event = threading.Event()
+		shutdown_event.set()
+
+		player = subsample.player.MidiPlayer(
+			"Test Device", shutdown_event,
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map={}, sample_rate=44100, bit_depth=16, buffer_frames=128,
+		)
+
+		with self._patch_open_input(self._make_mock_port()):
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+				player.run()
+
+		return player
+
+	def test_a_device_that_refuses_its_rate_is_not_blamed_on_the_buffer_size (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""#4704 (L6 of the 2026-10-07 review): only a buffer size the device refuses is blamed on it.
+
+		Any failure to open was put down to player.audio.buffer_frames, and a
+		device that refused the sample rate then failed anyway, after sending
+		the user to tune the buffer.
+		"""
+
+		mock_pa = self._make_mock_pyaudio()
+		mock_pa.open.side_effect = OSError(-9997, "Invalid sample rate")
+
+		with caplog.at_level(logging.ERROR, logger="subsample.player"):
+			with pytest.raises(OSError, match="Invalid sample rate"):
+				self._run_with_buffer_frames(mock_pa)
+
+		assert not any("buffer_frames" in message for message in caplog.messages)
+		mock_pa.terminate.assert_called_once()
+
+	def test_a_buffer_size_the_device_refuses_falls_back_to_its_own (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""The device opens without the size asked for, so the size is what it refused."""
+
+		mock_pa = self._make_mock_pyaudio()
+		stream = mock_pa.open.return_value
+		mock_pa.open.side_effect = [OSError(-9999, "Unanticipated host error"), stream]
+
+		with caplog.at_level(logging.ERROR, logger="subsample.player"):
+			player = self._run_with_buffer_frames(mock_pa)
+
+		assert "frames_per_buffer" not in mock_pa.open.call_args_list[1].kwargs
+		assert player._buffer_frames is None
+		assert any("PortAudio rejected buffer_frames=128" in message for message in caplog.messages)
+
+	def test_an_osc_note_before_the_stream_opens_plays_nothing (self) -> None:
+
+		"""#4704 (L7 of the 2026-10-07 review): notes wait for the audio to open.
+
+		One sent while the player started waited for the first buffer, then
+		sounded at once with every other early note; and a player whose stream
+		never opened went on collecting them.
+		"""
+
+		player = self._make_player(threading.Event())
+		handled = unittest.mock.MagicMock()
+		player._handle_message = handled  # type: ignore[method-assign]
+
+		player.play_osc_note(True, 9, 36, 0.8, time.time())
+
+		handled.assert_not_called()
+
+	def test_the_stream_counts_as_open_only_while_it_is (self) -> None:
+
+		"""Open while run() holds the stream, and shut again once it has closed it."""
+
+		shutdown_event = threading.Event()
+		player = self._make_player(shutdown_event)
+		mock_pa = self._make_mock_pyaudio()
+
+		with self._patch_open_input(self._make_mock_port()):
+			with unittest.mock.patch("subsample.audio.create_pyaudio", return_value=mock_pa):
+				runner = threading.Thread(target=player.run)
+				runner.start()
+
+				try:
+					assert player._stream_open.wait(timeout=5.0)
+				finally:
+					shutdown_event.set()
+					runner.join(timeout=5.0)
+
+		assert not runner.is_alive()
+		assert not player._stream_open.is_set()
+
 	def test_run_on_thread_exits_cleanly (self) -> None:
 		shutdown_event = threading.Event()
 		port = self._make_mock_port()
@@ -8229,26 +8322,24 @@ class TestBuildEnergyProfileResolver:
 		assert spec.steps[0].target_bpm == 90.0
 		assert spec.steps[0].resolution == 16
 
-	def test_session_bpm_fallback_when_no_quantize_step (self) -> None:
-		"""No quantize step but session_bpm > 0 → fall back to session-level
-		TimeStretch at the default grid (matches _build_beats_resolver)."""
+	def test_no_quantize_step_gives_no_resolver_whatever_the_tempo (self) -> None:
+		"""No quantize step means no grid to measure, even with a session tempo.
+
+		With one, the profile used to come from a stretch to tempo.bpm that the
+		note never played, a render per candidate nobody heard (#4704, L1); such
+		a map is now refused at load."""
+
 		process = subsample.query.ProcessSpec(steps=(
 			subsample.query.ProcessorStep(name="repitch"),
 		))
 		transform_manager = unittest.mock.MagicMock()
-		transform_manager.get_variant.return_value = unittest.mock.MagicMock(
-			energy_profile=self._profile(),
-		)
 
 		resolver = subsample.player._build_energy_profile_resolver(
 			process, transform_manager=transform_manager, session_bpm=140.0,
 		)
-		assert resolver is not None
-		resolver(1)
 
-		_, spec = transform_manager.get_variant.call_args[0]
-		assert isinstance(spec.steps[0], subsample.transform.TimeStretch)
-		assert spec.steps[0].target_bpm == 140.0
+		assert resolver is None
+		transform_manager.get_variant.assert_not_called()
 
 	def test_resolver_returns_profile_from_variant (self) -> None:
 		profile = self._profile(energy=(0.9, 0.1, 0.8, 0.2))
@@ -9864,6 +9955,7 @@ class TestTheTimingThreadsAskForRealTimePriority:
 
 		asked  = self._asking(monkeypatch, granted=True)
 		player = _make_player_for_mix_matrix()
+		player._stream_open.set()
 
 		self._on_a_thread(lambda: player._safe_handle_message(mido.Message("note_on", channel=9, note=36, velocity=100)))
 		self._on_a_thread(lambda: player.play_osc_note(True, 9, 36, 0.8, time.time()))
@@ -10674,34 +10766,73 @@ class TestDeclaredBeatCount:
 	def _process (step: dict[str, typing.Any]) -> subsample.query.ProcessSpec:
 		return subsample.query.parse_process([{"stretch_quantize": step}], "test")
 
-	def test_the_count_is_read_from_the_step (self) -> None:
-		assert subsample.player._quantize_beats(self._process({"beats": 8, "grid": 32})) == 8.0
+	@staticmethod
+	def _count (
+		process: subsample.query.ProcessSpec,
+		cc_omni: typing.Optional[dict[int, int]] = None,
+	) -> typing.Optional[float]:
 
-	def test_a_step_without_one_reads_as_none (self) -> None:
+		"""The beat count the quantized_beats filter and order read for a sample.
+
+		Its rendered variant measures 2 beats (8 sixteenths), so a count the step
+		declares reads as itself, and one it does not reads as 2.0."""
+
+		manager = unittest.mock.MagicMock(spec=subsample.transform.TransformManager)
+		manager.get_variant.return_value = unittest.mock.MagicMock(
+			energy_profile=subsample.transform.GridEnergyProfile(
+				bpm=120.0, resolution=16, energy=(1.0,) * 8,
+			),
+		)
+
+		resolver = subsample.player._build_beats_resolver(process, manager, 120.0, cc_omni=cc_omni)
+
+		assert resolver is not None
+		return resolver(1)
+
+	def test_the_count_is_read_from_the_step (self) -> None:
+		assert self._count(self._process({"beats": 8, "grid": 32})) == 8.0
+
+	def test_a_step_without_one_is_measured (self) -> None:
 
 		"""Absence is a different rule, not a value: the length then follows the
-		sample's own detected tempo."""
+		sample's own detected tempo, so the render is measured."""
 
-		assert subsample.player._quantize_beats(self._process({"grid": 16})) is None
+		assert self._count(self._process({"grid": 16})) == 2.0
 
 	def test_another_processor_is_not_mistaken_for_it (self) -> None:
 		process = subsample.query.parse_process([{"pad_quantize": {"grid": 16}}], "test")
 
-		assert subsample.player._quantize_beats(process) is None
+		assert self._count(process) == 2.0
 
-	def test_a_knob_resting_unset_reads_as_no_count (self) -> None:
+	def test_a_knob_resting_unset_is_measured (self) -> None:
 
 		"""Until the knob moves the step has no beat count, which is exactly what
 		a binding with no default rests at."""
 
 		process = self._process({"beats": {"cc": 20, "min": 2, "max": 16}})
 
-		assert subsample.player._quantize_beats(process) is None
+		assert self._count(process) == 2.0
 
 	def test_a_knob_with_a_resting_place_reads_at_it (self) -> None:
 		process = self._process({"beats": {"cc": 20, "min": 2, "max": 16, "default": 8}})
 
-		assert subsample.player._quantize_beats(process) == 8.0
+		assert self._count(process) == 8.0
+
+	def test_a_knob_that_has_moved_reads_where_it_is_as_the_render_does (self) -> None:
+
+		"""The filter reads the count the note renders with (#4704, L2).
+
+		Read from the step as the map wrote it, the count stayed at the knob's
+		resting place, 8, while the render followed the knob to 16: a filter
+		for 16 beats dropped every sample whose render filled 16, and kept
+		those for 8, which played 16."""
+
+		process = self._process({"beats": {"cc": 20, "min": 2, "max": 16, "default": 8}})
+		rendered = subsample.transform.spec_from_process(process, target_bpm=120.0, cc_omni={20: 127})
+
+		assert isinstance(rendered.steps[0], subsample.transform.TimeStretch)
+		assert rendered.steps[0].beats == 16.0
+		assert self._count(process, cc_omni={20: 127}) == 16.0
 
 	def test_a_knob_still_opens_the_gate_for_a_sample_with_no_tempo (self) -> None:
 
@@ -10715,7 +10846,12 @@ class TestDeclaredBeatCount:
 		process = self._process({"beats": {"cc": 20, "min": 2, "max": 16}, "grid": 32})
 
 		assert subsample.player._declares_beats(process) is True
-		assert subsample.player._quantize_beats(process) is None
+
+		resting = subsample.player._scored_spec(process, 120.0)
+
+		assert resting is not None
+		assert isinstance(resting.steps[0], subsample.transform.TimeStretch)
+		assert resting.steps[0].beats is None
 
 		spec = subsample.transform.spec_from_process(
 			process, target_bpm=120.0, cc_omni={20: 100},
@@ -10731,12 +10867,8 @@ class TestDeclaredBeatCount:
 
 		process = self._process({"beats": 8, "grid": 32})
 		compiled = subsample.transform.spec_from_process(process, target_bpm=120.0)
-		lookup_step = subsample.transform.TimeStretch(
-			target_bpm=120.0, resolution=32,
-			beats=subsample.player._quantize_beats(process),
-		)
 
-		assert compiled.steps[0] == lookup_step
+		assert subsample.player._scored_spec(process, 120.0) == compiled
 
 	def _player (self) -> subsample.player.MidiPlayer:
 
@@ -10858,3 +10990,55 @@ class TestTheScoredVariantIsThePlayedOne:
 		trigger = subsample.transform.spec_from_process(process, target_bpm=120.0, resolution=8)
 
 		assert self._looked_up(process) == trigger
+
+	def test_a_vocoder_on_the_reference_is_in_the_scored_chain (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4704 (L1 of the 2026-10-07 review): the player scores the chain with its carrier.
+
+		The lookup was never told the reference, so `carrier: reference` dropped
+		the vocoder from the chain it scored, and said the carrier was missing.
+		"""
+
+		reference = tmp_path / "voice.wav"
+		reference.write_bytes(b"")
+
+		assignment = subsample.query.Assignment(
+			name="Voiced loops",
+			select=(subsample.query.SelectSpec(
+				where=subsample.query.WherePredicate(reference=str(reference)),
+				order=(subsample.query.OrderClause(
+					by="beat_match", dir="desc", params=(("pattern", (1.0, 0.0)),),
+				),),
+			),),
+			process=self._process([
+				{"stretch_quantize": {"tempo": 120, "grid": 16}},
+				{"vocoder": {"carrier": "reference"}},
+			]),
+			mode="gated",
+		)
+
+		player = subsample.player.MidiPlayer(
+			"Test Device", threading.Event(),
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map={}, sample_rate=44100, bit_depth=16,
+		)
+
+		record = unittest.mock.MagicMock()
+		record.sample_id = 7
+		record.channel_format = None
+		_mock(player._instrument_library.samples).return_value = [record]
+
+		manager = unittest.mock.MagicMock(spec=subsample.transform.TransformManager)
+		manager.get_variant.return_value = None
+		player._transform_manager = manager
+
+		player._resolve_sample_id(assignment, subsample.query.PickSpec(1, 1), player._instrument_library, 100)
+
+		scored = [call.args[1] for call in manager.get_variant.call_args_list]
+
+		assert scored
+		assert all(
+			any(isinstance(step, subsample.transform.Vocoder) for step in spec.steps)
+			for spec in scored
+		)

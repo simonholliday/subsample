@@ -481,13 +481,12 @@ def _declares_beats (process: subsample.query.ProcessSpec) -> bool:
 
 	"""True when a stretch_quantize step declares a beat count at all, knob or number.
 
-	This is what the render gate asks, and it is deliberately not
-	``_quantize_beats(...) is not None``.  That reads the value, and a CC
-	binding with no ``default:`` rests unset and reads as None until the knob
-	moves — so a gate keyed on the value would drop the step before the knob
-	could ever raise it, and the knob would do nothing for the samples the beat
-	count exists for.  Whether a count is declared does not change with a
-	controller.
+	This is what the render gate asks, and it deliberately does not read the
+	value.  A CC binding with no ``default:`` rests unset and reads as None
+	until the knob moves, so a gate keyed on the value would drop the step
+	before the knob could ever raise it, and the knob would do nothing for the
+	samples the beat count exists for.  Whether a count is declared does not
+	change with a controller.
 	"""
 
 	step = next((s for s in process.steps if s.name == "stretch_quantize"), None)
@@ -495,33 +494,25 @@ def _declares_beats (process: subsample.query.ProcessSpec) -> bool:
 	return step is not None and step.get("beats") is not None
 
 
-def _quantize_beats (process: subsample.query.ProcessSpec) -> typing.Optional[float]:
+def _beat_rule (select_specs: tuple[subsample.query.SelectSpec, ...]) -> typing.Optional[str]:
 
-	"""The beat count a stretch_quantize step is set to now, or None if it has no value yet.
+	"""The first rule in these selects that measures a quantised sound, as the map writes it, or None.
 
-	Used where an actual number is needed: the variant built for scoring has to
-	carry the same count as the one that renders, or they are two different
-	variants and the score never finds its audio.
-
-	A CC-bound count reads at the value the knob rests at, the same way the
-	tempo does, and a binding resting unset reads as None — which is correct
-	here, and is why the gate asks ``_declares_beats`` instead.
+	``where: quantized_beats``, ``order: quantized_beats`` and
+	``order: beat_match`` each read the grid the assignment's quantiser
+	renders, so each needs one (#4704, L1).
 	"""
 
-	step = next((s for s in process.steps if s.name == "stretch_quantize"), None)
+	for spec in select_specs:
 
-	if step is None:
-		return None
+		if not spec.where.quantized_beats.is_empty():
+			return "where: quantized_beats"
 
-	raw = step.get("beats")
+		for clause in spec.order:
+			if clause.by in ("quantized_beats", "beat_match"):
+				return f"order: {clause.by}"
 
-	if isinstance(raw, subsample.query.CcBinding):
-		raw = raw.default_value
-
-	if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-		return None
-
-	return float(raw) if raw > 0 else None
+	return None
 
 
 # MIDI clock runs at 24 pulses per quarter note, so the span of 24 pulses is
@@ -707,70 +698,61 @@ class _MidiClockTracker:
 		return bpm
 
 
-def _build_variant_lookup (
+def _scored_spec (
 	process: subsample.query.ProcessSpec,
-	transform_manager: typing.Optional[subsample.transform.TransformManager],
 	session_bpm: float,
 	cc_state: typing.Optional[dict[tuple[int, int], int]] = None,
 	cc_omni: typing.Optional[dict[int, int]] = None,
-) -> typing.Optional[typing.Callable[[int], typing.Optional[subsample.transform.TransformResult]]]:
+	reference_path: typing.Optional[str] = None,
+) -> typing.Optional[subsample.transform.TransformSpec]:
 
-	"""Shared core for the quantize-aware resolvers below.
+	"""The variant an assignment's quantise step renders, built as its note builds it, or None.
 
-	Inspects ``process`` for the active quantize step (``stretch_quantize`` /
-	``pad_quantize``) and falls back to the session-level stretch_quantize
-	when neither is configured but the session has a global ``target_bpm``.
-	Returns a callable that, given a sample_id, returns the matching
-	``TransformResult`` from the transform manager — or ``None`` when no
-	variant exists yet (manager still processing) or when none of the above
-	conditions yield a usable BPM.
+	None when the process has no ``stretch_quantize`` or ``pad_quantize``, or
+	no usable tempo.  A map that ranks by the grid without a quantiser is
+	refused at load (#4704, L1), so there is then no grid to measure.
 	"""
 
-	if transform_manager is None:
+	if not (process.has_stretch_quantize() or process.has_pad_quantize()):
 		return None
 
-	spec: subsample.transform.TransformSpec
+	name = "stretch_quantize" if process.has_stretch_quantize() else "pad_quantize"
+	bpm, grid = _quantize_params(process, name, session_bpm)
 
-	if process.has_stretch_quantize() or process.has_pad_quantize():
-		name = "stretch_quantize" if process.has_stretch_quantize() else "pad_quantize"
-		bpm, grid = _quantize_params(process, name, session_bpm)
-
-		if bpm is None or bpm <= 0:
-			return None
-
-		# The WHOLE chain, built the way the trigger builds it.  This used to be
-		# a bare quantize step at full strength, which is a different variant
-		# from the one a note plays whenever the map says anything else —
-		# `strength:`, a filter, a knob that has moved.  So `beat_match` ranked
-		# candidates on a render nobody would ever hear, and every candidate
-		# enqueued a rubberband render that was never played.
-		#
-		# repitch is left out: it depends on the note, and this scores an
-		# assignment rather than a note.  A chain with repitch therefore still
-		# looks up a variant the trigger will not use, which is the one case
-		# left and is no worse than it was.
-		spec = subsample.transform.spec_from_process(
-			process,
-			target_bpm=float(bpm),
-			resolution=int(grid),
-			cc_state=cc_state,
-			cc_omni=cc_omni,
-		)
-
-		if not spec.steps:
-			return None
-
-	elif session_bpm > 0:
-		# No quantize step in the map at all: the session-level stretch is a
-		# synthetic spec by construction, so it is built by hand.
-		spec = subsample.transform.TransformSpec(steps=(
-			subsample.transform.TimeStretch(
-				target_bpm=float(session_bpm), resolution=_DEFAULT_QUANTIZE_GRID,
-			),
-		))
-
-	else:
+	if bpm is None or bpm <= 0:
 		return None
+
+	# The WHOLE chain, built the way the trigger builds it.  This used to be
+	# a bare quantize step at full strength, which is a different variant
+	# from the one a note plays whenever the map says anything else —
+	# `strength:`, a filter, a knob that has moved.  So `beat_match` ranked
+	# candidates on a render nobody would ever hear, and every candidate
+	# enqueued a rubberband render that was never played.  The vocoder's
+	# `carrier: reference` comes too: left out, the scored chain dropped the
+	# vocoder, and said its carrier was missing (#4704, L1).
+	#
+	# repitch is left out: it depends on the note, and this scores an
+	# assignment rather than a note.  A chain with repitch therefore still
+	# looks up a variant the trigger will not use, which is the one case
+	# left and is no worse than it was.
+	spec = subsample.transform.spec_from_process(
+		process,
+		target_bpm=float(bpm),
+		resolution=int(grid),
+		reference_path=reference_path,
+		cc_state=cc_state,
+		cc_omni=cc_omni,
+	)
+
+	return spec if spec.steps else None
+
+
+def _variant_lookup (
+	transform_manager: subsample.transform.TransformManager,
+	spec: subsample.transform.TransformSpec,
+) -> typing.Callable[[int], typing.Optional[subsample.transform.TransformResult]]:
+
+	"""A callable giving each sample's variant for this spec, or None until it is rendered."""
 
 	def _lookup (sample_id: int) -> typing.Optional[subsample.transform.TransformResult]:
 
@@ -785,29 +767,74 @@ def _build_variant_lookup (
 	return _lookup
 
 
+def _build_variant_lookup (
+	process: subsample.query.ProcessSpec,
+	transform_manager: typing.Optional[subsample.transform.TransformManager],
+	session_bpm: float,
+	cc_state: typing.Optional[dict[tuple[int, int], int]] = None,
+	cc_omni: typing.Optional[dict[int, int]] = None,
+	reference_path: typing.Optional[str] = None,
+) -> typing.Optional[typing.Callable[[int], typing.Optional[subsample.transform.TransformResult]]]:
+
+	"""Shared core for the quantize-aware resolvers below.
+
+	Returns a callable that, given a sample_id, returns the variant the
+	assignment's quantize step renders (see ``_scored_spec``) from the
+	transform manager, or ``None`` while it is still rendering.  Returns None
+	instead of a callable when there is no transform manager or no such
+	variant.
+	"""
+
+	if transform_manager is None:
+		return None
+
+	spec = _scored_spec(process, session_bpm, cc_state, cc_omni, reference_path)
+
+	if spec is None:
+		return None
+
+	return _variant_lookup(transform_manager, spec)
+
+
 def _build_beats_resolver (
 	process: subsample.query.ProcessSpec,
 	transform_manager: typing.Optional[subsample.transform.TransformManager],
 	session_bpm: float,
 	cc_state: typing.Optional[dict[tuple[int, int], int]] = None,
 	cc_omni: typing.Optional[dict[int, int]] = None,
+	reference_path: typing.Optional[str] = None,
 ) -> typing.Optional[typing.Callable[[int], typing.Optional[float]]]:
 
 	"""Build a callable returning the quantized beat count for a sample.
 
-	Used by the ``quantized_beats`` order scorer.  Beat count is derived
-	from the variant's ``GridEnergyProfile`` length as
-	``len(energy) * 4 / resolution``.
+	Used by the ``quantized_beats`` order scorer and filter.  A ``beats:``
+	on the stretch is the count, read at the knob's value where it is
+	CC-bound; without one, the count is derived from the variant's
+	``GridEnergyProfile`` length as ``len(energy) * 4 / resolution``.
 
 	Returns None (not a callable) when no valid quantize step is present,
 	no transform manager is available, or the effective BPM is 0.
 	"""
 
-	lookup = _build_variant_lookup(process, transform_manager, session_bpm, cc_state, cc_omni)
-	if lookup is None:
+	if transform_manager is None:
 		return None
 
-	declared = _quantize_beats(process)
+	spec = _scored_spec(process, session_bpm, cc_state, cc_omni, reference_path)
+
+	if spec is None:
+		return None
+
+	lookup = _variant_lookup(transform_manager, spec)
+
+	# The count the render is given, from the spec that renders it.  Read from
+	# the step as the map wrote it, a CC-bound count stayed at the knob's
+	# resting place while the render followed the knob, so the filter kept
+	# samples for one length and the note played another, or nothing
+	# (#4704, L2).  A count resting unset is None, and is measured instead.
+	declared = next(
+		(step.beats for step in spec.steps if isinstance(step, subsample.transform.TimeStretch)),
+		None,
+	)
 
 	if declared is not None:
 
@@ -843,6 +870,7 @@ def _build_energy_profile_resolver (
 	session_bpm: float,
 	cc_state: typing.Optional[dict[tuple[int, int], int]] = None,
 	cc_omni: typing.Optional[dict[int, int]] = None,
+	reference_path: typing.Optional[str] = None,
 ) -> typing.Optional[typing.Callable[[int], typing.Optional[subsample.transform.GridEnergyProfile]]]:
 
 	"""Build a callable returning the full GridEnergyProfile for a sample.
@@ -855,7 +883,9 @@ def _build_energy_profile_resolver (
 	no transform manager is available, or the effective BPM is 0.
 	"""
 
-	lookup = _build_variant_lookup(process, transform_manager, session_bpm, cc_state, cc_omni)
+	lookup = _build_variant_lookup(
+		process, transform_manager, session_bpm, cc_state, cc_omni, reference_path,
+	)
 	if lookup is None:
 		return None
 
@@ -1057,8 +1087,10 @@ def _parse_output_routing (
 		return None
 
 	# A scalar (`output: 3`) must fail the documented ValueError contract,
-	# not leak a TypeError past the startup/hot-reload catch sites.
-	if isinstance(raw, (str, int, float, bool)) or not hasattr(raw, "__iter__"):
+	# not leak a TypeError past the startup/hot-reload catch sites.  A mapping
+	# is no list either: `output: {1: 3}` used to load as its keys, channel 1
+	# alone (#4704, L4).
+	if not isinstance(raw, list):
 		raise ValueError(
 			f"MIDI map assignment {assignment_name!r}: output must be a list of "
 			f"1-indexed channel numbers (got {raw!r})"
@@ -1304,7 +1336,7 @@ def _parse_release (
 		if "cc" in raw and "time" not in raw:
 			unknown = set(raw).difference(_RELEASE_CC_SHORTHAND_KEYS)
 			allowed = _RELEASE_CC_SHORTHAND_KEYS
-			time_raw: typing.Any = raw
+			time_raw: typing.Any = {key: value for key, value in raw.items() if key != "curve"}
 		else:
 			unknown = set(raw).difference(RELEASE_INNER_KEYS)
 			allowed = RELEASE_INNER_KEYS
@@ -1346,14 +1378,17 @@ def _parse_release_time (
 		# Sweep unknown keys here too.  The `release: {cc: ...}` shorthand is
 		# swept by _parse_release, but the nested `release: {time: {cc: ...}}`
 		# form reaches this parser directly, so a typo like `minn:` was silently
-		# discarded and the knob kept a default floor of 0 ms.
-		unknown = set(raw).difference(_RELEASE_CC_SHORTHAND_KEYS)
+		# discarded and the knob kept a default floor of 0 ms.  A `curve:` is
+		# the release's, not the knob's: written in here it was accepted and
+		# dropped, so the release kept its cosine (#4704, L4).
+		unknown = set(raw).difference(subsample.query.CC_BINDING_KEYS)
 
 		if unknown:
+			hint = "  Write curve beside time, not inside it." if "curve" in unknown else ""
 			raise ValueError(
 				f"MIDI map assignment {assignment_name!r}: unknown release time "
 				f"key(s) {sorted(unknown)}.  Valid keys: "
-				f"{sorted(_RELEASE_CC_SHORTHAND_KEYS)}."
+				f"{sorted(subsample.query.CC_BINDING_KEYS)}.{hint}"
 			)
 
 		# Re-raise numeric-coercion errors with the assignment name and offending
@@ -1396,11 +1431,8 @@ def _parse_release_time (
 					f"{label} {value} must be a finite value >= 0 ms"
 				)
 
-		if min_val > max_val:
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: release time min "
-				f"({min_val}) must be <= max ({max_val})"
-			)
+		# A min above max turns the knob round, as on every other knob (#4704,
+		# L4): turned up, the release shortens.  The binding runs either way.
 
 		if not (0 <= cc_num <= 127):
 			raise ValueError(
@@ -1720,8 +1752,8 @@ def _parse_silenced_by (
 
 	"""Parse the ``silenced_by:`` field into a ChokeSpec (or None).
 
-	Accepts a single note, a list of notes, the token ``self``, and ``self``
-	freely mixed into a list.  Notes reuse the ``notes:`` resolver, so
+	Accepts a single note or range, a list of them, the token ``self``, and
+	``self`` freely mixed into a list.  Notes reuse the ``notes:`` resolver, so
 	``drum.hi_hat_closed`` / ``42`` / ``C3`` all resolve identically and an
 	unknown symbol or out-of-range note fails loudly at load.  ``self`` means
 	the assignment's own note(s) choke its own voices (single physical
@@ -1749,7 +1781,9 @@ def _parse_silenced_by (
 				f"must be a note (e.g. drum.hi_hat_closed, 42, C3) or 'self', "
 				f"got {item!r}"
 			)
-		notes.add(_parse_single_note(item, assignment_name, namespaces))
+		# A range cuts on any of its notes (#4704, L4), as the reference has
+		# always allowed: silenced_by: C2..C3.
+		notes.update(_parse_note_item(item, assignment_name, namespaces))
 
 	if not is_self and not notes:
 		# An empty list (or a list of nothing but stripped-away tokens) means no
@@ -2276,6 +2310,15 @@ def _parse_zone_notes (
 			f"2-element list [lo, hi], got {range_raw!r}"
 		)
 
+	# Each end is one note.  A range there was refused as a malformed note
+	# name, and the reference now refuses it too (#4704, L4).
+	for end in range_raw:
+		if _is_note_range(end):
+			raise ValueError(
+				f"MIDI map assignment {assignment_name!r}: a zone's range is its "
+				f"low note and its high note, each a single note, got {end!r}"
+			)
+
 	lo = _parse_single_note(range_raw[0], assignment_name, namespaces)
 	hi = _parse_single_note(range_raw[1], assignment_name, namespaces)
 
@@ -2302,7 +2345,7 @@ def _parse_note_spec (
 	  GM drum symbol:   "drum.kick_1"       → [36]   (case-insensitive)
 	  Numeric range:    "36..60"            → [36, 37, ..., 60]
 	  Note name range:  "C2..C4"            → [36, 37, ..., 60]
-	  List (mixed):     [36, "C3", "drum.snare_1"]  → [36, 48, 38]
+	  List (mixed):     [36, "C3..D3", "drum.snare_1"]  → [36, 48, 49, 50, 38]
 
 	Range syntax is intentionally not supported for symbolic notes — drum
 	names aren't sequential, use a list instead.
@@ -2323,32 +2366,8 @@ def _parse_note_spec (
 		ValueError: If any note value is malformed or outside [0, 127].
 	"""
 
-	# Range syntax: "C2..C4" or "36..60".  Reject symbolic ranges explicitly so
-	# the user gets a targeted error pointing at list syntax, rather than the
-	# generic "not a valid note name" from the inner _parse_single_note() call.
-	if isinstance(notes_raw, str) and ".." in notes_raw:
-
-		lo_str, hi_str = notes_raw.split("..", 1)
-
-		# Either end being symbolic makes the range meaningless — drum names
-		# are not a musical sequence ("36..drum.kick_1" is as invalid as
-		# "drum.kick_1..drum.snare_1").
-		if "." in lo_str or "." in hi_str:
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: "
-				f"range syntax (a..b) is not supported for symbolic notes - "
-				f"use a list instead, e.g. [drum.kick_1, drum.snare_1]"
-			)
-		lo = _parse_single_note(lo_str.strip(), assignment_name, namespaces)
-		hi = _parse_single_note(hi_str.strip(), assignment_name, namespaces)
-
-		if lo > hi:
-			raise ValueError(
-				f"MIDI map assignment {assignment_name!r}: note range {notes_raw!r} - "
-				f"start ({lo}) must be <= end ({hi})"
-			)
-
-		return list(range(lo, hi + 1))
+	if _is_note_range(notes_raw):
+		return _parse_note_range(notes_raw, assignment_name, namespaces)
 
 	# Reject bool explicitly: YAML `yes`/`no` parse to True/False, and bool is
 	# an int subclass, so `notes: yes` would otherwise silently map note 1.
@@ -2381,7 +2400,73 @@ def _parse_note_spec (
 			f"contain at least one note"
 		)
 
-	return [_parse_single_note(item, assignment_name, namespaces) for item in notes_raw]
+	# A range may stand in a list as it does alone (#4704, L4), as the map
+	# reference has always said: [C1, D2..F2].
+	return [
+		note
+		for item in notes_raw
+		for note in _parse_note_item(item, assignment_name, namespaces)
+	]
+
+
+def _is_note_range (raw: typing.Any) -> bool:
+
+	"""True when a note as the map writes it is a range, such as ``C2..C4`` or ``36..60``."""
+
+	return isinstance(raw, str) and ".." in raw
+
+
+def _parse_note_range (
+	text: str,
+	assignment_name: str,
+	namespaces: typing.Optional[typing.Mapping[str, typing.Mapping[str, int]]] = None,
+) -> list[int]:
+
+	"""Parse a range such as ``C2..C4`` or ``36..60`` into its MIDI note numbers, low to high.
+
+	Raises:
+		ValueError: If an end is symbolic, malformed or outside [0, 127], or
+		            the range runs high to low.
+	"""
+
+	lo_str, hi_str = text.split("..", 1)
+
+	# Either end being symbolic makes the range meaningless — drum names are
+	# not a musical sequence ("36..drum.kick_1" is as invalid as
+	# "drum.kick_1..drum.snare_1").  Said here, the user gets a targeted error
+	# pointing at list syntax, rather than the generic "not a valid note name"
+	# from the inner _parse_single_note() call.
+	if "." in lo_str or "." in hi_str:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: "
+			f"range syntax (a..b) is not supported for symbolic notes - "
+			f"use a list instead, e.g. [drum.kick_1, drum.snare_1]"
+		)
+
+	lo = _parse_single_note(lo_str.strip(), assignment_name, namespaces)
+	hi = _parse_single_note(hi_str.strip(), assignment_name, namespaces)
+
+	if lo > hi:
+		raise ValueError(
+			f"MIDI map assignment {assignment_name!r}: note range {text!r} - "
+			f"start ({lo}) must be <= end ({hi})"
+		)
+
+	return list(range(lo, hi + 1))
+
+
+def _parse_note_item (
+	item: typing.Any,
+	assignment_name: str,
+	namespaces: typing.Optional[typing.Mapping[str, typing.Mapping[str, int]]] = None,
+) -> list[int]:
+
+	"""Parse one entry of a list of notes, a single note or a range, into its MIDI note numbers."""
+
+	if _is_note_range(item):
+		return _parse_note_range(item, assignment_name, namespaces)
+
+	return [_parse_single_note(item, assignment_name, namespaces)]
 
 
 def _load_reference_from_path (path: pathlib.Path) -> typing.Optional[subsample.library.SampleRecord]:
@@ -3290,7 +3375,10 @@ def load_midi_map (
 		(not bank_definitions) or bool(directory_programs)
 	) and raw.get("maps") is None
 
-	if "assignments" not in raw:
+	# An `assignments:` whose entries are all commented out, as step 3 of the
+	# shipped map has a new user do, reads as null, and is the same as none
+	# (#4704, L3).  It was refused as "must be a list, got NoneType".
+	if raw.get("assignments") is None:
 		if needs_top_assignments and directory_programs:
 			raise ValueError(
 				f"MIDI map {path}: 'assignments:' is required because program(s) "
@@ -3429,17 +3517,21 @@ def load_midi_map (
 		# Parse process block (optional — defaults to no processing).
 		process = subsample.query.parse_process(assignment_raw.get("process"), name, definitions)
 
-		# A where.quantized_beats filter measures the beat-length of the
-		# assignment's quantize OUTPUT, so without a stretch_quantize/pad_quantize
-		# step the resolver always returns None and the note is permanently silent.
-		# Warn at load rather than leave a dead note with no diagnostic.
+		# quantized_beats and beat_match measure the sound as the assignment's
+		# own quantiser puts it on the grid, so without one there is nothing to
+		# measure (#4704, L1).  Such an assignment used to load: with no tempo
+		# nothing ever qualified, so its note was silent, and with one every
+		# sample was ranked on a stretch to tempo.bpm that its note never
+		# played, each costing a render nobody heard.  The reference says it
+		# needs a quantise processor, so the map is refused, as it says.
 		if not (process.has_stretch_quantize() or process.has_pad_quantize()):
-			if any(not spec.where.quantized_beats.is_empty() for spec in select_specs):
-				_log.warning(
-					"MIDI map assignment %r: a where.quantized_beats filter has no "
-					"stretch_quantize/pad_quantize step to measure against - the note "
-					"will never match a sample.  Add a quantize step or drop the filter.",
-					name,
+			beat_rule = _beat_rule(select_specs)
+
+			if beat_rule is not None:
+				raise ValueError(
+					f"MIDI map assignment {name!r}: {beat_rule} needs a "
+					f"stretch_quantize or pad_quantize step in the process, to put "
+					f"the sound on the grid it measures - add one, or drop {beat_rule}"
 				)
 
 		mode, loop_override = _parse_mode(assignment_raw, name, process)
@@ -4890,6 +4982,12 @@ class MidiPlayer:
 		self._osc_far_ahead_warned: float = float("-inf")
 		self._osc_waiting_full_warned: float = float("-inf")
 
+		# Set while the output stream is open, which is when an OSC note may
+		# play: one arriving before it opened waited for the first buffer and
+		# then sounded at once with every other early note, and a player whose
+		# stream never opened kept every note it was sent (#4704, L7).
+		self._stream_open: threading.Event = threading.Event()
+
 		# Impact timing (#604): when a timed note that landed its hit late was
 		# last warned about (monotonic), and the furthest any timed note's sound
 		# has had to start early, which the warning names as the lead the set
@@ -5457,24 +5555,32 @@ class MidiPlayer:
 			try:
 				stream = pa.open(**open_kwargs)
 			except OSError as exc:
-				if "frames_per_buffer" in open_kwargs:
-					_log.error(
-						"PortAudio rejected buffer_frames=%d (%s) - falling back "
-						"to the device default.  Lower or omit player.audio."
-						"buffer_frames in config.yaml.",
-						self._buffer_frames, exc,
-					)
-					open_kwargs.pop("frames_per_buffer")
-
-					# Clear the stored value too: the stream now runs at the
-					# device default, and the xrun warning reports this field —
-					# keeping the rejected number would send the user tuning a
-					# knob that isn't in effect.
-					self._buffer_frames = None
-
-					stream = pa.open(**open_kwargs)
-				else:
+				if "frames_per_buffer" not in open_kwargs:
 					raise
+
+				# The buffer size is to blame only if the device opens without
+				# it.  Blamed first, a device that refused the sample rate, or
+				# was busy, sent the user tuning buffer_frames, and then failed
+				# anyway (#4704, L6).
+				open_kwargs.pop("frames_per_buffer")
+
+				try:
+					stream = pa.open(**open_kwargs)
+				except OSError:
+					raise exc from None
+
+				_log.error(
+					"PortAudio rejected buffer_frames=%d (%s) - falling back "
+					"to the device default.  Lower or omit player.audio."
+					"buffer_frames in config.yaml.",
+					self._buffer_frames, exc,
+				)
+
+				# Clear the stored value too: the stream now runs at the
+				# device default, and the xrun warning reports this field —
+				# keeping the rejected number would send the user tuning a
+				# knob that isn't in effect.
+				self._buffer_frames = None
 
 			# Report the latency PortAudio actually negotiated for the stream —
 			# the floor between a queued voice and sound at the DAC.  This is
@@ -5490,6 +5596,8 @@ class MidiPlayer:
 				)
 			except Exception as exc:
 				_log.debug("Could not query output latency: %s", exc)
+
+			self._stream_open.set()
 
 			# Open the MIDI input port in callback mode.  rtmidi delivers each
 			# message to ``_safe_handle_message`` on its own dedicated thread
@@ -5544,6 +5652,8 @@ class MidiPlayer:
 			# stream that fails to stop once its USB device is unplugged
 			# must not leave PortAudio open or the heap frozen, nor report
 			# itself as a failure to start.
+			self._stream_open.clear()
+
 			try:
 				if port is not None:
 					try:
@@ -6231,8 +6341,13 @@ class MidiPlayer:
 		decimal velocity is for (#603).  Any velocity above 0 is at least 1,
 		so a quiet note is never read as a note-off.  The first note asks for
 		real-time priority for the receiver's thread, as the MIDI thread's
-		first message does (#4659).
+		first message does (#4659).  A note before the output stream has
+		opened, or after it closed, plays nothing.
 		"""
+
+		if not self._stream_open.is_set():
+			_log.debug("OSC note before the audio output opened - not played")
+			return
 
 		ahead = when - time.time()
 		at    = self._clock() + ahead
@@ -7464,11 +7579,15 @@ class MidiPlayer:
 		# scored is the variant that plays.
 		cc_state_now, cc_omni_now = self._snapshot_cc_state()
 
+		reference_path = _reference_wav_path(assignment)
+
 		beats_resolver = _build_beats_resolver(
 			assignment.process, eff_transform, self._target_bpm, cc_state_now, cc_omni_now,
+			reference_path,
 		)
 		energy_profile_resolver = _build_energy_profile_resolver(
 			assignment.process, eff_transform, self._target_bpm, cc_state_now, cc_omni_now,
+			reference_path,
 		)
 
 		for select_spec in assignment.select:
@@ -7600,11 +7719,15 @@ class MidiPlayer:
 
 				seen.add(assignment_id)
 
+				reference_path = _reference_wav_path(assignment)
+
 				beats_resolver = _build_beats_resolver(
 					assignment.process, eff_transform, self._target_bpm, cc_state_now, cc_omni_now,
+					reference_path,
 				)
 				energy_profile_resolver = _build_energy_profile_resolver(
 					assignment.process, eff_transform, self._target_bpm, cc_state_now, cc_omni_now,
+					reference_path,
 				)
 
 				ranked: list[subsample.library.SampleRecord] = []
