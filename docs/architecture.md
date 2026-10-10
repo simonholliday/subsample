@@ -80,8 +80,9 @@ many (`cli._drain_captures`, #4702).
   print cut the shutdown short.
 - **systemd.** Its default `KillMode=control-group` sends SIGTERM to the workers
   too. Workers keep SIGTERM, since a pool ends a broken worker with it, so a
-  capture being analysed is lost there. `KillMode=mixed` sends SIGTERM to
-  Subsample alone.
+  capture being analysed loses its analysis there: its audio is saved without
+  it and analysed at the next start (`SampleProcessor._save_unanalysed`,
+  #4703). `KillMode=mixed` sends SIGTERM to Subsample alone, which keeps both.
 
 Details a change here has to keep:
 
@@ -375,7 +376,11 @@ The OSC receiver takes `/sample/import` messages on one thread and imports them
 on another, one at a time and in order, with at most 64 waiting. At stop it drops
 those still waiting and gives the one being analysed ten seconds to finish; one
 that finishes later is not added, since shutdown has begun. The analysis runs on
-an analysis worker process (see Watchers).
+an analysis worker process (see Watchers). Its dispatcher is not strict
+(python-osc 1.10.2's `strict_timing=False`, #4703): a strict one sleeps on the
+server's thread until a bundle's time, so one import timed an hour ahead held
+every import after it for the hour, and stop() could not end it. Its stop waits
+a bounded time for the serve loop too.
 
 A second OSC receiver, `OscNoteReceiver` on its own port, takes `/note/on` and
 `/note/off` (#3610, #603). It reads each packet itself, walking bundles with
@@ -391,7 +396,11 @@ serialises the receiver's thread with the MIDI thread, since `_handle_message`
 is written for one at a time; a MIDI message is stamped before it waits. The
 velocity, 0 to 1, picks a velocity layer scaled to 0-127 and reaches the gain
 and a velocity pick unrounded. A note timed ahead is handled at once, and its
-voice waits in `_voices` until its time comes round.
+voice waits in `_voices` until its time comes round. At most 1,000 voices wait
+(`_OSC_WAITING_LIMIT`, #4703): past that a timed note is refused, with a warning
+once a minute. The audio callback walks every voice each buffer, so 30,000
+notes timed an hour ahead, as a sender whose clock is an hour out reaches at 8
+a second, took 5.5 to 7 ms of a 10 ms buffer.
 
 ### Note timing
 
@@ -754,3 +763,9 @@ envelopes and shares (the strata heights come from
 times, the accent colour and the badge's text.  Only a change in envelope
 resolution or spectral band count requires a `preview.version` bump.  A sample
 with no `preview` block still plays back and analyses identically.
+
+The tools (`import`, `catalog`, `similar`, `loops`, `analyze`) write sidecars
+without a preview. With previews on, the app's load gives such a sidecar its
+preview from the stored analysis and the audio (`cache._add_preview`, #4703),
+the same preview a full analysis draws; it ran the whole analysis and the loop
+search again for every file a tool had just analysed.

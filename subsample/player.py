@@ -137,6 +137,13 @@ _RELEASE_EXP_K: float = 9.0
 _OSC_FAR_AHEAD_SECONDS:         float = 2.0
 _OSC_FAR_AHEAD_WARNING_SECONDS: float = 60.0
 
+# How many voices may wait for their time at once; an OSC note timed ahead past
+# that is refused, with a warning at most once a minute (#4703, M29).  Waiting
+# voices had no limit, and the audio callback walks every voice each buffer:
+# 30,000 notes timed an hour ahead, as a sender whose clock is an hour out
+# reaches at 8 notes a second, took 5.5 to 7 ms of a 10 ms buffer.
+_OSC_WAITING_LIMIT: typing.Final[int] = 1000
+
 # A timed note sent too late for its sound to start early enough lands its hit
 # late, and is warned about at most once a minute (#604).  A shortfall under a
 # millisecond is not: nobody hears it, and the span a buffer plays can end that
@@ -4881,6 +4888,7 @@ class MidiPlayer:
 
 		# When an OSC note timed far ahead was last warned about (monotonic).
 		self._osc_far_ahead_warned: float = float("-inf")
+		self._osc_waiting_full_warned: float = float("-inf")
 
 		# Impact timing (#604): when a timed note that landed its hit late was
 		# last warned about (monotonic), and the furthest any timed note's sound
@@ -6240,6 +6248,24 @@ class MidiPlayer:
 					"OSC note timed %.1f s ahead - it will wait that long.  Is the "
 					"sending machine's clock in step with this one's?", ahead,
 				)
+
+		# A voice waits for its time with starts_at set, which the callback
+		# clears as it starts.  Counted only for a note that would wait too.
+		if on and velocity > 0.0 and ahead > 0.0:
+			with self._voices_lock:
+				waiting = sum(1 for voice in self._voices if voice.starts_at is not None)
+
+			if waiting >= _OSC_WAITING_LIMIT:
+				now = time.monotonic()
+
+				if now - self._osc_waiting_full_warned >= _OSC_FAR_AHEAD_WARNING_SECONDS:
+					self._osc_waiting_full_warned = now
+					_log.warning(
+						"OSC note timed %.1f s ahead ignored: %d notes are already waiting to play.  "
+						"Is the sending machine's clock in step with this one's?", ahead, waiting,
+					)
+
+				return
 
 		fine: typing.Optional[float] = None
 

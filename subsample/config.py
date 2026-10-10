@@ -592,8 +592,11 @@ class OscConfig:
 	"""UDP port the note receiver listens on."""
 
 	notes_host: str = "127.0.0.1"
-	"""Interface the note receiver binds to.  "0.0.0.0" is safer here than for
-	receive_host: a note can only play a sound."""
+	"""Interface the note receiver binds to.  "0.0.0.0" is safer than for
+	receive_host, as a note can only play a sound, but any host that can reach
+	the port can play (and 1,000 notes timed ahead may wait at most,
+	player._OSC_WAITING_LIMIT, #4703),
+	so only on a trusted network."""
 
 
 @dataclasses.dataclass(frozen=True)

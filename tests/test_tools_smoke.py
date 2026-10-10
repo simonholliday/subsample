@@ -141,6 +141,70 @@ class TestLoopsSmoke:
 		assert rc == 1
 
 
+class TestLoopAuditionsReplaceNothing:
+
+	"""`subsample loops --render DIR` writes over nothing it was not told to (#4703, M30).
+
+	It wrote `<stem>_loop.wav` over whatever had that name, a real sample
+	included, and samples of one name in different folders over each other's.
+	"""
+
+	def _pad (self, path: pathlib.Path) -> None:
+
+		"""Two seconds of a steady harmonic tone, which has a clean loop."""
+
+		path.parent.mkdir(parents=True, exist_ok=True)
+		t = numpy.arange(2 * 44100) / 44100.0
+		tone = numpy.zeros_like(t)
+
+		for harmonic in range(1, 6):
+			tone += numpy.sin(2.0 * numpy.pi * 220.0 * harmonic * t) / harmonic
+
+		soundfile.write(str(path), (0.2 * tone).astype(numpy.float32), 44100, subtype="PCM_16")
+
+	def test_a_file_already_there_is_kept_and_said (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+	) -> None:
+		monkeypatch.chdir(tmp_path)
+		self._pad(tmp_path / "src" / "pad.wav")
+		real = tmp_path / "out" / "pad_loop.wav"
+		real.parent.mkdir(parents=True)
+		_write_tone(real)
+		before = real.read_bytes()
+
+		assert subsample.tools.suggest_loops.main([str(tmp_path / "src"), "--render", str(tmp_path / "out"), "--all"]) == 0
+
+		said = capsys.readouterr().err
+
+		assert real.read_bytes() == before
+		assert (tmp_path / "out" / "pad_loop_butt.wav").exists()
+		assert f"{real}: already exists - not written (--force replaces it)" in said
+		assert "1 not written as they already exist (--force replaces them)" in said
+
+	def test_force_replaces_it (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.chdir(tmp_path)
+		self._pad(tmp_path / "src" / "pad.wav")
+		real = tmp_path / "out" / "pad_loop.wav"
+		real.parent.mkdir(parents=True)
+		_write_tone(real)
+		before = real.read_bytes()
+
+		assert subsample.tools.suggest_loops.main([str(tmp_path / "src"), "--render", str(tmp_path / "out"), "--all", "--force"]) == 0
+
+		assert real.read_bytes() != before
+
+	def test_samples_of_one_name_keep_their_own_folders (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.chdir(tmp_path)
+		self._pad(tmp_path / "src" / "a" / "pad.wav")
+		self._pad(tmp_path / "src" / "b" / "pad.wav")
+
+		assert subsample.tools.suggest_loops.main([str(tmp_path / "src"), "--render", str(tmp_path / "out"), "--all"]) == 0
+
+		assert sorted(str(path.relative_to(tmp_path / "out")) for path in (tmp_path / "out").rglob("*.wav")) == [
+			"a/pad_loop.wav", "a/pad_loop_butt.wav", "b/pad_loop.wav", "b/pad_loop_butt.wav",
+		]
+
+
 class TestSimilarSmoke:
 
 	def test_similar_no_references_returns_one (

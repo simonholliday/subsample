@@ -53,9 +53,10 @@
 #                               # read/load - only do so on a trusted LAN.
 #   notes_enabled: false
 #   notes_port: 9003
-#   notes_host: "127.0.0.1"     # loopback by default; "0.0.0.0" is safer here
-#                               # than for receive_host: a note can only play
-#                               # a sound.
+#   notes_host: "127.0.0.1"     # loopback by default; "0.0.0.0" is safer than
+#                               # for receive_host, as a note can only play a
+#                               # sound, but any host that can reach the port
+#                               # can play - only on a trusted LAN.
 
 # ---------------------------------------------------------------------------
 # ambisonic - first-order B-format (AmbiX) rotation and decoding

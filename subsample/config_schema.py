@@ -164,8 +164,10 @@ def json_schema () -> dict[str, typing.Any]:
 						"""
 						Network interface the note receiver binds to.  The default
 						accepts notes from this machine only.  `0.0.0.0` accepts them
-						from other hosts as well, which is safer here than for
-						`receive_host`: a note can only play a sound.
+						from other hosts as well.  That is safer than for
+						`receive_host`, as a note can only play a sound, but any host
+						that can reach the port can play, so open it only on a network
+						you trust.
 						""",
 						default="127.0.0.1",
 						examples=["0.0.0.0"],

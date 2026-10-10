@@ -327,9 +327,14 @@ def save_cache (
 		bit_depth=bit_depth, channels=channels, captured_at=captured_at,
 		channel_format=channel_format, preview_data=preview_data, loop=loop, cut_from=cut_from,
 	)
-	json_str = json.dumps(payload, indent=2)
+	_write_payload(cache_path(audio_path), payload)
 
-	sidecar = cache_path(audio_path)
+
+def _write_payload (sidecar: pathlib.Path, payload: dict[str, typing.Any]) -> None:
+
+	"""Write a sidecar's payload all at once: to a temp file beside it, then renamed into place."""
+
+	json_str = json.dumps(payload, indent=2)
 
 	# Write to a temp file in the same directory, then rename atomically.
 	# os.replace() is atomic on POSIX (same filesystem); on Windows it is
@@ -584,6 +589,61 @@ def _reanalyze_and_save (
 	)
 
 
+def _add_preview (
+	audio_path:     pathlib.Path,
+	payload:        dict[str, typing.Any],
+	channel_format: str,
+) -> SampleAssets | None:
+
+	"""Give a fresh sidecar the preview block it lacks, from its own analysis and the audio, and draw the PNG.
+
+	A sidecar that cannot be read, or audio that cannot, is analysed afresh
+	instead, as it was before (#4703, M31).
+	"""
+
+	assets = _deserialize_payload(payload, cache_path(audio_path).name)
+
+	if assets is None:
+		return _reanalyze_and_save(
+			audio_path, cached_version=None, silent=True,
+			channel_format=channel_format, with_preview=True, cut_from=_cut_from_in(payload),
+		)
+
+	channel_index = 0 if channel_format.startswith("b_format_") else None
+
+	try:
+		file_info = subsample.audio.read_audio_file(audio_path)
+		mono = subsample.analysis.to_mono_float(file_info.audio, file_info.bit_depth, channel_index=channel_index)
+		preview_data = subsample.preview.compute_preview_data(
+			mono, file_info.sample_rate,
+			assets.rhythm, assets.pitch, assets.spectral, assets.level, assets.band_energy,
+			duration=assets.duration,
+		)
+	except Exception as exc:
+		_log.info("Could not draw a preview for %s from its analysis (%s) - analysing it again", audio_path.name, exc)
+
+		return _reanalyze_and_save(
+			audio_path, cached_version=None, silent=True,
+			channel_format=channel_format, with_preview=True, cut_from=_cut_from_in(payload),
+		)
+
+	payload = dict(payload, preview=subsample.preview.serialize_for_sidecar(preview_data))
+
+	try:
+		_write_payload(cache_path(audio_path), payload)
+	except OSError as exc:
+		_log.warning("Could not add a preview to the sidecar of %s: %s", audio_path.name, exc)
+
+	png_path = audio_path.with_name(audio_path.name + PREVIEW_PNG_SUFFIX)
+
+	try:
+		subsample.preview.render_png(preview_data, png_path)
+	except Exception as exc:
+		_log.warning("Failed to render preview PNG %s: %s", png_path.name, exc)
+
+	return assets
+
+
 def ensure_sample_assets (
 	audio_path: pathlib.Path,
 	*,
@@ -684,13 +744,12 @@ def ensure_sample_assets (
 			audio_changed     = True,
 		)
 
+	# A fresh sidecar without a preview, as the tools write them, gets one made
+	# from its analysis and the audio (#4703, M31): a full re-analysis, as it
+	# was, ran the whole analysis and the loop search again for every file a
+	# tool had just analysed.
 	if with_preview and "preview" not in payload:
-		return _reanalyze_and_save(
-			audio_path,
-			channel_format    = prior_channel_format,
-			with_preview      = with_preview,
-			cut_from          = _cut_from_in(payload),
-		)
+		return _add_preview(audio_path, payload, prior_channel_format)
 
 	# Sidecar is fresh and complete.  If a PNG is wanted but missing, re-
 	# render it from the embedded preview block — cheap and avoids touching

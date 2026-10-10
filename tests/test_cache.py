@@ -485,6 +485,44 @@ class TestEnsureSampleAssets:
 		assert "preview" in payload
 		assert self._png_path(wav_path).exists()
 
+	def test_a_tools_sidecar_gets_its_preview_without_a_new_analysis (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""A tool's sidecar has no preview; the app's load draws one from it, analysing nothing again (#4703, M31).
+
+		With previews on, as they are by default, every file a tool had just
+		analysed was analysed again in full at the next start.
+		"""
+
+		wav_path = tmp_path / "pad.wav"
+		t = numpy.arange(22050) / 44100.0
+		tone = 0.5 * numpy.sin(2.0 * numpy.pi * 220.0 * t) * numpy.exp(-3.0 * t)
+		soundfile.write(str(wav_path), tone.astype(numpy.float32), 44100, subtype="PCM_16")
+
+		# As a full analysis would draw it, for comparison.
+		twin = tmp_path / "twin" / "pad.wav"
+		twin.parent.mkdir()
+		twin.write_bytes(wav_path.read_bytes())
+		subsample.cache.ensure_sample_assets(twin, with_preview=True)
+
+		subsample.cache.ensure_sample_assets(wav_path, with_preview=False)
+		sidecar = subsample.cache.cache_path(wav_path)
+		before  = json.loads(sidecar.read_text())
+
+		def _analysed (*_args: object, **_kwargs: object) -> typing.NoReturn:
+			raise AssertionError("analysed again")
+
+		monkeypatch.setattr(subsample.analysis, "analyze_all", _analysed)
+
+		result = subsample.cache.ensure_sample_assets(wav_path, with_preview=True)
+		after  = json.loads(sidecar.read_text())
+
+		assert result is not None
+		assert self._png_path(wav_path).exists()
+		assert after["preview"] == json.loads(subsample.cache.cache_path(twin).read_text())["preview"]
+		assert {key: value for key, value in after.items() if key != "preview"} == before
+
 	def test_very_short_audio_analyzed_not_raised (self, tmp_path: pathlib.Path) -> None:
 		"""A readable-but-very-short file (a few ms) analyses to a flat-featured
 		result instead of crashing the analysis pipeline.  It USED to raise a

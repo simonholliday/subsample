@@ -12,7 +12,11 @@ is given:
   <stem>_loop.wav       start -> loop x N with the 30 ms linear crossfade
   <stem>_loop_butt.wav  the same loop with NO crossfade (raw butt joint)
 
-so you can A/B whether the crossfade earns its place on your material.
+so you can A/B whether the crossfade earns its place on your material.  Each
+goes in the folder its sample was found in, under DIR, so samples of one name in
+different folders keep their own, and a file already there is not replaced
+unless --force is given (#4703, M30): renders wrote over whatever had their
+name, a real sample included.
 
 Usage:
 	subsample loops /path/to/samples           # report only
@@ -38,39 +42,56 @@ import subsample.tools._shared
 _log = logging.getLogger(__name__)
 
 
-def _collect_audio_files (paths: list[pathlib.Path]) -> list[pathlib.Path]:
+def _collect_audio_files (paths: list[pathlib.Path]) -> list[tuple[pathlib.Path, pathlib.Path]]:
 
-	"""Expand each argument (file or directory) into a sorted audio-file list."""
+	"""Expand each argument (file or directory) into a sorted audio-file list, each with its folder below the argument."""
 
-	found: list[pathlib.Path] = []
+	found: list[tuple[pathlib.Path, pathlib.Path]] = []
 
 	for p in paths:
 		if p.is_dir():
 			found.extend(
-				q for q in sorted(p.rglob("*"))
+				(q, q.parent.relative_to(p)) for q in sorted(p.rglob("*"))
 				if q.is_file() and q.suffix.lower() in subsample.cache.AUDIO_EXTENSIONS
 			)
 		elif p.is_file() and p.suffix.lower() in subsample.cache.AUDIO_EXTENSIONS:
-			found.append(p)
+			found.append((p, pathlib.Path()))
 		else:
 			print(f"Skipping {p}: not an audio file or directory", file=sys.stderr)
 
 	return found
 
 
-def _render (path: pathlib.Path, loop: subsample.loopfind.LoopPoints, audio: numpy.ndarray, sr: int, out_dir: pathlib.Path) -> None:
+def _render (
+	path:    pathlib.Path,
+	loop:    subsample.loopfind.LoopPoints,
+	audio:   numpy.ndarray,
+	sr:      int,
+	out_dir: pathlib.Path,
+	force:   bool,
+) -> int:
 
-	"""Write the crossfaded and butt-joint audition renders for one sample."""
+	"""Write the crossfaded and butt-joint audition renders for one sample; how many were not written, as they exist.
+
+	A file already there is replaced only with ``force`` (#4703, M30): a
+	render wrote over a real sample of its name.
+	"""
 
 	out_dir.mkdir(parents=True, exist_ok=True)
 
-	crossfaded = subsample.loopfind.render_audition(audio, loop, sr)
-	soundfile.write(str(out_dir / f"{path.stem}_loop.wav"), crossfaded, sr)
+	butt_loop = subsample.loopfind.LoopPoints(loop.start, loop.end, 0, loop.junction_flux)
+	kept      = 0
 
-	butt = subsample.loopfind.render_audition(
-		audio, subsample.loopfind.LoopPoints(loop.start, loop.end, 0, loop.junction_flux), sr,
-	)
-	soundfile.write(str(out_dir / f"{path.stem}_loop_butt.wav"), butt, sr)
+	for target, points in ((out_dir / f"{path.stem}_loop.wav", loop), (out_dir / f"{path.stem}_loop_butt.wav", butt_loop)):
+
+		if target.exists() and not force:
+			print(f"{target}: already exists - not written (--force replaces it)", file=sys.stderr)
+			kept += 1
+			continue
+
+		soundfile.write(str(target), subsample.loopfind.render_audition(audio, points, sr), sr)
+
+	return kept
 
 
 # What the output means, printed at the end of --help and published with it on
@@ -103,7 +124,14 @@ def parser () -> argparse.ArgumentParser:
 	command.add_argument("paths", type=pathlib.Path, nargs="+", help="Audio files or directories")
 	command.add_argument(
 		"--render", type=pathlib.Path, default=None, metavar="DIR",
-		help="Also write audition WAVs (crossfaded + butt-joint) to DIR",
+		help=(
+			"Also write audition WAVs (crossfaded + butt-joint) to DIR, each in the folder its "
+			"sample was found in; a file already there is not replaced"
+		),
+	)
+	command.add_argument(
+		"--force", action="store_true",
+		help="Replace audition WAVs already in DIR",
 	)
 	command.add_argument(
 		"--all", action="store_true",
@@ -138,9 +166,9 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		print("No audio files found.", file=sys.stderr)
 		return 1
 
-	n_candidates = n_found = 0
+	n_candidates = n_found = n_kept = 0
 
-	for path in files:
+	for path, folder in files:
 		assets = subsample.cache.ensure_sample_assets(path, with_preview=False)
 
 		if assets is None:
@@ -185,11 +213,13 @@ def main (argv: typing.Optional[list[str]] = None) -> int:
 		)
 
 		if args.render is not None:
-			_render(path, loop, audio, sr, args.render)
+			n_kept += _render(path, loop, audio, sr, args.render / folder, args.force)
 
 	summary = f"{n_found} loop(s) found across {n_candidates} candidate(s)"
 	if args.render is not None:
 		summary += f"; auditions in {args.render}"
+		if n_kept:
+			summary += f", {n_kept} not written as they already exist (--force replaces them)"
 	print(summary, file=sys.stderr)
 
 	return 0

@@ -476,7 +476,7 @@ _PARSERS: dict[str, tuple[str, list[str]]] = {
 	),
 	"subsample.tools.suggest_loops": (
 		"subsample loops",
-		["-h", "--help", "paths", "--render", "--all", "--config"],
+		["-h", "--help", "paths", "--render", "--force", "--all", "--config"],
 	),
 }
 

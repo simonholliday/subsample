@@ -226,6 +226,42 @@ class TestOscReceiver:
 
 		return receiver, receiver._server.server_address[1]
 
+	def test_a_bundle_timed_ahead_holds_up_nothing (self) -> None:
+
+		"""An import in a bundle timed an hour ahead is queued at once, and the one after it is not held (#4703, M28).
+
+		The dispatcher slept on the server's thread until the bundle's time,
+		so every import after it waited the hour, and stop() could not end it.
+		"""
+
+		import socket
+
+		received: list[str] = []
+		both = threading.Event()
+
+		def on_import (path: str) -> None:
+			received.append(path)
+
+			if len(received) == 2:
+				both.set()
+
+		receiver, port = self._make_receiver(on_import)
+		sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+		try:
+			sender.sendto(_bundle(time.time() + 3600.0, ("/sample/import", ["/tmp/later.wav"])), ("127.0.0.1", port))
+			sender.sendto(_bundle(time.time(), ("/sample/import", ["/tmp/now.wav"])), ("127.0.0.1", port))
+
+			assert both.wait(timeout=5.0), "an import was held"
+
+		finally:
+			sender.close()
+			started = time.monotonic()
+			receiver.stop()
+
+		assert received == ["/tmp/later.wav", "/tmp/now.wav"]
+		assert time.monotonic() - started < 5.0
+
 	def test_start_stop_lifecycle (self) -> None:
 		"""Receiver starts and stops cleanly."""
 

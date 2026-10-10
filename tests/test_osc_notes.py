@@ -128,6 +128,49 @@ class TestTheTimeANoteIsMeantFor:
 		assert len(handled.calls) == 3
 		assert len([record for record in caplog.records if "ahead" in record.message]) == 1
 
+	def test_notes_timed_ahead_wait_a_thousand_at_most (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""Past that a timed note is refused, said once a minute, and a note on its own still plays (#4703, M29).
+
+		Waiting voices had no limit, and the audio callback walks every voice
+		each buffer: 30,000 timed an hour ahead took 5.5 to 7 ms of a 10 ms one.
+		"""
+
+		player, handled, _clock = _player_handling()
+		monkeypatch.setattr(time, "time", lambda: 1000.0)
+
+		for _ in range(subsample.player._OSC_WAITING_LIMIT):
+			timing._voice(player, starts_at=3700.0, length=16)
+
+		with caplog.at_level(logging.WARNING, logger="subsample.player"):
+			player.play_osc_note(True, 9, 36, 0.5, 4600.0, True)
+			player.play_osc_note(True, 9, 36, 0.5, 4600.0, True)
+			player.play_osc_note(True, 9, 36, 0.5, 1000.0)
+			player.play_osc_note(False, 9, 36, 0.0, 4600.0, True)
+
+		refused = [record.getMessage() for record in caplog.records if "already waiting" in record.getMessage()]
+
+		assert [call[0].type for call in handled.calls] == ["note_on", "note_off"]
+		assert handled.calls[0][1] == pytest.approx(100.0)
+		assert refused == [
+			"OSC note timed 3600.0 s ahead ignored: 1000 notes are already waiting to play.  "
+			"Is the sending machine's clock in step with this one's?",
+		]
+
+	def test_below_the_limit_a_note_timed_ahead_waits_as_asked (self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		player, handled, _clock = _player_handling()
+		monkeypatch.setattr(time, "time", lambda: 1000.0)
+
+		for _ in range(subsample.player._OSC_WAITING_LIMIT - 1):
+			timing._voice(player, starts_at=3700.0, length=16)
+
+		player.play_osc_note(True, 9, 36, 0.5, 4600.0, True)
+
+		assert handled.calls[0][1] == pytest.approx(3700.0)
+
 
 class TestVelocity:
 

@@ -173,7 +173,19 @@ class OscReceiver:
 		import pythonosc.dispatcher
 		import pythonosc.osc_server
 
-		dispatcher = pythonosc.dispatcher.Dispatcher()
+		# Not strict: a strict dispatcher sleeps on the server's thread until a
+		# bundle's time, so one bundle timed an hour ahead held every import
+		# after it for that hour, and stop() could not end it (#4703, M28).
+		# An import has no time to keep; it is queued as it arrives.
+		try:
+			dispatcher = pythonosc.dispatcher.Dispatcher(strict_timing=False)
+		except TypeError:
+			dispatcher = pythonosc.dispatcher.Dispatcher()
+			_log.warning(
+				"python-osc is older than 1.10.2, so a /sample/import in a bundle timed ahead "
+				"holds the imports after it until that time - pip install 'python-osc>=1.10.2'",
+			)
+
 		dispatcher.map("/sample/import", self._handle_import)
 
 		self._on_import = on_import
@@ -221,8 +233,15 @@ class OscReceiver:
 			self._server.server_close()
 			return
 
-		self._server.shutdown()
+		# Bounded too: BaseServer.shutdown() waits for the serve loop with no
+		# limit, and a loop held in a handler would hold shutdown with it.
+		stopping = threading.Thread(target=self._server.shutdown, name="osc-receiver-stop", daemon=True)
+		stopping.start()
+		stopping.join(timeout=_STOP_WAIT_SECONDS)
 		self._thread.join(timeout=5.0)
+
+		if self._thread.is_alive():
+			_log.warning("OSC receiver did not stop listening in time - it is abandoned")
 
 		# shutdown() only stops the serve loop; server_close() releases the
 		# bound UDP socket so a later start on the same port can rebind.
