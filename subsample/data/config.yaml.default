@@ -517,14 +517,15 @@ analysis:
   # curve only; they do not constrain the tempo reported here or filtered on by where.tempo.
 
   tempo_min: 30.0
-  # Minimum tempo (BPM) considered during beat detection.
-  # Tempos below this are not detected, even if present in the audio.
-  # Range: 10-100 BPM. Typical: 30-60 BPM for slow music.
+  # Slowest tempo (BPM) the pulse detector considers when it looks for beats.
+  # It does not bound the tempo reported for a sample, or filtered on by
+  # where.tempo: that comes from beat tracking, which start_bpm seeds.
+  # Must be below tempo_max.
 
   tempo_max: 300.0
-  # Maximum tempo (BPM) considered during beat detection.
-  # Tempos above this are not detected, even if present in the audio.
-  # Range: 150-300 BPM. Typical: 200-300 BPM for fast music.
+  # Fastest tempo (BPM) the pulse detector considers when it looks for beats.
+  # Like tempo_min, it does not bound the tempo reported for a sample.
+  # Must be above tempo_min.
 
 # similarity:
 #   weight_spectral: 1.0
@@ -661,9 +662,10 @@ analysis:
 #   auto_pitch: true
 #   # When true, pitch-shifted variants are pre-computed for every MIDI note in the
 #   # assigned range (e.g. all 128 notes for C-1..G9). Requires rubberband-cli.
-#   # Pitch playback still works with this disabled - notes fall back to on-the-fly
-#   # rendering (slower, higher CPU at trigger time). Set to false if rubberband-cli
-#   # is not installed or you prefer lazy rendering over background pre-computation.
+#   # When false, only the notes played are rendered: each note's pitch is made
+#   # the first time it plays, and until it is ready that note sounds at the pitch
+#   # last played, or at the sample's own. Set to false if rubberband-cli is not
+#   # installed, or to spare the work of rendering every note ahead.
 #
 #   quantize_resolution: 16
 #   # Default grid subdivision for stretch_quantize / pad_quantize processors

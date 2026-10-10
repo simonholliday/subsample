@@ -967,7 +967,9 @@ def json_schema () -> dict[str, typing.Any]:
 						Renders pitch-shifted variants of each tonal sample for every
 						note in its assigned range ahead of time, with Rubber Band.
 						Set `false` when `rubberband-cli` is not installed, or to render
-						pitch when a note plays instead, at a higher CPU cost.
+						only the notes played: each note's pitch is then made the first
+						time it plays, and until it is ready that note sounds at the
+						pitch last played or at the sample's own.
 						""",
 						default=True,
 					),

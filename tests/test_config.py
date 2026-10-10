@@ -1602,8 +1602,9 @@ class TestMinPeakDb:
 
 		"""0 dBFS is full scale, so any value at or above it discards every
 		recording — a total capture failure that would look like a broken
-		detector.  Fail the load instead.  NaN fails the comparison and lands
-		here too; -inf would disable the gate while appearing to set it."""
+		detector.  Fail the load instead.  NaN and infinity are refused as they
+		are read (#4704, L29); -inf would disable the gate while appearing to set
+		it."""
 
 		with pytest.raises(ValueError, match="min_peak_db"):
 			_load_with(tmp_path, detection={"min_peak_db": value})
@@ -1611,9 +1612,8 @@ class TestMinPeakDb:
 	@pytest.mark.parametrize("value", [True, False])
 	def test_boolean_raises (self, tmp_path: pathlib.Path, value: bool) -> None:
 
-		"""`min_peak_db: yes` parses as a bool in YAML; float(True) is 1.0 and
-		float(False) is 0.0, so both fail the negativity check rather than
-		silently configuring a nonsense gate."""
+		"""`min_peak_db: yes` parses as a bool in YAML, which is refused as no
+		number (#4704, L30) rather than silently configuring a nonsense gate."""
 
 		with pytest.raises(ValueError, match="min_peak_db"):
 			_load_with(tmp_path, detection={"min_peak_db": value})
@@ -1864,6 +1864,148 @@ class TestValuesTheAppCannotActOn:
 
 		with pytest.raises(ValueError, match="wrong shape"):
 			subsample.config.load_config(path)
+
+
+class TestEachValueIsReadAsItsKind:
+
+	"""A setting written as something it cannot mean is refused by name (#4704, L29-L31).
+
+	float(), int() and str() took whatever YAML gave them: `yes` became 1,
+	44100.9 became 44100, a list became a folder named after it, an empty host
+	became "None", and NaN passed every check made by comparison, then crashed
+	the recorder.  A word they could not read said "could not convert string to
+	float", naming neither the key nor the file.  What reads the same is still
+	accepted: 44100.0, a quoted "12", a folder called 2026.
+	"""
+
+	def _load (self, tmp_path: pathlib.Path, settings: dict[str, typing.Any]) -> subsample.config.Config:
+
+		"""Load config.yaml holding *settings*, a dotted key to its value."""
+
+		cfg: dict[str, typing.Any] = {}
+
+		for dotted, value in settings.items():
+			*sections, key = dotted.split(".")
+			place = cfg
+
+			for section in sections:
+				place = place.setdefault(section, {})
+
+			place[key] = value
+
+		path = tmp_path / "config.yaml"
+		path.write_text(yaml.safe_dump(cfg))
+
+		return subsample.config.load_config(path)
+
+	@pytest.mark.parametrize(("key", "value"), [
+		("detection.hold_seconds",                    float("nan")),
+		("detection.hold_seconds",                    float("inf")),
+		("detection.trim_pre_ms",                     float("nan")),
+		("detection.trim_post_ms",                    float("inf")),
+		("detection.fade_out_ms",                     float("nan")),
+		("detection.retrigger_threshold_db",          float("nan")),
+		("player.limiter_threshold_db",               float("nan")),
+		("similarity.weight_timbre",                  float("nan")),
+		("ambisonic.yaw_degrees",                     float("inf")),
+		("analysis.tempo_min",                        float("nan")),
+		("analysis.tempo_max",                        float("inf")),
+		("recorder.audio.float_import_ceiling_dbfs",  float("-inf")),
+		("max_memory_mb",                             float("nan")),
+	])
+	def test_nan_and_infinity_are_refused (self, tmp_path: pathlib.Path, key: str, value: float) -> None:
+
+		"""Each loaded, and hold_seconds crashed the recorder as it started; the
+		budget's NaN was blamed on library.max_memory_mb."""
+
+		with pytest.raises(ValueError, match=re.escape(f"Config key '{key}' must be a number")):
+			self._load(tmp_path, {key: value})
+
+	@pytest.mark.parametrize(("key", "value", "refusal"), [
+		("detection.threshold_db",         True,        "must be a number"),
+		("player.max_polyphony",           True,        "must be a whole number"),
+		("recorder.audio.sample_rate",     44100.9,     "must be a whole number"),
+		("recorder.audio.bit_depth",       24.7,        "must be a whole number"),
+		("recorder.buffer.max_seconds",    0.5,         "must be a whole number"),
+		("osc.send_port",                  9000.7,      "must be a whole number"),
+		("transform.quantize_resolution",  16.9,        "must be a whole number"),
+		("library.directory",              ["a", "b"],  "must be a string"),
+		("recorder.directory",             ["a", "b"],  "must be a string"),
+		("osc.send_host",                  None,        "is present but has no value"),
+		("osc.receive_host",               None,        "is present but has no value"),
+		("osc.notes_host",                 None,        "is present but has no value"),
+	])
+	def test_a_value_that_would_mean_something_else_is_refused (
+		self, tmp_path: pathlib.Path, key: str, value: typing.Any, refusal: str,
+	) -> None:
+		with pytest.raises(ValueError, match=re.escape(f"Config key '{key}' {refusal}")):
+			self._load(tmp_path, {key: value})
+
+	def test_an_input_written_as_true_is_refused (self, tmp_path: pathlib.Path) -> None:
+
+		"""YAML's true is an int to Python, so `input: [true]` recorded input 1."""
+
+		with pytest.raises(ValueError, match="recorder.audio.input"):
+			self._load(tmp_path, {"recorder.audio.input": [True], "recorder.audio.channels": 1})
+
+	@pytest.mark.parametrize(("key", "value", "refusal"), [
+		("max_memory_mb",          "auto",  "must be a number (got 'auto')"),
+		("detection.hold_seconds", "short", "must be a number (got 'short')"),
+		("player.max_polyphony",   "lots",  "must be a whole number (got 'lots')"),
+	])
+	def test_a_word_is_refused_by_its_key (
+		self, tmp_path: pathlib.Path, key: str, value: str, refusal: str,
+	) -> None:
+		with pytest.raises(ValueError, match=re.escape(f"Config key '{key}' {refusal}")):
+			self._load(tmp_path, {key: value})
+
+	def test_what_reads_the_same_is_kept (self, tmp_path: pathlib.Path) -> None:
+		cfg = self._load(tmp_path, {
+			"recorder.audio.sample_rate": 44100.0,
+			"detection.threshold_db":     "12",
+			"player.max_polyphony":       "8",
+			"library.directory":          2026,
+			"transform.variant_cache_dir": None,
+		})
+
+		assert cfg.recorder.audio.sample_rate == 44100
+		assert isinstance(cfg.recorder.audio.sample_rate, int)
+		assert cfg.detection.threshold_db == 12.0
+		assert cfg.player.max_polyphony == 8
+		assert cfg.library.directory == "2026"
+		assert cfg.transform.variant_cache_dir == ""
+
+	def test_an_empty_library_folder_still_loads_nothing (self, tmp_path: pathlib.Path) -> None:
+		assert self._load(tmp_path, {"library.directory": None}).library.directory is None
+
+	@pytest.mark.parametrize(("contents", "line"), [
+		("detection:\n  # Caf\xe9 room\n  threshold_db: 12.0\n".encode("latin-1"), 2),
+		("detection:\n  threshold_db: 12.0\n".encode("utf-16"),                    1),
+	], ids=["latin-1", "utf-16"])
+	def test_a_file_not_in_utf8_is_named_with_its_line (
+		self, tmp_path: pathlib.Path, contents: bytes, line: int,
+	) -> None:
+
+		"""Latin-1 from an older editor, or the UTF-16 of Windows Notepad."""
+
+		path = tmp_path / "config.yaml"
+		path.write_bytes(contents)
+
+		with pytest.raises(ValueError) as caught:
+			subsample.config.load_config(path)
+
+		assert str(caught.value) == (
+			f"Config file {path} has a character on line {line} that is not UTF-8 - save the file as UTF-8."
+		)
+
+	def test_a_yaml_error_still_points_at_the_file (self, tmp_path: pathlib.Path) -> None:
+		path = tmp_path / "config.yaml"
+		path.write_text("detection: [1\n", encoding="utf-8")
+
+		with pytest.raises(ValueError) as caught:
+			subsample.config.load_config(path)
+
+		assert f'in "{path}", line' in str(caught.value)
 
 
 class TestHomeFolderInPaths:

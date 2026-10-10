@@ -9,6 +9,7 @@ mypy coverage.
 
 import dataclasses
 import datetime
+import io
 import logging
 import math
 import os
@@ -820,11 +821,30 @@ def _deep_merge (
 
 def _read_yaml (path: pathlib.Path) -> dict[str, typing.Any]:
 
-	"""Read and parse a YAML file, returning a plain dict."""
+	"""Read and parse a YAML file, returning a plain dict.
+
+	A file saved in another encoding, an accented letter in a comment from an
+	older editor or the UTF-16 of Windows Notepad, said only "'utf-8' codec
+	can't decode byte 0xe9 in position 5", naming neither the file nor where in
+	it (#4704, L31).
+	"""
 
 	try:
-		with path.open("r", encoding="utf-8") as fh:
-			data = subsample.yaml_numbers.load(fh)
+		text = path.read_text(encoding="utf-8")
+	except UnicodeDecodeError as exc:
+		line = exc.object[:exc.start].count(b"\n") + 1
+
+		raise ValueError(
+			f"Config file {path} has a character on line {line} that is not UTF-8 - "
+			"save the file as UTF-8."
+		) from exc
+
+	# Named, so a YAML error points at this file rather than at "<unicode string>".
+	stream = io.StringIO(text)
+	stream.name = str(path)
+
+	try:
+		data = subsample.yaml_numbers.load(stream)
 	except subsample.yaml_numbers.DuplicateKeyError as exc:
 		raise ValueError(f"Config file {path}: {exc.problem}") from exc
 	except yaml.YAMLError as exc:
@@ -928,10 +948,7 @@ def _require (section: dict[str, typing.Any], key: str, section_name: str) -> ty
 	# capture to a file called None.wav, each overwriting the last.  A required
 	# key with no value is always a mistake, so say so rather than inventing one.
 	if section[key] is None:
-		raise ValueError(
-			f"Config key '{section_name}.{key}' is present but has no value. "
-			f"Give it a value, or remove the line to use the default."
-		)
+		raise _no_value(f"{section_name}.{key}")
 
 	return section[key]
 
@@ -964,6 +981,92 @@ def _require_bool (
 		)
 
 	return value
+
+
+def _no_value (key: str) -> ValueError:
+
+	"""The refusal for a key written with nothing after it."""
+
+	return ValueError(
+		f"Config key '{key}' is present but has no value. "
+		f"Give it a value, or remove the line to use the default."
+	)
+
+
+def _as_float (value: typing.Any) -> float:
+
+	"""What YAML gave as a float, or NaN where it is no number: true/false, a list, a word."""
+
+	if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+		return math.nan
+
+	try:
+		return float(value)
+	except (ValueError, OverflowError):
+		return math.nan
+
+
+def _number (value: typing.Any, key: str) -> float:
+
+	"""A number setting's value, refused by its key where it is not one (#4704, L29-L31).
+
+	float() took whatever YAML gave it: `yes` became 1.0, and `.nan` or `.inf`
+	passed every check made by comparison, then crashed the recorder at its
+	first capture.  A word it could not read said only "could not convert
+	string to float", naming neither the key nor the file.  A quoted number,
+	"12", still reads as the number it spells.
+	"""
+
+	if value is None:
+		raise _no_value(key)
+
+	number = _as_float(value)
+
+	if not math.isfinite(number):
+		raise ValueError(f"Config key '{key}' must be a number (got {value!r}).")
+
+	return number
+
+
+def _whole_number (value: typing.Any, key: str) -> int:
+
+	"""A whole-number setting's value, refused where a fraction would be cut off (#4704, L30).
+
+	int() dropped the fraction without a word, so `sample_rate: 44100.9`
+	recorded at 44100.  A fraction of nothing, 44100.0, is the same number and
+	still reads as it.
+	"""
+
+	if isinstance(value, int) and not isinstance(value, bool):
+		return value
+
+	if value is None:
+		raise _no_value(key)
+
+	number = _as_float(value)
+
+	if not (math.isfinite(number) and number.is_integer()):
+		raise ValueError(f"Config key '{key}' must be a whole number (got {value!r}).")
+
+	return int(number)
+
+
+def _text (value: typing.Any, key: str) -> str:
+
+	"""A path's or a host's value, refused where it is not one piece of text (#4704, L30).
+
+	str() wrote whatever YAML gave it out as text, so `directory: [a, b]` made
+	a folder named "['a', 'b']" and an empty `send_host:` sent to a host named
+	"None".  A bare number is still its own text: a folder can be called 2026.
+	"""
+
+	if value is None:
+		raise _no_value(key)
+
+	if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+		raise ValueError(f"Config key '{key}' must be a string (got {value!r}).")
+
+	return str(value)
 
 
 def _checked_filename_format (fmt: str) -> str:
@@ -1104,11 +1207,11 @@ def _check_values (cfg: "Config") -> None:
 
 	These all loaded happily and went wrong later, quietly: a detection
 	threshold below the noise floor records continuously, a start tempo of 0
-	divides, a negative budget is not a budget, a port above 65535 cannot be
-	bound, and NaN compares false against every limit so a memory cap made of
-	it never applies.  Checked here, together, because the coercions above are
-	spread through the builder and a reader should be able to see the whole
-	rule set at once.
+	divides, a negative budget is not a budget, and a port above 65535 cannot
+	be bound.  Checked here, together, because the reads above are spread
+	through the builder and a reader should be able to see the whole rule set
+	at once.  NaN and infinity never reach here: _number refuses them as it
+	reads each value.
 	"""
 
 	ranges: tuple[tuple[str, float, float, float], ...] = (
@@ -1129,9 +1232,6 @@ def _check_values (cfg: "Config") -> None:
 	)
 
 	for key, value, lowest, highest in ranges:
-		if not math.isfinite(value):
-			raise ValueError(f"config.yaml: {key} is {value}, which is not a number")
-
 		if not lowest <= value <= highest:
 			raise ValueError(
 				f"config.yaml: {key} is {value}, outside {lowest} to {highest}"
@@ -1216,7 +1316,7 @@ def _build_config (
 
 	# channels is optional: None means auto-detect from the selected device at startup.
 	channels_raw = audio_raw.get("channels")
-	channels: typing.Optional[int] = int(channels_raw) if channels_raw is not None else None
+	channels: typing.Optional[int] = None if channels_raw is None else _whole_number(channels_raw, "recorder.audio.channels")
 
 	# input is optional: 1-indexed list of physical input channels, converted
 	# to 0-indexed tuple.  None means use the first N channels.
@@ -1230,7 +1330,7 @@ def _build_config (
 			raise ValueError("recorder.audio.input must be a non-empty list")
 
 		for ch in input_list:
-			if not isinstance(ch, int) or ch < 1:
+			if isinstance(ch, bool) or not isinstance(ch, int) or ch < 1:
 				raise ValueError(
 					f"recorder.audio.input channels must be positive integers "
 					f"(1-indexed), got {ch!r}"
@@ -1284,13 +1384,13 @@ def _build_config (
 
 	float_ceiling_raw = audio_raw.get("float_import_ceiling_dbfs", -1.0)
 	float_import_ceiling_dbfs = (
-		None if float_ceiling_raw is None else float(float_ceiling_raw)
+		None if float_ceiling_raw is None else _number(float_ceiling_raw, "recorder.audio.float_import_ceiling_dbfs")
 	)
 
 	audio = AudioConfig(
-		sample_rate=int(_require(audio_raw, "sample_rate", "recorder.audio")),
-		bit_depth=int(_require(audio_raw, "bit_depth", "recorder.audio")),
-		buffer_frames=int(_require(audio_raw, "buffer_frames", "recorder.audio")),
+		sample_rate=_whole_number(_require(audio_raw, "sample_rate", "recorder.audio"), "recorder.audio.sample_rate"),
+		bit_depth=_whole_number(_require(audio_raw, "bit_depth", "recorder.audio"), "recorder.audio.bit_depth"),
+		buffer_frames=_whole_number(_require(audio_raw, "buffer_frames", "recorder.audio"), "recorder.audio.buffer_frames"),
 		channels=channels,
 		input=input_channels,
 		device=device_raw,
@@ -1342,7 +1442,7 @@ def _build_config (
 		)
 
 	buffer = BufferConfig(
-		max_seconds=int(_require(buffer_raw, "max_seconds", "recorder.buffer")),
+		max_seconds=_whole_number(_require(buffer_raw, "max_seconds", "recorder.buffer"), "recorder.buffer.max_seconds"),
 	)
 
 	if buffer.max_seconds <= 0:
@@ -1353,8 +1453,8 @@ def _build_config (
 		buffer=buffer,
 		enabled=_require_bool(recorder_raw, "enabled", True, "recorder"),
 		previews=_require_bool(recorder_raw, "previews", True, "recorder"),
-		directory=_home_expanded(str(_require(recorder_raw, "directory", "recorder"))),
-		filename_format=_checked_filename_format(str(_require(recorder_raw, "filename_format", "recorder"))),
+		directory=_home_expanded(_text(_require(recorder_raw, "directory", "recorder"), "recorder.directory")),
+		filename_format=_checked_filename_format(_text(_require(recorder_raw, "filename_format", "recorder"), "recorder.filename_format")),
 	)
 
 	player_raw      = _section(raw, "player", trackers)
@@ -1400,7 +1500,7 @@ def _build_config (
 
 	player_bit_depth_raw = player_audio_raw.get("bit_depth")
 	player_bit_depth: typing.Optional[int] = (
-		int(player_bit_depth_raw) if player_bit_depth_raw is not None else None
+		None if player_bit_depth_raw is None else _whole_number(player_bit_depth_raw, "player.audio.bit_depth")
 	)
 	if player_bit_depth is not None and player_bit_depth not in {16, 24, 32}:
 		raise ValueError(
@@ -1410,14 +1510,14 @@ def _build_config (
 
 	player_sample_rate_raw = player_audio_raw.get("sample_rate")
 	player_sample_rate: typing.Optional[int] = (
-		int(player_sample_rate_raw) if player_sample_rate_raw is not None else None
+		None if player_sample_rate_raw is None else _whole_number(player_sample_rate_raw, "player.audio.sample_rate")
 	)
 	if player_sample_rate is not None and player_sample_rate <= 0:
 		raise ValueError(
 			f"player.audio.sample_rate must be > 0 (got {player_sample_rate})"
 		)
 
-	player_max_polyphony = int(player_raw.get("max_polyphony", 8))
+	player_max_polyphony = _whole_number(player_raw.get("max_polyphony", 8), "player.max_polyphony")
 	if player_max_polyphony < 1 or player_max_polyphony > 64:
 		raise ValueError(
 			f"player.max_polyphony ({player_max_polyphony}) must be in [1, 64]. "
@@ -1425,13 +1525,13 @@ def _build_config (
 			"individual notes."
 		)
 
-	player_limiter_threshold_db = float(player_raw.get("limiter_threshold_db", -1.5))
+	player_limiter_threshold_db = _number(player_raw.get("limiter_threshold_db", -1.5), "player.limiter_threshold_db")
 	if player_limiter_threshold_db > 0.0 or player_limiter_threshold_db < -12.0:
 		raise ValueError(
 			f"player.limiter_threshold_db ({player_limiter_threshold_db}) must be in [-12.0, 0.0]."
 		)
 
-	player_limiter_ceiling_db = float(player_raw.get("limiter_ceiling_db", -0.1))
+	player_limiter_ceiling_db = _number(player_raw.get("limiter_ceiling_db", -0.1), "player.limiter_ceiling_db")
 	if player_limiter_ceiling_db > 0.0 or player_limiter_ceiling_db < -12.0:
 		raise ValueError(
 			f"player.limiter_ceiling_db ({player_limiter_ceiling_db}) must be in [-12.0, 0.0]."
@@ -1457,7 +1557,7 @@ def _build_config (
 	if player_buffer_frames_raw is None:
 		player_buffer_frames = None
 	else:
-		player_buffer_frames = int(player_buffer_frames_raw)
+		player_buffer_frames = _whole_number(player_buffer_frames_raw, "player.audio.buffer_frames")
 
 		if player_buffer_frames < 32 or player_buffer_frames > 4096:
 			raise ValueError(
@@ -1471,12 +1571,14 @@ def _build_config (
 				f"(got {player_buffer_frames})"
 			)
 
+	player_channels_raw = player_audio_raw.get("channels")
+
 	player = PlayerConfig(
 		audio=PlayerAudioConfig(
 			device=player_device,
 			bit_depth=player_bit_depth,
 			sample_rate=player_sample_rate,
-			channels=int(player_audio_raw["channels"]) if player_audio_raw.get("channels") is not None else None,
+			channels=None if player_channels_raw is None else _whole_number(player_channels_raw, "player.audio.channels"),
 			buffer_frames=player_buffer_frames,
 		),
 		enabled=_require_bool(player_raw, "enabled", False, "player"),
@@ -1499,20 +1601,20 @@ def _build_config (
 	min_peak_raw = detection_raw.get("min_peak_db", None)
 
 	detection = DetectionConfig(
-		threshold_db=float(_require(detection_raw, "threshold_db", "detection")),
-		hold_seconds=float(_require(detection_raw, "hold_seconds", "detection")),
-		warmup_seconds=float(_require(detection_raw, "warmup_seconds", "detection")),
-		floor_adaptation=float(_require(detection_raw, "floor_adaptation", "detection")),
-		trim_pre_ms=float(detection_raw.get("trim_pre_ms", 0.25)),
-		trim_post_ms=float(detection_raw.get("trim_post_ms", 2.0)),
+		threshold_db=_number(_require(detection_raw, "threshold_db", "detection"), "detection.threshold_db"),
+		hold_seconds=_number(_require(detection_raw, "hold_seconds", "detection"), "detection.hold_seconds"),
+		warmup_seconds=_number(_require(detection_raw, "warmup_seconds", "detection"), "detection.warmup_seconds"),
+		floor_adaptation=_number(_require(detection_raw, "floor_adaptation", "detection"), "detection.floor_adaptation"),
+		trim_pre_ms=_number(detection_raw.get("trim_pre_ms", 0.25), "detection.trim_pre_ms"),
+		trim_post_ms=_number(detection_raw.get("trim_post_ms", 2.0), "detection.trim_post_ms"),
 		release_threshold_db=(
-			None if release_threshold_raw is None else float(release_threshold_raw)
+			None if release_threshold_raw is None else _number(release_threshold_raw, "detection.release_threshold_db")
 		),
 		retrigger_threshold_db=(
-			None if retrigger_threshold_raw is None else float(retrigger_threshold_raw)
+			None if retrigger_threshold_raw is None else _number(retrigger_threshold_raw, "detection.retrigger_threshold_db")
 		),
-		fade_out_ms=float(detection_raw.get("fade_out_ms", 0.0)),
-		min_peak_db=(None if min_peak_raw is None else float(min_peak_raw)),
+		fade_out_ms=_number(detection_raw.get("fade_out_ms", 0.0), "detection.fade_out_ms"),
+		min_peak_db=(None if min_peak_raw is None else _number(min_peak_raw, "detection.min_peak_db")),
 	)
 
 	if not (0.0 < detection.floor_adaptation <= 1.0):
@@ -1544,10 +1646,8 @@ def _build_config (
 		)
 	# Reject >= 0 rather than clamping: 0 dBFS is full scale, so any such value
 	# discards every segment — a silent, total failure of capture that would look
-	# like a broken detector.  NaN fails the comparison and lands here too.
-	if detection.min_peak_db is not None and not (
-		math.isfinite(detection.min_peak_db) and detection.min_peak_db < 0.0
-	):
+	# like a broken detector.
+	if detection.min_peak_db is not None and detection.min_peak_db >= 0.0:
 		raise ValueError(
 			"detection.min_peak_db must be a finite negative dBFS level (0 dBFS is "
 			"full scale, so a value at or above it would discard every recording); "
@@ -1555,9 +1655,9 @@ def _build_config (
 		)
 
 	analysis = AnalysisConfig(
-		start_bpm=float(analysis_raw.get("start_bpm", 120.0)),
-		tempo_min=float(analysis_raw.get("tempo_min", 30.0)),
-		tempo_max=float(analysis_raw.get("tempo_max", 300.0)),
+		start_bpm=_number(analysis_raw.get("start_bpm", 120.0), "analysis.start_bpm"),
+		tempo_min=_number(analysis_raw.get("tempo_min", 30.0), "analysis.tempo_min"),
+		tempo_max=_number(analysis_raw.get("tempo_max", 300.0), "analysis.tempo_max"),
 	)
 
 	if analysis.tempo_min <= 0 or analysis.tempo_max <= 0:
@@ -1577,21 +1677,21 @@ def _build_config (
 	# "load nothing", which is different from the key being absent.
 	directory_raw = library_raw.get("directory", "samples/captures")
 	library = LibraryConfig(
-		max_memory_mb=float(library_raw.get("max_memory_mb", 100.0)),
-		directory=(None if directory_raw is None else _home_expanded(str(directory_raw))),
+		max_memory_mb=_number(library_raw.get("max_memory_mb", 100.0), "library.max_memory_mb"),
+		directory=(None if directory_raw is None else _home_expanded(_text(directory_raw, "library.directory"))),
 		watch=_require_bool(library_raw, "watch", False, "library"),
 		reference_directory=(
-			None if reference_directory_raw is None else _home_expanded(str(reference_directory_raw))
+			None if reference_directory_raw is None else _home_expanded(_text(reference_directory_raw, "library.reference_directory"))
 		),
 	)
 
 	similarity_raw  = _section(raw, "similarity", trackers)
 	similarity = SimilarityConfig(
-		weight_spectral=float(similarity_raw.get("weight_spectral", 1.0)),
-		weight_timbre=float(similarity_raw.get("weight_timbre", 1.0)),
-		weight_timbre_delta=float(similarity_raw.get("weight_timbre_delta", 0.5)),
-		weight_timbre_onset=float(similarity_raw.get("weight_timbre_onset", 1.0)),
-		weight_band_energy=float(similarity_raw.get("weight_band_energy", 1.0)),
+		weight_spectral=_number(similarity_raw.get("weight_spectral", 1.0), "similarity.weight_spectral"),
+		weight_timbre=_number(similarity_raw.get("weight_timbre", 1.0), "similarity.weight_timbre"),
+		weight_timbre_delta=_number(similarity_raw.get("weight_timbre_delta", 0.5), "similarity.weight_timbre_delta"),
+		weight_timbre_onset=_number(similarity_raw.get("weight_timbre_onset", 1.0), "similarity.weight_timbre_onset"),
+		weight_band_energy=_number(similarity_raw.get("weight_band_energy", 1.0), "similarity.weight_band_energy"),
 	)
 
 	for name, value in [
@@ -1608,7 +1708,7 @@ def _build_config (
 			)
 
 	transform_raw   = _section(raw, "transform", trackers)
-	quantize_resolution = int(transform_raw.get("quantize_resolution", 16))
+	quantize_resolution = _whole_number(transform_raw.get("quantize_resolution", 16), "transform.quantize_resolution")
 
 	if quantize_resolution not in {1, 2, 4, 8, 16}:
 		raise ValueError(
@@ -1634,12 +1734,15 @@ def _build_config (
 			"config.yaml with a top-level `tempo:\n  source: X`."
 		)
 
+	# Empty or null turns the disk cache off, so neither is refused.
+	variant_cache_dir_raw = transform_raw.get("variant_cache_dir", "samples/variant-cache")
+
 	transform = TransformConfig(
-		max_memory_mb       = float(transform_raw.get("max_memory_mb", 50.0)),
+		max_memory_mb       = _number(transform_raw.get("max_memory_mb", 50.0), "transform.max_memory_mb"),
 		auto_pitch          = _require_bool(transform_raw, "auto_pitch", True, "transform"),
 		quantize_resolution = quantize_resolution,
-		variant_cache_dir   = _home_expanded(str(transform_raw.get("variant_cache_dir", "samples/variant-cache") or "")),
-		max_disk_mb         = float(transform_raw.get("max_disk_mb",   500.0)),
+		variant_cache_dir   = _home_expanded(_text(variant_cache_dir_raw or "", "transform.variant_cache_dir")),
+		max_disk_mb         = _number(transform_raw.get("max_disk_mb",   500.0), "transform.max_disk_mb"),
 	)
 
 	tempo_raw = _section(raw, "tempo", trackers)
@@ -1662,7 +1765,7 @@ def _build_config (
 		)
 
 	tempo = TempoConfig(
-		bpm    = float(tempo_raw.get("bpm", 0.0)),
+		bpm    = _number(tempo_raw.get("bpm", 0.0), "tempo.bpm"),
 		source = tempo_source,
 	)
 
@@ -1681,7 +1784,7 @@ def _build_config (
 	if global_raw is not None:
 		# An explicit global value is both the reported unified budget and the
 		# basis for every derivation.
-		global_budget    = float(global_raw)
+		global_budget    = _number(global_raw, "max_memory_mb")
 		effective_budget = global_budget
 	else:
 		# No explicit global: auto-detect the basis.  Report it as the unified
@@ -1717,20 +1820,20 @@ def _build_config (
 	osc_raw         = _section(raw, "osc", trackers)
 	osc = OscConfig(
 		enabled=_require_bool(osc_raw, "enabled", False, "osc"),
-		send_host=str(osc_raw.get("send_host", "127.0.0.1")),
-		send_port=int(osc_raw.get("send_port", 9000)),
+		send_host=_text(osc_raw.get("send_host", "127.0.0.1"), "osc.send_host"),
+		send_port=_whole_number(osc_raw.get("send_port", 9000), "osc.send_port"),
 		receive_enabled=_require_bool(osc_raw, "receive_enabled", False, "osc"),
-		receive_port=int(osc_raw.get("receive_port", 9002)),
-		receive_host=str(osc_raw.get("receive_host", "127.0.0.1")),
+		receive_port=_whole_number(osc_raw.get("receive_port", 9002), "osc.receive_port"),
+		receive_host=_text(osc_raw.get("receive_host", "127.0.0.1"), "osc.receive_host"),
 		notes_enabled=_require_bool(osc_raw, "notes_enabled", False, "osc"),
-		notes_port=int(osc_raw.get("notes_port", 9003)),
-		notes_host=str(osc_raw.get("notes_host", "127.0.0.1")),
+		notes_port=_whole_number(osc_raw.get("notes_port", 9003), "osc.notes_port"),
+		notes_host=_text(osc_raw.get("notes_host", "127.0.0.1"), "osc.notes_host"),
 	)
 
 	# --- Ambisonic ---
 	ambisonic_raw   = _section(raw, "ambisonic", trackers)
 	import subsample.ambisonic
-	ambi_decoder = str(ambisonic_raw.get("decoder", "basic"))
+	ambi_decoder = _text(ambisonic_raw.get("decoder", "basic"), "ambisonic.decoder")
 
 	if ambi_decoder not in subsample.ambisonic.SUPPORTED_DECODER_TYPES:
 		raise ValueError(
@@ -1738,7 +1841,7 @@ def _build_config (
 			f"Valid values: {sorted(subsample.ambisonic.SUPPORTED_DECODER_TYPES)}."
 		)
 
-	ambi_max_order = int(ambisonic_raw.get("max_order", 1))
+	ambi_max_order = _whole_number(ambisonic_raw.get("max_order", 1), "ambisonic.max_order")
 
 	if ambi_max_order != subsample.ambisonic.AMBISONIC_ORDER_SUPPORTED:
 		raise ValueError(
@@ -1748,9 +1851,9 @@ def _build_config (
 
 	ambisonic = AmbisonicConfig(
 		decoder       = ambi_decoder,
-		yaw_degrees   = float(ambisonic_raw.get("yaw_degrees",   0.0)),
-		pitch_degrees = float(ambisonic_raw.get("pitch_degrees", 0.0)),
-		roll_degrees  = float(ambisonic_raw.get("roll_degrees",  0.0)),
+		yaw_degrees   = _number(ambisonic_raw.get("yaw_degrees",   0.0), "ambisonic.yaw_degrees"),
+		pitch_degrees = _number(ambisonic_raw.get("pitch_degrees", 0.0), "ambisonic.pitch_degrees"),
+		roll_degrees  = _number(ambisonic_raw.get("roll_degrees",  0.0), "ambisonic.roll_degrees"),
 		max_order     = ambi_max_order,
 	)
 
