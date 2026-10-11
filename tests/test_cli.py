@@ -3284,6 +3284,252 @@ class TestAMapSavedWhileThePlayerStarts:
 			watcher.stop()
 
 
+class TestProgramsLoadWhatTheMapNames:
+
+	"""#4909 (lead 4 of the 2026-10-07 review's leads not verified): every ``directory:`` program holds what the top-level map names.
+
+	A sample a top-level assignment named by path or folder loaded into the
+	first program listed and no other.  In every other ``directory:``
+	program the assignment found nothing, and a ``map:`` preset listed
+	first held samples its own selects could choose and its map never named.
+	"""
+
+	class _Player:
+
+		"""Stands in for the player on a reload: refuses when told to, and notes each re-ranking."""
+
+		def __init__ (self, refuses: bool = False) -> None:
+			self.refuses  = refuses
+			self.reranked: list[str] = []
+
+		def reload_midi_map (self, result: subsample.player.MidiMapResult) -> None:
+			if self.refuses:
+				raise ValueError("'similarity' ordering requires where.reference to be set")
+
+		def _try_update_assignments (self, context: str) -> None:
+			self.reranked.append(context)
+
+	_KICK: typing.Final[str] = "  - name: Kick\n    notes: 36\n    select:\n      where: { name: kick }\n"
+	_RISER: typing.Final[str] = "  - name: Riser\n    notes: 48\n    select:\n      where: { path: fx/riser.wav }\n"
+
+	def _map (self, tmp_path: pathlib.Path, assignments: str, first: str = "directory") -> str:
+
+		"""A map of two programs, Kit A and Kit B, the first a ``directory:`` program or a ``map:`` preset."""
+
+		kit_a = (
+			"{ name: Kit A, program: 1, map: kits/a/preset.yaml }" if first == "preset"
+			else f"{{ name: Kit A, program: 1, directory: {tmp_path / 'kits' / 'a'} }}"
+		)
+
+		return (
+			"channel: 10\n"
+			"programs:\n"
+			f"  - {kit_a}\n"
+			f"  - {{ name: Kit B, program: 2, directory: {tmp_path / 'kits' / 'b'} }}\n"
+			"assignments:\n" + assignments
+		)
+
+	def _programs (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, assignments: str,
+		first: str = "directory", room: typing.Optional[float] = None,
+	) -> tuple[subsample.config.Config, subsample.player.MidiMapResult, list[subsample.bank.Bank], subsample.bank.BankManager]:
+
+		"""Build the two programs as a run does.  `room` is how many samples each program's library can hold."""
+
+		monkeypatch.setattr(subsample.cli, "_STARTED", [])
+		monkeypatch.setattr(subsample.performance, "power_saving", lambda: None)
+		monkeypatch.setattr(subsample.player.MidiPlayer, "run", lambda self: None)
+
+		for folder, stem in (("kits/a", "kick"), ("kits/b", "kick"), ("fx", "riser")):
+			(tmp_path / folder).mkdir(parents=True, exist_ok=True)
+			tests.helpers._write_wav_and_sidecar(tmp_path / folder, stem)
+
+		(tmp_path / "kits" / "a" / "preset.yaml").write_text(
+			"channel: 10\nassignments:\n"
+			"  - name: Kit\n    notes: 36\n    select:\n      where: { directory: . }\n",
+			encoding="utf-8",
+		)
+
+		map_path = tmp_path / "map.yaml"
+		map_path.write_text(self._map(tmp_path, assignments, first), encoding="utf-8")
+
+		cfg = _default_cfg()
+		cfg = dataclasses.replace(
+			cfg,
+			player=dataclasses.replace(
+				cfg.player, enabled=True, midi_map=str(map_path), watch_midi_map=True, virtual_midi_port="Subsample test",
+			),
+			# The variant cache would otherwise be made in the working directory.
+			transform=dataclasses.replace(cfg.transform, max_disk_mb=0.0),
+		)
+
+		if room is not None:
+			one = subsample.library.load_wav_audio(tmp_path / "fx" / "riser.wav", cfg.recorder.audio.sample_rate)
+			assert one is not None
+			cfg = dataclasses.replace(
+				cfg, library=dataclasses.replace(cfg.library, max_memory_mb=one.nbytes * room / (1024 * 1024)),
+			)
+
+		result = subsample.player.load_configured_map(cfg, [])
+		banks  = [
+			subsample.cli._load_bank(
+				defn, result.presets.get(defn.program), subsample.library.ReferenceLibrary([]), cfg,
+				cfg.recorder.audio.sample_rate, tmp_path, None,
+			)
+			for defn in result.bank_definitions
+		]
+
+		return cfg, result, banks, subsample.bank.BankManager(banks, result.bank_channel, default_program=result.default_bank)
+
+	def _start (
+		self, cfg: subsample.config.Config, result: subsample.player.MidiMapResult,
+		banks: list[subsample.bank.Bank], manager: subsample.bank.BankManager,
+	) -> None:
+
+		"""Start the player as a run does, with its run() stubbed."""
+
+		subsample.cli._start_player(
+			cfg, threading.Event(), banks[0].instrument_library, banks[0].similarity_matrix,
+			subsample.library.ReferenceLibrary([]), [None],
+			transform_manager=banks[0].transform_manager, bank_manager=manager,
+			preloaded_midi_map_result=result,
+		)
+
+	@staticmethod
+	def _held (bank: subsample.bank.Bank) -> list[str]:
+		return sorted(record.name for record in bank.instrument_library.samples())
+
+	@staticmethod
+	def _shut (banks: list[subsample.bank.Bank]) -> None:
+		for bank in banks:
+			bank.transform_manager.shutdown()
+
+	def test_every_directory_program_holds_a_sample_the_map_names (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""Kit B held its kick alone, so the Riser assignment found nothing there."""
+
+		cfg, result, banks, manager = self._programs(tmp_path, monkeypatch, self._KICK + self._RISER)
+
+		try:
+			self._start(cfg, result, banks, manager)
+
+			assert [self._held(bank) for bank in banks] == [["kick", "riser"], ["kick", "riser"]]
+
+			risers = [
+				record for bank in banks for record in bank.instrument_library.samples() if record.name == "riser"
+			]
+			assert risers[0] is risers[1], "its audio is in memory once"
+
+			# Each program's matrix scores what its library holds, and nothing else.
+			for bank in banks:
+				assert sorted(bank.similarity_matrix._vectors) == sorted(
+					record.sample_id for record in bank.instrument_library.samples()
+				)
+
+		finally:
+			self._shut(banks)
+
+	def test_a_preset_is_given_none_of_them (self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
+		"""Listed first, the preset held the riser, which its own selects could then choose."""
+
+		cfg, result, banks, manager = self._programs(tmp_path, monkeypatch, self._KICK + self._RISER, first="preset")
+
+		try:
+			self._start(cfg, result, banks, manager)
+
+			assert [self._held(bank) for bank in banks] == [["kick"], ["kick", "riser"]]
+			assert len(banks[0].similarity_matrix._vectors) == 1
+
+		finally:
+			self._shut(banks)
+
+	def test_a_program_that_loses_a_sample_of_its_own_to_them_is_named (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""Room for one sample each: the riser pushes out each program's kick."""
+
+		cfg, result, banks, manager = self._programs(tmp_path, monkeypatch, self._KICK + self._RISER, room=1.5)
+
+		try:
+			with caplog.at_level(logging.WARNING, logger="subsample.cli"):
+				self._start(cfg, result, banks, manager)
+
+			said = [
+				record.getMessage() for record in caplog.records
+				if record.name == "subsample.cli" and record.levelno == logging.WARNING
+			]
+
+			assert [self._held(bank) for bank in banks] == [["riser"], ["riser"]]
+			assert said == [
+				f"Program {name!r}: 1 sample(s) were left out to make room for those the map names, "
+				f"at library.max_memory_mb ({cfg.library.max_memory_mb:.0f} MB), so it cannot play them - "
+				f"raise the limit to keep them"
+				for name in ("Kit A", "Kit B")
+			]
+
+		finally:
+			self._shut(banks)
+
+	def _save (
+		self, tmp_path: pathlib.Path, cfg: subsample.config.Config, banks: list[subsample.bank.Bank],
+		manager: subsample.bank.BankManager, player: "TestProgramsLoadWhatTheMapNames._Player",
+	) -> None:
+
+		"""Save the map with the Riser assignment added, and let the watcher reload it as it starts."""
+
+		references = subsample.library.ReferenceLibrary([])
+		preloaded  = subsample.player.load_configured_map(cfg, references.names())
+		read_as    = subsample.cli._modification_times(preloaded.source_files)
+		map_path   = tmp_path / "map.yaml"
+
+		map_path.write_text(self._map(tmp_path, self._KICK + self._RISER), encoding="utf-8")
+		os.utime(map_path, ns=(time.time_ns(), (read_as[map_path.resolve()] or 0) + 10**9))
+
+		watcher = subsample.cli._start_midi_map_watcher(
+			cfg, preloaded, references, banks[0].instrument_library, banks[0].similarity_matrix,
+			banks[0].transform_manager, [typing.cast(typing.Any, player)], None, read_as, manager,
+		)
+
+		assert watcher is not None
+		watcher.stop()
+
+	def test_an_edit_that_names_a_sample_reaches_every_directory_program (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""A live edit loaded it into the first program, whichever was playing."""
+
+		cfg, _result, banks, manager = self._programs(tmp_path, monkeypatch, self._KICK)
+
+		try:
+			self._save(tmp_path, cfg, banks, manager, self._Player())
+
+			assert [self._held(bank) for bank in banks] == [["kick", "riser"], ["kick", "riser"]]
+
+		finally:
+			self._shut(banks)
+
+	def test_an_edit_that_is_refused_is_undone_in_every_program (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+		cfg, _result, banks, manager = self._programs(tmp_path, monkeypatch, self._KICK)
+		player = self._Player(refuses=True)
+
+		try:
+			self._save(tmp_path, cfg, banks, manager, player)
+
+			assert [self._held(bank) for bank in banks] == [["kick"], ["kick"]]
+			assert [len(bank.similarity_matrix._vectors) for bank in banks] == [1, 1]
+			assert player.reranked == ["the return to the map kept"]
+
+		finally:
+			self._shut(banks)
+
+
 class TestARefusedMapEdit:
 
 	"""#4908 (lead 1 of the 2026-10-07 review's leads not verified): a refused edit leaves the library as it was.

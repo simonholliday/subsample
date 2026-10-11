@@ -831,6 +831,18 @@ live preset and refresh of the top-level rules, take the player's
 edit after a switch to a `directory:` program gives that program the edit,
 rather than leaving it the rules from before it.
 
+The top-level map's assignments play from every `directory:` program, so what
+they name by `path`, `directory` or reference is loaded into each one's library
+and matrix (`cli._top_level_pools`, `cli._load_map_paths`, #4909), at start
+and on a live edit, and into no `map:` preset's. One record serves them all, so
+its audio is in memory once, though each program counts it against its own
+`library.max_memory_mb`, and one that loses samples of its own to it is named.
+It used to load into the first program listed alone: the others found nothing
+for such an assignment, and a preset listed first held samples its map never
+named. The extract check still reads one library, the primary one where it is
+a `directory:` program's, and a sample elsewhere that cannot give an extract is
+left out as its program is ranked (`MidiPlayer._playable_by`).
+
 An ensemble file's `maps:` block and `player.midi_maps` reach the same loader,
 `player.load_ensemble`. Includes are flat, one level, so there are no cycles to
 detect.

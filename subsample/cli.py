@@ -1329,6 +1329,121 @@ def _warn_of_programs_left_out (banks: list[subsample.bank.Bank], max_memory_mb:
 			)
 
 
+@dataclasses.dataclass(frozen=True)
+class _TopLevelPool:
+
+	"""One pool of samples the top-level map's assignments play from (#4909).
+
+	The library when the map has no programs, or one ``directory:``
+	program's, with the matrix and transform manager that go with it.
+	``program`` is the program's name, or None without programs.
+	"""
+
+	program:    typing.Optional[str]
+	library:    subsample.library.InstrumentLibrary
+	matrix:     typing.Optional[subsample.similarity.SimilarityMatrix]
+	transforms: typing.Optional[subsample.transform.TransformManager]
+
+
+def _top_level_pools (
+	bank_manager:       typing.Optional[subsample.bank.BankManager],
+	instrument_library: subsample.library.InstrumentLibrary,
+	similarity_matrix:  typing.Optional[subsample.similarity.SimilarityMatrix],
+	transform_manager:  typing.Optional[subsample.transform.TransformManager],
+) -> list[_TopLevelPool]:
+
+	"""The pools the top-level map's assignments play from (#4909).
+
+	With no programs, the one library.  With programs, each ``directory:``
+	program's: a Program Change to one plays the same assignments from its
+	own samples, so each needs what those assignments name by path, folder
+	or reference.  A ``map:`` preset plays its own assignments, and loaded
+	what they name as it was built (_load_bank), so it is not one.
+
+	The map's samples used to load into the first program listed and no
+	other, whichever kind it was.  Every other ``directory:`` program then
+	found nothing for such an assignment, and a preset listed first held
+	samples its own selects could choose and its map never named.
+	"""
+
+	if bank_manager is None:
+		return [_TopLevelPool(None, instrument_library, similarity_matrix, transform_manager)]
+
+	return [
+		_TopLevelPool(bank.name, bank.instrument_library, bank.similarity_matrix, bank.transform_manager)
+		for bank in bank_manager.all_banks()
+		if bank.note_map is None
+	]
+
+
+def _load_map_paths (
+	note_map:           subsample.player.NoteMap,
+	zone_templates:     tuple[typing.Any, ...],
+	pools:              list[_TopLevelPool],
+	every:              list[subsample.player.PathLoads],
+	reference_library:  subsample.library.ReferenceLibrary,
+	target_sample_rate: int,
+	with_preview:       bool,
+) -> None:
+
+	"""Load what the top-level map names into each pool that plays it, each sample held once (#4909).
+
+	``every`` takes what each pool gained and lost, in the pools' order.  It
+	is the caller's, so what was loaded before a failure is still known.
+	"""
+
+	shared: dict[pathlib.Path, subsample.library.SampleRecord] = {}
+
+	for pool, loads in zip(pools, every):
+		subsample.player._resolve_path_references(
+			note_map, [pool.matrix] if pool.matrix is not None else [], pool.library,
+			target_sample_rate=target_sample_rate,
+			with_preview=with_preview,
+			reference_library=reference_library,
+			transform_manager=pool.transforms,
+			zone_templates=zone_templates,
+			loads=loads,
+			shared=shared,
+		)
+
+
+def _extract_checked_library (
+	pools:              list[_TopLevelPool],
+	instrument_library: subsample.library.InstrumentLibrary,
+) -> subsample.library.InstrumentLibrary:
+
+	"""The library the top-level map's extracts are checked against as it loads.
+
+	The primary library, as before, where it plays the top-level
+	assignments; where it is a ``map:`` preset's, the first pool that does.
+	A sample in another program that cannot give an extract is left out of
+	the assignment as that program is ranked (MidiPlayer._playable_by).
+	"""
+
+	if not pools or any(pool.library is instrument_library for pool in pools):
+		return instrument_library
+
+	return pools[0].library
+
+
+def _warn_of_samples_pushed_out (
+	pools:         list[_TopLevelPool],
+	every:         list[subsample.player.PathLoads],
+	max_memory_mb: float,
+) -> None:
+
+	"""Name each program that lost samples of its own to those the map names (#4909)."""
+
+	for pool, loads in zip(pools, every):
+		if pool.program is not None and loads.evicted:
+			_log.warning(
+				"Program %r: %d sample(s) were left out to make room for those "
+				"the map names, at library.max_memory_mb (%.0f MB), so it cannot "
+				"play them - raise the limit to keep them",
+				pool.program, len(loads.evicted), max_memory_mb,
+			)
+
+
 def _load_bank (
 	defn: subsample.bank.BankDefinition,
 	preset: typing.Optional[subsample.player.MidiMapResult],
@@ -1600,15 +1715,10 @@ def _start_player (
 
 	midi_map = midi_map_result.note_map
 
-	# Resolve path-based references and instruments from the MIDI map
-	matrices: list[subsample.similarity.SimilarityMatrix] = []
-	if bank_manager is not None:
-		# Multi-bank mode: resolve into each bank's matrix
-		for bank in bank_manager.all_banks():
-			matrices.append(bank.similarity_matrix)
-	else:
-		# Single-bank mode: use the global similarity matrix
-		matrices.append(similarity_matrix)
+	# What the map names by path, folder or reference goes to every pool its
+	# assignments play from: the library, or each `directory:` program's.
+	pools = _top_level_pools(bank_manager, instrument_library, similarity_matrix, transform_manager)
+	every = [subsample.player.PathLoads() for _pool in pools]
 
 	effective_output_sr = _output_sample_rate(cfg)
 
@@ -1617,18 +1727,18 @@ def _start_player (
 	# otherwise escape this thread target as a raw traceback and leave the
 	# player dead while the rest of the app runs on.  One clean line + return.
 	try:
-		subsample.player._resolve_path_references(
-			midi_map, matrices, instrument_library,
-			target_sample_rate=effective_output_sr,
-			with_preview=cfg.recorder.previews,
-			reference_library=reference_library,
-			zone_templates=midi_map_result.zone_templates,
+		_load_map_paths(
+			midi_map, midi_map_result.zone_templates, pools, every,
+			reference_library, effective_output_sr, cfg.recorder.previews,
 		)
+		_warn_of_samples_pushed_out(pools, every, cfg.library.max_memory_mb)
 
 		# Validate `extract:` directives now that all candidate samples are
 		# loaded: any assignment whose extract is incompatible with even one of
 		# its matching samples is rejected here, before audio playback begins.
-		subsample.player._validate_assignment_extracts(midi_map, instrument_library)
+		subsample.player._validate_assignment_extracts(
+			midi_map, _extract_checked_library(pools, instrument_library),
+		)
 
 		# duration_beats measures sample length in beats, so a map that uses it
 		# needs a session tempo to resolve — reject at startup (like the extract
@@ -2278,6 +2388,7 @@ def _main_impl () -> None:
 		midi_map_watcher = _start_midi_map_watcher(
 			cfg, preloaded_midi_map_result, reference_library, instrument_library,
 			similarity_matrix, transform_manager, _player_cell, once_playing, map_read_as,
+			bank_manager,
 		)
 
 	# --- OSC receivers ---
@@ -2709,11 +2820,9 @@ def _modification_times (paths: typing.Iterable[pathlib.Path]) -> dict[pathlib.P
 
 
 def _put_back (
-	loads:              subsample.player.PathLoads,
-	instrument_library: subsample.library.InstrumentLibrary,
-	matrices:           list[subsample.similarity.SimilarityMatrix],
-	transform_manager:  typing.Optional[subsample.transform.TransformManager],
-	player:             subsample.player.MidiPlayer,
+	pools:  list[_TopLevelPool],
+	every:  list[subsample.player.PathLoads],
+	player: subsample.player.MidiPlayer,
 ) -> None:
 
 	"""Undo what a refused map edit loaded: take its samples out, and put back those they pushed out (#4908).
@@ -2723,47 +2832,54 @@ def _put_back (
 	edit left its folders in the library, and at library.max_memory_mb they
 	had pushed out the samples the map being kept plays.  A sample put back
 	keeps its id, so it ranks by age where it did.  A capture that arrived
-	meanwhile is neither of these, and stays.
+	meanwhile is neither of these, and stays.  With programs, each pool the
+	edit loaded into is put back (#4909).
 	"""
 
-	if not loads.added and not loads.evicted:
+	removed: set[int] = set()
+	put_back = 0
+
+	for pool, loads in zip(pools, every):
+		matrices = [pool.matrix] if pool.matrix is not None else []
+
+		for record in loads.added:
+
+			# Loaded again since, by a watcher or an import: no longer the edit's.
+			if record.filepath is None or pool.library.find_by_path(record.filepath) != record.sample_id:
+				continue
+
+			pool.library.remove_by_path(record.filepath)
+
+			for matrix in matrices:
+				matrix.remove([record.sample_id])
+
+			if pool.transforms is not None:
+				pool.transforms.on_parent_evicted([record.sample_id])
+
+			removed.add(record.sample_id)
+
+		for record in loads.evicted:
+			evicted = pool.library.add(record)
+
+			for matrix in matrices:
+				if evicted:
+					matrix.remove(evicted)
+				matrix.add(record)
+
+			if pool.transforms is not None:
+				if evicted:
+					pool.transforms.on_parent_evicted(evicted)
+				pool.transforms.on_sample_added(record)
+
+			put_back += 1
+
+	if not removed and not put_back:
 		return
-
-	removed = 0
-
-	for record in loads.added:
-
-		# Loaded again since, by a watcher or an import: no longer the edit's.
-		if record.filepath is None or instrument_library.find_by_path(record.filepath) != record.sample_id:
-			continue
-
-		instrument_library.remove_by_path(record.filepath)
-
-		for matrix in matrices:
-			matrix.remove([record.sample_id])
-
-		if transform_manager is not None:
-			transform_manager.on_parent_evicted([record.sample_id])
-
-		removed += 1
-
-	for record in loads.evicted:
-		evicted = instrument_library.add(record)
-
-		for matrix in matrices:
-			if evicted:
-				matrix.remove(evicted)
-			matrix.add(record)
-
-		if transform_manager is not None:
-			if evicted:
-				transform_manager.on_parent_evicted(evicted)
-			transform_manager.on_sample_added(record)
 
 	_log.info(
 		"MIDI map reload: removed %d sample(s) the refused edit loaded%s",
-		removed,
-		f", and put back {len(loads.evicted)} they pushed out" if loads.evicted else "",
+		len(removed),
+		f", and put back {put_back} they pushed out" if put_back else "",
 	)
 
 	# The notes go back to the samples they had: the player ranked none of
@@ -2781,6 +2897,7 @@ def _start_midi_map_watcher (
 	player_cell:        list[typing.Optional[subsample.player.MidiPlayer]],
 	once_playing:       typing.Optional["_ReloadOncePlaying"] = None,
 	map_read_as:        typing.Optional[dict[pathlib.Path, typing.Optional[int]]] = None,
+	bank_manager:       typing.Optional[subsample.bank.BankManager] = None,
 ) -> typing.Optional[subsample.watcher.MidiMapWatcher]:
 
 	"""Start player.watch_midi_map's watcher, and return it, or None if it could not start.
@@ -2880,27 +2997,21 @@ def _start_midi_map_watcher (
 			)
 
 		# Load any NEW path/directory/reference predicates the edit
-		# introduced — startup does this via _resolve_path_references, and
+		# introduced — startup does this via _load_map_paths, and
 		# without it here a live-coded `path:`/`directory:` select would
 		# reload "successfully" but silently match nothing until restart.
-		# Targets the primary library/matrix (same as the OSC import
-		# path); per-bank matrices in multi-bank mode still resolve at
-		# startup/program load.  Already-loaded paths are deduped inside.
+		# They go where startup puts them: the library, or with programs
+		# each `directory:` program's (#4909).  Already-loaded paths are
+		# deduped inside.
 		#
 		# What it loads is noted, so a refusal below can undo it (#4908).
-		loads = subsample.player.PathLoads()
-		reload_matrices = [similarity_matrix] if similarity_matrix is not None else []
+		pools = _top_level_pools(bank_manager, instrument_library, similarity_matrix, transform_manager)
+		every = [subsample.player.PathLoads() for _pool in pools]
 
 		try:
-			reload_sr = _output_sample_rate(cfg)
-			subsample.player._resolve_path_references(
-				result.note_map, reload_matrices, instrument_library,
-				target_sample_rate=reload_sr,
-				with_preview=cfg.recorder.previews,
-				reference_library=reference_library,
-				transform_manager=transform_manager,
-				zone_templates=result.zone_templates,
-				loads=loads,
+			_load_map_paths(
+				result.note_map, result.zone_templates, pools, every,
+				reference_library, _output_sample_rate(cfg), cfg.recorder.previews,
 			)
 		except Exception as exc:
 			_log.warning(
@@ -2917,14 +3028,14 @@ def _start_midi_map_watcher (
 		# which is the same trade the parse-time failure above makes.
 		try:
 			subsample.player._validate_assignment_extracts(
-				result.note_map, instrument_library,
+				result.note_map, _extract_checked_library(pools, instrument_library),
 			)
 		except ValueError as exc:
 			_log.error(
 				"MIDI map reload failed extract validation - keeping current "
 				"map: %s", exc,
 			)
-			_put_back(loads, instrument_library, reload_matrices, transform_manager, player)
+			_put_back(pools, every, player)
 			return
 
 		# reload_midi_map runs update_assignments() against the new map
@@ -2940,7 +3051,7 @@ def _start_midi_map_watcher (
 				"MIDI map reload failed validation - keeping current map: %s",
 				exc,
 			)
-			_put_back(loads, instrument_library, reload_matrices, transform_manager, player)
+			_put_back(pools, every, player)
 
 	watched = preloaded.source_files
 

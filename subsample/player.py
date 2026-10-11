@@ -2697,6 +2697,7 @@ def _resolve_path_references (
 	transform_manager: typing.Optional["subsample.transform.TransformManager"] = None,
 	zone_templates: tuple["ZoneTemplate", ...] = (),
 	loads: typing.Optional[PathLoads] = None,
+	shared: typing.Optional[dict[pathlib.Path, subsample.library.SampleRecord]] = None,
 ) -> None:
 
 	"""Load references, instruments, and directory samples named by the MIDI map.
@@ -2741,7 +2742,29 @@ def _resolve_path_references (
 		                     pushed out, for a caller that may have to undo
 		                     them (#4908).  A reference added to a matrix is
 		                     not noted: it changes nothing that plays.
+		shared:              The samples this map has already had loaded for
+		                     another program, by path.  One found there is
+		                     added as it is, and one loaded here is put there,
+		                     so every program that plays the map holds the
+		                     same record and its audio is in memory once
+		                     (#4909).
 	"""
+
+	def _load (path: pathlib.Path) -> typing.Optional[subsample.library.SampleRecord]:
+
+		"""Load one sample, or take the record another program already holds for this map."""
+
+		key = subsample.query.linked_path(pathlib.Path(path))
+
+		if shared is not None and key in shared:
+			return shared[key]
+
+		record = _load_instrument_from_path(path, target_sample_rate, with_preview=with_preview)
+
+		if record is not None and shared is not None:
+			shared[key] = record
+
+		return record
 
 	# The records the library holds now, so one pushed out can be put back.
 	held_before = {record.sample_id: record for record in instrument_lib.samples()} if loads is not None else {}
@@ -2841,9 +2864,7 @@ def _resolve_path_references (
 			if instrument_lib.find_by_path(audio_path) is not None:
 				continue
 
-			record = _load_instrument_from_path(
-				audio_path, target_sample_rate, with_preview=with_preview,
-			)
+			record = _load(audio_path)
 
 			if record is not None:
 				# Keep the eviction list.  Dropping it left every ranking and
@@ -2919,9 +2940,7 @@ def _resolve_path_references (
 			)
 			continue
 
-		record = _load_instrument_from_path(
-			path, target_sample_rate, with_preview=with_preview,
-		)
+		record = _load(path)
 		if record is None:
 			continue
 
