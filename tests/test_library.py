@@ -248,14 +248,16 @@ class TestLoadReferenceLibrary:
 		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
 	) -> None:
 
-		"""#4704 (L17 of the 2026-10-07 review): Kick.wav, kick.wav and kick.flac are one reference.
+		"""#4704 (L17 of the 2026-10-07 review): Kick.wav, kick.flac and kick.ogg are one reference.
 
 		They collapsed into whichever came last, silently, and the log said 4
 		references loaded where there were 2.  The first in file-name order is
-		kept, and the others are named.
+		kept, and the others are named.  Each name here differs from the others
+		in its extension, so that all three are files of their own on a
+		filesystem that takes Kick and kick for one name, as macOS's does.
 		"""
 
-		for stem, ext in (("Kick", ".wav"), ("kick", ".wav"), ("kick", ".flac"), ("snare", ".wav")):
+		for stem, ext in (("Kick", ".wav"), ("kick", ".flac"), ("kick", ".ogg"), ("snare", ".wav")):
 			_write_sidecar(tmp_path, stem, ext)
 
 		with caplog.at_level(logging.INFO, logger="subsample.library"):
@@ -268,8 +270,33 @@ class TestLoadReferenceLibrary:
 
 		messages = [record.getMessage() for record in caplog.records if record.name == "subsample.library"]
 
-		assert "Reference 'Kick' is Kick.wav: kick.flac, kick.wav left out, as names that differ only in letter case or extension are one reference - rename one to keep both" in messages
+		assert "Reference 'Kick' is Kick.wav: kick.flac, kick.ogg left out, as names that differ only in letter case or extension are one reference - rename one to keep both" in messages
 		assert f"Loaded 2 reference sample(s) from {tmp_path}" in messages
+
+	def test_names_that_differ_only_in_letter_case_clash (
+		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""Kick.wav and kick.wav, the pair L17 named, where a folder can hold both."""
+
+		_write_sidecar(tmp_path, "Kick")
+
+		if (tmp_path / ("kick.wav" + subsample.cache.SIDECAR_SUFFIX)).exists():
+			pytest.skip("this filesystem takes Kick.wav and kick.wav for one file")
+
+		_write_sidecar(tmp_path, "kick")
+
+		with caplog.at_level(logging.WARNING, logger="subsample.library"):
+			lib = subsample.library.load_reference_library(tmp_path)
+
+		kick = lib.get("kick")
+
+		assert len(lib) == 1
+		assert kick is not None and kick.name == "Kick"
+
+		messages = [record.getMessage() for record in caplog.records if record.name == "subsample.library" and record.levelno == logging.WARNING]
+
+		assert messages == ["Reference 'Kick' is Kick.wav: kick.wav left out, as names that differ only in letter case or extension are one reference - rename one to keep both"]
 
 	def test_assigns_unique_ids (self, tmp_path: pathlib.Path) -> None:
 		_write_sidecar(tmp_path, "KICK")
