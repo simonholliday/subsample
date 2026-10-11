@@ -3340,10 +3340,41 @@ def _check_binding (
 			)
 
 
+def _with_paths_from (step: ProcessorStep, folder: pathlib.Path) -> ProcessorStep:
+
+	"""Return the step with each path it names read from the map's folder (#4910).
+
+	A vocoder's carrier was kept as written, and resolved from the folder
+	Subsample runs in when the step was built, where a select's ``path``,
+	``directory`` and ``reference`` are read from the map's own: a sample set
+	kept elsewhere could not find the carrier beside it.  A word the
+	parameter declares, such as ``reference``, is not a path and is left as
+	it is, and so is a step of an undeclared processor.
+	"""
+
+	processor = subsample.processors.PROCESSORS.get(step.name)
+
+	if processor is None:
+		return step
+
+	params: list[tuple[str, typing.Any]] = []
+
+	for name, value in step.params:
+		parameter = processor.parameter(name)
+
+		if "path" in parameter.forms and isinstance(value, str) and value not in parameter.choice_values:
+			value = str((folder / value).resolve())
+
+		params.append((name, value))
+
+	return dataclasses.replace(step, params=tuple(params))
+
+
 def parse_process (
 	raw: typing.Any,
 	assignment_name: str,
 	definitions: typing.Optional["subsample.definitions.Definitions"] = None,
+	midi_map_dir: typing.Optional[pathlib.Path] = None,
 ) -> ProcessSpec:
 
 	"""Parse the ``process:`` block into a ProcessSpec.
@@ -3362,10 +3393,16 @@ def parse_process (
 
 	``definitions`` (threaded from load_midi_map) lets a CC binding name its
 	cc/channel via the map's mounted vocabulary, e.g. ``{cc: my.brightness}``.
+
+	``midi_map_dir`` is the folder of the map's file, which a path a step names
+	is read from, as a select's are; the current folder when None.
 	"""
 
 	if raw is None:
 		return ProcessSpec()
+
+	if midi_map_dir is None:
+		midi_map_dir = pathlib.Path.cwd()
 
 	if not isinstance(raw, list):
 		raise ValueError(
@@ -3596,7 +3633,7 @@ def parse_process (
 	# A value outside what a parameter allows would otherwise be clamped, ignored,
 	# or fail inside the render worker on every note: a different sound, and no
 	# error to say why.
-	steps = [_checked_step(step, assignment_name) for step in steps]
+	steps = [_with_paths_from(_checked_step(step, assignment_name), midi_map_dir) for step in steps]
 
 	# A process chain may carry at most ONE beat-aligning step.  Combining
 	# stretch_quantize with pad_quantize — or repeating either — is ambiguous

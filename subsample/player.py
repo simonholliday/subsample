@@ -3512,7 +3512,7 @@ def load_midi_map (
 			continue
 
 		# Parse process block (optional — defaults to no processing).
-		process = subsample.query.parse_process(assignment_raw.get("process"), name, definitions)
+		process = subsample.query.parse_process(assignment_raw.get("process"), name, definitions, midi_map_dir)
 
 		# quantized_beats and beat_match measure the sound as the assignment's
 		# own quantiser puts it on the grid, so without one there is nothing to

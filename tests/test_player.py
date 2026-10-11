@@ -11042,3 +11042,44 @@ class TestTheScoredVariantIsThePlayedOne:
 			any(isinstance(step, subsample.transform.Vocoder) for step in spec.steps)
 			for spec in scored
 		)
+
+
+class TestACarrierBesideItsMap:
+
+	"""#4910 (lead 3 of the 2026-10-07 review's leads not verified): a vocoder's carrier is read from the map's folder.
+
+	A select's path was read from the map's folder and the carrier from the
+	folder Subsample runs in, so a sample set kept elsewhere played its
+	notes without the vocoder, and warned of a path it never held.
+	"""
+
+	def test_a_set_run_from_another_folder_finds_its_carrier (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		set_dir = tmp_path / "sets" / "voices"
+		set_dir.mkdir(parents=True)
+		(set_dir / "map.yaml").write_text(
+			"channel: 10\n"
+			"assignments:\n"
+			"  - name: Voice\n"
+			"    notes: 36\n"
+			"    select:\n"
+			"      where: { path: hits/hit.wav }\n"
+			"    process:\n"
+			"      - vocoder: { carrier: carriers/ah.wav }\n",
+			encoding="utf-8",
+		)
+
+		project = tmp_path / "project"
+		project.mkdir()
+		monkeypatch.chdir(project)
+		subsample.transform._resolved_carrier.cache_clear()
+
+		result     = subsample.player.load_midi_map(set_dir / "map.yaml", [])
+		assignment = result.note_map[(9, 36)][0][0]
+		spec       = subsample.transform.spec_from_process(assignment.process, midi_note=36)
+		[vocoder]  = [step for step in spec.steps if isinstance(step, subsample.transform.Vocoder)]
+
+		assert assignment.select[0].where.name_path == str((set_dir / "hits" / "hit.wav").resolve())
+		assert vocoder.carrier_path == str((set_dir / "carriers" / "ah.wav").resolve())

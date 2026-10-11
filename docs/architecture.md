@@ -297,6 +297,11 @@ the same pause (#4703). Its dry result is not kept, so a carrier put back is
 used at the next try; unpaused, every note rendered the whole chain again and
 warned, where now the vocoder warns once per carrier.
 
+A carrier named by path is read from the map's folder, as a select's `path`,
+`directory` and `reference` are: the map's loader makes it whole
+(`query._with_paths_from`, #4910). It was resolved from the folder Subsample
+runs in, so a sample set kept elsewhere could not find the carrier beside it.
+
 The radio processor oversamples the sound four times in 64-bit numbers, so a
 copy of it costs 1.4 MB per second of sound at 44.1 kHz, twice that as complex
 numbers, and its fade, AGC and receiver held several at once. `radio.py` frees

@@ -5779,7 +5779,9 @@ def spec_from_process (
 						)
 						continue
 				else:
-					# Explicit file path — resolve relative to cwd.
+					# A file.  A map's carrier arrives whole, read from the map's
+					# folder as the map loaded (query._with_paths_from, #4910);
+					# a step built in code is read from the current folder.
 					carrier_str = _resolved_carrier(carrier_str)
 
 				steps.append(Vocoder(

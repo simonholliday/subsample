@@ -859,6 +859,32 @@ class TestParseProcess:
 		assert spec.steps[0].name == "repitch"
 		assert spec.steps[0].params == ()
 
+	def test_a_carrier_is_read_from_the_map_s_folder (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4910: a carrier was kept as written, and looked for in the folder Subsample runs in."""
+
+		spec = subsample.query.parse_process(
+			[{"vocoder": {"carrier": "carriers/ah.wav"}}], "Voice", midi_map_dir=tmp_path,
+		)
+
+		assert spec.steps[0].get("carrier") == str((tmp_path / "carriers" / "ah.wav").resolve())
+
+	def test_a_carrier_written_whole_stays_where_it_is (self, tmp_path: pathlib.Path) -> None:
+		written = (tmp_path / "elsewhere" / "ah.wav").resolve()
+
+		spec = subsample.query.parse_process(
+			[{"vocoder": {"carrier": str(written)}}], "Voice", midi_map_dir=tmp_path / "set",
+		)
+
+		assert spec.steps[0].get("carrier") == str(written)
+
+	def test_the_carrier_word_reference_is_not_a_path (self, tmp_path: pathlib.Path) -> None:
+		spec = subsample.query.parse_process(
+			[{"vocoder": {"carrier": "reference"}}], "Voice", midi_map_dir=tmp_path,
+		)
+
+		assert spec.steps[0].get("carrier") == "reference"
+
 	def test_beat_quantize_with_params (self) -> None:
 		"""YAML `bpm:` translates to canonical `tempo:` in the step params."""
 		raw = [{"stretch_quantize": {"grid": 16, "bpm": 120}}]

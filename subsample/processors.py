@@ -1106,7 +1106,7 @@ _DECLARED: typing.Final[tuple[Processor, ...]] = (
 				required=True,
 				examples=("carriers/vowel-ah.wav",),
 				title="Carrier",
-				description="The sound the vocoder shapes: `reference`, or the path to an audio file.",
+				description="The sound the vocoder shapes: `reference`, or an audio file, by its path relative to the map.",
 			),
 			Parameter(
 				name="bands", forms=_INTEGER,
