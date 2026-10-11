@@ -808,7 +808,10 @@ on every MIDI channel (decision #3974). A switch installs the new program's
 rules at once, on the MIDI thread; the re-evaluation worker then ranks its
 samples against them, and switches back to the previous program if they fail
 (#4488). A `map:` preset's rules are loaded with the map that names it
-(`player.load_preset_map`, #3886). The switch, and a map reload's check for a
+(`player.load_preset_map`, #3886). One that filters by `duration_beats` with no
+session tempo stops the start as its program is built (`cli._load_bank`,
+#4913), as the top-level map does, where it was first refused at the switch
+that chose it. The switch, and a map reload's check for a
 live preset and refresh of the top-level rules, take the player's
 `_publish_lock`, so they never interleave. A reload that finishes validating an
 edit after a switch to a `directory:` program gives that program the edit,

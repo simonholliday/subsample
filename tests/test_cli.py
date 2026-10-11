@@ -2233,6 +2233,7 @@ class TestPresetsLoadWithTheirMap:
 	def _build_program (
 		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, preset: str,
 		variant_disk_cache: typing.Optional[subsample.transform.VariantDiskCache] = None,
+		tempo_bpm: float = 0.0,
 	) -> tuple[subsample.bank.Bank, subsample.player.MidiMapResult]:
 
 		"""Build program 3 as a run does, from a preset beside a folder of one sample."""
@@ -2247,7 +2248,11 @@ class TestPresetsLoadWithTheirMap:
 
 		cfg = TestLoadConfiguredMap._cfg(midi_map=str(path))
 		# The variant cache would otherwise be made in the working directory.
-		cfg = dataclasses.replace(cfg, transform=dataclasses.replace(cfg.transform, max_disk_mb=0.0))
+		cfg = dataclasses.replace(
+			cfg,
+			transform=dataclasses.replace(cfg.transform, max_disk_mb=0.0),
+			tempo=dataclasses.replace(cfg.tempo, bpm=tempo_bpm),
+		)
 		result = subsample.player.load_configured_map(cfg, [])
 
 		bank = subsample.cli._load_bank(
@@ -2317,6 +2322,40 @@ class TestPresetsLoadWithTheirMap:
 			"    select:\n      where: { directory: Snare }\n"
 			"    process:\n      - repitch: true\n"
 		))
+
+		try:
+			assert len(bank.instrument_library) == 1
+
+		finally:
+			bank.transform_manager.shutdown()
+
+
+	_BEATS_PRESET: typing.Final[str] = (
+		"channel: 10\nassignments:\n  - name: Snare\n    notes: 38\n"
+		"    select:\n      where: { directory: Snare, duration_beats: { lt: 4 } }\n"
+	)
+
+	def test_a_preset_that_filters_by_beats_is_refused_at_startup_with_no_tempo (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		"""#4913: such a preset was refused only when a Program Change chose it.
+
+		The top-level map was checked at startup and a preset was not, so
+		the run started, and the switch was undone mid-performance.
+		"""
+
+		with pytest.raises(ValueError, match=(
+			r"Program 'Brushes', preset 'kits/brushes/midi-map\.yaml': "
+			r"A MIDI map assignment filters by duration_beats, but no session tempo is set"
+		)):
+			self._build_program(tmp_path, monkeypatch, self._BEATS_PRESET)
+
+	def test_a_preset_that_filters_by_beats_loads_when_a_tempo_is_set (
+		self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+	) -> None:
+
+		bank, _result = self._build_program(tmp_path, monkeypatch, self._BEATS_PRESET, tempo_bpm=120.0)
 
 		try:
 			assert len(bank.instrument_library) == 1

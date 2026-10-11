@@ -1371,7 +1371,8 @@ def _load_bank (
 
 	Raises:
 		ValueError: If an assignment's ``extract:`` does not suit the samples
-		            a preset loads.
+		            a preset loads, or a preset filters by ``duration_beats``
+		            with no session tempo set.
 	"""
 
 	max_instrument_bytes = int(cfg.library.max_memory_mb * 1024 * 1024)
@@ -1381,6 +1382,18 @@ def _load_bank (
 		# broken one; the library starts empty and is filled by the preset's
 		# own path / directory references below.
 		assert preset is not None
+
+		# A preset that filters by duration_beats needs a session tempo, as the
+		# top-level map does (_start_player).  It was checked only when a
+		# Program Change chose it, so the run started, and the switch was
+		# undone mid-performance (#4913).
+		try:
+			subsample.player._validate_beat_filter_tempo(
+				preset.note_map, preset.zone_templates, cfg.tempo.bpm,
+			)
+		except ValueError as exc:
+			raise ValueError(f"Program {defn.name!r}, preset {defn.map_path!r}: {exc}") from exc
+
 		directory = (parent_map_dir / defn.map_path).parent
 		instrument_library = subsample.library.InstrumentLibrary(max_instrument_bytes)
 	else:
