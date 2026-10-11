@@ -797,6 +797,15 @@ the map again and swaps the active note map, keeping the old one when the new
 one fails to parse or validate. Once it parses, the watcher follows the files it
 was read from this time, so a set added to an ensemble is watched from then on.
 
+An edit's `path` and `directory` samples are loaded before it can be checked,
+because the extract check reads their formats. The load is noted
+(`player.PathLoads`), and an edit refused after it is undone
+(`cli._put_back`, #4908): its samples are taken out, those they pushed out at
+`library.max_memory_mb` are put back under the ids they had, and the player
+ranks again. Left in place, the refused edit's folder stayed in the library,
+and at the limit the map being kept had lost its samples to it. A reference the
+edit added to the matrix stays, as it changes nothing that plays.
+
 A map saved while Subsample starts is reloaded once the player is playing
 (`cli._ReloadOncePlaying`, #4703). The watcher starts before the player, and a
 reload that found no player was dropped; a save before the watcher started was

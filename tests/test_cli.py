@@ -3284,6 +3284,151 @@ class TestAMapSavedWhileThePlayerStarts:
 			watcher.stop()
 
 
+class TestARefusedMapEdit:
+
+	"""#4908 (lead 1 of the 2026-10-07 review's leads not verified): a refused edit leaves the library as it was.
+
+	An edit's paths are loaded before it can be checked.  Refused after
+	that, it left its folder in the library, and at the memory limit that
+	folder had pushed out the samples the map being kept plays.
+	"""
+
+	class _Player:
+
+		"""Stands in for the player: refuses a reload when told to, and notes each re-ranking."""
+
+		def __init__ (self, refuses: bool = False) -> None:
+			self.refuses  = refuses
+			self.reranked: list[str] = []
+
+		def reload_midi_map (self, result: subsample.player.MidiMapResult) -> None:
+			if self.refuses:
+				raise ValueError("'similarity' ordering requires where.reference to be set")
+
+		def _try_update_assignments (self, context: str) -> None:
+			self.reranked.append(context)
+
+	_OLD: typing.Final[str] = (
+		"channel: 10\n"
+		"assignments:\n"
+		"  - name: Old\n    notes: 36\n    select:\n      where: { directory: lib }\n"
+	)
+
+	def _edit (
+		self, tmp_path: pathlib.Path, added: str, player: "TestARefusedMapEdit._Player", room: float = 2.5,
+	) -> tuple[subsample.library.InstrumentLibrary, subsample.similarity.SimilarityMatrix, list[int]]:
+
+		"""Save an edit that adds an assignment on the folder `new`, with a library that has room for two samples.
+
+		Returns the library, its matrix, and the ids of the samples it held
+		before the edit.  `room` is how many samples the library can hold.
+		"""
+
+		for folder, stem in (("lib", "old1"), ("lib", "old2"), ("new", "new1"), ("new", "new2")):
+			(tmp_path / folder).mkdir(exist_ok=True)
+			tests.helpers._write_wav_and_sidecar(tmp_path / folder, stem)
+
+		map_path = tmp_path / "map.yaml"
+		map_path.write_text(self._OLD, encoding="utf-8")
+
+		cfg = _default_cfg()
+		cfg = dataclasses.replace(
+			cfg, player=dataclasses.replace(cfg.player, enabled=True, midi_map=str(map_path), watch_midi_map=True),
+		)
+		references = subsample.library.ReferenceLibrary([])
+		preloaded  = subsample.player.load_configured_map(cfg, references.names())
+		read_as    = subsample.cli._modification_times(preloaded.source_files)
+
+		def _loaded (max_memory_bytes: int) -> tuple[subsample.library.InstrumentLibrary, subsample.similarity.SimilarityMatrix]:
+			library = subsample.library.InstrumentLibrary(max_memory_bytes)
+			matrix  = subsample.similarity.SimilarityMatrix(references, cfg.similarity)
+			subsample.player._resolve_path_references(
+				preloaded.note_map, [matrix], library, with_preview=False, reference_library=references,
+			)
+
+			return library, matrix
+
+		roomy, _matrix  = _loaded(10**9)
+		library, matrix = _loaded(int(roomy.memory_used / 2 * room))
+		before = [record.sample_id for record in library.samples()]
+
+		assert self._held(library) == ["old1", "old2"][-int(room):]
+
+		map_path.write_text(self._OLD + added, encoding="utf-8")
+		os.utime(map_path, ns=(time.time_ns(), (read_as[map_path.resolve()] or 0) + 10**9))
+
+		# A map saved since it was read is reloaded as the watcher starts.
+		watcher = subsample.cli._start_midi_map_watcher(
+			cfg, preloaded, references, library, matrix, None, [typing.cast(typing.Any, player)], None, read_as,
+		)
+
+		assert watcher is not None
+		watcher.stop()
+
+		return library, matrix, before
+
+	@staticmethod
+	def _held (library: subsample.library.InstrumentLibrary) -> list[str]:
+		return sorted(record.name for record in library.samples())
+
+	def test_one_refused_for_its_extract_leaves_the_library_as_it_was (self, tmp_path: pathlib.Path) -> None:
+
+		"""The library held the edit's two samples and neither of the map's own."""
+
+		player = self._Player()
+		library, matrix, before = self._edit(
+			tmp_path,
+			"  - name: New\n    notes: 38\n    extract: channel.9\n    select:\n      where: { directory: new }\n",
+			player,
+		)
+
+		assert self._held(library) == ["old1", "old2"]
+		assert sorted(record.sample_id for record in library.samples()) == sorted(before)
+		assert sorted(matrix._vectors) == sorted(before)
+		assert player.reranked == ["the return to the map kept"]
+
+	def test_one_the_player_refuses_leaves_the_library_as_it_was (self, tmp_path: pathlib.Path) -> None:
+		player = self._Player(refuses=True)
+		library, matrix, before = self._edit(
+			tmp_path,
+			"  - name: New\n    notes: 38\n    select:\n      where: { directory: new }\n",
+			player,
+		)
+
+		assert self._held(library) == ["old1", "old2"]
+		assert sorted(matrix._vectors) == sorted(before)
+		assert player.reranked == ["the return to the map kept"]
+
+	def test_a_sample_the_edit_loaded_and_pushed_out_again_is_not_put_back (self, tmp_path: pathlib.Path) -> None:
+
+		"""Room for one: the edit's second sample pushes out its first, which the library never held before."""
+
+		player = self._Player(refuses=True)
+		library, matrix, before = self._edit(
+			tmp_path,
+			"  - name: New\n    notes: 38\n    select:\n      where: { directory: new }\n",
+			player,
+			room=1.5,
+		)
+
+		assert self._held(library) == ["old2"]
+		assert sorted(matrix._vectors) == before
+
+	def test_one_that_is_taken_keeps_what_it_loaded (self, tmp_path: pathlib.Path) -> None:
+
+		"""Room for two: the edit's folder pushes out the older one, as the limit has it."""
+
+		player = self._Player()
+		library, _matrix, _before = self._edit(
+			tmp_path,
+			"  - name: New\n    notes: 38\n    select:\n      where: { directory: new }\n",
+			player,
+		)
+
+		assert self._held(library) == ["new1", "new2"]
+		assert player.reranked == []
+
+
 class TestShutDown:
 
 	"""The order things stop in, and how the process ends."""

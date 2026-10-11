@@ -2671,6 +2671,21 @@ def _reference_wav_path (assignment: subsample.query.Assignment) -> typing.Optio
 	return path
 
 
+@dataclasses.dataclass
+class PathLoads:
+
+	"""What a map's paths brought into a library, and what that pushed out of it (#4908).
+
+	A map reload keeps one, so an edit refused after its sounds were loaded
+	can be undone (cli._put_back).  ``added`` holds the samples loaded and
+	still held; ``evicted`` those the library held before and lost to make
+	room, oldest first.
+	"""
+
+	added:   list[subsample.library.SampleRecord] = dataclasses.field(default_factory=list)
+	evicted: list[subsample.library.SampleRecord] = dataclasses.field(default_factory=list)
+
+
 def _resolve_path_references (
 	note_map: NoteMap,
 	matrices: list[subsample.similarity.SimilarityMatrix],
@@ -2681,6 +2696,7 @@ def _resolve_path_references (
 	reference_library: typing.Optional[subsample.library.ReferenceLibrary] = None,
 	transform_manager: typing.Optional["subsample.transform.TransformManager"] = None,
 	zone_templates: tuple["ZoneTemplate", ...] = (),
+	loads: typing.Optional[PathLoads] = None,
 ) -> None:
 
 	"""Load references, instruments, and directory samples named by the MIDI map.
@@ -2721,7 +2737,33 @@ def _resolve_path_references (
 		                     their selects name (#3971): a preset's library
 		                     starts empty, and library.directory may not hold
 		                     the folder a zone-tuned select names.
+		loads:               Filled with each sample added and each one that
+		                     pushed out, for a caller that may have to undo
+		                     them (#4908).  A reference added to a matrix is
+		                     not noted: it changes nothing that plays.
 	"""
+
+	# The records the library holds now, so one pushed out can be put back.
+	held_before = {record.sample_id: record for record in instrument_lib.samples()} if loads is not None else {}
+
+	def _note (record: subsample.library.SampleRecord, evicted_ids: list[int]) -> None:
+
+		"""Note one sample added, and what it pushed out."""
+
+		if loads is None:
+			return
+
+		for sample_id in evicted_ids:
+
+			# One this call added and then pushed out again leaves nothing to
+			# undo.  Told apart by id: comparing records compares their audio.
+			if any(added.sample_id == sample_id for added in loads.added):
+				loads.added[:] = [added for added in loads.added if added.sample_id != sample_id]
+
+			elif sample_id in held_before:
+				loads.evicted.append(held_before[sample_id])
+
+		loads.added.append(record)
 
 	# Collect unique paths for references, instruments, and directories.
 	# ref_names holds the other kind of reference — a NAME looked up in the
@@ -2809,6 +2851,7 @@ def _resolve_path_references (
 				# holds, so a similarity select could return a dead id, and the
 				# variants of an evicted parent were never released.
 				evicted = instrument_lib.add(record)
+				_note(record, evicted)
 				# Rank the new sample against every reference too.  At startup
 				# the matrix has no references yet and only keeps the sample,
 				# which the add_reference pass below scores (#4704, L16); on a
@@ -2883,6 +2926,7 @@ def _resolve_path_references (
 			continue
 
 		evicted = instrument_lib.add(record)
+		_note(record, evicted)
 
 		# Path-pinned instruments load AFTER the reference pass above, so the
 		# add_reference snapshot never saw them — rank them into every existing

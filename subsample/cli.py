@@ -2708,6 +2708,69 @@ def _modification_times (paths: typing.Iterable[pathlib.Path]) -> dict[pathlib.P
 	return times
 
 
+def _put_back (
+	loads:              subsample.player.PathLoads,
+	instrument_library: subsample.library.InstrumentLibrary,
+	matrices:           list[subsample.similarity.SimilarityMatrix],
+	transform_manager:  typing.Optional[subsample.transform.TransformManager],
+	player:             subsample.player.MidiPlayer,
+) -> None:
+
+	"""Undo what a refused map edit loaded: take its samples out, and put back those they pushed out (#4908).
+
+	An edit's paths are loaded before it can be checked, since the extract
+	check reads the formats of the samples it names.  Refused after that, the
+	edit left its folders in the library, and at library.max_memory_mb they
+	had pushed out the samples the map being kept plays.  A sample put back
+	keeps its id, so it ranks by age where it did.  A capture that arrived
+	meanwhile is neither of these, and stays.
+	"""
+
+	if not loads.added and not loads.evicted:
+		return
+
+	removed = 0
+
+	for record in loads.added:
+
+		# Loaded again since, by a watcher or an import: no longer the edit's.
+		if record.filepath is None or instrument_library.find_by_path(record.filepath) != record.sample_id:
+			continue
+
+		instrument_library.remove_by_path(record.filepath)
+
+		for matrix in matrices:
+			matrix.remove([record.sample_id])
+
+		if transform_manager is not None:
+			transform_manager.on_parent_evicted([record.sample_id])
+
+		removed += 1
+
+	for record in loads.evicted:
+		evicted = instrument_library.add(record)
+
+		for matrix in matrices:
+			if evicted:
+				matrix.remove(evicted)
+			matrix.add(record)
+
+		if transform_manager is not None:
+			if evicted:
+				transform_manager.on_parent_evicted(evicted)
+			transform_manager.on_sample_added(record)
+
+	_log.info(
+		"MIDI map reload: removed %d sample(s) the refused edit loaded%s",
+		removed,
+		f", and put back {len(loads.evicted)} they pushed out" if loads.evicted else "",
+	)
+
+	# The notes go back to the samples they had: the player ranked none of
+	# this, or ranked the edit's samples for a capture that came meanwhile.
+	player._try_update_assignments("the return to the map kept")
+
+
 def _start_midi_map_watcher (
 	cfg:                subsample.config.Config,
 	preloaded:          subsample.player.MidiMapResult,
@@ -2823,9 +2886,13 @@ def _start_midi_map_watcher (
 		# Targets the primary library/matrix (same as the OSC import
 		# path); per-bank matrices in multi-bank mode still resolve at
 		# startup/program load.  Already-loaded paths are deduped inside.
+		#
+		# What it loads is noted, so a refusal below can undo it (#4908).
+		loads = subsample.player.PathLoads()
+		reload_matrices = [similarity_matrix] if similarity_matrix is not None else []
+
 		try:
 			reload_sr = _output_sample_rate(cfg)
-			reload_matrices = [similarity_matrix] if similarity_matrix is not None else []
 			subsample.player._resolve_path_references(
 				result.note_map, reload_matrices, instrument_library,
 				target_sample_rate=reload_sr,
@@ -2833,6 +2900,7 @@ def _start_midi_map_watcher (
 				reference_library=reference_library,
 				transform_manager=transform_manager,
 				zone_templates=result.zone_templates,
+				loads=loads,
 			)
 		except Exception as exc:
 			_log.warning(
@@ -2856,6 +2924,7 @@ def _start_midi_map_watcher (
 				"MIDI map reload failed extract validation - keeping current "
 				"map: %s", exc,
 			)
+			_put_back(loads, instrument_library, reload_matrices, transform_manager, player)
 			return
 
 		# reload_midi_map runs update_assignments() against the new map
@@ -2871,6 +2940,7 @@ def _start_midi_map_watcher (
 				"MIDI map reload failed validation - keeping current map: %s",
 				exc,
 			)
+			_put_back(loads, instrument_library, reload_matrices, transform_manager, player)
 
 	watched = preloaded.source_files
 
