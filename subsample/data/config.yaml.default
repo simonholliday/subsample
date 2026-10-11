@@ -69,7 +69,8 @@
 # normalisation).  First order only for now; `max_order` is reserved.
 #
 # The decoder maps the 4-channel B-format to the output layout (mono, stereo,
-# quad, 5.1, or 7.1) via a virtual speaker array.  Rotation is applied before
+# quad, 5.1, or 7.1) via a ring of virtual speakers, each shared between the
+# two real speakers either side of it.  Rotation is applied before
 # the decoder so you can re-orient the whole sound field - useful when the
 # mic wasn't facing "forward" at capture time, or when you want to rotate the
 # image for creative effect.
@@ -77,13 +78,15 @@
 # ambisonic:
 #   decoder: basic
 #   # Decoder weight mode:
-#   # - basic:   flat velocity weights.  Sharp front lobes, best low-frequency
-#   #            behaviour; some anti-phase back-radiation for widely-spaced
-#   #            speaker pairs.
-#   # - max_re:  Max-rE weighting (1/√3 for first order).  Narrower lobes, best
-#   #            high-frequency localisation and perceptual sweet-spot accuracy.
-#   # - inphase: In-phase / cardioid weighting.  Softest lobes, no back-lobes,
-#   #            wider image - robust for listening far from the sweet spot.
+#   # - basic:   flat weights.  Places each sound most sharply, and plays a
+#   #            little of it from the speakers opposite, inverted.
+#   # - max_re:  Max-rE weighting.  Puts the most of each sound's energy in its
+#   #            own direction - the usual choice for 5.1 and 7.1.
+#   # - inphase: In-phase / cardioid weighting.  Never plays a speaker
+#   #            inverted; the softest image - robust for listening away from
+#   #            the centre.
+#   # On stereo, a sound fades as it goes behind.  7.1 is decoded for side
+#   # speakers at 90 degrees and back speakers at 135.
 #
 #   yaw_degrees: 0.0
 #   # Rotation about the up axis.  Positive spins the sound field

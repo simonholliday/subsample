@@ -20,9 +20,11 @@ Pipeline stages supplied here:
 - Rotation matrices (``rotation_matrix``) for yaw / pitch / roll; W is
   left unchanged, the (X, Y, Z) block rotates as a 3-vector.
 - Decoder matrices (``decoder_matrix``) mapping B-format to a standard
-  output layout (mono, stereo, quad, 5.1, 7.1) with three weight modes:
-  "basic" (velocity / projection), "max_re" (narrower localisation,
-  better at HF), and "inphase" (softest, no anti-phase lobes).
+  output layout (mono, stereo, quad, 5.1, 7.1): the field is decoded to a
+  regular virtual ring and panned onto the layout's speakers (AllRAD), with
+  three weight modes: "basic" (sharpest, with an inverted lobe behind),
+  "max_re" (the most energy from a sound's own direction), and "inphase"
+  (softest, no inverted lobes).
 
 Axis conventions — AmbiX / ACN / SN3D:
     +X = front, +Y = left, +Z = up.
@@ -31,6 +33,7 @@ Axis conventions — AmbiX / ACN / SN3D:
 """
 
 import dataclasses
+import functools
 import math
 import typing
 
@@ -354,15 +357,21 @@ def rotation_matrix (
 
 
 # ---------------------------------------------------------------------------
-# Decoder virtual speaker layouts
+# Decoder speaker layouts
 # ---------------------------------------------------------------------------
 
 # Each entry: tuple of per-output-channel (azimuth, elevation) in degrees,
 # or None for LFE slots.  Ambisonic convention: 0° azimuth = front,
 # positive azimuth = counter-clockwise (i.e. towards the +Y left axis).
-# Virtual speakers for stereo/quad use wider angles than the physical SMPTE
+# Stereo and quad are decoded for speakers wider than the physical SMPTE
 # layout because ambisonic decoders sound better with more separation;
-# 5.1/7.1 use the SMPTE-standard angles to match typical speaker setups.
+# 5.1/7.1 use the standard angles to match typical speaker setups: 7.1's
+# back pair is at ±135° (ITU-R BS.2051), where until #4705 it sat at 5.1's
+# ±110°, 20° behind its own side pair.
+#
+# Every layout is at ear level, elevation 0, and the decoder reads the
+# azimuths only (see _ring_decoder): a layout with height would need the
+# decode on a sphere.
 
 _Angle    = tuple[float, float]
 _LayoutAngles = tuple[typing.Optional[_Angle], ...]
@@ -372,7 +381,7 @@ _LAYOUT_ANGLES: dict[int, _LayoutAngles] = {
 	2: ((45.0, 0.0), (-45.0, 0.0)),
 	4: ((45.0, 0.0), (-45.0, 0.0), (135.0, 0.0), (-135.0, 0.0)),
 	6: ((30.0, 0.0), (-30.0, 0.0), (0.0, 0.0), None, (110.0, 0.0), (-110.0, 0.0)),
-	8: ((30.0, 0.0), (-30.0, 0.0), (0.0, 0.0), None, (110.0, 0.0), (-110.0, 0.0),
+	8: ((30.0, 0.0), (-30.0, 0.0), (0.0, 0.0), None, (135.0, 0.0), (-135.0, 0.0),
 	    (90.0, 0.0), (-90.0, 0.0)),
 }
 
@@ -381,64 +390,140 @@ SUPPORTED_DECODER_OUT_CHANNELS: frozenset[int] = frozenset(_LAYOUT_ANGLES.keys()
 SUPPORTED_DECODER_TYPES: frozenset[str] = frozenset({"basic", "max_re", "inphase"})
 
 
-def _direction_cosines (azimuth_deg: float, elevation_deg: float) -> tuple[float, float, float]:
-
-	"""Return (x, y, z) unit vector for the given direction.
-
-	AmbiX convention: x forward, y left, z up; azimuth 0 = front, positive
-	counter-clockwise; elevation positive up.
-	"""
-
-	az = math.radians(azimuth_deg)
-	el = math.radians(elevation_deg)
-	ce = math.cos(el)
-
-	return (ce * math.cos(az), ce * math.sin(az), math.sin(el))
+# How many virtual speakers the decoder's ring holds: one a degree.  Three sample
+# a first-order field exactly; this many make the panning onto the real speakers
+# smooth, and every real speaker here sits on one of them.
+_RING_SPEAKERS: int = 360
 
 
-# The order gain a first-order decode needs on its velocity terms, and leaving
-# it out is what made every decoder here one pattern too blunt until 2026-09-21.
-#
-# Mode matching evaluates N3D spherical harmonics at the speaker directions,
-# while an AmbiX signal is SN3D: for first order each is √3 times the other, and
-# the term carries the factor at both ends, so the velocity coefficient is 3.
-# Without it, "basic" produced 1 + cos — a cardioid with no anti-phase lobe at
-# all, which is what its own docstring said it would NOT be, and front-to-back
-# separation was 7 to 15 dB instead of the full null.
-_DECODE_ORDER_GAIN: float = 3.0
+def _ring_weight (decoder_type: str) -> float:
 
+	"""Return the weight g1 on a decoder's first-order terms, for speakers at ear level.
 
-def _first_order_shelf_gain (decoder_type: str) -> float:
+	Each speaker of the virtual ring plays ``1 + (2 · g1) · cos`` of the angle
+	between it and the sound.  The 2 is a ring's order gain: what mode matching
+	needs on an SN3D signal's X and Y when every speaker is at ear level.  A
+	full sphere's is 3, which every layout here was given until #4705: basic's
+	velocity then overshot by half on quad, and a sound behind a stereo pair or
+	a 5.1 front came out of it inverted.
 
-	"""Return the high-order weight g1 relative to g0=1 for a first-order decoder.
-
-	Multiplied by _DECODE_ORDER_GAIN where it is used, so the pattern each one
-	produces for a plane wave is ``1 + (3 · g1) · cos``:
-
-	- basic:   g1 = 1      → 1 + 3cos.  Unweighted velocity: sharpest lobes, a
-	                         true null at ±70° and an anti-phase back lobe, which
-	                         is what a velocity decode means.
-	- max_re:  g1 = 1/√3   → 1 + √3cos.  Energy-vector maximisation, the standard
-	                         first-order Max-rE weight.
-	- inphase: g1 = 1/3    → 1 + cos.  A cardioid, which is the widest weight
-	                         that never goes negative — "in-phase" is precisely
-	                         the promise of no back lobe, so it is the largest
-	                         value that keeps it.  It was 1/2, which with the
-	                         order gain restored would put the rear speakers out
-	                         of phase and break that promise.
+	- basic:   g1 = 1        → 1 + 2cos.   The sharpest, with an inverted lobe
+	                           behind.
+	- max_re:  g1 = cos 45°  → 1 + √2cos.  The most of a sound's energy from
+	                           its own direction, the standard first-order
+	                           Max-rE weight in the plane.
+	- inphase: g1 = 1/2      → 1 + cos.    A cardioid, the sharpest pattern
+	                           that never goes negative, which is the promise
+	                           "in-phase" makes.
 	"""
 
 	if decoder_type == "basic":
 		return 1.0
 	if decoder_type == "max_re":
-		return 1.0 / math.sqrt(3.0)
+		return math.cos(math.pi / 4.0)
 	if decoder_type == "inphase":
-		return 1.0 / 3.0
+		return 0.5
 
 	raise ValueError(
 		f"Unknown decoder type {decoder_type!r}.  "
 		f"Supported: {', '.join(sorted(SUPPORTED_DECODER_TYPES))}."
 	)
+
+
+def _panned (azimuths_deg: tuple[float, ...], target_deg: float) -> numpy.ndarray:
+
+	"""Return each speaker's gain for a sound placed at ``target_deg``, at constant power.
+
+	The sound is shared between the two speakers either side of it (pairwise
+	amplitude panning: VBAP in the plane), so it never plays inverted and
+	never from a speaker across the room.  Where the speakers leave half a
+	circle or more empty, as a stereo pair does behind, a speaker that is not
+	there stands in the middle of the gap and its share is dropped: a sound
+	fades as it moves behind, rather than jumping to the far speaker.
+	"""
+
+	placed = sorted(
+		((azimuth % 360.0, index) for index, azimuth in enumerate(azimuths_deg)),
+		key=lambda speaker: speaker[0],
+	)
+
+	# The speakers in order round the circle; None is one that is not there.
+	ring: list[tuple[float, typing.Optional[int]]] = []
+
+	for position, (azimuth, index) in enumerate(placed):
+		following = placed[(position + 1) % len(placed)][0]
+		gap = (following - azimuth) % 360.0 or 360.0
+
+		ring.append((azimuth, index))
+
+		if gap >= 180.0:
+			ring.append(((azimuth + gap / 2.0) % 360.0, None))
+
+	gains = numpy.zeros(len(azimuths_deg))
+
+	for position, (start, speaker) in enumerate(ring):
+		end, next_speaker = ring[(position + 1) % len(ring)]
+		span   = (end - start) % 360.0
+		offset = (target_deg - start) % 360.0
+
+		if offset > span:
+			continue
+
+		# The pair's gains for a source between them are in the ratio of
+		# these sines; scaled to unit power, their common divisor drops out.
+		near = math.sin(math.radians(span - offset))
+		far  = math.sin(math.radians(offset))
+		power = math.hypot(near, far)
+
+		if speaker is not None:
+			gains[speaker] = near / power
+
+		if next_speaker is not None:
+			gains[next_speaker] = far / power
+
+		break
+
+	return gains
+
+
+@functools.lru_cache(maxsize=None)
+def _ring_decoder (azimuths_deg: tuple[float, ...], decoder_type: str) -> numpy.ndarray:
+
+	"""Return the (speakers, 4) decoder for speakers at ear level at these azimuths.
+
+	AllRAD in the plane (Zotter and Frank, 2012): the field is decoded to a
+	regular ring of many virtual speakers, where a first-order decode is exact
+	and each weight means what it says, and each virtual speaker is then
+	panned onto the real ones.  A plain decode straight to the real speakers
+	is right only where they are evenly spaced, and of these layouts only quad
+	is: on 5.1 the three front speakers each took a full share, so a sound
+	behind was louder in front than behind, and inverted (#4705, M32 of the
+	2026-10-07 review; Simon's call was this method for every layout).
+
+	Scaled so the W gains sum to one, as they always have: a sound from
+	everywhere at once sums to its own pressure at the listener.  Kept after
+	the first call, since the player asks again for every pan position, and
+	read-only for that reason.
+	"""
+
+	order_gain = 2.0 * _ring_weight(decoder_type)
+	matrix = numpy.zeros((len(azimuths_deg), _AMBI_CHANNELS_FIRST_ORDER))
+
+	for step in range(_RING_SPEAKERS):
+		azimuth_deg = 360.0 * step / _RING_SPEAKERS
+		azimuth = math.radians(azimuth_deg)
+
+		plays = numpy.zeros(_AMBI_CHANNELS_FIRST_ORDER)
+		plays[ACN_W] = 1.0
+		plays[ACN_Y] = order_gain * math.sin(azimuth)
+		plays[ACN_X] = order_gain * math.cos(azimuth)
+
+		matrix += numpy.outer(_panned(azimuths_deg, azimuth_deg), plays)
+
+	matrix /= matrix[:, ACN_W].sum()
+	matrix.setflags(write=False)
+
+	return matrix
 
 
 def decoder_matrix (
@@ -454,6 +539,10 @@ def decoder_matrix (
 	(position 3 in 5.1/7.1) receive a weighted copy of W to give a usable
 	low-frequency channel; a downstream LFE filter in the audio chain is
 	recommended but not applied here.
+
+	Every layout is at ear level, so the decode is in the plane (see
+	_ring_decoder) and Z plays from no speaker: height reaches the output only
+	through a pitch or roll rotation applied first.
 
 	Args:
 		order:        Ambisonic order.  Currently must be 1.
@@ -482,38 +571,19 @@ def decoder_matrix (
 		matrix[0, ACN_W] = 1.0
 		return matrix
 
-	g1       = _first_order_shelf_gain(decoder_type)
 	angles   = _LAYOUT_ANGLES[out_channels]
-	n_active = sum(1 for a in angles if a is not None)
-
-	# W gain per speaker: 1/N_active.  W is the omnidirectional, in-phase
-	# component, so its per-speaker gains sum COHERENTLY (by amplitude) at the
-	# listener to N × (1/N) = 1 — unity omni reconstruction.  (By power the sum
-	# is N × (1/N)² = 1/N; coherent amplitude is the right measure for an in-phase
-	# term.)  Exact for an LFE-less layout; when the layout has an LFE slot it
-	# ALSO receives g_w, so the coherent sum runs over N_active + 1 rows and
-	# slightly exceeds 1 — e.g. 5.1's six 0.2 rows sum to 1.2.  That extra LFE
-	# contribution is intentional.
-	g_w = 1.0 / n_active
+	speakers = [index for index, angle in enumerate(angles) if angle is not None]
+	azimuths = tuple(angle[0] for angle in angles if angle is not None)
 
 	matrix = numpy.zeros((out_channels, _AMBI_CHANNELS_FIRST_ORDER), dtype=numpy.float32)
+	matrix[speakers] = _ring_decoder(azimuths, decoder_type)
 
-	for speaker_idx, angle in enumerate(angles):
+	# An LFE slot takes W only, at the speakers' mean W gain, for bass
+	# continuity with them.  It is on top of their sum of one, so 5.1's W
+	# gains sum to 1.2, and that extra is intentional.
+	for index, angle in enumerate(angles):
 		if angle is None:
-			# LFE slot — take W only, at the same per-speaker gain for
-			# bass continuity with the other channels.
-			matrix[speaker_idx, ACN_W] = g_w
-			continue
-
-		az_deg, el_deg = angle
-		x, y, z = _direction_cosines(az_deg, el_deg)
-
-		velocity = g_w * _DECODE_ORDER_GAIN * g1
-
-		matrix[speaker_idx, ACN_W] = g_w
-		matrix[speaker_idx, ACN_Y] = velocity * y
-		matrix[speaker_idx, ACN_Z] = velocity * z
-		matrix[speaker_idx, ACN_X] = velocity * x
+			matrix[index, ACN_W] = 1.0 / len(speakers)
 
 	return matrix
 

@@ -30,6 +30,41 @@ def _plane_wave (azimuth_deg: float, elevation_deg: float, n_frames: int = 64) -
 	return numpy.broadcast_to(frame, (n_frames, 4)).astype(numpy.float32)
 
 
+def _heard (out_channels: int, decoder_type: str, azimuth_deg: float) -> tuple[numpy.ndarray, numpy.ndarray]:
+
+	"""Each speaker's gain for a plane wave from ``azimuth_deg`` at ear level, and each speaker's unit vector (x, y).
+
+	LFE slots are left out of both: they have no direction.
+	"""
+
+	angles   = subsample.ambisonic._LAYOUT_ANGLES[out_channels]
+	speakers = [index for index, angle in enumerate(angles) if angle is not None]
+	towards  = numpy.array([
+		[math.cos(math.radians(angle[0])), math.sin(math.radians(angle[0]))]
+		for angle in angles if angle is not None
+	])
+
+	wave  = _plane_wave(azimuth_deg, 0.0, n_frames=1)[0]
+	gains = (subsample.ambisonic.decoder_matrix(1, out_channels, decoder_type) @ wave)[speakers]
+
+	return gains.astype(numpy.float64), towards
+
+
+def _energy_vector (out_channels: int, decoder_type: str, azimuth_deg: float) -> tuple[float, float]:
+
+	"""Gerzon's energy vector for a plane wave from ``azimuth_deg``: its length, and how far its direction is off, in degrees.
+
+	The length is how sharply the sound is placed (1 is one speaker alone),
+	and the direction is where its energy says it is.
+	"""
+
+	gains, towards = _heard(out_channels, decoder_type, azimuth_deg)
+	vector = (gains ** 2) @ towards / float((gains ** 2).sum())
+	off    = math.degrees(math.atan2(vector[1], vector[0])) - azimuth_deg
+
+	return float(numpy.linalg.norm(vector)), abs((off + 180.0) % 360.0 - 180.0)
+
+
 # ---------------------------------------------------------------------------
 # A → B matrix
 # ---------------------------------------------------------------------------
@@ -182,27 +217,146 @@ class TestDecoderMatrix:
 		"""A correctly normalised SN3D plane wave from straight ahead."""
 		return numpy.array([1.0, 0.0, 0.0, 1.0], dtype=numpy.float32)
 
-	def test_basic_is_a_velocity_decode_with_an_anti_phase_back_lobe (self) -> None:
+	def test_basic_is_the_sharpest_and_has_an_inverted_lobe_behind (self) -> None:
 
-		"""What "basic" means, and what it did not do.
+		"""What "basic" means: 1 + 2cos on the ring, which is negative behind.
 
-		Mode matching needs the SN3D-to-N3D factor at both ends, so the velocity
-		coefficient is 3 and the pattern is 1 + 3cos.  Without it the pattern was
-		1 + cos — a cardioid, the shape "inphase" is supposed to have, with the
-		rear speakers in phase and no null anywhere.  Every decoder here was one
-		pattern too blunt."""
+		Without the order gain the pattern was 1 + cos, a cardioid, the shape
+		"inphase" is supposed to have.  The lobe is small once the ring is
+		panned onto four speakers, but it is there."""
 
 		gains = subsample.ambisonic.decoder_matrix(1, 4, "basic") @ self._front_plane_wave()
 
-		assert gains[0] > 0.7
-		assert gains[2] < -0.1, "a velocity decode puts the rear speakers out of phase"
+		assert gains[0] > 0.5
+		assert gains[2] < -0.01, "basic puts the rear speakers out of phase"
+
+	def test_basic_does_not_overshoot_on_quad (self) -> None:
+
+		"""The velocity a quad rig rebuilds is no more than the sound's own (#4705).
+
+		With a full sphere's order gain, 3, on a ring of speakers, it was 1.5
+		times it: the image pulled outward, with the rear pair at a third of
+		the front's level, inverted."""
+
+		gains, towards = _heard(4, "basic", 0.0)
+		velocity = gains @ towards / float(gains.sum())
+
+		assert 0.7 < float(velocity[0]) <= 1.0
+		assert float(velocity[1]) == pytest.approx(0.0, abs=1e-6)
+
+	@pytest.mark.parametrize("decoder_type", ["basic", "max_re", "inphase"])
+	def test_a_sound_behind_a_stereo_pair_plays_in_phase (self, decoder_type: str) -> None:
+
+		"""It fades as it goes behind, and is never inverted (#4705).
+
+		Decoded straight to two speakers in front, a sound from behind came
+		out of both inverted, at a third of a front sound's level with basic."""
+
+		behind, _towards = _heard(2, decoder_type, 180.0)
+		ahead, _towards  = _heard(2, decoder_type, 0.0)
+
+		assert numpy.all(behind > 0.0)
+		assert numpy.all(behind < ahead)
+
+	@pytest.mark.parametrize("decoder_type", ["basic", "max_re", "inphase"])
+	def test_a_sound_behind_5_1_plays_from_behind (self, decoder_type: str) -> None:
+
+		"""The surrounds carry it, and the front three next to nothing (#4705).
+
+		Each of the three front speakers took a full share of a plain decode,
+		so with basic a sound from behind had more energy in front, inverted,
+		than behind."""
+
+		gains, _towards = _heard(6, decoder_type, 180.0)
+		front, surrounds = gains[:3], gains[3:]
+
+		assert float((front ** 2).sum()) < 0.05 * float((surrounds ** 2).sum())
+
+	@pytest.mark.parametrize("out_channels", [6, 8])
+	@pytest.mark.parametrize("decoder_type", ["basic", "max_re", "inphase"])
+	def test_the_energy_points_where_the_sound_is (self, out_channels: int, decoder_type: str) -> None:
+
+		"""On 5.1 and 7.1, a sound's energy is within 30° of it wherever it is (#4705).
+
+		A plain decode suits evenly spaced speakers, and these are not: the
+		energy was up to 63° off with max_re, and on the far side with basic."""
+
+		for azimuth in range(0, 360, 5):
+			_length, off = _energy_vector(out_channels, decoder_type, float(azimuth))
+
+			assert off <= 30.0, f"{azimuth}° is heard {off:.0f}° off"
+
+	@pytest.mark.parametrize("decoder_type", ["basic", "max_re", "inphase"])
+	def test_a_sound_behind_7_1_keeps_its_direction (self, decoder_type: str) -> None:
+
+		"""7.1's back pair is behind, at ±135° (#4705).
+
+		It sat at 5.1's ±110°, 20° behind its own side pair, so a sound from
+		behind was spread over a 140° gap: an energy vector of 0.3."""
+
+		length, off = _energy_vector(8, decoder_type, 180.0)
+
+		assert length > 0.5
+		assert off < 1.0
+
+	@pytest.mark.parametrize("out_channels", [2, 4, 6, 8])
+	@pytest.mark.parametrize("decoder_type", ["basic", "max_re", "inphase"])
+	def test_the_w_gains_sum_to_one (self, out_channels: int, decoder_type: str) -> None:
+
+		"""A sound from everywhere at once sums to its own pressure, on every layout."""
+
+		angles = subsample.ambisonic._LAYOUT_ANGLES[out_channels]
+		matrix = subsample.ambisonic.decoder_matrix(1, out_channels, decoder_type)
+		w_sum  = sum(float(matrix[index, subsample.ambisonic.ACN_W]) for index, angle in enumerate(angles) if angle is not None)
+
+		assert w_sum == pytest.approx(1.0, abs=1e-5)
+
+	@pytest.mark.parametrize("out_channels", [2, 4, 6, 8])
+	@pytest.mark.parametrize("decoder_type", ["basic", "max_re", "inphase"])
+	def test_left_and_right_mirror_each_other (self, out_channels: int, decoder_type: str) -> None:
+
+		for azimuth in (0.0, 35.0, 90.0, 160.0):
+			left, _towards  = _heard(out_channels, decoder_type, azimuth)
+			right, _towards = _heard(out_channels, decoder_type, -azimuth)
+
+			# Every layout lists its speakers in left-right pairs, the centre alone.
+			mirrored = left.copy()
+			pairs    = [(0, 1)] + [(index, index + 1) for index in range(3 if out_channels > 4 else 2, len(left), 2)]
+
+			for one, other in pairs:
+				mirrored[one], mirrored[other] = left[other], left[one]
+
+			numpy.testing.assert_allclose(right, mirrored, atol=1e-6)
+
+	def test_every_layout_is_at_ear_level (self) -> None:
+
+		"""The decoder reads azimuths only, so a layout with height would be decoded flat without a word."""
+
+		for angles in subsample.ambisonic._LAYOUT_ANGLES.values():
+			assert all(angle[1] == 0.0 for angle in angles if angle is not None)
+
+		for out_channels in (2, 4, 6, 8):
+			matrix = subsample.ambisonic.decoder_matrix(1, out_channels, "basic")
+
+			assert numpy.all(matrix[:, subsample.ambisonic.ACN_Z] == 0.0)
+
+	def test_each_call_gets_a_matrix_of_its_own (self) -> None:
+
+		"""The decode is worked out once and kept, so what a caller changes must not reach the next."""
+
+		first = subsample.ambisonic.decoder_matrix(1, 4, "max_re")
+		kept  = first.copy()
+		first[:] = 99.0
+
+		numpy.testing.assert_array_equal(subsample.ambisonic.decoder_matrix(1, 4, "max_re"), kept)
 
 	def test_inphase_never_puts_a_speaker_out_of_phase (self) -> None:
 
 		"""That is the whole promise of the name, so it is worth a test.
 
-		It is why the weight is 1/3 and not 1/2: with the order gain restored,
-		1/2 would give 1 + 1.5cos, which is negative behind."""
+		It is why the ring's weight is 1/2: 1 + cos, a cardioid, is the
+		sharpest pattern that is never negative, and panning each virtual
+		speaker between the two real ones beside it adds no inversion."""
 
 		for out_channels in (2, 4, 6, 8):
 			matrix = subsample.ambisonic.decoder_matrix(1, out_channels, "inphase")
@@ -217,7 +371,7 @@ class TestDecoderMatrix:
 
 	def test_each_mode_is_sharper_than_the_next (self) -> None:
 
-		"""basic 1 + 3cos, max_re 1 + √3cos, inphase 1 + cos: three patterns, in order."""
+		"""basic 1 + 2cos, max_re 1 + √2cos, inphase 1 + cos: three patterns, in order."""
 
 		wave = self._front_plane_wave()
 		fronts = [
@@ -231,8 +385,8 @@ class TestDecoderMatrix:
 	def test_the_speaker_gains_still_sum_to_unit_pressure (self, decoder_type: str) -> None:
 
 		"""The velocity terms cancel in the sum whatever their weight, so the
-		reconstructed pressure is unity in every mode.  This is what says the
-		order gain sharpened the pattern rather than turning the output up."""
+		reconstructed pressure is unity in every mode.  This is what says a
+		weight sharpens the pattern rather than turning the output up."""
 
 		gains = subsample.ambisonic.decoder_matrix(1, 4, decoder_type) @ self._front_plane_wave()
 
@@ -280,14 +434,15 @@ class TestDecoderMatrix:
 		D = subsample.ambisonic.decoder_matrix(1, 2, "basic")
 		left_wave = _plane_wave(90.0, 0.0, n_frames=1)[0]
 		l_out, r_out = D @ left_wave
-		# Basic decoder at ±45° for +Y source: L (at +45°) gets +sin(45°) component,
-		# R (at -45°) gets -sin(45°) component.  The magnitudes differ in sign, so
-		# L is positive, R is negative.
-		assert l_out > r_out
+		# A sound at +Y is beyond the left speaker, so the right one plays
+		# next to nothing: with basic, a little of it inverted.
+		assert l_out > 0.9
+		assert abs(r_out) < 0.1
 
-	def test_max_re_has_narrower_lobes_than_basic (self) -> None:
-		"""Max-rE trades front energy for a tighter lobe — the front/rear
-		amplitude ratio is smaller than basic for an on-axis wave.
+	def test_max_re_gives_the_nearest_speakers_less_than_basic (self) -> None:
+		"""Max-rE is the softer pattern of the two: for a wave from the front
+		it gives the front pair less than basic does, and the rear pair no
+		inverted share.
 		"""
 		basic  = subsample.ambisonic.decoder_matrix(1, 4, "basic")
 		max_re = subsample.ambisonic.decoder_matrix(1, 4, "max_re")
@@ -296,6 +451,7 @@ class TestDecoderMatrix:
 		max_re_out = max_re @ front_wave
 		# Front gain magnitude decreases with Max-rE weighting.
 		assert abs(basic_out[0]) > abs(max_re_out[0])
+		assert basic_out[2] < 0.0 < max_re_out[2]
 
 	def test_inphase_has_no_back_lobes (self) -> None:
 		"""In-phase decoder gives strictly non-negative output everywhere for
@@ -326,6 +482,35 @@ class TestDecoderMatrix:
 	def test_unsupported_decoder_type_raises (self) -> None:
 		with pytest.raises(ValueError, match="Unknown decoder type"):
 			subsample.ambisonic.decoder_matrix(1, 2, "fancy")
+
+
+class TestPanned:
+
+	"""A virtual speaker is shared between the two real ones either side of it, at constant power."""
+
+	def test_a_direction_at_a_speaker_is_that_speaker_alone (self) -> None:
+		numpy.testing.assert_allclose(subsample.ambisonic._panned((45.0, -45.0, 135.0, -135.0), 135.0), [0.0, 0.0, 1.0, 0.0], atol=1e-12)
+
+	def test_a_direction_between_two_is_shared_at_unit_power (self) -> None:
+		gains = subsample.ambisonic._panned((30.0, -30.0, 0.0, 110.0, -110.0), 10.0)
+
+		assert gains[0] > 0.0 and gains[2] > gains[0]
+		assert gains[1] == gains[3] == gains[4] == 0.0
+		assert float((gains ** 2).sum()) == pytest.approx(1.0)
+
+	def test_a_direction_in_a_gap_of_half_a_circle_fades (self) -> None:
+
+		"""Behind a stereo pair there is no speaker, so a sound there is dropped, and one nearly there is quiet."""
+
+		pair = (45.0, -45.0)
+
+		numpy.testing.assert_allclose(subsample.ambisonic._panned(pair, 180.0), [0.0, 0.0], atol=1e-12)
+
+		beside = subsample.ambisonic._panned(pair, 100.0)
+		behind = subsample.ambisonic._panned(pair, 170.0)
+
+		assert beside[0] > behind[0] > 0.0
+		assert beside[1] == behind[1] == 0.0
 
 
 # ---------------------------------------------------------------------------

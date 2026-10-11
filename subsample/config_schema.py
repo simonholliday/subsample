@@ -188,11 +188,12 @@ def json_schema () -> dict[str, typing.Any]:
 						"string",
 						"""
 						Decoder weighting that maps B-format onto the output speaker
-						layout.  `basic` uses flat weights, with sharp lobes and the
-						best low-frequency behaviour.  `max_re` narrows the front lobe
-						for better high-frequency localisation.  `inphase` gives the
-						softest lobes with no back lobes, for listening away from the
-						sweet spot.
+						layout.  `basic` places each sound most sharply, and plays a
+						little of it from the speakers opposite, inverted.  `max_re`
+						puts the most of each sound's energy in its own direction, the
+						usual choice for 5.1 and 7.1.  `inphase` never plays a speaker
+						inverted and gives the softest image, for listening away from
+						the centre.
 						""",
 						default="basic",
 						enum=sorted(subsample.ambisonic.SUPPORTED_DECODER_TYPES),

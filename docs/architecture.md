@@ -360,6 +360,22 @@ traceback, and silenced the layers stacked after it. Each layer of a note now
 plays apart from the others: one that raises is skipped, and said once with its
 traceback.
 
+An ambisonic sample is stored as B-format and decoded as it plays, by the
+voice's mix matrix (`ambisonic.decoder_matrix`), so changing `ambisonic.decoder`
+or the rotation re-renders nothing. The decode is AllRAD in the plane: the field
+is decoded to a regular ring of 360 virtual speakers, where a first-order decode
+is exact, with the weights of a ring at ear level (`1 + 2cos` for `basic`,
+`1 + √2cos` for `max_re`, `1 + cos` for `inphase`), and each virtual speaker is
+panned at constant power between the two real speakers either side of it. Behind
+a stereo pair there is no speaker, so a virtual one there is dropped and a sound
+fades as it goes behind. The matrix is scaled so its W gains sum to one. A plain
+decode straight to the real speakers, as it was until #4705, is right only where
+they are evenly spaced, which of these layouts only quad is, and it carried a
+full sphere's order gain, 3: `basic` overshot on quad, a sound behind a stereo
+pair played inverted, and on 5.1 one from behind had more energy in the front
+three than behind. Every layout is at ear level, so Z plays from no speaker.
+7.1's back pair is at ±135°, where it had sat at 5.1's ±110°.
+
 ## Performance
 
 ### Pre-rendered playback
