@@ -521,6 +521,57 @@ def unpack_audio (raw_bytes: bytes, bit_depth: int, channels: int) -> numpy.ndar
 	raise ValueError(f"Unsupported bit depth {bit_depth}. Supported: 16, 24, 32")
 
 
+class StreamWatch:
+
+	"""Tells when an audio stream has stopped delivering buffers, and when it starts again (#4911).
+
+	PortAudio calls a running stream many times a second, in silence too.  A
+	device unplugged mid-session stops those calls, and each system reports
+	that its own way, or not at all, so this goes by the calls themselves.
+	look() is called at a steady interval, or at every read that can time
+	out, with the number of buffers so far: it answers once when
+	``quiet_looks`` in a row have found none new, and once more if they
+	start again.  A stream that says it is no longer active is believed at
+	the first such look.
+
+	Nothing noticed a lost device before: the player went on taking notes
+	and played none, the recorder went on waiting, and neither said a word.
+	"""
+
+	def __init__ (self, quiet_looks: int = 2) -> None:
+
+		"""Watch a stream that is stopped once this many looks in a row find no new buffer."""
+
+		self._quiet_looks = quiet_looks
+		self._buffers = 0
+		self._quiet = 0
+		self.stopped = False
+
+	def look (self, buffers: int, active: bool = True) -> typing.Optional[bool]:
+
+		"""Return True the first time the stream is found stopped, False the first time it is found running again, and None otherwise.
+
+		Args:
+			buffers: How many buffers the stream has delivered so far.
+			active:  Whether the stream itself says it is running.
+		"""
+
+		if buffers != self._buffers:
+			self._buffers = buffers
+			self._quiet = 0
+		else:
+			self._quiet += 1
+
+		stopped = self._quiet >= (self._quiet_looks if active else 1)
+
+		if stopped == self.stopped:
+			return None
+
+		self.stopped = stopped
+
+		return stopped
+
+
 class AudioReader:
 
 	"""Reads audio chunks from a PyAudio stream using PortAudio's callback mode.
@@ -662,6 +713,16 @@ class AudioReader:
 		self._dropped_taken = dropped
 
 		return new
+
+	@property
+	def active (self) -> bool:
+
+		"""Whether the input stream says it is running; False too when asking fails, as it can once its device is gone."""
+
+		try:
+			return bool(self._stream.is_active())
+		except Exception:
+			return False
 
 	def stop (self) -> None:
 

@@ -124,6 +124,15 @@ _log = logging.getLogger(__name__)
 # correct regardless of device.
 _RELEASE_FADE_SECONDS: float = 0.01  # 10 ms
 
+# How often the player looks in on its output stream, and what it says when
+# the stream has stopped calling for sound (#4911).  Two looks in a row with
+# no call is a stream that has stopped: it calls many times a second.
+_OUTPUT_WATCH_SECONDS: float = 1.0
+_OUTPUT_STOPPED: str = (
+	"Audio output has stopped: the output device is no longer taking sound, "
+	"so notes are silent. Was it unplugged? Restart Subsample once it is back."
+)
+
 # Decay steepness for the "exponential" release curve.  The ramp is
 # (exp(-k*x) - exp(-k)) / (1 - exp(-k)) for x in [0, 1], which starts at 1.0 and
 # reaches EXACTLY 0 at x=1 (so the fade is click-free, unlike a raw exp(-k*x)
@@ -5000,6 +5009,10 @@ class MidiPlayer:
 		self._xrun_count:     int   = 0
 		self._last_xrun_warn: float = 0.0
 
+		# How many buffers PortAudio has asked for, which run() watches to tell
+		# a stream that has stopped (#4911).
+		self._callbacks: int = 0
+
 		# What else costs this machine headroom, which the xrun warning names
 		# (#4659): a CPU set to save power, found at startup, and audio left at
 		# ordinary priority, found by the audio thread's first callback.
@@ -5698,8 +5711,11 @@ class MidiPlayer:
 
 			# Block until shutdown is signalled.  All MIDI work happens on
 			# rtmidi's callback thread; this thread is now purely a lifecycle
-			# coordinator.
-			self._shutdown_event.wait()
+			# coordinator, which looks in on the output as it waits (#4911).
+			playing = subsample.audio.StreamWatch()
+
+			while not self._shutdown_event.wait(_OUTPUT_WATCH_SECONDS):
+				self._look_in_on_output(stream, playing)
 
 		finally:
 			# Tear down whichever resources were successfully opened.  None
@@ -5769,6 +5785,8 @@ class MidiPlayer:
 		for real-time priority (_promote_audio_thread).
 		"""
 
+		self._callbacks += 1
+
 		try:
 			self._promote_audio_thread()
 
@@ -5786,6 +5804,28 @@ class MidiPlayer:
 			silence = b"\x00" * (frame_count * self._output_channels * (self._output_bit_depth // 8))
 
 			return (silence, pyaudio.paContinue)
+
+	def _look_in_on_output (self, stream: typing.Any, playing: subsample.audio.StreamWatch) -> None:
+
+		"""Say when the output stream has stopped calling for sound, and when it calls again (#4911).
+
+		An interface unplugged mid-session stops PortAudio's calls.  The player
+		went on taking notes and played none, with nothing in the log.  It
+		still plays none, since the stream is not opened again, but it says so.
+		"""
+
+		try:
+			active = bool(stream.is_active())
+		except Exception:
+			active = False
+
+		found = playing.look(self._callbacks, active)
+
+		if found is True:
+			_log.error(_OUTPUT_STOPPED)
+
+		elif found is False:
+			_log.info("Audio output is running again")
 
 	def _promote_thread (self, priority: int) -> bool:
 

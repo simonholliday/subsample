@@ -639,6 +639,21 @@ from the system inside the audio callback.
 The xrun warning then names what costs the machine headroom: a CPU found saving
 power at startup, and audio left at ordinary priority.
 
+### A lost audio device
+
+PortAudio calls a running stream many times a second, in silence too, and a
+device unplugged mid-session stops those calls. Each system reports that its
+own way or not at all, so `audio.StreamWatch` goes by the calls themselves
+(#4911). The player counts its output callbacks, and its `run()` looks once a
+second: two looks with no new call, or a stream that says it is not active,
+and it logs once that the output has stopped. The recorder's loop reads with a
+half-second timeout, and six empty reads in a row say the same of the input.
+Either says once more if its stream starts again. Subsample keeps running, so
+a recording on a sound input survives a lost output, and neither stream is
+opened again: that takes a restart. Before, nothing looked, and the first sign
+was silence. The check is tested with stand-in streams; what a real interface
+does when unplugged on Linux and on macOS has yet to be seen on one.
+
 ### Gain staging
 
 Every voice is RMS-normalised so a quiet recording and a loud one play at

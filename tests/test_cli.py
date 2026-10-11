@@ -2823,6 +2823,72 @@ class TestRunRecorder:
 		assert (recorded.channels, recorded.input) == (2, (1, 3))
 		self._input_prompt.assert_not_called()
 
+	def _run_reads (
+		self, monkeypatch: pytest.MonkeyPatch, reads: list[bool],
+	) -> None:
+
+		"""Run the capture thread over reads that each bring a chunk (True) or time out (False), then stop."""
+
+		self._devices(monkeypatch)
+		shutdown_event = threading.Event()
+		cfg     = self._cfg()
+		chunk   = numpy.zeros((cfg.recorder.audio.buffer_frames, 1), dtype=numpy.int16)
+		pending = list(reads)
+
+		def read (timeout: float) -> typing.Optional[numpy.ndarray]:
+			if not pending:
+				shutdown_event.set()
+				return None
+
+			return chunk if pending.pop(0) else None
+
+		reader = _quiet_reader()
+		reader.read.side_effect = read
+		reader.active = True
+		monkeypatch.setattr(subsample.audio, "AudioReader", unittest.mock.MagicMock(return_value=reader))
+		monkeypatch.setattr(subsample.recorder, "SampleProcessor", unittest.mock.MagicMock())
+		monkeypatch.setattr(subsample.cli, "_process_chunk", lambda *args: None)
+
+		subsample.cli._run_recorder(
+			cfg, None, subsample.library.InstrumentLibrary(1024 * 1024),
+			subsample.analysis.compute_params(cfg.recorder.audio.sample_rate),
+			None, shutdown_event, store_audio=False, processor_cell=[None],
+		)
+
+	def test_an_input_that_stops_arriving_is_said_once (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+
+		"""#4911: the recorder waited on a lost input for as long as it ran, and said nothing."""
+
+		with caplog.at_level(logging.INFO, logger="subsample.cli"):
+			self._run_reads(monkeypatch, [True, True] + [False] * 10)
+
+		said = [record.getMessage() for record in caplog.records if record.name == "subsample.cli" and "Audio input" in record.getMessage()]
+
+		assert said == [
+			"Audio input has stopped: no sound is arriving from the input device, so "
+			"nothing is being recorded. Was it unplugged? Restart Subsample once it is back.",
+		]
+
+	def test_an_input_that_arrives_again_is_said_too (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		with caplog.at_level(logging.INFO, logger="subsample.cli"):
+			self._run_reads(monkeypatch, [True] + [False] * 6 + [True, True])
+
+		said = [record.getMessage() for record in caplog.records if record.name == "subsample.cli" and "Audio input" in record.getMessage()]
+
+		assert [line.split(":")[0] for line in said] == ["Audio input has stopped", "Audio input is running again"]
+
+	def test_a_few_empty_reads_are_not_a_lost_input (
+		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		with caplog.at_level(logging.INFO, logger="subsample.cli"):
+			self._run_reads(monkeypatch, [True] + [False] * 5 + [True] + [False] * 5)
+
+		assert "Audio input" not in caplog.text
+
 	def test_overflows_are_reported_when_capture_stops (
 		self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 	) -> None:

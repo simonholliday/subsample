@@ -11083,3 +11083,80 @@ class TestACarrierBesideItsMap:
 
 		assert assignment.select[0].where.name_path == str((set_dir / "hits" / "hit.wav").resolve())
 		assert vocoder.carrier_path == str((set_dir / "carriers" / "ah.wav").resolve())
+
+
+class TestALostOutputIsSaid:
+
+	"""#4911 (lead 5 of the 2026-10-07 review's leads not verified): the player says when its output stops.
+
+	run() opened the stream and waited for shutdown, and nothing looked at
+	the stream again: an interface unplugged mid-session left the player
+	taking notes and playing none, with nothing in the log.
+	"""
+
+	def _player (self) -> subsample.player.MidiPlayer:
+		return subsample.player.MidiPlayer(
+			"Test Device", threading.Event(),
+			instrument_library=unittest.mock.MagicMock(spec=subsample.library.InstrumentLibrary),
+			similarity_matrix=unittest.mock.MagicMock(spec=subsample.similarity.SimilarityMatrix),
+			midi_map={}, sample_rate=44100, bit_depth=16,
+		)
+
+	@staticmethod
+	def _said (caplog: pytest.LogCaptureFixture) -> list[str]:
+		return [
+			record.getMessage() for record in caplog.records
+			if record.name == "subsample.player" and "Audio output" in record.getMessage()
+		]
+
+	def test_each_call_for_sound_is_counted (self) -> None:
+		player = self._player()
+
+		with unittest.mock.patch.object(player, "_audio_callback_impl", return_value=(b"", 0)), \
+			unittest.mock.patch.object(player, "_promote_audio_thread"):
+			for _call in range(3):
+				player._audio_callback(None, 64, {}, 0)
+
+		assert player._callbacks == 3
+
+	def test_a_stream_that_stops_calling_is_said_once_and_once_more_when_it_calls_again (
+		self, caplog: pytest.LogCaptureFixture,
+	) -> None:
+		player  = self._player()
+		stream  = unittest.mock.MagicMock()
+		playing = subsample.audio.StreamWatch()
+		stream.is_active.return_value = True
+
+		with caplog.at_level(logging.INFO, logger="subsample.player"):
+			player._callbacks = 100
+			player._look_in_on_output(stream, playing)
+
+			# Unplugged: three seconds with no call.
+			for _second in range(3):
+				player._look_in_on_output(stream, playing)
+
+			assert self._said(caplog) == [
+				"Audio output has stopped: the output device is no longer taking sound, "
+				"so notes are silent. Was it unplugged? Restart Subsample once it is back.",
+			]
+
+			player._callbacks = 140
+			player._look_in_on_output(stream, playing)
+
+		assert self._said(caplog)[1:] == ["Audio output is running again"]
+
+	def test_a_stream_that_cannot_be_asked_counts_as_stopped (self, caplog: pytest.LogCaptureFixture) -> None:
+
+		"""Asking a stream whose device has gone can raise."""
+
+		player  = self._player()
+		stream  = unittest.mock.MagicMock()
+		playing = subsample.audio.StreamWatch()
+		stream.is_active.side_effect = OSError("Stream closed")
+
+		with caplog.at_level(logging.INFO, logger="subsample.player"):
+			player._callbacks = 100
+			player._look_in_on_output(stream, playing)
+			player._look_in_on_output(stream, playing)
+
+		assert len(self._said(caplog)) == 1

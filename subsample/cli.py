@@ -628,6 +628,16 @@ def _queue_the_last_sounds (
 		writer.enqueue(trimmed, datetime.datetime.now(), missing_seconds=dropped.owed(detector, trimmed))
 
 
+# What the recorder says once no sound has arrived for this many half-second
+# reads in a row (#4911).  An interface unplugged mid-session stops the input,
+# and the recorder went on waiting for it, with nothing in the log.
+_INPUT_QUIET_READS: int = 6
+_INPUT_STOPPED: str = (
+	"Audio input has stopped: no sound is arriving from the input device, so "
+	"nothing is being recorded. Was it unplugged? Restart Subsample once it is back."
+)
+
+
 class _DroppedInput:
 
 	"""Input the recorder dropped for falling behind: said once each time it falls behind, and owed to the capture recorded across it.
@@ -1149,13 +1159,27 @@ def _run_recorder (
 
 	dropped = _DroppedInput(reader, audio_cfg.sample_rate)
 
+	# Each read waits half a second, so six empty in a row is three seconds
+	# with nothing from the input (#4911).
+	arriving = subsample.audio.StreamWatch(quiet_looks=_INPUT_QUIET_READS)
+	chunks = 0
+
 	try:
 		while not shutdown_event.is_set():
 			chunk = reader.read(timeout=0.5)
 
 			if chunk is None:
-				# Timeout — loop back to check shutdown_event.
+				# Timeout — loop back to check shutdown_event.  An input that
+				# goes quiet because Subsample is stopping is not a lost one.
+				if not shutdown_event.is_set() and arriving.look(chunks, reader.active):
+					_log.error(_INPUT_STOPPED)
+
 				continue
+
+			chunks += 1
+
+			if arriving.look(chunks) is False:
+				_log.info("Audio input is running again")
 
 			dropped.before(detector)
 			trimmed = _process_chunk(chunk, buf, detector, cfg.detection, audio_cfg.sample_rate)

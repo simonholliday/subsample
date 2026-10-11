@@ -135,6 +135,21 @@ class TestAudioReader:
 
 		return reader, mock_stream
 
+	def test_it_says_whether_its_stream_is_running (self) -> None:
+
+		"""#4911: asked of PortAudio, and False when asking fails, as it can once the device is gone."""
+
+		reader, mock_stream = self._make_reader()
+
+		mock_stream.is_active.return_value = True
+		assert reader.active is True
+
+		mock_stream.is_active.return_value = False
+		assert reader.active is False
+
+		mock_stream.is_active.side_effect = OSError("Stream closed")
+		assert reader.active is False
+
 	def test_an_unresolved_channel_count_is_refused (self) -> None:
 
 		"""The check was an assert, which python -O removes, so the reader
@@ -258,6 +273,53 @@ class TestAudioReader:
 
 		assert chunk is not None
 		assert chunk.shape == (buffer_frames, 1)
+
+
+class TestStreamWatch:
+
+	"""#4911 (lead 5 of the 2026-10-07 review's leads not verified): a stream that stops delivering is noticed.
+
+	Nothing watched either stream, so an interface unplugged mid-session
+	left the player taking notes it could not play and the recorder
+	waiting, with nothing in the log.
+	"""
+
+	def test_a_stream_that_keeps_delivering_is_never_found_stopped (self) -> None:
+		watch = subsample.audio.StreamWatch()
+
+		assert [watch.look(buffers) for buffers in (40, 81, 120, 163)] == [None, None, None, None]
+		assert not watch.stopped
+
+	def test_two_looks_with_nothing_new_find_it_stopped_once (self) -> None:
+		watch = subsample.audio.StreamWatch()
+
+		assert [watch.look(buffers) for buffers in (40, 40, 40, 40, 40)] == [None, None, True, None, None]
+		assert watch.stopped
+
+	def test_one_quiet_look_is_not_enough (self) -> None:
+
+		"""A machine waking from sleep can be a look behind."""
+
+		watch = subsample.audio.StreamWatch()
+
+		assert [watch.look(buffers) for buffers in (40, 40, 85, 85, 120)] == [None, None, None, None, None]
+
+	def test_one_that_delivers_again_is_found_running_once (self) -> None:
+		watch = subsample.audio.StreamWatch()
+
+		assert [watch.look(buffers) for buffers in (40, 40, 40, 77, 110)] == [None, None, True, False, None]
+		assert not watch.stopped
+
+	def test_a_stream_that_says_it_has_stopped_is_believed_a_look_sooner (self) -> None:
+		watch = subsample.audio.StreamWatch()
+
+		assert watch.look(40) is None
+		assert watch.look(40, active=False) is True
+
+	def test_the_recorder_s_count_of_empty_reads_can_be_longer (self) -> None:
+		watch = subsample.audio.StreamWatch(quiet_looks=6)
+
+		assert [watch.look(0) for _read in range(7)] == [None, None, None, None, None, True, None]
 
 
 class TestPortAudioStartsOnce:
