@@ -153,10 +153,10 @@ def parser () -> argparse.ArgumentParser:
 			"and named after the source file (e.g. recording_1.wav, "
 			"recording_2.wav, …, or .flac files when "
 			"`recorder.audio.audio_format` is `flac`). Cutting a file again "
-			"replaces the samples it gave before. Samples of that name cut "
-			"from another file are kept, and this file's take its folder's "
-			"name too (e.g. day2_recording_1.wav). Subsample exits once they "
-			"are done, without starting live capture."
+			"replaces the samples it gave before. Samples of that name, in "
+			"any letter case, cut from another file are kept, and this file's "
+			"take its folder's name too (e.g. day2_recording_1.wav). Subsample "
+			"exits once they are done, without starting live capture."
 		),
 	)
 	command.add_argument(
@@ -907,7 +907,8 @@ def _segment_base (source: pathlib.Path, directory: pathlib.Path) -> tuple[str, 
 	note no file at all: then its folder's name before it, and a number after
 	while that is taken too.  Two files called ZOOM0001.WAV, from two days'
 	folders, wrote the same names, and the second replaced the first's
-	samples.  A sample's sidecar notes the file it was cut from.
+	samples.  A sample's sidecar notes the file it was cut from.  A name
+	that differs only in letter case is the same name (_segments_named).
 	"""
 
 	cut_from = str(source.resolve())
@@ -930,12 +931,19 @@ def _segment_base (source: pathlib.Path, directory: pathlib.Path) -> tuple[str, 
 
 def _segments_named (directory: pathlib.Path, base: str) -> list[pathlib.Path]:
 
-	"""The samples in a folder named as file mode names a cut's: base_1.wav, base_2.flac, and so on."""
+	"""The samples in a folder named as file mode names a cut's: base_1.wav, base_2.flac, and so on.
+
+	In any letter case, on every system (#4912).  Where file names fold
+	case, as on macOS, Kick_1.wav and kick_1.wav are one file: a cut of
+	day2/kick.wav did not see day1/Kick.wav's samples, and wrote over them.
+	Matched the same way everywhere, a library cut on Linux can be copied
+	to such a system whole.
+	"""
 
 	if not directory.is_dir():
 		return []
 
-	pattern = re.compile(re.escape(base) + r"_(\d+)\.(?:wav|flac)")
+	pattern = re.compile(re.escape(base) + r"_(\d+)\.(?:wav|flac)", re.IGNORECASE)
 
 	return sorted(sample for sample in directory.iterdir() if pattern.fullmatch(sample.name))
 

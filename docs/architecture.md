@@ -133,7 +133,9 @@ processor before the next.
   Cutting a file again replaces its own samples and removes those it no longer
   gives. A different file of the same name takes its folder's name too, and a
   sample that notes no source is never replaced (`cli._segment_base`, #4703).
-  Two days' ZOOM0001.WAV wrote the same names before.
+  Two days' ZOOM0001.WAV wrote the same names before. Names that differ only
+  in letter case count as the same, on every system: `Kick_1.wav` and
+  `kick_1.wav` are one file on macOS (#4912).
 - **Ambisonics.** `recorder.audio.ambisonic_format` describes the live rig, so
   it applies only to 4-channel files, and each file's line says what it did.
 - **What counts.** A file whose every segment was lost is not processed, so a

@@ -1076,6 +1076,27 @@ class TestProcessInputFiles:
 		assert subsample.cache.cut_from(out / "ZOOM0001_1.wav") == str(day1.resolve())
 		assert subsample.cache.cut_from(out / "day2_ZOOM0001_1.wav") == str(day2.resolve())
 
+	def test_two_files_named_alike_but_for_letter_case_keep_each_others_samples (self, tmp_path: pathlib.Path) -> None:
+
+		"""#4912: day2/kick.wav was cut into kick_1.wav beside day1's Kick_1.wav, which are one file on macOS.
+
+		The second takes its folder's name there and everywhere, so one cut
+		gives the same names on every system, and cutting it again replaces
+		only its own.
+		"""
+
+		day1 = self._wav(tmp_path / "day1" / "Kick.wav", 1, hz=440.0)
+		day2 = self._wav(tmp_path / "day2" / "kick.wav", 1, hz=880.0)
+		out  = tmp_path / "out"
+		cfg  = self._cfg(tmp_path)
+
+		assert subsample.cli._process_input_files([day1, day2], cfg) == 2
+		assert subsample.cli._process_input_files([day2], cfg) == 1
+
+		assert sorted(sample.name for sample in out.glob("*.wav")) == ["Kick_1.wav", "day2_kick_1.wav"]
+		assert subsample.cache.cut_from(out / "Kick_1.wav") == str(day1.resolve())
+		assert subsample.cache.cut_from(out / "day2_kick_1.wav") == str(day2.resolve())
+
 	def test_a_file_cut_again_into_fewer_samples_leaves_none_of_the_old (
 		self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
 	) -> None:
