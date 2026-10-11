@@ -121,6 +121,19 @@ warnings.filterwarnings(
 	message="Compilation requested for previously compiled argument types",
 	module="numba",
 )
+# librosa 1.0 hands numba an output array it has not filled, in the tuning
+# estimate behind the chroma analysis.  numba compiled that function for the
+# 64-bit numbers pitch detection gave it first, so numpy converts the array on
+# its way in, and warns when the memory it was made from happens to hold a
+# signalling NaN.  The function then writes every element, so the result is
+# the same either way: the warning came and went with what the allocator
+# handed back, and nothing a user can set stops it (#4903).
+warnings.filterwarnings(
+	"ignore",
+	message="invalid value encountered in cast",
+	category=RuntimeWarning,
+	module="numba",
+)
 
 
 # Bump this string whenever the analysis algorithm changes in a way that

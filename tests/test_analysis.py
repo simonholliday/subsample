@@ -2387,6 +2387,18 @@ class TestAttackLevels:
 		assert len(subsample.analysis.attack_levels(take, (0.1, last), self.SR)) == 2
 
 
+def _printed_by_a_fresh_python (script: str) -> str:
+
+	"""Run *script* in a fresh Python that shows every warning, and return what it printed to stderr."""
+
+	result = subprocess.run(
+		[sys.executable, "-W", "default", "-c", script],
+		capture_output=True, text=True, check=True,
+	)
+
+	return result.stderr
+
+
 class TestNumbaRecompileWarning:
 
 	"""Analysis threads that race to compile one of librosa's numba functions print nothing.
@@ -2414,12 +2426,7 @@ class TestNumbaRecompileWarning:
 
 		"""Run *first*, then compile one type twice, in a fresh Python; return what it printed."""
 
-		result = subprocess.run(
-			[sys.executable, "-W", "default", "-c", f"{first}\n{self._ASK_TWICE}"],
-			capture_output=True, text=True, check=True,
-		)
-
-		return result.stderr
+		return _printed_by_a_fresh_python(f"{first}\n{self._ASK_TWICE}")
 
 	def test_numba_warns_on_its_own (self) -> None:
 
@@ -2429,6 +2436,46 @@ class TestNumbaRecompileWarning:
 
 	def test_importing_analysis_silences_it (self) -> None:
 		assert self._WARNING not in self._stderr("import subsample.analysis")
+
+
+class TestNumbaCastWarning:
+
+	"""An array librosa leaves unfilled prints nothing as numpy converts it for numba (#4903).
+
+	librosa's tuning estimate hands numba an output array it has not filled.
+	Pitch detection has compiled that function for 64-bit numbers by then, so
+	numpy converts the array on its way in, and warns when the memory holds a
+	signalling NaN.  The result is the same either way.  A full run of these
+	tests once printed 100 of them, and macOS a few on every run.  Each case
+	runs in a fresh Python, as TestNumbaRecompileWarning's do.
+	"""
+
+	# A numba function of the same kind, compiled for 64-bit and then given
+	# 32-bit numbers with a signalling NaN left in its output: what librosa's
+	# does when the allocator hands it such memory, made to happen every time.
+	_CONVERT_UNFILLED: typing.Final[str] = "\n".join((
+		"import numba",
+		"import numpy",
+		"@numba.guvectorize('(n)->(n)', nopython=True)",
+		"def copy (x, y):",
+		"\ty[:] = x",
+		"copy(numpy.zeros(4), numpy.empty(4))",
+		"out = numpy.empty(4, dtype=numpy.float32)",
+		"out.view(numpy.uint32)[...] = 0x7FA00000",
+		"copy(numpy.ones(4, dtype=numpy.float32), out)",
+		"assert out.tolist() == [1.0, 1.0, 1.0, 1.0]",
+	))
+
+	_WARNING: typing.Final[str] = "invalid value encountered in cast"
+
+	def test_numpy_warns_on_its_own (self) -> None:
+
+		"""Without Subsample the warning is printed, so the next test cannot pass for want of one."""
+
+		assert self._WARNING in _printed_by_a_fresh_python(self._CONVERT_UNFILLED)
+
+	def test_importing_analysis_silences_it (self) -> None:
+		assert self._WARNING not in _printed_by_a_fresh_python(f"import subsample.analysis\n{self._CONVERT_UNFILLED}")
 
 
 @pytest.mark.parametrize("rate", [8000, 11025, 16000, 22050, 44100, 48000, 96000])

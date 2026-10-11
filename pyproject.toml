@@ -109,4 +109,9 @@ filterwarnings = [
 	# import, and librosa 1.0 reports this one from the line in Subsample that called
 	# it, so the filter above no longer matches it; this one mirrors the app's.
 	"ignore:n_fft=:UserWarning",
+	# analysis.py ignores numba's "invalid value encountered in cast" as well:
+	# librosa hands numba an array it has not filled, and the result is the same
+	# whatever that memory held.  It came and went between runs, mostly on macOS
+	# (#4903); this one mirrors the app's too.
+	"ignore:invalid value encountered in cast:RuntimeWarning:numba",
 ]
