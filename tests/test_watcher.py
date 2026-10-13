@@ -977,6 +977,11 @@ class TestMidiMapWatcher:
 		The test asks which files the callback named, not whether it ran:
 		macOS reports a file made in the half-minute before a watch began, so
 		the added set, written just before it was watched, may be heard as new.
+		So may the dropped set, while it is still watched: heard just as the
+		list is replaced, its callback comes half a second later, naming a
+		file that is by then let go (#5022).  That is a change heard in time,
+		and the watcher is right to pass it on, so the test waits it out and
+		judges what is heard from then on.
 		"""
 
 		called = threading.Event()
@@ -995,7 +1000,9 @@ class TestMidiMapWatcher:
 
 		try:
 			watcher.watch([added])
-			time.sleep(0.2)
+			time.sleep(subsample.watcher._MIDI_MAP_DEBOUNCE_SECONDS + 1.0)
+			received.clear()
+			called.clear()
 
 			# Apart by more than the debounce, which would otherwise fold the
 			# two edits into one callback naming only the last.
