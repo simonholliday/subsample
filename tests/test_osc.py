@@ -17,7 +17,7 @@ import subsample.osc
 
 import tests.helpers
 
-# python-osc is an optional dependency (`pip install subsample[osc]`).  The
+# python-osc is an optional dependency (`pip install "subsampler[osc]"`).  The
 # subsample.osc module itself imports cleanly without it — pythonosc is only
 # touched when OscEventSender / OscReceiver are constructed.  Every test in
 # this file does construct one of those, so skip the whole file when the

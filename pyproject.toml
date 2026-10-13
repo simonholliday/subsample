@@ -3,7 +3,9 @@ requires = ["setuptools>=77.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "subsample"
+# The name on PyPI, where `subsample` is another project's.  The package and
+# the command are both `subsample`.
+name = "subsampler"
 dynamic = ["version"]
 description = "Automatic sample harvester, analyser, and MIDI instrument"
 readme = "README.md"

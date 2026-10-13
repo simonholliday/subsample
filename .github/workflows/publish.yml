@@ -1,0 +1,104 @@
+# Publish a release to PyPI, as `subsampler`, when its version tag is pushed
+# (#5018).  The version comes from the tag through setuptools-scm.  PyPI's
+# trusted publishing (OIDC) signs the upload, so no token is stored anywhere.
+#
+# An upload cannot be taken back: PyPI never accepts the same version twice.
+# So the tag has to pass what a push to main passes, and the wheel a reader
+# will install is installed and run here first.  A run started by hand does
+# all of that and uploads nothing, which is how to try a change to this file.
+
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      # Release tags only, in GitHub's filter syntax, where [0-9]+ is one or
+      # more digits.  A pre-release such as v0.7.0rc1 does not publish.
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    name: Build and try the distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # setuptools-scm reads the version from the tags.
+          fetch-depth: 0
+          # Nothing after this needs the token, and the build must not push.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build the sdist and the wheel
+        run: pipx run build
+
+      - name: Check the metadata
+        run: pipx run twine check --strict dist/*
+
+      # A commit that is not the tag's builds a version nobody released, and
+      # one PyPI refuses.
+      - name: Check the version is the tag's
+        if: github.event_name == 'push'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test -f "dist/subsampler-${version}.tar.gz"
+          test -f "dist/subsampler-${version}-py3-none-any.whl"
+
+      # The tests run an editable install, which reads the package's data from
+      # the checkout.  This installs the wheel itself and makes a project with
+      # it in an empty folder, so a wheel that lacks its data files is caught
+      # before it is uploaded.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes portaudio19-dev libsndfile1 rubberband-cli libasound2-dev
+
+      - name: Install the wheel and make a project with it
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install dist/*.whl
+          mkdir "$RUNNER_TEMP/project"
+          cd "$RUNNER_TEMP/project"
+          "$RUNNER_TEMP/venv/bin/subsample" --init
+          test -s config.yaml
+          test -s midi-map.yaml
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    # A tag whose tests fail, or whose wheel does not run, publishes nothing.
+    needs: [tests, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # Trusted publishing.
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      # Pinned to a commit and not to a moving branch, because this job can
+      # publish to PyPI as Subsample.  This commit is release v1.14.2; to
+      # update it, read the commit the new release's tag points at.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33

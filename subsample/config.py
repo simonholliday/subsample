@@ -557,7 +557,7 @@ class OscConfig:
 	requests, and notes to play, from other OSC-compatible apps.
 
 	Requires the optional ``python-osc`` dependency:
-	``pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"``
+	``pip install "subsampler[osc]"``
 	"""
 
 	enabled: bool = False

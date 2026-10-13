@@ -27,7 +27,7 @@
 # osc - send sample events and receive file import requests and notes via OSC
 # ---------------------------------------------------------------------------
 # OSC (Open Sound Control) integration for communicating with other apps.
-# Requires the optional python-osc dependency: pip install "subsample[osc] @ git+https://github.com/simonholliday/subsample.git"
+# Requires the optional python-osc dependency: pip install "subsampler[osc]"
 #
 # Sender: forwards /sample/captured and /sample/loaded events when samples
 # are recorded or loaded - so sequencers, visualisers, or other audio tools

@@ -1,11 +1,16 @@
-# Run the suite and the type checker on Linux and macOS for every push and
-# pull request (#4491), as CONTRIBUTING.md runs them by hand.
+# Run the suite and the type checker on Linux and macOS for every push to a
+# branch and every pull request (#4491), as CONTRIBUTING.md runs them by hand.
+# publish.yml calls this for a version tag, and uploads nothing unless it
+# passes (#5018).
 
 name: Tests
 
 on:
   push:
+    # A tag is tested once, by publish.yml, and not a second time here.
+    branches: ["**"]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read

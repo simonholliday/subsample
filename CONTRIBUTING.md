@@ -40,9 +40,32 @@ listed under `[tool.mypy]` in `pyproject.toml`.
 
 ## On GitHub
 
-Every push and pull request runs the tests and the type check on Linux and
-macOS, under Python 3.12 and 3.14 (`.github/workflows/tests.yml`). The
-workflow also lists the system libraries a fresh machine needs first.
+Every push to a branch and every pull request runs the tests and the type
+check on Linux and macOS, under Python 3.12 and 3.14
+(`.github/workflows/tests.yml`). The workflow also lists the system libraries
+a fresh machine needs first.
+
+## Releasing
+
+Subsample is on the Python Package Index as `subsampler`, because the name
+`subsample` there is another project's. Only the name a reader installs
+differs: the package and the command are both `subsample`.
+
+A release is an annotated tag, `v` and the version, and setuptools-scm takes
+the version from it. Pushing the tag runs `.github/workflows/publish.yml`,
+which:
+
+1. runs the tests and the type check, as a push to a branch does;
+2. builds the sdist and the wheel, and checks their metadata and that their
+   version is the tag's;
+3. installs the wheel into a clean environment and makes a project with it,
+   which the tests cannot do, since they run an editable install;
+4. uploads both to PyPI by trusted publishing, so no token is stored anywhere.
+
+A tag that fails at any step publishes nothing. One that is published cannot
+be replaced, because PyPI never accepts the same version twice. To try a
+change to the workflow, start it by hand from the Actions tab: that run does
+everything but the upload.
 
 ## Maintainer scripts
 

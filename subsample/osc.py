@@ -12,7 +12,7 @@ hands each note to the player with the time its bundle names (#3610, #603).
 
 Requires the optional ``python-osc`` dependency::
 
-    pip install subsample[osc]
+    pip install "subsampler[osc]"
 
 The module is safe to import without python-osc installed — the classes guard
 their constructor bodies with a lazy import so the ImportError surfaces only

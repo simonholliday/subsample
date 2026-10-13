@@ -3105,6 +3105,12 @@ def _start_midi_map_watcher (
 	return midi_map_watcher
 
 
+# How to add python-osc, said when OSC is switched on without it.  It names
+# the distribution, `subsampler` on PyPI (#5018), and its `osc` extra, both
+# from pyproject.toml.
+_OSC_INSTALL: str = "pip install 'subsampler[osc]'"
+
+
 def _start_osc_sender (cfg: subsample.config.Config, app_events: subsample.events.EventEmitter) -> None:
 
 	"""Send OSC to osc.send_host as samples are captured and loaded, or say why not and carry on without.
@@ -3118,7 +3124,7 @@ def _start_osc_sender (cfg: subsample.config.Config, app_events: subsample.event
 		sender = subsample.osc.OscEventSender(cfg.osc.send_host, cfg.osc.send_port)
 
 	except ImportError:
-		_log.warning("OSC enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
+		_log.warning("OSC enabled but python-osc not installed. %s", _OSC_INSTALL)
 		return
 
 	except OSError as exc:
@@ -3221,7 +3227,7 @@ def _start_osc_receiver (
 		return osc_receiver
 
 	except ImportError:
-		_log.warning("OSC receive enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
+		_log.warning("OSC receive enabled but python-osc not installed. %s", _OSC_INSTALL)
 	except OSError as exc:
 		# OscReceiver binds the UDP socket in its constructor, so a busy port
 		# raises OSError here (not ImportError).  Log and continue rather
@@ -3272,7 +3278,7 @@ def _start_osc_note_receiver (
 		return note_receiver
 
 	except ImportError:
-		_log.warning("OSC notes enabled but python-osc not installed. pip install 'subsample[osc] @ git+https://github.com/simonholliday/subsample.git'")
+		_log.warning("OSC notes enabled but python-osc not installed. %s", _OSC_INSTALL)
 	except OSError as exc:
 		_log.warning("OSC note receiver could not bind port %d: %s - OSC notes disabled", cfg.osc.notes_port, exc)
 
